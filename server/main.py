@@ -18,10 +18,8 @@ if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == '--sim
     sys.exit(0)
 
 import asyncio
-import base64
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -30,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse
 
 from server import config
 from server.api import rest, ws, isc_ws, discovery as discovery_api, plugins as plugins_api, assets as assets_api, themes as themes_api, ai_proxy as ai_proxy_api
@@ -179,37 +177,12 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
-# Programmer static-file auth middleware (only active when password is set)
-class ProgrammerAuthMiddleware(BaseHTTPMiddleware):
-    """Checks HTTP Basic auth for /programmer paths."""
-
-    async def dispatch(self, request: Request, call_next):
-        if not request.url.path.startswith("/programmer"):
-            return await call_next(request)
-        from server.system_config import get_system_config
-        pw = get_system_config().get("auth", "programmer_password", "")
-        if not pw:
-            return await call_next(request)
-
-        auth = request.headers.get("authorization", "")
-        password = ""
-        if auth.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth[6:]).decode("utf-8")
-                _, password = decoded.split(":", 1)
-            except (ValueError, UnicodeDecodeError):
-                password = ""
-        if secrets.compare_digest(password, pw):
-            return await call_next(request)
-
-        return Response(
-            "Authentication required",
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="OpenAVC Programmer"'},
-        )
-
-
-app.add_middleware(ProgrammerAuthMiddleware)
+# /programmer static files are served without auth — the SPA renders a login
+# screen and gates itself. API routes remain protected by `require_programmer_auth`,
+# which the SPA satisfies by sending an Authorization header on every fetch.
+# Removing the static-file middleware lets the JS run so it can show a login
+# form (instead of the browser's native Basic auth dialog, which can't pass
+# credentials to WebSocket upgrades on most browsers).
 
 # Per-IP rate limiting (outermost — runs before auth)
 from server.middleware.rate_limit import RateLimitMiddleware

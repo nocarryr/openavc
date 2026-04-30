@@ -4,11 +4,17 @@ import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { ViewErrorBoundary } from "./components/shared/ViewErrorBoundary";
 import ToastContainer from "./components/shared/ToastContainer";
 import { ShortcutsPanel } from "./components/shared/ShortcutsPanel";
+import { Login } from "./components/Login";
 import { DashboardView } from "./views/DashboardView";
 import { useProjectStore } from "./store/projectStore";
 import { useNavigationStore } from "./store/navigationStore";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { showInfo } from "./store/toastStore";
+import {
+  AUTH_REQUIRED_EVENT,
+  getStoredAuth,
+  probeAuth,
+} from "./api/auth";
 
 // Lazy-load views that aren't shown on initial page load
 const ProjectView = lazy(() => import("./views/ProjectView").then((m) => ({ default: m.ProjectView })));
@@ -26,7 +32,44 @@ const PluginExtensionView = lazy(() => import("./views/PluginExtensionView").the
 const UpdatesView = lazy(() => import("./views/UpdatesView").then((m) => ({ default: m.UpdatesView })));
 const SystemSettingsView = lazy(() => import("./views/SystemSettingsView").then((m) => ({ default: m.SystemSettingsView })));
 
+type AuthState = "checking" | "needed" | "ready";
+
 function App() {
+  const [authState, setAuthState] = useState<AuthState>(() =>
+    getStoredAuth() ? "ready" : "checking",
+  );
+
+  // On first mount with no stored creds, ask the server whether auth is
+  // required. Skip the login screen if the deployment has no password set.
+  useEffect(() => {
+    if (authState !== "checking") return;
+    let cancelled = false;
+    probeAuth().then((result) => {
+      if (cancelled) return;
+      setAuthState(result === "required" ? "needed" : "ready");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [authState]);
+
+  // Drop back to the login screen if any /api request comes back 401.
+  useEffect(() => {
+    const handler = () => setAuthState("needed");
+    window.addEventListener(AUTH_REQUIRED_EVENT, handler);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, handler);
+  }, []);
+
+  if (authState === "checking") {
+    return <div style={{ height: "100vh" }} />;
+  }
+  if (authState === "needed") {
+    return <Login onSuccess={() => setAuthState("ready")} />;
+  }
+  return <AuthedApp />;
+}
+
+function AuthedApp() {
   const activeView = useNavigationStore((s) => s.activeView);
   const navigateTo = useNavigationStore((s) => s.navigateTo);
   const loadProject = useProjectStore((s) => s.load);

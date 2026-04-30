@@ -161,6 +161,16 @@ def check_ws_auth(query_params: dict, headers: dict) -> bool:
         proto = proto.strip()
         if proto.startswith("auth."):
             token = proto[5:]
+            # Support `auth.b64.<urlsafe-b64>` for tokens with characters
+            # that aren't valid in a WebSocket subprotocol token (RFC 6455
+            # restricts subprotocol values to HTTP token chars).
+            if token.startswith("b64."):
+                try:
+                    raw = token[4:]
+                    raw += "=" * (-len(raw) % 4)
+                    token = base64.urlsafe_b64decode(raw).decode("utf-8")
+                except (binascii.Error, UnicodeDecodeError, ValueError):
+                    continue
             if token:
                 if pw and _check_password(token):
                     return True
@@ -173,12 +183,14 @@ def check_ws_auth(query_params: dict, headers: dict) -> bool:
 def get_ws_auth_subprotocol(headers: dict) -> str | None:
     """Extract the auth subprotocol from WebSocket headers, if present.
 
-    Must be echoed back in ws.accept(subprotocol=...) for the browser
-    to keep the connection open.
+    Returns the exact subprotocol token the client sent (not a shortened
+    form) so it can be echoed back via ws.accept(subprotocol=...). Per
+    RFC 6455, the server MUST select a subprotocol from the client's list;
+    returning anything else causes the browser to fail the handshake.
     """
     ws_protocols = headers.get("sec-websocket-protocol", "")
     for proto in ws_protocols.split(","):
         proto = proto.strip()
         if proto.startswith("auth."):
-            return "auth"
+            return proto
     return None

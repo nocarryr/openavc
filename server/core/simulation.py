@@ -41,6 +41,10 @@ class SimulationManager:
         self._sim_ui_url: str | None = None
         self._starting = False  # prevents concurrent start attempts
         self._monitor_task: asyncio.Task | None = None
+        # Background tasks that drain the subprocess's stdout/stderr so its
+        # OS pipe buffers don't fill up and block uvicorn writes inside the
+        # simulator (which would deadlock and kill the simulator).
+        self._drain_tasks: list[asyncio.Task] = []
 
     @property
     def active(self) -> bool:
@@ -221,6 +225,19 @@ class SimulationManager:
         except Exception as e:
             raise RuntimeError(f"Error waiting for simulator startup: {e}")
 
+        # Drain stdout/stderr from this point on. The readiness loop above
+        # consumes stderr explicitly; once it exits, nothing reads the pipes
+        # so uvicorn would eventually block when its OS pipe buffer fills
+        # (~64 KB), which freezes the simulator and drops client connections.
+        self._drain_tasks = [
+            asyncio.ensure_future(
+                self._drain_stream(self._process.stdout, "simulator.stdout"),
+            ),
+            asyncio.ensure_future(
+                self._drain_stream(self._process.stderr, "simulator.stderr"),
+            ),
+        ]
+
         self._sim_ui_url = f"http://localhost:{sim_config['ui_port']}"
 
         # Query the simulator API for actual port assignments instead of
@@ -285,9 +302,35 @@ class SimulationManager:
             "ui_url": self._sim_ui_url,
         }
 
+    async def _drain_stream(self, stream: asyncio.StreamReader | None, label: str) -> None:
+        """Read a subprocess pipe forever, forwarding lines to our logger.
+
+        Stops silently when the stream closes (subprocess exit) or the task
+        is cancelled.
+        """
+        if stream is None:
+            return
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    log.debug("[%s] %s", label, text)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("Stream drain (%s) ended: %s", label, e)
+
     async def stop(self) -> None:
         """Stop simulation and restore original device connections."""
         if not self._active:
+            # Even if the in-memory flag is False, keep state keys honest in
+            # case a previous run left them set (e.g. crash during _do_start
+            # before the monitor task could clean up).
+            self.engine.state.set("system.simulation_active", False, source="simulation")
+            self.engine.state.set("system.simulation_ui_url", None, source="simulation")
             return
 
         log.info("Stopping simulation...")
@@ -300,6 +343,12 @@ class SimulationManager:
             except asyncio.CancelledError:
                 pass
         self._monitor_task = None
+
+        # Cancel stream drainers
+        for t in self._drain_tasks:
+            if not t.done():
+                t.cancel()
+        self._drain_tasks = []
 
         # Restore original connections
         await self._restore_connections()
@@ -324,6 +373,11 @@ class SimulationManager:
                     exit_code = self._process.returncode
                     log.info("Simulator process exited (code %s)", exit_code)
                     await self._restore_connections()
+                    # Stop draining the now-closed pipes
+                    for t in self._drain_tasks:
+                        if not t.done():
+                            t.cancel()
+                    self._drain_tasks = []
                     self._process = None
                     self._sim_ports.clear()
                     self._original_configs.clear()
@@ -356,6 +410,11 @@ class SimulationManager:
                 pass
             log.info("Simulator process stopped")
         self._process = None
+        # Stop draining now-closed pipes
+        for t in self._drain_tasks:
+            if not t.done():
+                t.cancel()
+        self._drain_tasks = []
         if hasattr(self, "_config_path") and self._config_path:
             Path(self._config_path).unlink(missing_ok=True)
             self._config_path = None

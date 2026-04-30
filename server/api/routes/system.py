@@ -21,6 +21,22 @@ async def startup_status() -> dict[str, Any]:
     return {"ready": True, "error": None}
 
 
+@open_router.get("/auth/required")
+async def auth_required() -> dict[str, bool]:
+    """Tells the SPA whether the deployment has a programmer password set.
+
+    The SPA can't rely on probing a protected endpoint because browsers
+    auto-attach cached HTTP Basic credentials, masking whether auth is
+    actually required. This explicit signal lets the SPA decide between
+    showing its login screen or skipping straight to the app.
+    """
+    from server.system_config import get_system_config
+    cfg = get_system_config()
+    pw = cfg.get("auth", "programmer_password", "")
+    api_key = cfg.get("auth", "api_key", "")
+    return {"required": bool(pw or api_key)}
+
+
 @open_router.get("/status")
 async def get_status() -> dict[str, Any]:
     """System status, uptime, project info."""

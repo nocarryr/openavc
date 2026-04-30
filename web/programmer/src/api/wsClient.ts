@@ -1,3 +1,5 @@
+import { AUTH_REQUIRED_EVENT, clearStoredAuth, getAuthSubprotocols } from "./auth";
+
 type MessageHandler = (msg: Record<string, unknown>) => void;
 type LifecycleHandler = () => void;
 
@@ -8,6 +10,9 @@ const MAX_RECONNECT_DELAY = 15000;
 let handlers: MessageHandler[] = [];
 let connectHandlers: LifecycleHandler[] = [];
 let disconnectHandlers: LifecycleHandler[] = [];
+/** True once any WS attempt has reached the OPEN state. Used to distinguish
+ *  "server rejected us" (probably auth) from "connection dropped mid-session". */
+let everConnected = false;
 
 /** Queue for messages sent while disconnected (commands only, capped). */
 const MAX_SEND_QUEUE = 50;
@@ -26,10 +31,17 @@ function getWsUrl(): string {
 export function connect(): void {
   if (socket && socket.readyState <= WebSocket.OPEN) return;
 
-  socket = new WebSocket(getWsUrl());
+  // Pass the password as a Sec-WebSocket-Protocol subprotocol so the server
+  // can authenticate the upgrade request — browsers can't attach Authorization
+  // headers to WebSockets.
+  const protocols = getAuthSubprotocols();
+  socket = protocols
+    ? new WebSocket(getWsUrl(), protocols)
+    : new WebSocket(getWsUrl());
 
   socket.onopen = () => {
     console.log("[WS] Connected");
+    everConnected = true;
     reconnectDelay = 2000; // Reset backoff on successful connect
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
@@ -65,12 +77,27 @@ export function connect(): void {
     }
   };
 
-  socket.onclose = () => {
-    console.log(`[WS] Disconnected, reconnecting in ${reconnectDelay / 1000}s...`);
+  socket.onclose = (ev) => {
     socket = null;
     for (const handler of disconnectHandlers) {
       handler();
     }
+    // Auth rejection: the server can return either 4001 (sent after accept)
+    // or close the upgrade with HTTP 401, which the browser surfaces as
+    // 1006 (abnormal close, no message). When the close happens before any
+    // successful open AND the server requires auth, treat it as an auth
+    // failure and bounce the user to the login screen rather than looping
+    // reconnects forever.
+    const looksLikeAuthFailure =
+      ev.code === 4001 ||
+      (ev.code === 1006 && everConnected === false);
+    if (looksLikeAuthFailure) {
+      console.warn(`[WS] Connection rejected (code ${ev.code}); requesting login`);
+      clearStoredAuth();
+      window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+      return;
+    }
+    console.log(`[WS] Disconnected (code ${ev.code}), reconnecting in ${reconnectDelay / 1000}s...`);
     reconnectTimer = setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT_DELAY);
   };
