@@ -1,17 +1,33 @@
-## Branding and Theming
+## Browse Drivers Refresh
 
-The Programmer IDE and Simulator now use the OpenAVC brand palette. The blue accent is replaced with the sage green from the logo across all views, buttons, and status indicators. Both apps show the OpenAVC favicon and logo. A dark/light theme toggle is available in System Settings.
+The Browse Drivers panel in the Programmer IDE now surfaces the full driver catalog. Video, Streaming, and Power are first-class categories, and drivers using HTTP or OSC transports are now properly tagged. Each driver shows its tags, an overview of what the driver covers, the list of compatible models, and a deprecated badge when the author has marked it for replacement.
 
-## Add Device Dialog
+## Declarative Telnet Login
 
-Selecting a driver now auto-fills the Device ID and Display Name. IDs are generated from the driver category (e.g., `projector_1`, `display_2`) and names from the driver name, with automatic numbering to avoid conflicts. Both fields are editable if you want to override them. Driver and Device ID are now marked as required.
+`.avcdriver` files can now declare a Telnet-style `Username:` / `Password:` login handshake without any Python. Add an `auth:` block to the driver definition and the platform handles the prompt-and-respond exchange between the TCP connect and the first command. The Atlona OmniStream and Lutron HomeWorks QS community drivers use this to support devices with login authentication enabled out of the box.
 
-## Simulator
+## Smarter Discovery
 
-- Device cards with many controls (like the Behringer X32) no longer clip at the bottom. The controls area scrolls independently within each card.
-- Closing the simulator browser tab now shuts down the simulator process after a 5-second grace period. The main server detects the exit and cleans up simulation state automatically. Refreshing the tab within 5 seconds cancels the shutdown.
-- OSC simulators now correctly apply value maps when responding to state queries and processing incoming commands. This fixes initial state mismatch between the simulator and main server on startup for drivers with inverted value mappings.
+Network discovery now uses a curated device catalog from the community driver repo to identify equipment by exact manufacturer and model. When a scan recognizes a device that matches a known model, OpenAVC suggests the right driver directly instead of guessing from open ports.
 
-## Pi Image Build
+## Programmer Login
 
-Fixed the build script referencing `update-helper.sh` via a relative path that breaks when pi-gen copies the stage into its own directory tree. The file is now staged into the build files directory alongside everything else.
+The Programmer IDE now has its own login screen. When you set a Programmer username and password in System Settings, integrators are prompted to sign in before they can edit the project. The Panel UI is unaffected and continues to use its own access settings.
+
+## Simulator Improvements
+
+The auto-generated simulator now handles HTTP-based YAML drivers, so you can test REST-style devices without writing a custom `_sim.py`. The simulator also mirrors the new declarative login handshake, so drivers with `auth:` blocks can be exercised end to end without real hardware.
+
+## Stability and Polish
+
+- WebSocket broadcasts now fan out concurrently, smoothing out UI updates when many panels are connected to a busy room.
+- Project files preserve fields they don't recognize, making it safer to roll back to an older OpenAVC after editing on a newer one.
+- Plugins now use a dedicated `variable_write` capability for setting user variables, separate from plugin-namespace state writes.
+- Panels can no longer write outside the `var.*` and `plugin.*` state namespaces over WebSocket.
+- Programmer and Panel passwords set at runtime are enforced immediately without restarting the server.
+- A new `state.delete` WebSocket message replaces the previous workaround for clearing state keys when devices are removed.
+- The Programmer IDE debounces plugin event refetches, eliminating a flicker on plugin-heavy projects.
+
+## Driver Definitions
+
+The canonical YAML keys for command and response definitions are now `send` and `match`. The legacy `string` and `pattern` aliases still load, but the platform logs a one-time deprecation warning so driver authors can migrate at their own pace.
