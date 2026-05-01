@@ -299,21 +299,200 @@ class DeviceToolsMixin:
         return get_driver_registry()
 
     async def _search_community_drivers(self, input: dict) -> Any:
+        """Search the community driver catalog with filters and ranking.
+
+        Inputs (all optional):
+          query        - free-text matched against id, name, manufacturer,
+                         description, tags, and compatible model names
+          category     - exact category filter (projector, display, switcher,
+                         audio, camera, lighting, video, streaming, power,
+                         utility)
+          manufacturer - case-insensitive manufacturer match
+          transport    - tcp | http | osc | serial | udp
+          limit        - cap on result count (default 25, max 100)
+
+        Returns lean entries (omits help and compatible_models — call
+        get_community_driver_detail for those). Results are ranked: exact id
+        and manufacturer matches first, then name matches, then description /
+        tag hits.
+        """
+        drivers = await self._fetch_community_index()
+        if drivers is None:
+            return {"drivers": [], "total": 0, "error": "Failed to fetch community index"}
+
+        query = (input.get("query") or "").strip().lower()
+        category = (input.get("category") or "").strip().lower()
+        manufacturer = (input.get("manufacturer") or "").strip().lower()
+        transport = (input.get("transport") or "").strip().lower()
+        try:
+            limit = max(1, min(int(input.get("limit", 25)), 100))
+        except (TypeError, ValueError):
+            limit = 25
+
+        results: list[tuple[int, dict]] = []
+        for drv in drivers:
+            if category and (drv.get("category") or "").lower() != category:
+                continue
+            if manufacturer and (drv.get("manufacturer") or "").lower() != manufacturer:
+                continue
+            if transport and (drv.get("transport") or "").lower() != transport:
+                continue
+
+            score = self._score_driver_match(drv, query) if query else 1
+            if query and score == 0:
+                continue
+            results.append((score, drv))
+
+        results.sort(key=lambda pair: (-pair[0], pair[1].get("id", "")))
+        total = len(results)
+        trimmed = [self._lean_driver_entry(d) for _, d in results[:limit]]
+        return {
+            "drivers": trimmed,
+            "total": total,
+            "returned": len(trimmed),
+            "truncated": total > len(trimmed),
+            "error": None,
+        }
+
+    async def _get_community_driver_detail(self, input: dict) -> Any:
+        """Return the full community catalog entry for a single driver.
+
+        Includes help.overview, help.setup, compatible_models, and other heavy
+        fields stripped from search results. Use this after search to read a
+        driver's setup notes or check whether a specific model is supported.
+        """
+        driver_id = (input.get("driver_id") or "").strip()
+        if not driver_id:
+            return {"error": "driver_id is required"}
+
+        drivers = await self._fetch_community_index()
+        if drivers is None:
+            return {"error": "Failed to fetch community index"}
+
+        for drv in drivers:
+            if drv.get("id") == driver_id:
+                base_url = "https://raw.githubusercontent.com/open-avc/openavc-drivers/main"
+                if "file" in drv and "download_url" not in drv:
+                    drv = {**drv, "download_url": f"{base_url}/{drv['file']}"}
+                return drv
+        return {"error": f"Driver '{driver_id}' not found in community catalog"}
+
+    async def _find_driver_for_device(self, input: dict) -> Any:
+        """Look up community drivers that control a specific device by exact
+        manufacturer + model match using the curated devices.json catalog.
+
+        Use this when the user names specific hardware (e.g. "Sharp NEC
+        NP-PA853UL"). Returns matching driver entries with confidence
+        ('verified', 'tested', 'untested'). Empty list when no exact match —
+        fall back to search_community_drivers in that case.
+        """
+        manufacturer = (input.get("manufacturer") or "").strip()
+        model = (input.get("model") or "").strip()
+        if not manufacturer or not model:
+            return {"matches": [], "error": "manufacturer and model are required"}
+
         base_url = "https://raw.githubusercontent.com/open-avc/openavc-drivers/main"
-        index_url = f"{base_url}/index.json"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(index_url)
+                resp = await client.get(f"{base_url}/devices.json")
                 resp.raise_for_status()
                 data = resp.json()
-                drivers = data.get("drivers", []) if isinstance(data, dict) else data
-                # Add ready-to-use download URL so the AI doesn't have to construct it
-                for drv in drivers:
-                    if "file" in drv:
-                        drv["download_url"] = f"{base_url}/{drv['file']}"
-                return {"drivers": drivers, "error": None}
         except (httpx.HTTPError, OSError) as e:
-            return {"drivers": [], "error": str(e)}
+            return {"matches": [], "error": str(e)}
+
+        devices = data.get("devices", []) if isinstance(data, dict) else data
+        mfr_lower = manufacturer.lower()
+        model_lower = model.lower()
+        matches: list[dict] = []
+        for dev in devices:
+            if (dev.get("manufacturer") or "").lower() != mfr_lower:
+                continue
+            if (dev.get("model") or "").lower() != model_lower:
+                continue
+            for drv in dev.get("drivers", []) or []:
+                matches.append({
+                    "driver_id": drv.get("id"),
+                    "confidence": drv.get("confidence", "untested"),
+                    "notes": drv.get("notes"),
+                })
+        return {
+            "manufacturer": manufacturer,
+            "model": model,
+            "matches": matches,
+            "error": None,
+        }
+
+    # --- helpers for community catalog tools ---
+
+    async def _fetch_community_index(self) -> list[dict] | None:
+        """Fetch and cache the community index.json. Returns None on failure."""
+        cache = getattr(self, "_community_index_cache", None)
+        import time
+        now = time.time()
+        if cache and (now - cache["fetched_at"]) < 600:
+            return cache["drivers"]
+
+        base_url = "https://raw.githubusercontent.com/open-avc/openavc-drivers/main"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{base_url}/index.json")
+                resp.raise_for_status()
+                data = resp.json()
+        except (httpx.HTTPError, OSError):
+            return cache["drivers"] if cache else None
+
+        drivers = data.get("drivers", []) if isinstance(data, dict) else data
+        for drv in drivers:
+            if "file" in drv:
+                drv["download_url"] = f"{base_url}/{drv['file']}"
+        self._community_index_cache = {"drivers": drivers, "fetched_at": now}
+        return drivers
+
+    @staticmethod
+    def _score_driver_match(drv: dict, query: str) -> int:
+        """Rank a driver against a free-text query. Higher score = better match."""
+        if not query:
+            return 1
+        score = 0
+        drv_id = (drv.get("id") or "").lower()
+        name = (drv.get("name") or "").lower()
+        manufacturer = (drv.get("manufacturer") or "").lower()
+        description = (drv.get("description") or "").lower()
+        tags = [t.lower() for t in (drv.get("tags") or []) if isinstance(t, str)]
+        compat_models = []
+        for entry in drv.get("compatible_models") or []:
+            for m in entry.get("models") or []:
+                if isinstance(m, str):
+                    compat_models.append(m.lower())
+
+        if query == drv_id or query == manufacturer:
+            score += 100
+        if query in drv_id:
+            score += 30
+        if query in manufacturer:
+            score += 30
+        if query in name:
+            score += 20
+        if any(query == t for t in tags):
+            score += 15
+        if any(query in t for t in tags):
+            score += 5
+        if any(query in m for m in compat_models):
+            score += 25
+        if query in description:
+            score += 3
+        return score
+
+    @staticmethod
+    def _lean_driver_entry(drv: dict) -> dict:
+        """Return only the fields needed to pick a driver. Drops help, compatible_models, and source_url."""
+        keep = (
+            "id", "name", "manufacturer", "category", "version", "author",
+            "transport", "description", "file", "format", "ports", "protocols",
+            "tags", "simulated", "verified", "deprecated", "replacement_id",
+            "min_platform_version", "download_url",
+        )
+        return {k: drv[k] for k in keep if k in drv}
 
     async def _get_installed_drivers(self, input: dict) -> Any:
         engine = self._get_engine()

@@ -666,7 +666,8 @@ class AIToolHandler(
     _READ_ONLY_TOOLS: set[str] = {
         "get_project_summary", "get_project_state", "get_state_value",
         "get_state_history", "list_devices", "get_device_info",
-        "list_drivers", "search_community_drivers", "get_installed_drivers",
+        "list_drivers", "search_community_drivers", "get_community_driver_detail",
+        "find_driver_for_device", "get_installed_drivers",
         "get_driver_definition", "get_script_source", "get_logs",
         "list_triggers", "get_macro", "get_ui_page",
         "list_plugins", "browse_community_plugins", "get_plugin_config",
@@ -708,6 +709,8 @@ class AIToolHandler(
             "get_device_info": self._get_device_info,
             "list_drivers": self._list_drivers,
             "search_community_drivers": self._search_community_drivers,
+            "get_community_driver_detail": self._get_community_driver_detail,
+            "find_driver_for_device": self._find_driver_for_device,
             "get_installed_drivers": self._get_installed_drivers,
             "get_driver_definition": self._get_driver_definition,
             "get_script_source": self._get_script_source,
