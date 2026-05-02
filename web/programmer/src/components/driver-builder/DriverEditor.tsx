@@ -13,6 +13,7 @@ import { DeviceSettingsEditor } from "./DeviceSettingsEditor";
 import { SimulatorEditor } from "./SimulatorEditor";
 import { LiveTestPanel } from "./LiveTestPanel";
 import { LifecycleEditor } from "./LifecycleEditor";
+import { AuthEditor } from "./AuthEditor";
 
 type TabId =
   | "general"
@@ -408,6 +409,7 @@ export function DriverEditor({
         {activeTab === "transport" && (
           <>
             <TransportPicker draft={draft} onUpdate={onUpdate} />
+            <AuthEditor draft={draft} onUpdate={onUpdate} />
             <LifecycleEditor draft={draft} onUpdate={onUpdate} />
           </>
         )}

@@ -500,6 +500,23 @@ export interface DriverDefinition {
   // auth handshake completes). Used for verbose-mode toggles, GET ALL, push
   // subscriptions. The runtime substitutes config-key placeholders.
   on_connect?: string[];
+  // Login handshake the runtime performs after raw connect. Today only
+  // type='telnet_login' is implemented (prompt-driven Telnet/SSH banner
+  // login). Username/password come from device config keys named here.
+  auth?: DriverAuthDef;
+}
+
+export interface DriverAuthDef {
+  type?: string;
+  username_prompt?: string;
+  password_prompt?: string;
+  success_pattern?: string;
+  failure_pattern?: string;
+  username_field?: string;
+  password_field?: string;
+  timeout_seconds?: number;
+  line_ending?: string;
+  skip_if_empty?: boolean;
 }
 
 // --- API response types ---
