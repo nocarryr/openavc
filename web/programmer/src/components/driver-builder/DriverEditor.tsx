@@ -243,28 +243,59 @@ export function DriverEditor({
           overflowX: "auto",
         }}
       >
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            style={{
-              padding: "var(--space-sm) var(--space-lg)",
-              fontSize: "var(--font-size-sm)",
-              borderBottom:
-                activeTab === tab.id
-                  ? "2px solid var(--accent)"
-                  : "2px solid transparent",
-              color:
-                activeTab === tab.id
-                  ? "var(--text-primary)"
-                  : "var(--text-muted)",
-              fontWeight: activeTab === tab.id ? 600 : 400,
-              whiteSpace: "nowrap",
-            }}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {tabs.map((tab) => {
+          const tabIssues = issuesFor(issues, tab.id);
+          const errorCount = tabIssues.filter((i) => i.severity === "error").length;
+          const warningCount = tabIssues.filter((i) => i.severity === "warning").length;
+          const badgeColor =
+            errorCount > 0
+              ? "var(--color-error)"
+              : warningCount > 0
+                ? "var(--color-warning, #d97706)"
+                : null;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              title={
+                badgeColor
+                  ? `${errorCount} error${errorCount === 1 ? "" : "s"}, ${warningCount} warning${warningCount === 1 ? "" : "s"}`
+                  : undefined
+              }
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "var(--space-sm) var(--space-lg)",
+                fontSize: "var(--font-size-sm)",
+                borderBottom:
+                  activeTab === tab.id
+                    ? "2px solid var(--accent)"
+                    : "2px solid transparent",
+                color:
+                  activeTab === tab.id
+                    ? "var(--text-primary)"
+                    : "var(--text-muted)",
+                fontWeight: activeTab === tab.id ? 600 : 400,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {tab.label}
+              {badgeColor && (
+                <span
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: badgeColor,
+                    display: "inline-block",
+                    flexShrink: 0,
+                  }}
+                />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Tab content + optional live YAML pane */}
