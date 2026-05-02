@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight } from "lucide-react";
-import type { DriverCommandDef, DriverDefinition } from "../../api/types";
+import type {
+  DriverCommandDef,
+  DriverDefinition,
+  DriverParamDef,
+} from "../../api/types";
 
 interface CommandBuilderProps {
   draft: DriverDefinition;
@@ -531,21 +535,18 @@ function ParamEditor({
   params,
   onChange,
 }: {
-  params: Record<
-    string,
-    { type: string; required?: boolean; values?: string[] }
-  >;
-  onChange: (
-    params: Record<
-      string,
-      { type: string; required?: boolean; values?: string[] }
-    >
-  ) => void;
+  params: Record<string, DriverParamDef>;
+  onChange: (params: Record<string, DriverParamDef>) => void;
 }) {
   const paramNames = Object.keys(params);
 
   const addParam = () => {
-    const name = `param${paramNames.length + 1}`;
+    let counter = paramNames.length + 1;
+    let name = `param${counter}`;
+    while (name in params) {
+      counter++;
+      name = `param${counter}`;
+    }
     onChange({ ...params, [name]: { type: "string" } });
   };
 
@@ -558,17 +559,24 @@ function ParamEditor({
   const renameParam = (oldName: string, newName: string) => {
     const cleaned = newName.replace(/[^a-zA-Z0-9_]/g, "");
     if (!cleaned || cleaned === oldName) return;
-    if (cleaned in params) return; // prevent collision
-    const entries = Object.entries(params);
+    if (cleaned in params) return;
     const next: typeof params = {};
-    for (const [k, v] of entries) {
+    for (const [k, v] of Object.entries(params)) {
       next[k === oldName ? cleaned : k] = v;
     }
     onChange(next);
   };
 
+  const updateParam = (name: string, partial: Partial<DriverParamDef>) => {
+    const merged = { ...params[name], ...partial } as Record<string, unknown>;
+    for (const k of Object.keys(merged)) {
+      if (merged[k] === undefined) delete merged[k];
+    }
+    onChange({ ...params, [name]: merged as unknown as DriverParamDef });
+  };
+
   return (
-    <div>
+    <div style={{ marginTop: "var(--space-md)" }}>
       <div
         style={{
           fontSize: "var(--font-size-sm)",
@@ -579,48 +587,14 @@ function ParamEditor({
         Parameters
       </div>
       {paramNames.map((name) => (
-        <div
+        <ParamRow
           key={name}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--space-sm)",
-            marginBottom: "var(--space-xs)",
-          }}
-        >
-          <input
-            value={name}
-            onChange={(e) => renameParam(name, e.target.value)}
-            onBlur={(e) => renameParam(name, e.target.value)}
-            style={{
-              width: 120,
-              fontSize: "var(--font-size-sm)",
-              fontFamily: "var(--font-mono)",
-            }}
-          />
-          <select
-            value={params[name].type}
-            onChange={(e) =>
-              onChange({
-                ...params,
-                [name]: { ...params[name], type: e.target.value },
-              })
-            }
-            style={{ width: 100, fontSize: "var(--font-size-sm)" }}
-          >
-            <option value="string">String</option>
-            <option value="integer">Integer</option>
-            <option value="number">Number</option>
-            <option value="boolean">Boolean</option>
-            <option value="enum">Enum</option>
-          </select>
-          <button
-            onClick={() => removeParam(name)}
-            style={{ padding: "2px", color: "var(--text-muted)" }}
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
+          name={name}
+          def={params[name]}
+          onRename={(next) => renameParam(name, next)}
+          onUpdate={(partial) => updateParam(name, partial)}
+          onRemove={() => removeParam(name)}
+        />
       ))}
       <button
         onClick={addParam}
@@ -632,6 +606,262 @@ function ParamEditor({
       >
         + Add Parameter
       </button>
+    </div>
+  );
+}
+
+function ParamRow({
+  name,
+  def,
+  onRename,
+  onUpdate,
+  onRemove,
+}: {
+  name: string;
+  def: DriverParamDef;
+  onRename: (next: string) => void;
+  onUpdate: (partial: Partial<DriverParamDef>) => void;
+  onRemove: () => void;
+}) {
+  const labelStyle: React.CSSProperties = {
+    display: "block",
+    fontSize: "11px",
+    color: "var(--text-muted)",
+    marginBottom: 2,
+  };
+  const isNumeric = def.type === "integer" || def.type === "number";
+  const isEnum = def.type === "enum";
+  const isBool = def.type === "boolean";
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border-color)",
+        borderRadius: "var(--border-radius)",
+        padding: "var(--space-sm) var(--space-md)",
+        marginBottom: "var(--space-xs)",
+        background: "var(--bg-surface)",
+      }}
+    >
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 110px auto auto",
+          gap: "var(--space-sm)",
+          alignItems: "end",
+        }}
+      >
+        <div>
+          <span style={labelStyle}>Name</span>
+          <input
+            value={name}
+            onChange={(e) => onRename(e.target.value)}
+            onBlur={(e) => onRename(e.target.value)}
+            style={{
+              width: "100%",
+              fontSize: "var(--font-size-sm)",
+              fontFamily: "var(--font-mono)",
+            }}
+          />
+        </div>
+        <div>
+          <span style={labelStyle}>Display Label</span>
+          <input
+            value={def.label ?? ""}
+            onChange={(e) =>
+              onUpdate({ label: e.target.value || undefined })
+            }
+            placeholder={name}
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          />
+        </div>
+        <div>
+          <span style={labelStyle}>Type</span>
+          <select
+            value={def.type}
+            onChange={(e) => {
+              const t = e.target.value;
+              const partial: Partial<DriverParamDef> = { type: t };
+              // Strip type-incompatible fields when switching types so
+              // round-tripped YAML stays clean.
+              if (t !== "integer" && t !== "number") {
+                partial.min = undefined;
+                partial.max = undefined;
+              }
+              if (t !== "enum") {
+                partial.values = undefined;
+              }
+              onUpdate(partial);
+            }}
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          >
+            <option value="string">String</option>
+            <option value="integer">Integer</option>
+            <option value="number">Number</option>
+            <option value="boolean">Boolean</option>
+            <option value="enum">Enum</option>
+          </select>
+        </div>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: "var(--font-size-sm)",
+            color: "var(--text-secondary)",
+            paddingBottom: 6,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!def.required}
+            onChange={(e) =>
+              onUpdate({ required: e.target.checked || undefined })
+            }
+          />
+          Required
+        </label>
+        <button
+          onClick={onRemove}
+          style={{
+            padding: "4px",
+            color: "var(--text-muted)",
+            alignSelf: "center",
+          }}
+          title="Remove parameter"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: isNumeric ? "1fr 1fr 1fr 1fr" : "1fr 1fr",
+          gap: "var(--space-sm)",
+          marginTop: "var(--space-sm)",
+        }}
+      >
+        <div>
+          <span style={labelStyle}>Help Text</span>
+          <input
+            value={def.help ?? def.description ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              // Always write `help`. If the existing def used `description`
+              // (legacy), drop it so we don't ship two equivalent fields.
+              onUpdate({
+                help: v || undefined,
+                description: undefined,
+              });
+            }}
+            placeholder="Brief description shown in tooltips"
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          />
+        </div>
+        <div>
+          <span style={labelStyle}>Default</span>
+          <input
+            value={def.default == null ? "" : String(def.default)}
+            onChange={(e) => {
+              const raw = e.target.value;
+              if (!raw) {
+                onUpdate({ default: undefined });
+                return;
+              }
+              if (def.type === "integer") {
+                const n = parseInt(raw, 10);
+                onUpdate({ default: Number.isFinite(n) ? n : raw });
+              } else if (def.type === "number") {
+                const n = parseFloat(raw);
+                onUpdate({ default: Number.isFinite(n) ? n : raw });
+              } else if (def.type === "boolean") {
+                onUpdate({ default: raw === "true" });
+              } else {
+                onUpdate({ default: raw });
+              }
+            }}
+            placeholder={
+              isBool ? "true / false" : isEnum ? "must be one of values" : ""
+            }
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          />
+        </div>
+        {isNumeric && (
+          <>
+            <div>
+              <span style={labelStyle}>Min</span>
+              <input
+                type="number"
+                value={def.min ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  onUpdate({
+                    min:
+                      v === ""
+                        ? undefined
+                        : def.type === "integer"
+                          ? parseInt(v, 10)
+                          : parseFloat(v),
+                  });
+                }}
+                style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+              />
+            </div>
+            <div>
+              <span style={labelStyle}>Max</span>
+              <input
+                type="number"
+                value={def.max ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  onUpdate({
+                    max:
+                      v === ""
+                        ? undefined
+                        : def.type === "integer"
+                          ? parseInt(v, 10)
+                          : parseFloat(v),
+                  });
+                }}
+                style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+              />
+            </div>
+          </>
+        )}
+      </div>
+
+      {isEnum && (
+        <div style={{ marginTop: "var(--space-sm)" }}>
+          <span style={labelStyle}>Allowed Values</span>
+          <input
+            value={(def.values ?? []).join(", ")}
+            onChange={(e) => {
+              const values = e.target.value
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+              onUpdate({ values: values.length ? values : undefined });
+            }}
+            placeholder="e.g. low, medium, high"
+            style={{
+              width: "100%",
+              fontSize: "var(--font-size-sm)",
+              fontFamily: "var(--font-mono)",
+            }}
+          />
+          <div
+            style={{
+              fontSize: "11px",
+              color: "var(--text-muted)",
+              marginTop: 2,
+            }}
+          >
+            Comma-separated. The Add Device dialog and macro editor render
+            these as a dropdown.
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -417,8 +417,25 @@ export interface DriverCommandDef {
   // OSC.
   address?: string;
   args?: { type: string; value: string }[];
-  params: Record<string, { type: string; required?: boolean; values?: string[]; help?: string }>;
+  params: Record<string, DriverParamDef>;
   help?: string;
+}
+
+export interface DriverParamDef {
+  type: string;
+  required?: boolean;
+  label?: string;
+  help?: string;
+  // The runtime accepts `description` as an alias for `help` — read either,
+  // write `help` (canonical) when introducing new params.
+  description?: string;
+  // Numeric bounds — only meaningful when type is integer or number.
+  min?: number;
+  max?: number;
+  // Default value — type-coerced by the runtime against `type`.
+  default?: unknown;
+  // Allowed values for type='enum' — required for that type.
+  values?: string[];
 }
 
 export interface DriverResponseMapping {
