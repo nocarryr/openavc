@@ -2,22 +2,7 @@ import { create } from "zustand";
 import yaml from "js-yaml";
 import type { DriverDefinition, DriverInfo, CommunityDriver, InstalledDriver } from "../api/types";
 import * as api from "../api/restClient";
-
-function parseApiError(e: unknown): string {
-  if (!(e instanceof Error)) return String(e);
-  const match = e.message.match(/^API \d+: (.+)/s);
-  if (!match) return e.message;
-  try {
-    const body = JSON.parse(match[1]);
-    const detail = body?.detail;
-    if (typeof detail === "string") return detail;
-    if (detail?.message) {
-      const errors: string[] = detail.errors ?? [];
-      return errors.length ? `${detail.message}:\n${errors.join("\n")}` : detail.message;
-    }
-  } catch { /* not JSON, use raw */ }
-  return e.message;
-}
+import { parseApiError } from "../api/errors";
 
 const EMPTY_DEFINITION: DriverDefinition = {
   id: "",
@@ -275,7 +260,11 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => ({
   },
 
   uninstallDriver: async (driverId) => {
-    await api.uninstallDriver(driverId);
+    try {
+      await api.uninstallDriver(driverId);
+    } catch (e) {
+      throw new Error(parseApiError(e));
+    }
     // Refresh all lists
     await Promise.all([
       get().loadRegisteredDrivers(),
@@ -284,7 +273,11 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => ({
   },
 
   updateDriver: async (driverId, fileUrl, minPlatformVersion) => {
-    await api.updateCommunityDriver(driverId, fileUrl, minPlatformVersion);
+    try {
+      await api.updateCommunityDriver(driverId, fileUrl, minPlatformVersion);
+    } catch (e) {
+      throw new Error(parseApiError(e));
+    }
     await Promise.all([
       get().loadRegisteredDrivers(),
       get().loadInstalledDrivers(),

@@ -5,6 +5,7 @@ import { ViewContainer } from "../components/layout/ViewContainer";
 import { usePluginStore } from "../store/pluginStore";
 import { useNavigationStore } from "../store/navigationStore";
 import * as api from "../api/restClient";
+import { parseApiError } from "../api/errors";
 import type { PluginInfo, SchemaField } from "../api/types";
 import { SurfaceConfigurator } from "../components/plugins/SurfaceConfigurator";
 import { BrowsePlugins } from "../components/plugins/BrowsePlugins";
@@ -1130,7 +1131,7 @@ function PluginDetail({ plugin }: { plugin: PluginInfo }) {
                       setSelectedId(null);
                       load();
                     } catch (e) {
-                      setUninstallError(String(e));
+                      setUninstallError(parseApiError(e));
                       setConfirmUninstall(false);
                     }
                   }}

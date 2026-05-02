@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Search, Trash2 } from "lucide-react";
 import { useDriverBuilderStore } from "../../store/driverBuilderStore";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { parseApiError } from "../../api/errors";
 import type { DriverInfo } from "../../api/types";
 
 const GENERIC_IDS = new Set(["generic_tcp", "generic_serial", "generic_http"]);
@@ -58,7 +59,7 @@ export function InstalledDriversView() {
       if (selectedId === confirmUninstall) setSelectedId(null);
       setConfirmUninstall(null);
     } catch (e) {
-      setUninstallError(String(e));
+      setUninstallError(parseApiError(e));
       setConfirmUninstall(null);
     }
   };
@@ -162,27 +163,16 @@ export function InstalledDriversView() {
 
       {/* Right detail panel */}
       <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-lg)" }}>
-        {uninstallError && (
-          <div
-            style={{
-              padding: "var(--space-sm) var(--space-md)",
-              marginBottom: "var(--space-md)",
-              background: "var(--danger-dim, rgba(220,38,38,0.1))",
-              border: "1px solid var(--danger)",
-              borderRadius: "var(--radius)",
-              color: "var(--danger)",
-              fontSize: "var(--font-size-sm)",
-            }}
-          >
-            {uninstallError}
-          </div>
-        )}
-
         {selectedDriver ? (
           <DriverDetailPanel
             driver={selectedDriver}
             canUninstall={canUninstall}
-            onUninstall={() => setConfirmUninstall(selectedDriver.id)}
+            onUninstall={() => {
+              setUninstallError(null);
+              setConfirmUninstall(selectedDriver.id);
+            }}
+            uninstallError={uninstallError}
+            onDismissUninstallError={() => setUninstallError(null)}
           />
         ) : (
           <div
@@ -219,10 +209,14 @@ function DriverDetailPanel({
   driver,
   canUninstall,
   onUninstall,
+  uninstallError,
+  onDismissUninstallError,
 }: {
   driver: DriverInfo;
   canUninstall: boolean;
   onUninstall: () => void;
+  uninstallError: string | null;
+  onDismissUninstallError: () => void;
 }) {
   const help = driver.help;
   const configSchema = driver.config_schema || {};
@@ -377,6 +371,40 @@ function DriverDetailPanel({
       {/* Uninstall */}
       {canUninstall && (
         <div style={{ marginTop: "var(--space-lg)", paddingTop: "var(--space-md)", borderTop: "1px solid var(--border-color)" }}>
+          {uninstallError && (
+            <div
+              style={{
+                padding: "var(--space-sm) var(--space-md)",
+                marginBottom: "var(--space-md)",
+                background: "var(--danger-dim, rgba(220,38,38,0.1))",
+                border: "1px solid var(--danger)",
+                borderRadius: "var(--radius)",
+                color: "var(--danger)",
+                fontSize: "var(--font-size-sm)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                gap: "var(--space-sm)",
+              }}
+            >
+              <span style={{ whiteSpace: "pre-wrap" }}>{uninstallError}</span>
+              <button
+                onClick={onDismissUninstallError}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--danger)",
+                  cursor: "pointer",
+                  fontSize: "var(--font-size-sm)",
+                  padding: 0,
+                  lineHeight: 1,
+                }}
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <button
             className="btn btn-sm btn-danger"
             onClick={onUninstall}
