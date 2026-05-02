@@ -52,33 +52,19 @@ export function FrameParserEditor({ draft, onUpdate }: FrameParserEditorProps) {
   };
 
   return (
-    <div style={{ marginTop: "var(--space-xl)" }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: "var(--space-md)",
-          marginBottom: "var(--space-xs)",
-        }}
-      >
-        <h3 style={{ fontSize: "var(--font-size-md)", margin: 0 }}>
-          Frame Parser <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12 }}>(advanced)</span>
-        </h3>
-        <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-          binary protocols only
-        </span>
-      </div>
+    <div>
       <p
         style={{
           fontSize: "var(--font-size-sm)",
           color: "var(--text-muted)",
+          marginTop: 0,
           marginBottom: "var(--space-md)",
         }}
       >
         For binary protocols where messages aren't delimited by a control
         byte. Text protocols (most AV gear) should use the Message Delimiter
-        setting above instead. If you're not sure which you need, leave this
-        disabled.
+        setting on the Transport section instead. If you're not sure which
+        you need, leave this disabled.
       </p>
 
       <label

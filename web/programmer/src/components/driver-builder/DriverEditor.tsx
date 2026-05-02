@@ -15,17 +15,15 @@ import { LiveTestPanel } from "./LiveTestPanel";
 import { LifecycleEditor } from "./LifecycleEditor";
 import { AuthEditor } from "./AuthEditor";
 import { FrameParserEditor } from "./FrameParserEditor";
+import { ConfigSchemaEditor } from "./ConfigSchemaEditor";
+import { CollapsibleSection } from "./CollapsibleSection";
 
 type TabId =
   | "general"
-  | "transport"
-  | "states"
-  | "commands"
-  | "responses"
-  | "polling"
+  | "connection"
+  | "behavior"
   | "discovery"
-  | "settings"
-  | "simulator"
+  | "simulation"
   | "test";
 
 interface DriverEditorProps {
@@ -89,16 +87,37 @@ export function DriverEditor({
 
   const tabs: { id: TabId; label: string }[] = [
     { id: "general", label: "General" },
-    { id: "transport", label: "Transport" },
-    { id: "states", label: "State Variables" },
-    { id: "commands", label: "Commands" },
-    { id: "responses", label: "Responses" },
-    { id: "polling", label: "Polling" },
+    { id: "connection", label: "Connection" },
+    { id: "behavior", label: "Behavior" },
     { id: "discovery", label: "Discovery" },
-    { id: "settings", label: "Device Settings" },
-    { id: "simulator", label: "Simulator" },
-    { id: "test", label: "Live Test" },
+    { id: "simulation", label: "Simulation" },
+    { id: "test", label: "Test" },
   ];
+
+  // Counts surfaced in collapsible headers so users can scan a tab and see
+  // which sections are populated without expanding every panel.
+  const stateCount = Object.keys(draft.state_variables ?? {}).length;
+  const commandCount = Object.keys(draft.commands ?? {}).length;
+  const responseCount = (draft.responses ?? []).length;
+  const pollingQueryCount = (draft.polling?.queries ?? []).length;
+  const settingCount = Object.keys(draft.device_settings ?? {}).length;
+  const configFieldCount = Object.keys(draft.config_schema ?? {}).filter(
+    (k) =>
+      ![
+        "host",
+        "port",
+        "baudrate",
+        "parity",
+        "poll_interval",
+        "inter_command_delay",
+      ].includes(k),
+  ).length;
+  const onConnectCount = (draft.on_connect ?? []).length;
+  const authEnabled = !!draft.auth;
+  const frameParserEnabled = !!draft.frame_parser;
+
+  const countMeta = (n: number, singular: string) =>
+    n === 0 ? "none" : `${n} ${n === 1 ? singular : `${singular}s`}`;
 
   const labelStyle: React.CSSProperties = {
     display: "block",
@@ -414,40 +433,105 @@ export function DriverEditor({
           </div>
         )}
 
-        {activeTab === "transport" && (
+        {activeTab === "connection" && (
           <>
-            <TransportPicker draft={draft} onUpdate={onUpdate} />
-            <AuthEditor draft={draft} onUpdate={onUpdate} />
-            <LifecycleEditor draft={draft} onUpdate={onUpdate} />
-            <FrameParserEditor draft={draft} onUpdate={onUpdate} />
+            <CollapsibleSection
+              title="Transport"
+              subtitle="How the driver talks to the device — TCP, serial, UDP, OSC, HTTP."
+              meta={draft.transport || "not set"}
+            >
+              <TransportPicker draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Authentication"
+              subtitle="Optional login handshake — for devices that present a login: / password: prompt after connect."
+              meta={authEnabled ? "enabled" : "disabled"}
+              defaultOpen={authEnabled}
+            >
+              <AuthEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Connect Sequence"
+              subtitle="Commands sent automatically on every connect — verbose-mode toggles, GET ALL requests, push subscriptions."
+              meta={countMeta(onConnectCount, "command")}
+              defaultOpen={onConnectCount > 0}
+            >
+              <LifecycleEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Frame Parser"
+              subtitle="Advanced — only for binary protocols framed by length prefix or fixed length. Most drivers leave this off."
+              meta={frameParserEnabled ? "enabled" : "disabled"}
+              defaultOpen={frameParserEnabled}
+            >
+              <FrameParserEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Configuration Fields"
+              subtitle="Per-device settings users fill in (display IDs, instance tags, custom passwords). Become {placeholders} in commands."
+              meta={countMeta(configFieldCount, "field")}
+              defaultOpen={configFieldCount > 0}
+            >
+              <ConfigSchemaEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
           </>
         )}
 
-        {activeTab === "states" && (
-          <StateVariableEditor draft={draft} onUpdate={onUpdate} />
-        )}
+        {activeTab === "behavior" && (
+          <>
+            <CollapsibleSection
+              title="State Variables"
+              subtitle="Read-only values the driver reports — power, input, mute, volume. Use these in command parameters and panel bindings."
+              meta={countMeta(stateCount, "variable")}
+            >
+              <StateVariableEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
 
-        {activeTab === "commands" && (
-          <CommandBuilder draft={draft} onUpdate={onUpdate} />
-        )}
+            <CollapsibleSection
+              title="Commands"
+              subtitle="Actions the driver can perform — power on, switch input, set volume. Reference state variables and config fields with {placeholders}."
+              meta={countMeta(commandCount, "command")}
+            >
+              <CommandBuilder draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
 
-        {activeTab === "responses" && (
-          <ResponseBuilder draft={draft} onUpdate={onUpdate} />
-        )}
+            <CollapsibleSection
+              title="Responses"
+              subtitle="Patterns matched against incoming data — capture groups update state variables."
+              meta={countMeta(responseCount, "pattern")}
+            >
+              <ResponseBuilder draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
 
-        {activeTab === "polling" && (
-          <PollingConfig draft={draft} onUpdate={onUpdate} />
+            <CollapsibleSection
+              title="Polling"
+              subtitle="Periodic queries that keep state variables fresh on devices that don't push updates."
+              meta={countMeta(pollingQueryCount, "query")}
+              defaultOpen={pollingQueryCount > 0}
+            >
+              <PollingConfig draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Device Settings"
+              subtitle="Writable values stored on the device hardware — labels, IDs, lock codes. Pending writes queue while offline."
+              meta={countMeta(settingCount, "setting")}
+              defaultOpen={settingCount > 0}
+            >
+              <DeviceSettingsEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+          </>
         )}
 
         {activeTab === "discovery" && (
           <DiscoveryHintsEditor draft={draft} onUpdate={onUpdate} />
         )}
 
-        {activeTab === "settings" && (
-          <DeviceSettingsEditor draft={draft} onUpdate={onUpdate} />
-        )}
-
-        {activeTab === "simulator" && (
+        {activeTab === "simulation" && (
           <SimulatorEditor draft={draft} onUpdate={onUpdate} />
         )}
 

@@ -79,26 +79,12 @@ export function LifecycleEditor({ draft, onUpdate }: LifecycleEditorProps) {
   })();
 
   return (
-    <div style={{ marginTop: "var(--space-xl)" }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: "var(--space-md)",
-          marginBottom: "var(--space-xs)",
-        }}
-      >
-        <h3 style={{ fontSize: "var(--font-size-md)", margin: 0 }}>
-          Connect Sequence
-        </h3>
-        <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-          on_connect — runs once per connection
-        </span>
-      </div>
+    <div>
       <p
         style={{
           fontSize: "var(--font-size-sm)",
           color: "var(--text-muted)",
+          marginTop: 0,
           marginBottom: "var(--space-md)",
         }}
       >
