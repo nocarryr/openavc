@@ -42,6 +42,80 @@ const TRANSPORT_COLORS: Record<string, string> = {
   osc: "#9b59b6",
 };
 
+// A single card rendered in the browser. A driver may produce multiple cards
+// when its compatible_models lists more than one manufacturer (e.g. a generic
+// VISCA-IP driver covering Sony, AVer, Marshall — each brand gets its own
+// card so the integrator searching "AVer" sees an "AVer PTZ Camera" entry,
+// not a "Generic VISCA-IP" entry with AVer hidden inside).
+//
+// Native vs. via:
+//   - native (isViaCard=false): the card's brand matches driver.manufacturer.
+//     This is the canonical brand the driver is named for. Sorts first within
+//     a brand so users always get the dedicated driver if one exists.
+//   - via   (isViaCard=true):  the card's brand is one of the OTHER
+//     manufacturers in compatible_models. The card is labeled with a small
+//     "via <driver name>" line so the user knows it's a generic fallback.
+type DisplayCard = {
+  driver: CommunityDriver;
+  brand: string;
+  brandModels: string[];
+  brandConfidence: 'full' | 'partial' | 'untested' | null;
+  brandNotes?: string;
+  isViaCard: boolean;
+};
+
+/** Fan a driver out into one card per distinct manufacturer it claims to
+ *  support. Drivers that only target a single brand produce a single card,
+ *  matching today's behavior.
+ */
+function expandDriverToCards(driver: CommunityDriver): DisplayCard[] {
+  const cms = driver.compatible_models ?? [];
+  if (cms.length === 0) {
+    // No compatible_models declared — fall back to the top-level manufacturer.
+    return [{
+      driver,
+      brand: driver.manufacturer,
+      brandModels: [],
+      brandConfidence: null,
+      isViaCard: false,
+    }];
+  }
+  const distinct = new Set(cms.map((c) => c.manufacturer));
+  if (distinct.size <= 1) {
+    // Single-manufacturer driver — keep one card, aggregate models so the
+    // count line stays accurate.
+    return [{
+      driver,
+      brand: driver.manufacturer,
+      brandModels: cms.flatMap((c) => c.models),
+      brandConfidence: cms[0]?.confidence ?? null,
+      brandNotes: cms[0]?.notes,
+      isViaCard: false,
+    }];
+  }
+  // Multi-manufacturer driver — fan out, one card per compatible_models entry.
+  return cms.map((cm) => ({
+    driver,
+    brand: cm.manufacturer,
+    brandModels: cm.models,
+    brandConfidence: cm.confidence,
+    brandNotes: cm.notes,
+    isViaCard: cm.manufacturer !== driver.manufacturer,
+  }));
+}
+
+/** Sort: alphabetical by brand, native cards before via cards within a brand,
+ *  driver name as final tiebreaker. Keeps Sony's dedicated driver above any
+ *  Sony card surfaced by a generic VISCA-IP driver, etc.
+ */
+function compareCards(a: DisplayCard, b: DisplayCard): number {
+  const ba = a.brand.toLowerCase();
+  const bb = b.brand.toLowerCase();
+  if (ba !== bb) return ba < bb ? -1 : 1;
+  if (a.isViaCard !== b.isViaCard) return a.isViaCard ? 1 : -1;
+  return a.driver.name.localeCompare(b.driver.name);
+}
+
 export function CommunityBrowser() {
   const communityDrivers = useDriverBuilderStore((s) => s.communityDrivers);
   const installedDrivers = useDriverBuilderStore((s) => s.installedDrivers);
@@ -67,7 +141,13 @@ export function CommunityBrowser() {
   // Build a map of driver id -> name for deprecated drivers' replacement lookup
   const driverNameById = new Map(communityDrivers.map((d) => [d.id, d.name]));
 
-  const filteredDrivers = communityDrivers.filter((driver) => {
+  // Expand each driver into 1+ cards (one per supported manufacturer when the
+  // driver is multi-brand), then filter cards individually. Filtering at the
+  // card level means searching "Sony" only surfaces Sony-branded cards — not
+  // every other brand the same driver happens to support.
+  const allCards = communityDrivers.flatMap(expandDriverToCards);
+  const filteredCards = allCards.filter((card) => {
+    const driver = card.driver;
     // Category filter
     if (activeCategory !== "All") {
       if (driver.category.toLowerCase() !== activeCategory.toLowerCase()) {
@@ -77,23 +157,23 @@ export function CommunityBrowser() {
     // Search filter
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
+      // Driver-level matches surface every card from that driver — searching
+      // the driver's own brand or its description is "show me everything this
+      // driver does."
       if (driver.name.toLowerCase().includes(q)) return true;
-      if (driver.manufacturer.toLowerCase().includes(q)) return true;
       if (driver.description.toLowerCase().includes(q)) return true;
       if (driver.id.toLowerCase().includes(q)) return true;
       if (driver.tags?.some((t) => t.toLowerCase().includes(q))) return true;
-      if (
-        driver.compatible_models?.some(
-          (cm) =>
-            cm.manufacturer.toLowerCase().includes(q) ||
-            cm.models.some((m) => m.toLowerCase().includes(q)),
-        )
-      )
-        return true;
+      // Card-level matches isolate to this brand's card. Searching "AVer"
+      // surfaces the AVer card from a generic VISCA-IP driver without also
+      // surfacing the Sony card from the same driver.
+      if (card.brand.toLowerCase().includes(q)) return true;
+      if (card.brandModels.some((m) => m.toLowerCase().includes(q))) return true;
       return false;
     }
     return true;
   });
+  filteredCards.sort(compareCards);
 
   const handleInstall = useCallback(
     async (driver: CommunityDriver) => {
@@ -249,7 +329,7 @@ export function CommunityBrowser() {
           <LoadingState />
         ) : communityError ? (
           <ErrorState error={communityError} onRetry={handleRetry} />
-        ) : filteredDrivers.length === 0 ? (
+        ) : filteredCards.length === 0 ? (
           <EmptyFilterState
             hasDrivers={communityDrivers.length > 0}
             searchQuery={searchQuery}
@@ -263,25 +343,30 @@ export function CommunityBrowser() {
               gap: "var(--space-md)",
             }}
           >
-            {filteredDrivers.map((driver) => (
-              <DriverCard
-                key={driver.id}
-                driver={driver}
-                installed={installedIdSet.has(driver.id)}
-                installing={installingIds.has(driver.id)}
-                installError={installErrors[driver.id] || null}
-                updateAvailable={hasUpdate(installedVersions.get(driver.id) ?? "", driver.version)}
-                replacementName={
-                  driver.deprecated && driver.replacement_id
-                    ? driverNameById.get(driver.replacement_id) ?? driver.replacement_id
-                    : null
-                }
-                onInstall={handleInstall}
-                onUpdate={handleUpdate}
-                onSelect={setSelectedDriver}
-                onTagClick={setSearchQuery}
-              />
-            ))}
+            {filteredCards.map((card) => {
+              const driver = card.driver;
+              return (
+                <DriverCard
+                  // Brand is part of the key because one driver may produce
+                  // multiple cards (Sony / AVer / Marshall via generic VISCA).
+                  key={`${driver.id}|${card.brand}`}
+                  card={card}
+                  installed={installedIdSet.has(driver.id)}
+                  installing={installingIds.has(driver.id)}
+                  installError={installErrors[driver.id] || null}
+                  updateAvailable={hasUpdate(installedVersions.get(driver.id) ?? "", driver.version)}
+                  replacementName={
+                    driver.deprecated && driver.replacement_id
+                      ? driverNameById.get(driver.replacement_id) ?? driver.replacement_id
+                      : null
+                  }
+                  onInstall={handleInstall}
+                  onUpdate={handleUpdate}
+                  onSelect={setSelectedDriver}
+                  onTagClick={setSearchQuery}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -297,7 +382,8 @@ export function CommunityBrowser() {
             flexShrink: 0,
           }}
         >
-          {filteredDrivers.length} of {communityDrivers.length} drivers
+          {filteredCards.length} {filteredCards.length === 1 ? "result" : "results"} ·{" "}
+          {communityDrivers.length} {communityDrivers.length === 1 ? "driver" : "drivers"}
           {installedDrivers.length > 0 &&
             ` · ${installedDrivers.length} installed`}
         </div>
@@ -332,7 +418,7 @@ export function CommunityBrowser() {
 // --- Driver Card ---
 
 function DriverCard({
-  driver,
+  card,
   installed,
   installing,
   installError,
@@ -343,7 +429,7 @@ function DriverCard({
   onSelect,
   onTagClick,
 }: {
-  driver: CommunityDriver;
+  card: DisplayCard;
   installed: boolean;
   installing: boolean;
   installError: string | null;
@@ -354,8 +440,10 @@ function DriverCard({
   onSelect: (driver: CommunityDriver) => void;
   onTagClick: (tag: string) => void;
 }) {
-  const compatibleModelCount =
-    driver.compatible_models?.reduce((acc, cm) => acc + cm.models.length, 0) ?? 0;
+  const driver = card.driver;
+  // Count models for THIS card's brand only — for via cards, that's just the
+  // brand we're surfacing on this card, not the entire compatible_models tree.
+  const compatibleModelCount = card.brandModels.length;
   const [hovered, setHovered] = useState(false);
 
   const catColor = CATEGORY_COLORS[driver.category.toLowerCase()] || "#888";
@@ -390,6 +478,7 @@ function DriverCard({
             }}
           >
             <span
+              title={card.isViaCard ? `${card.brand} (provided by ${driver.name})` : driver.name}
               style={{
                 fontWeight: 600,
                 fontSize: "var(--font-size-sm)",
@@ -399,7 +488,7 @@ function DriverCard({
                 whiteSpace: "nowrap",
               }}
             >
-              {driver.name}
+              {card.isViaCard ? card.brand : driver.name}
             </span>
             {driver.verified && (
               <span title="Verified driver" style={{ display: "flex", flexShrink: 0 }}>
@@ -436,15 +525,33 @@ function DriverCard({
               </span>
             )}
           </div>
-          <div
-            style={{
-              fontSize: "12px",
-              color: "#888",
-              marginTop: "2px",
-            }}
-          >
-            {driver.manufacturer} · by {driver.author}
-          </div>
+          {card.isViaCard ? (
+            // Via cards make the fallback explicit: this brand isn't getting
+            // a dedicated driver — it's covered by a generic. The italic
+            // styling and "via …" wording are the user's signal that a
+            // dedicated driver, if one ever ships, would be preferred.
+            <div
+              title={`${card.brand} is covered by ${driver.name}, a generic / multi-brand driver. If a dedicated ${card.brand} driver becomes available, it will appear above this card.`}
+              style={{
+                fontSize: "12px",
+                color: "#888",
+                marginTop: "2px",
+                fontStyle: "italic",
+              }}
+            >
+              via {driver.name} · by {driver.author}
+            </div>
+          ) : (
+            <div
+              style={{
+                fontSize: "12px",
+                color: "#888",
+                marginTop: "2px",
+              }}
+            >
+              {driver.manufacturer} · by {driver.author}
+            </div>
+          )}
         </div>
       </div>
 
