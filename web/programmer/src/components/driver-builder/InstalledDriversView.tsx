@@ -4,6 +4,7 @@ import { useDriverBuilderStore } from "../../store/driverBuilderStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useNavigationStore } from "../../store/navigationStore";
 import { parseApiError } from "../../api/errors";
+import { InlineError } from "../shared/InlineError";
 import type { DriverInfo, InstalledDriver } from "../../api/types";
 
 const GENERIC_IDS = new Set(["generic_tcp", "generic_serial", "generic_http"]);
@@ -488,40 +489,11 @@ function DriverDetailPanel({
         </div>
 
         {/* Uninstall error / in-use warning live next to the action */}
-        {uninstallError && (
-          <div
-            style={{
-              marginTop: "var(--space-sm)",
-              padding: "var(--space-sm) var(--space-md)",
-              background: "var(--danger-dim, rgba(220,38,38,0.1))",
-              border: "1px solid var(--danger)",
-              borderRadius: "var(--radius)",
-              color: "var(--danger)",
-              fontSize: "var(--font-size-sm)",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "var(--space-sm)",
-            }}
-          >
-            <span style={{ whiteSpace: "pre-wrap" }}>{uninstallError}</span>
-            <button
-              onClick={onDismissUninstallError}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "var(--danger)",
-                cursor: "pointer",
-                fontSize: "var(--font-size-sm)",
-                padding: 0,
-                lineHeight: 1,
-              }}
-              aria-label="Dismiss error"
-            >
-              ✕
-            </button>
-          </div>
-        )}
+        <InlineError
+          message={uninstallError}
+          onDismiss={onDismissUninstallError}
+          style={{ marginTop: "var(--space-sm)" }}
+        />
         {canUninstall && inUse && !uninstallError && (
           <div
             style={{

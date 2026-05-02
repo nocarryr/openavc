@@ -6,6 +6,7 @@ import { usePluginStore } from "../store/pluginStore";
 import { useNavigationStore } from "../store/navigationStore";
 import * as api from "../api/restClient";
 import { parseApiError } from "../api/errors";
+import { InlineError } from "../components/shared/InlineError";
 import type { PluginInfo, SchemaField } from "../api/types";
 import { SurfaceConfigurator } from "../components/plugins/SurfaceConfigurator";
 import { BrowsePlugins } from "../components/plugins/BrowsePlugins";
@@ -1007,40 +1008,11 @@ function PluginDetail({ plugin }: { plugin: PluginInfo }) {
       </div>
 
       {/* Uninstall error / status, next to the action */}
-      {uninstallError && (
-        <div
-          style={{
-            padding: "var(--space-sm) var(--space-md)",
-            marginBottom: "var(--space-md)",
-            background: "rgba(220,38,38,0.1)",
-            border: "1px solid rgba(220,38,38,0.3)",
-            borderRadius: "var(--border-radius)",
-            color: "var(--color-error)",
-            fontSize: "var(--font-size-sm)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            gap: "var(--space-sm)",
-          }}
-        >
-          <span style={{ whiteSpace: "pre-wrap" }}>{uninstallError}</span>
-          <button
-            onClick={() => setUninstallError(null)}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: "var(--color-error)",
-              cursor: "pointer",
-              fontSize: "var(--font-size-sm)",
-              padding: 0,
-              lineHeight: 1,
-            }}
-            aria-label="Dismiss error"
-          >
-            ✕
-          </button>
-        </div>
-      )}
+      <InlineError
+        message={uninstallError}
+        onDismiss={() => setUninstallError(null)}
+        style={{ marginBottom: "var(--space-md)" }}
+      />
 
       {/* Description */}
       {info.description && (
