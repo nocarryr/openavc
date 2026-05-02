@@ -1,4 +1,4 @@
-import { Plus, Upload, Download, Trash2 } from "lucide-react";
+import { Plus, Upload, Download, Trash2, Copy } from "lucide-react";
 import type { DriverDefinition } from "../../api/types";
 
 interface DriverListProps {
@@ -8,6 +8,7 @@ interface DriverListProps {
   onNew: () => void;
   onImport: () => void;
   onExport: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
 }
 
@@ -18,6 +19,7 @@ export function DriverList({
   onNew,
   onImport,
   onExport,
+  onDuplicate,
   onDelete,
 }: DriverListProps) {
   return (
@@ -132,9 +134,24 @@ export function DriverList({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  onDuplicate(def.id);
+                }}
+                title="Duplicate driver — create an editable copy"
+                style={{
+                  padding: "2px",
+                  borderRadius: "var(--border-radius)",
+                  color: "var(--text-muted)",
+                  flexShrink: 0,
+                }}
+              >
+                <Copy size={14} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
                   onExport(def.id);
                 }}
-                title="Export driver as .json file"
+                title="Export driver as .avcdriver file"
                 style={{
                   padding: "2px",
                   borderRadius: "var(--border-radius)",

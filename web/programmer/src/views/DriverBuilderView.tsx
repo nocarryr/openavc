@@ -50,6 +50,7 @@ export function DriverPanel() {
     deleteDriver,
     importDriver,
     exportDriver,
+    duplicateDriver,
   } = useDriverBuilderStore();
 
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
@@ -158,6 +159,7 @@ export function DriverPanel() {
             onNew={newDriver}
             onImport={handleImportClick}
             onExport={handleExport}
+            onDuplicate={duplicateDriver}
             onDelete={handleDelete}
           />
 

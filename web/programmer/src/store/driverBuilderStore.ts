@@ -64,6 +64,7 @@ interface DriverBuilderState {
   deleteDriver: (id: string) => Promise<void>;
   importDriver: (definition: DriverDefinition) => Promise<void>;
   exportDriver: (id: string) => void;
+  duplicateDriver: (id: string) => Promise<void>;
 
   // Driver actions
   loadRegisteredDrivers: () => Promise<void>;
@@ -191,6 +192,44 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => ({
     a.download = `${def.id}.avcdriver`;
     a.click();
     URL.revokeObjectURL(url);
+  },
+
+  duplicateDriver: async (id) => {
+    const { definitions } = get();
+    const original = definitions.find((d) => d.id === id);
+    if (!original) return;
+
+    // Pick a unique id and name for the copy. `<id>_copy`, `<id>_copy2`, …
+    const existingIds = new Set(definitions.map((d) => d.id));
+    let suffix = "_copy";
+    let counter = 1;
+    while (existingIds.has(`${original.id}${suffix}`)) {
+      counter += 1;
+      suffix = `_copy${counter}`;
+    }
+    const newId = `${original.id}${suffix}`;
+    const newName = original.name
+      ? `${original.name} (Copy${counter > 1 ? ` ${counter}` : ""})`
+      : newId;
+
+    // Deep-clone so we don't mutate the original. Drop the verified flag —
+    // verification is server-controlled and the copy hasn't been validated.
+    const copy: DriverDefinition = {
+      ...structuredClone(original),
+      id: newId,
+      name: newName,
+      verified: undefined,
+    };
+
+    set({ saving: true, error: null });
+    try {
+      await api.createDriverDefinition(copy);
+      await get().loadDefinitions();
+      get().selectDriver(newId);
+      set({ saving: false });
+    } catch (e) {
+      set({ saving: false, error: parseApiError(e) });
+    }
   },
 
   loadRegisteredDrivers: async () => {
