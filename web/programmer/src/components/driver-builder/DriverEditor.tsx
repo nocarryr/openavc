@@ -403,6 +403,10 @@ export function DriverEditor({
                 }}
               />
             </div>
+
+            <HelpFieldsSection draft={draft} onUpdate={onUpdate} />
+
+            <PublishingSection draft={draft} onUpdate={onUpdate} />
           </div>
         )}
 
@@ -522,6 +526,271 @@ export function DriverEditor({
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+const sectionLabelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: "var(--font-size-sm)",
+  color: "var(--text-secondary)",
+  marginBottom: "var(--space-xs)",
+};
+
+function HelpFieldsSection({
+  draft,
+  onUpdate,
+}: {
+  draft: DriverDefinition;
+  onUpdate: (partial: Partial<DriverDefinition>) => void;
+}) {
+  const help = draft.help ?? {};
+
+  const update = (partial: Partial<typeof help>) => {
+    const next = { ...help, ...partial };
+    // Drop empty strings so we don't ship `help: {}` blocks in YAML.
+    for (const k of Object.keys(next) as (keyof typeof next)[]) {
+      if (!next[k]) delete next[k];
+    }
+    onUpdate({ help: Object.keys(next).length ? next : undefined });
+  };
+
+  return (
+    <div style={{ marginTop: "var(--space-xl)" }}>
+      <h3 style={{ fontSize: "var(--font-size-md)", marginBottom: "var(--space-xs)" }}>
+        Help &amp; Setup
+      </h3>
+      <p
+        style={{
+          fontSize: "var(--font-size-sm)",
+          color: "var(--text-muted)",
+          marginBottom: "var(--space-md)",
+        }}
+      >
+        Markdown shown to integrators in the Add Device dialog. Overview is a
+        short pitch (what does this device do, who's it for). Setup is the
+        step-by-step the user follows to get it talking — IP setup, pairing,
+        physical button presses, anything device-specific.
+      </p>
+
+      <div style={{ marginBottom: "var(--space-md)" }}>
+        <label style={sectionLabelStyle}>Overview (markdown)</label>
+        <textarea
+          value={help.overview ?? ""}
+          onChange={(e) => update({ overview: e.target.value })}
+          placeholder="Short pitch — what this device is, where AV integrators use it."
+          rows={4}
+          style={{
+            width: "100%",
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--font-size-sm)",
+            resize: "vertical",
+          }}
+        />
+      </div>
+
+      <div>
+        <label style={sectionLabelStyle}>Setup Instructions (markdown)</label>
+        <textarea
+          value={help.setup ?? ""}
+          onChange={(e) => update({ setup: e.target.value })}
+          placeholder={
+            "1. Set a static IP on the device.\n" +
+            "2. Note the admin credentials (or pair via the device's button).\n" +
+            "3. Enter host, port, and credentials below..."
+          }
+          rows={8}
+          style={{
+            width: "100%",
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--font-size-sm)",
+            resize: "vertical",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function PublishingSection({
+  draft,
+  onUpdate,
+}: {
+  draft: DriverDefinition;
+  onUpdate: (partial: Partial<DriverDefinition>) => void;
+}) {
+  // Comma-separated text -> string[] helper.
+  const parseList = (raw: string): string[] | undefined => {
+    const items = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return items.length ? items : undefined;
+  };
+
+  const parsePorts = (raw: string): number[] | undefined => {
+    const items = raw
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n));
+    return items.length ? items : undefined;
+  };
+
+  return (
+    <div style={{ marginTop: "var(--space-xl)" }}>
+      <h3 style={{ fontSize: "var(--font-size-md)", marginBottom: "var(--space-xs)" }}>
+        Publishing
+      </h3>
+      <p
+        style={{
+          fontSize: "var(--font-size-sm)",
+          color: "var(--text-muted)",
+          marginBottom: "var(--space-md)",
+        }}
+      >
+        Catalog metadata used by the community driver index, Browse Drivers,
+        and the platform-version compatibility check at install time.
+      </p>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "var(--space-md)",
+          marginBottom: "var(--space-md)",
+        }}
+      >
+        <div>
+          <label style={sectionLabelStyle}>Minimum Platform Version</label>
+          <input
+            value={draft.min_platform_version ?? ""}
+            onChange={(e) =>
+              onUpdate({ min_platform_version: e.target.value || undefined })
+            }
+            placeholder="e.g. 0.9.0"
+            style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+          />
+          <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: 4 }}>
+            Blocks install on older OpenAVC versions that lack required
+            features. Leave blank if the driver works on every supported
+            version.
+          </div>
+        </div>
+        <div>
+          <label style={sectionLabelStyle}>Source URL</label>
+          <input
+            value={draft.source_url ?? ""}
+            onChange={(e) =>
+              onUpdate({ source_url: e.target.value || undefined })
+            }
+            placeholder="https://github.com/..."
+            style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+          />
+          <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: 4 }}>
+            Optional. Reference implementation or protocol docs.
+          </div>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "var(--space-md)",
+          marginBottom: "var(--space-md)",
+        }}
+      >
+        <div>
+          <label style={sectionLabelStyle}>Protocols</label>
+          <input
+            value={(draft.protocols ?? []).join(", ")}
+            onChange={(e) => onUpdate({ protocols: parseList(e.target.value) })}
+            placeholder="e.g. sis, telnet"
+            style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+          />
+          <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: 4 }}>
+            Protocol identifiers for catalog filtering. Comma-separated.
+          </div>
+        </div>
+        <div>
+          <label style={sectionLabelStyle}>Tags</label>
+          <input
+            value={(draft.tags ?? []).join(", ")}
+            onChange={(e) => onUpdate({ tags: parseList(e.target.value) })}
+            placeholder="e.g. matrix, 4k, hdmi"
+            style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+          />
+          <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: 4 }}>
+            Free-form discovery tags. Comma-separated.
+          </div>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 120px 120px",
+          gap: "var(--space-md)",
+          alignItems: "end",
+        }}
+      >
+        <div>
+          <label style={sectionLabelStyle}>Default Ports</label>
+          <input
+            value={(draft.ports ?? []).join(", ")}
+            onChange={(e) => onUpdate({ ports: parsePorts(e.target.value) })}
+            placeholder="e.g. 23, 80"
+            style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+          />
+          <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: 4 }}>
+            Network ports this driver speaks on. Used by the discovery
+            engine. Comma-separated.
+          </div>
+        </div>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: "var(--font-size-sm)",
+            paddingBottom: 6,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!draft.simulated}
+            onChange={(e) =>
+              onUpdate({ simulated: e.target.checked || undefined })
+            }
+          />
+          Simulated
+        </label>
+        <div
+          title="Server-controlled — set by the community catalog after testing"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: "var(--font-size-sm)",
+            paddingBottom: 6,
+            color: draft.verified ? "var(--accent)" : "var(--text-muted)",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!draft.verified}
+            disabled
+            readOnly
+          />
+          Verified
+        </div>
+      </div>
+      <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "var(--space-xs)" }}>
+        <strong>Simulated:</strong> set when this driver has a simulator
+        section so users can test without hardware. <strong>Verified:</strong>{" "}
+        read-only — the community catalog flips this once a driver is
+        validated against real hardware.
       </div>
     </div>
   );

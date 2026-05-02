@@ -513,6 +513,17 @@ export interface DriverDefinition {
   device_settings?: Record<string, DriverDeviceSettingDef>;
   simulator?: DriverSimulatorDef;
   help?: { overview?: string; setup?: string };
+  // Catalog / publishing metadata. The runtime reads `protocols` and
+  // `min_platform_version`; the others (`tags`, `simulated`, `verified`,
+  // `source_url`, `ports`, `compatible_models`) are surfaced by the
+  // community catalog and the Browse Drivers UI.
+  min_platform_version?: string;
+  protocols?: string[];
+  tags?: string[];
+  simulated?: boolean;
+  verified?: boolean;
+  source_url?: string;
+  ports?: number[];
   // Sequence of wire strings sent immediately after connect (and after any
   // auth handshake completes). Used for verbose-mode toggles, GET ALL, push
   // subscriptions. The runtime substitutes config-key placeholders.
