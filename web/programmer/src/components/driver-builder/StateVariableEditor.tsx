@@ -44,10 +44,12 @@ export function StateVariableEditor({
     field: string,
     value: unknown
   ) => {
+    const merged = { ...vars[name], [field]: value } as Record<string, unknown>;
+    if (value === undefined) delete merged[field];
     onUpdate({
       state_variables: {
         ...vars,
-        [name]: { ...vars[name], [field]: value },
+        [name]: merged as (typeof vars)[string],
       },
     });
   };
@@ -90,6 +92,7 @@ export function StateVariableEditor({
 
       {varNames.map((name) => {
         const v = vars[name];
+        const isNumeric = v.type === "integer" || v.type === "number";
         return (
           <div key={name} style={{ marginBottom: "var(--space-xs)" }}>
             <div
@@ -114,14 +117,26 @@ export function StateVariableEditor({
                 style={{ fontSize: "var(--font-size-sm)" }}
               />
               <input
-                value={(v as any).help ?? ""}
+                value={v.help ?? ""}
                 onChange={(e) => updateVariable(name, "help", e.target.value)}
                 placeholder="Description..."
                 style={{ fontSize: "var(--font-size-sm)" }}
               />
               <select
                 value={v.type}
-                onChange={(e) => updateVariable(name, "type", e.target.value)}
+                onChange={(e) => {
+                  const t = e.target.value;
+                  updateVariable(name, "type", t);
+                  // Strip type-incompatible bounds when switching off numeric.
+                  if (t !== "integer" && t !== "number") {
+                    updateVariable(name, "min", undefined);
+                    updateVariable(name, "max", undefined);
+                    updateVariable(name, "step", undefined);
+                  }
+                  if (t !== "enum") {
+                    updateVariable(name, "values", undefined);
+                  }
+                }}
                 style={{ width: 100, fontSize: "var(--font-size-sm)" }}
               >
                 <option value="string">String</option>
@@ -137,6 +152,77 @@ export function StateVariableEditor({
                 <Trash2 size={14} />
               </button>
             </div>
+
+            {isNumeric && (
+              <div
+                style={{
+                  marginTop: "var(--space-xs)",
+                  marginLeft: "var(--space-sm)",
+                  paddingLeft: "var(--space-sm)",
+                  borderLeft: "2px solid var(--border-color)",
+                  display: "grid",
+                  gridTemplateColumns: "100px 100px 100px 1fr",
+                  gap: "var(--space-sm)",
+                  alignItems: "center",
+                }}
+              >
+                <input
+                  type="number"
+                  value={v.min ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateVariable(
+                      name,
+                      "min",
+                      raw === ""
+                        ? undefined
+                        : v.type === "integer"
+                          ? parseInt(raw, 10)
+                          : parseFloat(raw),
+                    );
+                  }}
+                  placeholder="min"
+                  style={{ fontSize: "var(--font-size-sm)" }}
+                />
+                <input
+                  type="number"
+                  value={v.max ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateVariable(
+                      name,
+                      "max",
+                      raw === ""
+                        ? undefined
+                        : v.type === "integer"
+                          ? parseInt(raw, 10)
+                          : parseFloat(raw),
+                    );
+                  }}
+                  placeholder="max"
+                  style={{ fontSize: "var(--font-size-sm)" }}
+                />
+                <input
+                  type="number"
+                  value={v.step ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateVariable(
+                      name,
+                      "step",
+                      raw === "" ? undefined : parseFloat(raw),
+                    );
+                  }}
+                  placeholder="step"
+                  style={{ fontSize: "var(--font-size-sm)" }}
+                />
+                <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                  Numeric bounds — used by panel sliders and the simulator UI
+                  to render appropriate controls.
+                </div>
+              </div>
+            )}
+
             {v.type === "enum" && (
               <div
                 style={{

@@ -924,11 +924,14 @@ function OscArgsEditor({
             onChange={(e) => updateArg(i, { type: e.target.value })}
             style={{ width: 100, fontSize: "var(--font-size-sm)" }}
           >
-            <option value="f">Float</option>
-            <option value="i">Integer</option>
-            <option value="s">String</option>
-            <option value="T">True</option>
-            <option value="F">False</option>
+            <option value="f">Float (f)</option>
+            <option value="d">Double (d)</option>
+            <option value="i">Integer (i)</option>
+            <option value="h">Int64 (h)</option>
+            <option value="s">String (s)</option>
+            <option value="T">True (T)</option>
+            <option value="F">False (F)</option>
+            <option value="N">Nil (N)</option>
           </select>
           {!["T", "F", "N"].includes(arg.type) && (
             <input
