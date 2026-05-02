@@ -64,6 +64,12 @@ fi
 # pi-gen (user, password, locale, SSH).
 rm -f /etc/xdg/autostart/piwiz.desktop
 
+# Disable userconfig.service. On Pi OS Trixie, userconf-pi's first-boot
+# service rewrites /etc/lightdm/lightdm.conf back to
+# autologin-user=rpi-first-boot-wizard, undoing the autologin-user=openavc
+# we set above. Disabling it preserves our config.
+systemctl disable userconfig.service 2>/dev/null || true
+
 # --- Kiosk display integration ---
 
 # --- labwc display configuration ---
