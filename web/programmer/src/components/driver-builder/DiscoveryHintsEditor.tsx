@@ -109,6 +109,21 @@ export function DiscoveryHintsEditor({ draft, onUpdate }: DiscoveryHintsEditorPr
           Regex patterns to match against device hostnames found via DNS or NetBIOS.
         </div>
       </div>
+
+      {/* UPnP / SSDP types */}
+      <div style={rowStyle}>
+        <label style={labelStyle}>UPnP / SSDP Device Types</label>
+        <ListEditor
+          items={hints.upnp_types ?? []}
+          onChange={(items) => update({ upnp_types: items })}
+          placeholder="e.g., urn:schemas-upnp-org:device:MediaRenderer:1"
+        />
+        <div style={helpStyle}>
+          Substrings the discovery engine matches against SSDP <code>ST</code>{" "}
+          / <code>NT</code> headers. Most AV devices that advertise via UPnP
+          publish a recognizable URN here.
+        </div>
+      </div>
     </div>
   );
 }

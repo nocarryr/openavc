@@ -471,6 +471,10 @@ export interface DriverDiscoveryHints {
   protocols?: string[];
   mdns_services?: string[];
   hostname_patterns?: string[];
+  // SSDP / UPnP device-type URN substrings. The discovery engine matches
+  // these against the SSDP NOTIFY / M-SEARCH `ST` and `NT` headers (e.g.
+  // "urn:schemas-upnp-org:device:MediaRenderer:1") to identify devices.
+  upnp_types?: string[];
 }
 
 export interface DriverDeviceSettingDef {
