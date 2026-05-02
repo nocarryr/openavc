@@ -178,6 +178,113 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
               Verify SSL Certificate
             </label>
           </div>
+
+          {/* Auth-type-specific credential fields */}
+          {(draft.default_config.auth_type as string | undefined) === "bearer" && (
+            <div style={rowStyle}>
+              <label style={labelStyle}>Bearer Token (default)</label>
+              <input
+                value={(draft.default_config.token as string | undefined) ?? ""}
+                onChange={(e) =>
+                  onUpdate({
+                    default_config: {
+                      ...draft.default_config,
+                      token: e.target.value,
+                    },
+                  })
+                }
+                placeholder="leave blank — users enter per device"
+                style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+              />
+              <div
+                style={{
+                  fontSize: "11px",
+                  color: "var(--text-muted)",
+                  marginTop: "var(--space-xs)",
+                }}
+              >
+                Default value if the device ships with a known token. Users
+                normally enter their own per-device token.
+              </div>
+            </div>
+          )}
+
+          {(draft.default_config.auth_type as string | undefined) === "api_key" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-md)", ...rowStyle }}>
+              <div>
+                <label style={labelStyle}>API Key Header</label>
+                <input
+                  value={
+                    (draft.default_config.api_key_header as string | undefined) ?? ""
+                  }
+                  onChange={(e) =>
+                    onUpdate({
+                      default_config: {
+                        ...draft.default_config,
+                        api_key_header: e.target.value,
+                      },
+                    })
+                  }
+                  placeholder="X-API-Key"
+                  style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+                />
+                <div
+                  style={{
+                    fontSize: "11px",
+                    color: "var(--text-muted)",
+                    marginTop: "var(--space-xs)",
+                  }}
+                >
+                  Header name the device expects (e.g. <code>X-API-Key</code>,{" "}
+                  <code>Authorization</code>).
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>API Key (default)</label>
+                <input
+                  value={(draft.default_config.api_key as string | undefined) ?? ""}
+                  onChange={(e) =>
+                    onUpdate({
+                      default_config: {
+                        ...draft.default_config,
+                        api_key: e.target.value,
+                      },
+                    })
+                  }
+                  placeholder="leave blank — users enter per device"
+                  style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div style={rowStyle}>
+            <label style={labelStyle}>Request Timeout (seconds)</label>
+            <input
+              type="number"
+              value={(draft.default_config.timeout as number | undefined) ?? 5}
+              onChange={(e) =>
+                onUpdate({
+                  default_config: {
+                    ...draft.default_config,
+                    timeout: parseFloat(e.target.value) || 5,
+                  },
+                })
+              }
+              min={0.1}
+              step={0.5}
+              style={{ width: 120 }}
+            />
+            <div
+              style={{
+                fontSize: "11px",
+                color: "var(--text-muted)",
+                marginTop: "var(--space-xs)",
+              }}
+            >
+              Per-request timeout. Default 5 seconds.
+            </div>
+          </div>
         </>
       )}
 
@@ -308,26 +415,82 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
               )}
             </select>
           </div>
-          <div style={rowStyle}>
-            <label style={labelStyle}>Default Parity</label>
-            <select
-              value={
-                (draft.default_config.parity as string | undefined) ?? "N"
-              }
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    parity: e.target.value,
-                  },
-                })
-              }
-              style={{ width: 120 }}
-            >
-              <option value="N">None</option>
-              <option value="E">Even</option>
-              <option value="O">Odd</option>
-            </select>
+          <div style={{ display: "flex", gap: "var(--space-lg)", ...rowStyle }}>
+            <div>
+              <label style={labelStyle}>Default Parity</label>
+              <select
+                value={
+                  (draft.default_config.parity as string | undefined) ?? "N"
+                }
+                onChange={(e) =>
+                  onUpdate({
+                    default_config: {
+                      ...draft.default_config,
+                      parity: e.target.value,
+                    },
+                  })
+                }
+                style={{ width: 120 }}
+              >
+                <option value="N">None</option>
+                <option value="E">Even</option>
+                <option value="O">Odd</option>
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle}>Data Bits</label>
+              <select
+                value={String(
+                  (draft.default_config.bytesize as number | undefined) ?? 8
+                )}
+                onChange={(e) =>
+                  onUpdate({
+                    default_config: {
+                      ...draft.default_config,
+                      bytesize: parseInt(e.target.value),
+                    },
+                  })
+                }
+                style={{ width: 100 }}
+              >
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle}>Stop Bits</label>
+              <select
+                value={String(
+                  (draft.default_config.stopbits as number | undefined) ?? 1
+                )}
+                onChange={(e) =>
+                  onUpdate({
+                    default_config: {
+                      ...draft.default_config,
+                      stopbits: parseFloat(e.target.value),
+                    },
+                  })
+                }
+                style={{ width: 100 }}
+              >
+                <option value="1">1</option>
+                <option value="1.5">1.5</option>
+                <option value="2">2</option>
+              </select>
+            </div>
+          </div>
+          <div
+            style={{
+              fontSize: "11px",
+              color: "var(--text-muted)",
+              marginTop: "calc(-1 * var(--space-md))",
+              marginBottom: "var(--space-md)",
+            }}
+          >
+            Most modern AV gear uses 8/N/1. Older RS-232 protocols may need
+            7/E/1 — check the device manual.
           </div>
         </>
       )}
@@ -595,14 +758,19 @@ function ConfigSchemaEditor({
                     <label style={labelStyle}>Type</label>
                     <select
                       value={field.type}
-                      onChange={(e) =>
-                        updateField(name, { type: e.target.value })
-                      }
+                      onChange={(e) => {
+                        const t = e.target.value;
+                        const partial: Partial<ConfigField> = { type: t };
+                        if (t !== "enum") partial.values = undefined;
+                        updateField(name, partial);
+                      }}
                       style={{ width: "100%" }}
                     >
                       <option value="string">String</option>
                       <option value="integer">Integer</option>
                       <option value="number">Number</option>
+                      <option value="boolean">Boolean</option>
+                      <option value="enum">Enum (dropdown)</option>
                     </select>
                   </div>
                   <div>
@@ -669,6 +837,39 @@ function ConfigSchemaEditor({
                     style={{ width: "100%" }}
                   />
                 </div>
+
+                {field.type === "enum" && (
+                  <div style={{ marginTop: "var(--space-md)" }}>
+                    <label style={labelStyle}>Allowed Values</label>
+                    <input
+                      value={(field.values ?? []).join(", ")}
+                      onChange={(e) => {
+                        const values = e.target.value
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean);
+                        updateField(name, {
+                          values: values.length ? values : undefined,
+                        });
+                      }}
+                      placeholder="e.g. tcp, udp, http"
+                      style={{
+                        width: "100%",
+                        fontFamily: "var(--font-mono)",
+                      }}
+                    />
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: "var(--text-muted)",
+                        marginTop: 2,
+                      }}
+                    >
+                      Comma-separated. The Add Device dialog renders these as
+                      a dropdown.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

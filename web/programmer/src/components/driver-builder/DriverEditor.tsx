@@ -351,9 +351,12 @@ export function DriverEditor({
                   <option value="display">Display</option>
                   <option value="switcher">Switcher</option>
                   <option value="scaler">Scaler</option>
+                  <option value="video">Video (encoders, decoders, NDI)</option>
                   <option value="audio">Audio</option>
                   <option value="camera">Camera</option>
                   <option value="lighting">Lighting</option>
+                  <option value="recorder">Recorder</option>
+                  <option value="power">Power (PDU, UPS, sequencer)</option>
                   <option value="relay">Relay / GPIO</option>
                   <option value="utility">Utility</option>
                   <option value="other">Other</option>
