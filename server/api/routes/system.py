@@ -350,11 +350,17 @@ async def reboot_system() -> dict[str, str]:
 
     async def _delayed_reboot():
         await asyncio.sleep(1)
+        # Explicit /sbin/reboot to match the sudoers rule. sudo's secure_path
+        # resolves bare "reboot" to /usr/sbin/reboot first, which isn't in the
+        # allow list, so the bare command silently fails.
         proc = await asyncio.create_subprocess_exec(
-            "sudo", "reboot",
+            "sudo", "-n", "/sbin/reboot",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        await proc.communicate()
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            log.error("Reboot command failed (exit %d): %s",
+                      proc.returncode, stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip())
 
     asyncio.create_task(_delayed_reboot())
     return {"status": "rebooting"}
