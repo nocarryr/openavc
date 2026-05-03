@@ -20,30 +20,63 @@ PENDING_UPDATE_MARKER = "pending-update"
 
 
 def _launch_installer_via_scheduler(installer: Path, label: str) -> bool:
-    """Schedule a one-time Windows task to run the installer ~10s from now.
+    """Schedule a one-time Windows task to run the installer ~15s from now.
 
     Launching the installer as a direct child via subprocess.Popen does not
-    work under NSSM. NSSM 2.24 walks the service's process tree on exit and
-    kills every descendant by parent-PID enumeration (not via Job Objects),
-    so any installer launched as a child is killed before it can replace
-    files. CREATE_BREAKAWAY_FROM_JOB does not help — the parent PID is set
-    at CreateProcess time and cannot be changed.
+    work under NSSM: NSSM walks the service's process tree on exit and kills
+    every descendant. Task Scheduler runs the task under taskhostw.exe, in
+    its own process tree, completely outside NSSM's awareness.
 
-    Task Scheduler runs the task in its own process tree under taskhostw.exe,
-    completely outside NSSM's awareness. The installer survives our exit.
+    We register the task via XML rather than schtasks CLI flags because:
+      - schtasks /st truncates seconds (e.g., 22:18:44 -> 22:18:00), which
+        can leave the trigger in the past and the task never fires
+      - StartWhenAvailable defaults to false via CLI, so a slightly-late
+        trigger is silently skipped forever
+      - RunLevel via /ru SYSTEM defaults to LeastPrivilege, which can prevent
+        the installer from running with full admin rights
     """
-    run_at = (datetime.now() + timedelta(seconds=10)).strftime("%H:%M:%S")
+    run_at = (datetime.now() + timedelta(seconds=15)).strftime("%Y-%m-%dT%H:%M:%S")
     task_name = f"OpenAVCUpdate-{label}"
+
+    xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>OpenAVC</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>{run_at}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Settings>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{installer}</Command>
+      <Arguments>/VERYSILENT /SUPPRESSMSGBOXES /NORESTART</Arguments>
+    </Exec>
+  </Actions>
+</Task>'''
+
+    xml_path = installer.parent / f"_{task_name}.xml"
     try:
+        xml_path.write_text(xml, encoding="utf-16")
         subprocess.run(
-            [
-                "schtasks", "/create", "/f",
-                "/tn", task_name,
-                "/sc", "once",
-                "/st", run_at,
-                "/ru", "SYSTEM",
-                "/tr", f'"{installer}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART',
-            ],
+            ["schtasks", "/create", "/f", "/tn", task_name, "/xml", str(xml_path)],
             check=True, capture_output=True, text=True, timeout=30,
         )
         log.info("Scheduled installer task '%s' to run at %s", task_name, run_at)
@@ -54,6 +87,8 @@ def _launch_installer_via_scheduler(installer: Path, label: str) -> bool:
     except (OSError, subprocess.TimeoutExpired) as e:
         log.error("Failed to schedule installer task: %s", e)
         return False
+    finally:
+        xml_path.unlink(missing_ok=True)
 
 
 def write_pending_marker(data_dir: Path, from_version: str, to_version: str) -> None:
