@@ -13,6 +13,7 @@ import {
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { Dialog } from "../components/shared/Dialog";
+import { AssetBrowser, type AssetFilter } from "../components/assets/AssetBrowser";
 import { useProjectStore } from "../store/projectStore";
 import * as api from "../api/restClient";
 import type { LibraryProject } from "../api/types";
@@ -45,6 +46,9 @@ export function ProjectView() {
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
   const [creatingBackup, setCreatingBackup] = useState(false);
+
+  // Assets section filter (image/audio/all)
+  const [assetFilter, setAssetFilter] = useState<AssetFilter>("all");
 
   // Form states
   const [saveAsId, setSaveAsId] = useState("");
@@ -534,6 +538,48 @@ export function ProjectView() {
           }}
         >
           Click a project to open it. Opening a project replaces the running one — a backup is created automatically.
+        </p>
+      </div>
+
+      {/* Assets */}
+      <div style={{ marginTop: "var(--space-2xl)", maxWidth: 600 }}>
+        <h3
+          style={{
+            fontSize: "var(--font-size-base)",
+            color: "var(--text-secondary)",
+            margin: "0 0 var(--space-md)",
+          }}
+        >
+          Assets
+        </h3>
+        <div
+          style={{
+            background: "var(--bg-surface)",
+            borderRadius: "var(--border-radius)",
+            border: "1px solid var(--border-color)",
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+            height: 480,
+            paddingTop: 12,
+          }}
+        >
+          <AssetBrowser
+            filter={assetFilter}
+            selectMode="manage"
+            showFilterChips
+            onFilterChange={setAssetFilter}
+          />
+        </div>
+        <p
+          style={{
+            marginTop: "var(--space-md)",
+            fontSize: "var(--font-size-sm)",
+            color: "var(--text-muted)",
+            lineHeight: 1.5,
+          }}
+        >
+          Images and audio used by panels, macros, and plugins. Drop files to upload, or click an audio file's player to preview it.
         </p>
       </div>
 
