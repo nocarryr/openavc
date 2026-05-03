@@ -2,7 +2,7 @@
 OpenAVC Asset Management API.
 
 Handles uploading, listing, serving, and deleting project assets
-(images, icons, backgrounds) used by the panel UI.
+(images, icons, backgrounds, audio) used by the panel UI and plugins.
 """
 
 import re
@@ -23,14 +23,40 @@ open_router = APIRouter(prefix="/api")
 
 _engine = None
 
-ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico"}
-ALLOWED_MIME_TYPES = {
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".m4a"}
+ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS
+
+IMAGE_MIME_TYPES = {
     "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
     "image/x-icon", "image/vnd.microsoft.icon",
 }
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB per file
-MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50 MB per project
+AUDIO_MIME_TYPES = {
+    "audio/mpeg", "audio/mp3",
+    "audio/wav", "audio/wave", "audio/x-wav",
+    "audio/ogg", "audio/vorbis",
+    "audio/mp4", "audio/x-m4a", "audio/aac",
+}
+ALLOWED_MIME_TYPES = IMAGE_MIME_TYPES | AUDIO_MIME_TYPES
+
+MAX_IMAGE_SIZE = 50 * 1024 * 1024     # 50 MB per image
+MAX_AUDIO_SIZE = 200 * 1024 * 1024    # 200 MB per audio file
+MAX_TOTAL_SIZE = 5 * 1024 * 1024 * 1024  # 5 GB per project (shared across types)
 FILENAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-][a-zA-Z0-9_\-. ]*\.[a-zA-Z0-9]+$")
+
+
+def _asset_type(ext: str) -> str:
+    """Classify an extension as 'image' or 'audio'. Caller must pre-validate ext."""
+    if ext in AUDIO_EXTENSIONS:
+        return "audio"
+    return "image"
+
+
+def _max_size_for(ext: str) -> int:
+    """Per-file size limit for the given extension."""
+    if ext in AUDIO_EXTENSIONS:
+        return MAX_AUDIO_SIZE
+    return MAX_IMAGE_SIZE
 
 # SVG sanitization: reject SVGs containing dangerous elements or attributes
 SVG_DANGEROUS_PATTERNS = [
@@ -137,11 +163,13 @@ async def list_assets(project_id: str) -> dict[str, Any]:
     assets_dir = _assets_dir()
     assets = []
     for f in sorted(assets_dir.iterdir()):
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
+        ext = f.suffix.lower()
+        if f.is_file() and ext in ALLOWED_EXTENSIONS:
             assets.append({
                 "name": f.name,
                 "size": f.stat().st_size,
-                "type": f.suffix.lower().lstrip("."),
+                "extension": ext.lstrip("."),
+                "type": _asset_type(ext),
             })
     return {"assets": assets, "total_size": _get_total_size(assets_dir)}
 
@@ -161,12 +189,14 @@ async def upload_asset(project_id: str, file: UploadFile = File(...)) -> dict[st
             detail=f"File type {ext} not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
 
+    max_size = _max_size_for(ext)
+
     # Read content
     content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
+    if len(content) > max_size:
         raise HTTPException(
             status_code=400,
-            detail=f"File too large ({len(content)} bytes). Maximum: {MAX_FILE_SIZE} bytes.",
+            detail=f"File too large ({len(content)} bytes). Maximum for {ext} files: {max_size} bytes.",
         )
 
     assets_dir = _assets_dir()
@@ -190,6 +220,7 @@ async def upload_asset(project_id: str, file: UploadFile = File(...)) -> dict[st
         "name": filename,
         "reference": f"assets://{filename}",
         "size": len(content),
+        "type": _asset_type(ext),
     }
 
 

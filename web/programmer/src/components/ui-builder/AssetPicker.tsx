@@ -132,7 +132,8 @@ function AssetBrowserModal({
   const loadAssets = useCallback(async () => {
     try {
       const data = await api.listAssets();
-      setAssets(data.assets);
+      // This picker is image-only; non-image assets (audio, etc.) live in their own pickers.
+      setAssets(data.assets.filter((a) => a.type === "image"));
     } catch (e) {
       setError(String(e));
     } finally {

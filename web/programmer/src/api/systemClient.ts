@@ -107,17 +107,22 @@ export async function getUpdateHistory(): Promise<UpdateHistoryEntry[]> {
 
 // --- Assets ---
 
+export type AssetType = "image" | "audio";
+
 export interface AssetInfo {
   name: string;
   size: number;
-  type: string;
+  /** High-level category derived from extension */
+  type: AssetType;
+  /** File extension without the leading dot (e.g. "png", "mp3") */
+  extension: string;
 }
 
 export async function listAssets(): Promise<{ assets: AssetInfo[]; total_size: number }> {
   return request("/projects/default/assets");
 }
 
-export async function uploadAsset(file: File): Promise<{ name: string; reference: string; size: number }> {
+export async function uploadAsset(file: File): Promise<{ name: string; reference: string; size: number; type: AssetType }> {
   const formData = new FormData();
   formData.append("file", file);
   const res = await fetch(`${BASE}/projects/default/assets`, {

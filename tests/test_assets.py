@@ -164,3 +164,115 @@ async def test_filename_validation(client):
         files={"file": ("../../../etc/passwd", io.BytesIO(b"test"), "image/png")},
     )
     assert resp.status_code == 400
+
+
+# --- Audio asset tests ---
+
+
+def _make_audio(size: int = 1024) -> bytes:
+    """Create a minimal payload that passes extension-based validation.
+    Content isn't validated; size is what matters for the upload path."""
+    return b"\x00" * size
+
+
+async def test_upload_mp3(client):
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("chime.mp3", io.BytesIO(_make_audio()), "audio/mpeg")},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["name"] == "chime.mp3"
+    assert data["reference"] == "assets://chime.mp3"
+    assert data["type"] == "audio"
+
+
+async def test_upload_wav(client):
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("bell.wav", io.BytesIO(_make_audio()), "audio/wav")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["type"] == "audio"
+
+
+async def test_upload_ogg(client):
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("alert.ogg", io.BytesIO(_make_audio()), "audio/ogg")},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_upload_m4a(client):
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("notif.m4a", io.BytesIO(_make_audio()), "audio/mp4")},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_serve_audio(client):
+    client.post(
+        "/api/projects/default/assets",
+        files={"file": ("playme.mp3", io.BytesIO(_make_audio(2048)), "audio/mpeg")},
+    )
+    resp = client.get("/api/projects/default/assets/playme.mp3")
+    assert resp.status_code == 200
+    assert len(resp.content) == 2048
+
+
+async def test_list_includes_type_and_extension(client):
+    client.post(
+        "/api/projects/default/assets",
+        files={"file": ("img.png", io.BytesIO(_make_png()), "image/png")},
+    )
+    client.post(
+        "/api/projects/default/assets",
+        files={"file": ("snd.mp3", io.BytesIO(_make_audio()), "audio/mpeg")},
+    )
+    resp = client.get("/api/projects/default/assets")
+    assert resp.status_code == 200
+    by_name = {a["name"]: a for a in resp.json()["assets"]}
+    assert by_name["img.png"]["type"] == "image"
+    assert by_name["img.png"]["extension"] == "png"
+    assert by_name["snd.mp3"]["type"] == "audio"
+    assert by_name["snd.mp3"]["extension"] == "mp3"
+
+
+async def test_audio_size_limit_higher_than_image(client):
+    """A 60 MB file: rejected as image, accepted as audio."""
+    big = _make_audio(60 * 1024 * 1024)
+    # As image: should fail (50 MB image cap)
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("huge.png", io.BytesIO(big), "image/png")},
+    )
+    assert resp.status_code == 400
+    # As audio: should succeed (200 MB audio cap)
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("long.mp3", io.BytesIO(big), "audio/mpeg")},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_audio_too_large_rejected(client):
+    """File over 200 MB audio cap is rejected."""
+    too_big = _make_audio(201 * 1024 * 1024)
+    resp = client.post(
+        "/api/projects/default/assets",
+        files={"file": ("toobig.mp3", io.BytesIO(too_big), "audio/mpeg")},
+    )
+    assert resp.status_code == 400
+
+
+async def test_delete_audio(client):
+    client.post(
+        "/api/projects/default/assets",
+        files={"file": ("delme.mp3", io.BytesIO(_make_audio()), "audio/mpeg")},
+    )
+    resp = client.delete("/api/projects/default/assets/delme.mp3")
+    assert resp.status_code == 200
+    resp = client.get("/api/projects/default/assets/delme.mp3")
+    assert resp.status_code == 404
