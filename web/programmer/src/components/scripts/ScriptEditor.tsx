@@ -2,6 +2,11 @@ import { useRef, useCallback, useEffect } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { useProjectStore } from "../../store/projectStore";
 import { useConnectionStore } from "../../store/connectionStore";
+import {
+  ensurePluginScriptApiLoaded,
+  getCachedPluginScriptApi,
+  groupByPlugin,
+} from "./pluginScriptApiCache";
 
 export interface RuntimeError {
   line: number;
@@ -40,6 +45,10 @@ export function ScriptEditor({ source, onChange, onEditorReady, runtimeErrors, e
     monacoRef.current = monaco;
     onEditorReady?.(editor);
 
+    // Kick off plugin script API fetch so completions for plugins.<id>.<method>
+    // can resolve. Runs once per session; the cache is module-level.
+    ensurePluginScriptApiLoaded();
+
     // Clean up any previous registrations
     disposablesRef.current.forEach((d) => d.dispose());
     disposablesRef.current = [];
@@ -67,7 +76,8 @@ export function ScriptEditor({ source, onChange, onEditorReady, runtimeErrors, e
         if (textUntilPosition.match(/from openavc import\s/)) {
           const imports = [
             "on_event", "on_state_change", "devices", "state",
-            "events", "macros", "log", "after", "every", "cancel_timer",
+            "events", "macros", "log", "isc", "plugins",
+            "after", "every", "cancel_timer", "delay", "Event",
           ];
           for (const item of imports) {
             suggestions.push({
@@ -179,6 +189,52 @@ export function ScriptEditor({ source, onChange, onEditorReady, runtimeErrors, e
               documentation: { value: `${desc}.\n\n\`\`\`python\nlog.${level}("Something happened")\n\`\`\`` },
               range,
             });
+          }
+        }
+
+        // plugins.* — list installed plugin ids that have script methods
+        if (textUntilPosition.match(/plugins\.\s*$/)) {
+          const grouped = groupByPlugin(getCachedPluginScriptApi());
+          for (const [pluginId, info] of grouped) {
+            suggestions.push({
+              label: pluginId,
+              kind: monaco.languages.CompletionItemKind.Module,
+              insertText: pluginId,
+              detail: info.plugin_name,
+              documentation: {
+                value: `Plugin: **${info.plugin_name}**\n\nMethods:\n${info.methods
+                  .map((m) => `- \`${m.method}\`${m.sync ? "" : " (async)"}`)
+                  .join("\n")}`,
+              },
+              range,
+            });
+          }
+        }
+
+        // plugins.<plugin_id>.* — list registered methods for that plugin
+        const pluginMatch = textUntilPosition.match(/plugins\.([a-z][a-zA-Z0-9_]*)\.\s*$/);
+        if (pluginMatch) {
+          const pluginId = pluginMatch[1];
+          const grouped = groupByPlugin(getCachedPluginScriptApi());
+          const info = grouped.get(pluginId);
+          if (info) {
+            for (const m of info.methods) {
+              suggestions.push({
+                label: m.method,
+                kind: monaco.languages.CompletionItemKind.Method,
+                insertText: `${m.method}($0)`,
+                insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                detail: m.sync ? `${info.plugin_name} (sync)` : `${info.plugin_name} (async)`,
+                documentation: {
+                  value: m.doc
+                    ? `${m.doc}\n\n${m.sync ? "Call directly." : "Must be `await`ed."}`
+                    : m.sync
+                      ? "Call directly."
+                      : "Must be `await`ed.",
+                },
+                range,
+              });
+            }
           }
         }
 

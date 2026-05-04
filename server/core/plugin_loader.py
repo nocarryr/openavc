@@ -57,6 +57,15 @@ VALID_MACRO_ACTION_PARAM_TYPES = {
 # Action name segment after "<plugin_id>." — lowercase letters, digits, underscores
 _MACRO_ACTION_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# Script API method name pattern — valid Python identifier, no leading underscore
+_SCRIPT_API_METHOD_RE = re.compile(r"^[a-z][a-zA-Z0-9_]*$")
+
+# Names plugins can't use for SCRIPT_API methods (Python or proxy machinery)
+_SCRIPT_API_RESERVED_NAMES = frozenset({
+    "register", "unregister", "clear",
+    # Anything starting with underscore is rejected by the regex above.
+})
+
 
 def get_platform_id() -> str:
     """Detect the current platform identifier."""
@@ -170,6 +179,62 @@ def validate_macro_actions(
                     f"action '{action_type}' select param '{key}' needs either "
                     f"'options' (list) or 'options_source' (state key)"
                 )
+
+    return True, ""
+
+
+def validate_script_api(
+    script_api: Any, plugin_id: str, plugin_class: type
+) -> tuple[bool, str]:
+    """Validate a plugin's SCRIPT_API declaration.
+
+    Returns (valid, error_message).
+    """
+    if not isinstance(script_api, dict):
+        return False, "SCRIPT_API must be a dict"
+
+    # The plugin id itself must be a valid Python identifier — otherwise
+    # `openavc.plugins.<id>` won't even parse.
+    if not _SCRIPT_API_METHOD_RE.match(plugin_id):
+        return False, (
+            f"plugin id '{plugin_id}' is not a valid Python identifier — "
+            f"SCRIPT_API can't be exposed under openavc.plugins"
+        )
+
+    for method_name, spec in script_api.items():
+        if not isinstance(method_name, str):
+            return False, f"method key {method_name!r} must be a string"
+        if not _SCRIPT_API_METHOD_RE.match(method_name):
+            return False, (
+                f"method '{method_name}' is not a valid identifier "
+                f"(lowercase start, letters/digits/underscores only)"
+            )
+        if method_name in _SCRIPT_API_RESERVED_NAMES:
+            return False, f"method name '{method_name}' is reserved"
+        if not isinstance(spec, dict):
+            return False, f"method '{method_name}' spec must be a dict"
+
+        handler_name = spec.get("handler")
+        if not handler_name or not isinstance(handler_name, str):
+            return False, f"method '{method_name}' missing 'handler' (method name)"
+        handler = getattr(plugin_class, handler_name, None)
+        if handler is None:
+            return False, (
+                f"method '{method_name}' handler '{handler_name}' not found "
+                f"on plugin class"
+            )
+        is_async = inspect.iscoroutinefunction(handler)
+        wants_sync = bool(spec.get("sync"))
+        if wants_sync and is_async:
+            return False, (
+                f"method '{method_name}' marked sync=True but handler "
+                f"'{handler_name}' is async"
+            )
+        if not wants_sync and not is_async:
+            return False, (
+                f"method '{method_name}' handler '{handler_name}' is not async — "
+                f"add 'sync': True to SCRIPT_API entry if intentional"
+            )
 
     return True, ""
 
@@ -400,6 +465,13 @@ class PluginLoader:
             if not valid:
                 return False, f"MACRO_ACTIONS invalid: {error}"
 
+        # SCRIPT_API validation
+        script_api = getattr(plugin_class, "SCRIPT_API", None)
+        if script_api is not None:
+            valid, error = validate_script_api(script_api, info["id"], plugin_class)
+            if not valid:
+                return False, f"SCRIPT_API invalid: {error}"
+
         return True, ""
 
     def is_platform_compatible(self, plugin_class: type) -> bool:
@@ -521,6 +593,7 @@ class PluginLoader:
             instance = plugin_class()
             await instance.start(api)
             self._register_macro_actions(plugin_id, instance)
+            self._register_script_api(plugin_id, instance)
 
             self._instances[plugin_id] = instance
             self._registries[plugin_id] = registry
@@ -544,6 +617,7 @@ class PluginLoader:
             self._errors[plugin_id] = str(e)
             # Clean up any partial registrations
             self._macros.unregister_plugin_actions(plugin_id)
+            self._unregister_script_api(plugin_id)
             await registry.cleanup(self._state, self._events)
             await self._events.emit(
                 "plugin.error", {"plugin_id": plugin_id, "error": str(e)}
@@ -556,9 +630,10 @@ class PluginLoader:
         registry = self._registries.pop(plugin_id, None)
         self._apis.pop(plugin_id, None)
 
-        # Unregister macro actions before stop() so in-flight macros can't
-        # dispatch to a half-shutdown plugin
+        # Unregister macro actions and script API methods before stop() so
+        # in-flight macros and scripts can't dispatch to a half-shutdown plugin
         self._macros.unregister_plugin_actions(plugin_id)
+        self._unregister_script_api(plugin_id)
 
         if instance is not None:
             try:
@@ -724,6 +799,7 @@ class PluginLoader:
             "has_surface_layout": hasattr(plugin_class, "SURFACE_LAYOUT"),
             "has_extensions": hasattr(plugin_class, "EXTENSIONS"),
             "has_macro_actions": bool(getattr(plugin_class, "MACRO_ACTIONS", None)),
+            "has_script_api": bool(getattr(plugin_class, "SCRIPT_API", None)),
         }
 
         if status == "error":
@@ -750,6 +826,14 @@ class PluginLoader:
             result["macro_actions"] = {
                 action_type: {k: v for k, v in spec.items() if k != "handler"}
                 for action_type, spec in macro_actions.items()
+            }
+
+        # Include script API methods if available — strip 'handler' (internal)
+        script_api = getattr(plugin_class, "SCRIPT_API", None)
+        if script_api:
+            result["script_api"] = {
+                method_name: {k: v for k, v in spec.items() if k != "handler"}
+                for method_name, spec in script_api.items()
             }
 
         return result
@@ -784,6 +868,33 @@ class PluginLoader:
                     entry["description"] = spec["description"]
                 if spec.get("icon"):
                     entry["icon"] = spec["icon"]
+                result.append(entry)
+        return result
+
+    def get_all_script_api(self) -> list[dict[str, Any]]:
+        """Get all script API methods from running plugins.
+
+        Returns a flat list, each entry shaped for the script editor
+        autocomplete and hover docs:
+        ``{plugin_id, plugin_name, method, doc?, sync}``
+        """
+        result: list[dict[str, Any]] = []
+        for plugin_id, instance in self._instances.items():
+            plugin_class = type(instance)
+            script_api = getattr(plugin_class, "SCRIPT_API", None)
+            if not script_api:
+                continue
+            info = plugin_class.PLUGIN_INFO
+            plugin_name = info.get("name", plugin_id)
+            for method_name, spec in script_api.items():
+                entry = {
+                    "plugin_id": plugin_id,
+                    "plugin_name": plugin_name,
+                    "method": method_name,
+                    "sync": bool(spec.get("sync", False)),
+                }
+                if spec.get("doc"):
+                    entry["doc"] = spec["doc"]
                 result.append(entry)
         return result
 
@@ -894,6 +1005,23 @@ class PluginLoader:
             handler = getattr(instance, spec["handler"])
             label = spec.get("label") or action_type
             self._macros.register_plugin_action(action_type, handler, plugin_id, label)
+
+    def _register_script_api(self, plugin_id: str, instance: Any) -> None:
+        """Register every SCRIPT_API entry with the openavc.plugins proxy."""
+        script_api = getattr(type(instance), "SCRIPT_API", None)
+        if not script_api:
+            return
+        # Late import to avoid pulling script_api at module load — keeps the
+        # loader importable in test environments that mock the script engine.
+        from server.core.script_api import plugins as plugins_proxy
+        for method_name, spec in script_api.items():
+            handler = getattr(instance, spec["handler"])
+            plugins_proxy._register_method(plugin_id, method_name, handler)
+
+    def _unregister_script_api(self, plugin_id: str) -> None:
+        """Remove all script methods registered by a plugin."""
+        from server.core.script_api import plugins as plugins_proxy
+        plugins_proxy._unregister_plugin(plugin_id)
 
     def _plugin_log(self, plugin_id: str, message: str, level: str = "info") -> None:
         """Log a message from a plugin."""

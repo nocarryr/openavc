@@ -241,6 +241,102 @@ class _ISCProxy:
         return self._manager.get_instances()
 
 
+class _PluginProxy:
+    """Per-plugin facade exposing methods registered via SCRIPT_API.
+
+    Returned by ``plugins.<plugin_id>``. Methods are bound directly to the
+    live plugin instance, so calling ``plugins.audio_player.play(...)``
+    invokes the plugin's handler with whatever capabilities it declared.
+    """
+
+    def __init__(self, plugin_id: str):
+        # Use object.__setattr__ to bypass our own __setattr__ guard.
+        object.__setattr__(self, "_plugin_id", plugin_id)
+        object.__setattr__(self, "_methods", {})
+
+    def _register(self, name: str, handler: Callable) -> None:
+        self._methods[name] = handler
+
+    def _unregister(self, name: str) -> None:
+        self._methods.pop(name, None)
+
+    def _clear(self) -> None:
+        self._methods.clear()
+
+    def __getattr__(self, name: str) -> Callable:
+        # Only called if normal attribute lookup fails — _methods etc. are
+        # on the instance dict so they hit before this.
+        try:
+            return self._methods[name]
+        except KeyError:
+            available = sorted(self._methods)
+            hint = (
+                f" Available: {available}"
+                if available
+                else " (the plugin is installed but has no SCRIPT_API methods)"
+            )
+            raise AttributeError(
+                f"Plugin '{self._plugin_id}' has no script method '{name}'.{hint}"
+            )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            f"Cannot assign to plugins.{self._plugin_id}.{name} — "
+            f"plugin script methods are read-only"
+        )
+
+    def __dir__(self) -> list[str]:
+        return sorted(self._methods)
+
+
+class _PluginsProxy:
+    """Registry of running plugins exposed under ``openavc.plugins``.
+
+    Scripts call ``openavc.plugins.<plugin_id>.<method>(...)`` to invoke
+    a method registered by the plugin's SCRIPT_API.
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "_plugins", {})
+
+    def _get_or_create(self, plugin_id: str) -> _PluginProxy:
+        proxy = self._plugins.get(plugin_id)
+        if proxy is None:
+            proxy = _PluginProxy(plugin_id)
+            self._plugins[plugin_id] = proxy
+        return proxy
+
+    def _register_method(self, plugin_id: str, name: str, handler: Callable) -> None:
+        self._get_or_create(plugin_id)._register(name, handler)
+
+    def _unregister_plugin(self, plugin_id: str) -> None:
+        proxy = self._plugins.get(plugin_id)
+        if proxy is not None:
+            proxy._clear()
+
+    def __getattr__(self, plugin_id: str) -> _PluginProxy:
+        try:
+            proxy = self._plugins[plugin_id]
+        except KeyError:
+            raise AttributeError(
+                f"Plugin '{plugin_id}' is not installed or not currently running"
+            )
+        if not proxy._methods:
+            raise AttributeError(
+                f"Plugin '{plugin_id}' is not currently running "
+                f"(or has no SCRIPT_API methods)"
+            )
+        return proxy
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            f"Cannot assign to plugins.{name} — the plugin proxy is read-only"
+        )
+
+    def __dir__(self) -> list[str]:
+        return sorted(pid for pid, proxy in self._plugins.items() if proxy._methods)
+
+
 # Singleton proxy instances (scripts import these directly)
 devices = _DeviceProxy()
 state = _StateProxy()
@@ -248,6 +344,7 @@ events = _EventProxy()
 macros = _MacroProxy()
 log = _LogProxy()
 isc = _ISCProxy()
+plugins = _PluginsProxy()
 
 # --- Timer functions ---
 

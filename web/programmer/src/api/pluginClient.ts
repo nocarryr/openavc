@@ -105,6 +105,20 @@ export async function getPluginMacroActions(): Promise<{ actions: PluginMacroAct
   return request("/plugins/macro-actions");
 }
 
+// --- Plugin Script API ---
+
+export interface PluginScriptMethod {
+  plugin_id: string;
+  plugin_name: string;
+  method: string;
+  sync: boolean;
+  doc?: string;
+}
+
+export async function getPluginScriptApi(): Promise<{ methods: PluginScriptMethod[] }> {
+  return request("/plugins/script-api");
+}
+
 export interface PluginExtension {
   id: string;
   label: string;

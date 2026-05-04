@@ -245,6 +245,24 @@ Remote state from peers is available in the state store under `isc.<peer_id>.<ke
 remote_power = state.get("isc.lobby-id.device.projector1.power")
 ```
 
+### plugins (Plugin Methods)
+
+```python
+from openavc import plugins
+
+# Async methods
+await plugins.audio_player.play("chime_soft", volume=0.6)
+
+# Sync methods (no await)
+sounds = plugins.audio_player.list_sounds()
+```
+
+Plugins can register methods under `openavc.plugins.<plugin_id>` via their `SCRIPT_API` declaration. Each method is called like a normal Python function — positional and keyword arguments work as the plugin author defined them. Whether you `await` depends on whether the plugin marked the method as async (the default) or `sync: True`.
+
+If the plugin isn't installed or isn't currently running, the proxy raises `AttributeError` with a message naming the plugin id. If the plugin is running but the method doesn't exist, the error message lists the methods that *are* available — useful for catching typos.
+
+To see what's available in your project, hover any `plugins.<plugin_id>` reference in the script editor or check the plugin's docs (look for the `SCRIPT_API` section in its README).
+
 ## Timer Functions
 
 ### delay(seconds)

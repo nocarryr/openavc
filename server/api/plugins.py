@@ -88,6 +88,17 @@ async def get_all_macro_actions() -> dict[str, Any]:
     return {"actions": engine.plugin_loader.get_all_macro_actions()}
 
 
+@router.get("/plugins/script-api")
+async def get_all_script_api() -> dict[str, Any]:
+    """Get all SCRIPT_API methods registered by running plugins.
+
+    Used by the script editor to power autocomplete and hover docs for
+    `openavc.plugins.<plugin_id>.<method>(...)` calls.
+    """
+    engine = _get_engine()
+    return {"methods": engine.plugin_loader.get_all_script_api()}
+
+
 # ──── Plugin Panel Files (serve HTML/JS/CSS for iframe-based panel elements) ────
 
 

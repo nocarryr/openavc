@@ -2896,7 +2896,9 @@ class PanelApp {
         el._pluginId = pluginId;
         el._pluginConfig = element.plugin_config || {};
 
-        // postMessage API: send initial config + theme when iframe loads
+        // postMessage API: send initial config + theme + state snapshot
+        // when iframe loads. The state snapshot is filtered to the plugin's
+        // own namespace (plugin.<id>.*) so iframes don't see unrelated keys.
         iframe.addEventListener('load', () => {
             loadingIndicator.remove();
             const themeVars = {};
@@ -2908,10 +2910,18 @@ class PanelApp {
                 '--panel-grid-gap', '--panel-border-radius']) {
                 themeVars[prop] = getComputedStyle(root).getPropertyValue(prop).trim();
             }
+            const stateSnapshot = {};
+            const namespacePrefix = `plugin.${pluginId}.`;
+            for (const [key, value] of Object.entries(this.state || {})) {
+                if (key.startsWith(namespacePrefix)) {
+                    stateSnapshot[key] = value;
+                }
+            }
             iframe.contentWindow.postMessage({
                 type: 'openavc:init',
                 config: element.plugin_config || {},
                 theme: themeVars,
+                state: stateSnapshot,
                 elementId: element.id,
             }, '*');  // sandboxed iframe has opaque origin; source check provides security
         });

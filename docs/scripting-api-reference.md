@@ -9,7 +9,7 @@ Quick reference for the `openavc` module available in all OpenAVC scripts.
 ```python
 from openavc import (
     on_event, on_state_change,                        # Decorators
-    devices, state, events, macros, log, isc,         # Proxy objects
+    devices, state, events, macros, log, isc, plugins,  # Proxy objects
     delay, after, every, cancel_timer, cancel_all_timers,  # Timer functions
     Event,                                            # Event class
 )
@@ -171,6 +171,29 @@ Communicate with other OpenAVC instances on the network. ISC must be enabled in 
 | `isc.get_instances()` | `list[dict]` | List all discovered/connected peer instances. |
 
 Remote state from peers is available in the state store under `isc.<peer_id>.<key>`.
+
+---
+
+## plugins
+
+Call methods that plugins expose via their `SCRIPT_API` declaration.
+
+```python
+# Async method (most plugin methods)
+await plugins.<plugin_id>.<method>(*args, **kwargs)
+
+# Sync method (when the plugin marks `sync: True`)
+result = plugins.<plugin_id>.<method>(*args, **kwargs)
+```
+
+| Pattern | Returns | Description |
+|---------|---------|-------------|
+| `plugins.<plugin_id>` | `_PluginProxy` | Proxy for a running plugin. Raises `AttributeError` if the plugin isn't installed or running. |
+| `plugins.<plugin_id>.<method>` | `Callable` | The bound method. Call signature is whatever the plugin defined. Raises `AttributeError` listing available methods if the name doesn't exist. |
+| `dir(plugins)` | `list[str]` | Plugin ids that are currently running and have script methods. |
+| `dir(plugins.<plugin_id>)` | `list[str]` | Method names registered by that plugin. |
+
+Whether a method needs `await` depends on the plugin author's choice — async by default, `sync: True` opts a method out. Check the plugin's docs or the script editor's hover help.
 
 ---
 
