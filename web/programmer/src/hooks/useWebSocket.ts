@@ -7,6 +7,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useUIBuilderStore } from "../store/uiBuilderStore";
 import { useDiscoveryStore } from "../store/discoveryStore";
 import { usePluginStore } from "../store/pluginStore";
+import { invalidatePluginMacroActions } from "../components/macros/pluginMacroActions";
 import { showSuccess, showInfo, showError } from "../store/toastStore";
 import * as api from "../api/restClient";
 
@@ -305,7 +306,9 @@ export function useWebSocket() {
         useDiscoveryStore.getState().setStatus("complete");
       }
 
-      // Plugin events — refresh plugin list on status changes
+      // Plugin events — refresh plugin list AND macro builder's plugin
+      // actions cache so newly-enabled plugins show up in Add Step without
+      // a page reload.
       if (
         msg.type === "plugin.started" ||
         msg.type === "plugin.stopped" ||
@@ -313,6 +316,7 @@ export function useWebSocket() {
         msg.type === "plugin.missing"
       ) {
         debouncedPluginRefresh();
+        invalidatePluginMacroActions().catch(console.error);
       }
     });
 

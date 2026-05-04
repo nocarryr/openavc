@@ -55,6 +55,21 @@ export function getCachedState(key: string): unknown {
 }
 
 /**
+ * Invalidate the cached actions + state snapshot and re-fetch immediately.
+ * Mounted components subscribed via usePluginMacroActions get notified
+ * through the listener set when the new fetch resolves.
+ *
+ * Called by the WebSocket handler on plugin lifecycle events
+ * (started, stopped, error, missing) so newly-enabled plugins show up in
+ * the macro builder without a page reload.
+ */
+export async function invalidatePluginMacroActions(): Promise<void> {
+  _cache = null;
+  _stateSnapshot = null;
+  await Promise.all([_fetch(), _fetchState()]);
+}
+
+/**
  * Read a plugin param's `options_source` state key and parse it as a list
  * of {value, label} dropdown options. Plugins publish this list as a
  * JSON-encoded string (state values must be flat primitives, not arrays).
