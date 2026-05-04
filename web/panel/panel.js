@@ -3040,8 +3040,21 @@ class PanelApp {
         const reqVol = Number(req.volume ?? 1.0);
         const finalVol = Math.max(0, Math.min(1, (isFinite(master) ? master : 1) * (isFinite(reqVol) ? reqVol : 1)));
         if (finalVol <= 0) return;
-        if (!req.sound) return;
-        this._playSound(req.sound, finalVol);
+        // Prefer the URL the plugin resolved (knows file extensions);
+        // fall back to building one from the sound id for forward compat
+        // with plugins that don't include url, and for assets:// references.
+        const url = req.url ? this._resolveAbsoluteUrl(req.url) : this._resolveSoundUrl(req.sound);
+        if (!url) return;
+        this._playSound(url, finalVol);
+    }
+
+    _resolveAbsoluteUrl(url) {
+        if (!url || typeof url !== 'string') return null;
+        if (url.startsWith('http://') || url.startsWith('https://')) return url;
+        if (!url.startsWith('/')) return url;
+        const pathParts = location.pathname.split('/panel');
+        const basePath = pathParts[0] || '';
+        return basePath + url;
     }
 
     _resolveSoundUrl(soundId) {
@@ -3050,16 +3063,16 @@ class PanelApp {
             return this.resolveAssetUrl(soundId);
         }
         if (soundId.startsWith('http://') || soundId.startsWith('https://') || soundId.startsWith('/')) {
-            return soundId;
+            return this._resolveAbsoluteUrl(soundId);
         }
-        // Built-in sound — served from the audio_player plugin's sounds dir
+        // Last-resort fallback for sounds the plugin didn't resolve a URL for.
+        // Assumes .mp3 by convention; works for plugins that follow it.
         const pathParts = location.pathname.split('/panel');
         const basePath = pathParts[0] || '';
         return `${basePath}/api/plugins/audio_player/files/sounds/${encodeURIComponent(soundId)}.mp3`;
     }
 
-    _playSound(soundId, volume) {
-        const url = this._resolveSoundUrl(soundId);
+    _playSound(url, volume) {
         if (!url) return;
         const audio = new Audio(url);
         audio.volume = volume;
@@ -3067,13 +3080,13 @@ class PanelApp {
         const cleanup = () => this._activeAudio.delete(audio);
         audio.addEventListener('ended', cleanup);
         audio.addEventListener('error', () => {
-            console.warn(`[panel-audio] failed to load sound: ${soundId}`);
+            console.warn(`[panel-audio] failed to load: ${url}`);
             cleanup();
         });
         audio.play().catch((err) => {
             // Most common cause: browser autoplay policy hasn't been satisfied
             // yet. Drop the sound — stale notifications are worse than missed.
-            console.warn(`[panel-audio] play() rejected for ${soundId}: ${err && err.message}`);
+            console.warn(`[panel-audio] play() rejected for ${url}: ${err && err.message}`);
             cleanup();
         });
     }
