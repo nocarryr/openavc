@@ -5,22 +5,31 @@ OPENAVC_USER="openavc"
 DATA_DIR="/var/lib/openavc"
 
 # --- User and permissions ---
-
-# The first user (openavc) is already created by pi-gen from the config.
-# Ensure the user owns all OpenAVC directories.
+#
+# The 'openavc' user is created by pi-gen's stage1 from FIRST_USER_NAME
+# with the password from FIRST_USER_PASS. The first-boot rename wizard is
+# skipped via DISABLE_FIRST_BOOT_USER_RENAME=1 in config, so the user we
+# get out of stage1 is the user the system boots into.
 chown -R "$OPENAVC_USER:$OPENAVC_USER" /opt/openavc
 chown -R "$OPENAVC_USER:$OPENAVC_USER" "$DATA_DIR"
 mkdir -p /var/log/openavc
 chown -R "$OPENAVC_USER:$OPENAVC_USER" /var/log/openavc
 
 # Add openavc user to video and input groups (needed for display + touch)
-usermod -aG video,input,dialout "$OPENAVC_USER" 2>/dev/null || true
+usermod -aG video,input,dialout "$OPENAVC_USER"
 
 # Allow passwordless reboot from the server (used by Programmer UI reboot button)
 echo "$OPENAVC_USER ALL=(ALL) NOPASSWD: /sbin/reboot" > /etc/sudoers.d/openavc-reboot
 chmod 440 /etc/sudoers.d/openavc-reboot
 
 # --- Enable services ---
+
+# Defensive: even with DISABLE_FIRST_BOOT_USER_RENAME=1, the userconf-pi
+# package is still installed by export-image/01-user-rename/00-packages,
+# so the userconfig.service unit file remains on disk (just not enabled).
+# Disable it explicitly in case a future package update or postinst
+# enables it. See pi-gen issue #913.
+systemctl disable userconfig.service 2>/dev/null || true
 
 systemctl enable openavc.service
 # Note: openavc-panel.service is NOT enabled. The kiosk is launched from
@@ -57,18 +66,6 @@ fi
 if command -v raspi-config &> /dev/null; then
     raspi-config nonint do_boot_behaviour B4 2>/dev/null || true
 fi
-
-# Disable the Raspberry Pi OS first-boot wizard. It hijacks the graphical
-# session (runs labwc as its own user) which prevents auto-login as openavc
-# and blocks the kiosk launcher. Everything it configures is already set by
-# pi-gen (user, password, locale, SSH).
-rm -f /etc/xdg/autostart/piwiz.desktop
-
-# Disable userconfig.service. On Pi OS Trixie, userconf-pi's first-boot
-# service rewrites /etc/lightdm/lightdm.conf back to
-# autologin-user=rpi-first-boot-wizard, undoing the autologin-user=openavc
-# we set above. Disabling it preserves our config.
-systemctl disable userconfig.service 2>/dev/null || true
 
 # --- Kiosk display integration ---
 
@@ -156,4 +153,59 @@ if [ -f "$SEED_PROJECT" ] && [ ! -f "$TARGET_PROJECT" ]; then
     chown "$OPENAVC_USER:$OPENAVC_USER" "$TARGET_PROJECT"
 fi
 
+# --- Build verification ---
+#
+# Hard-check the final image state. If any of these fail, abort the build
+# rather than producing an image that boots into the wrong user / blank
+# desktop. Every check here corresponds to a real failure mode we have
+# previously shipped.
+echo "=== OpenAVC pi-image build verification ==="
+errors=0
+
+if ! id "$OPENAVC_USER" >/dev/null 2>&1; then
+    echo "FATAL: $OPENAVC_USER user does not exist"
+    errors=$((errors + 1))
+fi
+
+if id rpi-first-boot-wizard >/dev/null 2>&1; then
+    echo "FATAL: rpi-first-boot-wizard user still exists (userconf-pi purge incomplete)"
+    errors=$((errors + 1))
+fi
+
+if [ -f "$LIGHTDM_CONF" ]; then
+    if ! grep -q "^autologin-user=$OPENAVC_USER\$" "$LIGHTDM_CONF"; then
+        echo "FATAL: lightdm autologin-user is not '$OPENAVC_USER':"
+        grep -i autologin "$LIGHTDM_CONF" || echo "  (no autologin-user line found)"
+        errors=$((errors + 1))
+    fi
+else
+    echo "FATAL: $LIGHTDM_CONF does not exist"
+    errors=$((errors + 1))
+fi
+
+state=$(systemctl is-enabled userconfig.service 2>&1 || true)
+case "$state" in
+    masked|disabled|not-found) ;;
+    *)
+        echo "FATAL: userconfig.service is in unexpected state: $state"
+        errors=$((errors + 1))
+        ;;
+esac
+
+if [ -e /etc/xdg/autostart/piwiz.desktop ]; then
+    echo "FATAL: piwiz.desktop autostart still present"
+    errors=$((errors + 1))
+fi
+
+if [ ! -f "$LABWC_DIR/autostart" ]; then
+    echo "FATAL: openavc labwc autostart missing at $LABWC_DIR/autostart"
+    errors=$((errors + 1))
+fi
+
+if [ "$errors" -gt 0 ]; then
+    echo "Pi-image build aborted: $errors verification error(s) above"
+    exit 1
+fi
+
+echo "Pi-image build verification: OK"
 echo "OpenAVC Pi image configuration complete."

@@ -12,9 +12,17 @@ RELEASE=trixie
 # If no display is connected, the server still runs headless over the network.
 STAGE_LIST="stage0 stage1 stage2 stage3 stage-openavc"
 
-# First user (openavc, password changed on first boot)
+# First user (openavc, password set at build time)
 FIRST_USER_NAME=openavc
 FIRST_USER_PASS=openavc
+
+# Skip the Raspberry Pi OS first-boot user-rename wizard. With this set,
+# export-image/01-user-rename never installs rpi-first-boot-wizard, never
+# enables userconfig.service, never rewrites lightdm autologin, and just
+# removes piwiz.desktop. Our 'openavc' user from FIRST_USER_NAME stays as
+# pi-gen's stage1 created it. Requires FIRST_USER_PASS to be set.
+# See: https://github.com/RPi-Distro/pi-gen (DISABLE_FIRST_BOOT_USER_RENAME)
+DISABLE_FIRST_BOOT_USER_RENAME=1
 
 # Locale and keyboard (sensible defaults, user can change later)
 KEYBOARD_KEYMAP=us
