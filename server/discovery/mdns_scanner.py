@@ -33,19 +33,62 @@ DNS_TYPE_AAAA = 28   # IPv6 address (parsed but not used for discovery)
 
 DNS_CLASS_IN = 1
 
-# AV-relevant mDNS service types to query
+# AV-relevant mDNS service types to query.
+#
+# This list was overhauled in the discovery redesign. Three former entries
+# were removed because the service types do not exist in the wild:
+#   - _amx-beacon._udp.local. - AMX uses DDP multicast on
+#     239.255.250.250:9131 instead. See amx_ddp_scanner.py.
+#   - _crestron._tcp.local. - Crestron primary discovery is the CIP UDP
+#     41794 probe. AirMedia receivers advertise as _airplay._tcp.
+#   - _lutron._tcp.local. - actual Lutron service type is _leap._tcp.
+# Three more were unverified hard-coded guesses removed in favor of
+# enumeration via _services._dns-sd._udp.local.:
+#   - _qsc._tcp.local., _shure._tcp.local., _tesira._tcp.local.
+# When a Q-SYS Core, Shure mixer, or Tesira processor advertises *any*
+# service that contains "qsc"/"shure"/"tesira" or carries a matching
+# manufacturer TXT record, the new TierMatcher will identify it via
+# the catch-all enumeration plus a TXT filter declared by the driver.
 AV_SERVICE_TYPES = [
-    "_http._tcp.local.",         # HTTP management interfaces
-    "_https._tcp.local.",        # HTTPS management
-    "_pjlink._tcp.local.",       # PJLink projectors
-    "_amx-beacon._udp.local.",   # AMX devices
-    "_crestron._tcp.local.",     # Crestron devices
-    "_qsc._tcp.local.",          # QSC Q-SYS
-    "_shure._tcp.local.",        # Shure devices
-    "_tesira._tcp.local.",       # Biamp Tesira
-    "_airplay._tcp.local.",      # AirPlay (Apple TV, many displays)
-    "_googlecast._tcp.local.",   # Chromecast / Google Cast
-    "_raop._tcp.local.",         # Remote Audio Output (AirPlay)
+    # ---- Generic web UIs (used to enrich already-identified devices,
+    # NOT a primary identification signal on their own) ----
+    "_http._tcp.local.",
+    "_https._tcp.local.",
+
+    # ---- Standardized AV protocols with vendor-specific service types ----
+    "_pjlink._tcp.local.",        # PJLink projectors (when advertised)
+    "_ndi._tcp.local.",           # NDI sources (NewTek / Vizrt)
+    "_leap._tcp.local.",          # Lutron HomeWorks QSX / RA3 / Caseta
+
+    # ---- Dante (Audinate) ----
+    # The single largest AV protocol population on most modern AV LANs.
+    "_netaudio-cmc._udp.local.",  # Conmon control - primary device announcement
+    "_netaudio-arc._udp.local.",  # Audio Routing Control
+    "_netaudio-chan._udp.local.", # Per-channel descriptions
+    "_netaudio-dbc._udp.local.",  # Device-by-channel
+    "_workgroup._udp.local.",     # Older Brooklyn-II firmware
+
+    # ---- NMOS / IPMX (open AV-over-IP) ----
+    "_nmos-node._tcp.local.",         # Node API
+    "_nmos-register._tcp.local.",     # Registration API (current)
+    "_nmos-query._tcp.local.",        # Query API
+    "_nmos-registration._tcp.local.", # Legacy alias for v1.2 and below
+
+    # ---- Sennheiser SSC (TeamConnect Ceiling, MobileConnect, EW-DX) ----
+    "_ssc._udp.local.",
+    "_ssc._tcp.local.",
+
+    # ---- Consumer / streaming endpoints often present in AV spaces ----
+    "_airplay._tcp.local.",       # Apple TV, AirMedia, AirPlay-capable displays/AVRs
+    "_googlecast._tcp.local.",    # Chromecast, Nest Hub
+    "_raop._tcp.local.",          # AirPlay audio
+    "_roku._tcp.local.",          # Roku ECP
+
+    # ---- Catch-all enumeration ----
+    # DNS-SD meta-query that enumerates every other service type the
+    # network advertises. Lets us surface unknown service types to the
+    # user for catalog growth without hard-coding every vendor.
+    "_services._dns-sd._udp.local.",
 ]
 
 
@@ -314,20 +357,58 @@ class MDNSResult:
 
         return info
 
+    def to_evidence(self):
+        """Emit a Tier 1 Evidence record for the deterministic matcher.
+
+        Returns ``None`` if this MDNSResult does not carry a service type
+        (e.g. an A-record-only resolution). The caller should drop those.
+
+        Imports happen locally to avoid a circular import: ``tier_matcher``
+        imports from ``result``, and ``result`` is imported by everything.
+        """
+        if not self.service_type:
+            return None
+        from server.discovery.tier_matcher import evidence_mdns
+
+        return evidence_mdns(
+            service_type=self.service_type,
+            txt=self.txt_records or None,
+            instance_name=self.instance_name,
+        )
+
 
 def _service_type_to_protocol(service_type: str | None) -> str | None:
-    """Map mDNS service type to OpenAVC protocol name."""
+    """Map mDNS service type to OpenAVC protocol name.
+
+    Only entries with documented vendor-specific service types are
+    included. Generic types (`_http._tcp`) and unverified guesses
+    (`_qsc._tcp`, `_shure._tcp`) are not mapped here — driver matching
+    via TXT records (Phase 6) handles those.
+    """
     if not service_type:
         return None
     # Normalize: ensure trailing dot for lookup
     key = service_type if service_type.endswith(".") else service_type + "."
     mapping = {
         "_pjlink._tcp.local.": "pjlink",
-        "_amx-beacon._udp.local.": "amx",
-        "_crestron._tcp.local.": "crestron_cip",
-        "_qsc._tcp.local.": "qsc",
-        "_shure._tcp.local.": "shure_dcs",
-        "_tesira._tcp.local.": "biamp_tesira",
+        "_ndi._tcp.local.": "ndi",
+        "_leap._tcp.local.": "lutron_leap",
+        # Dante - any of the Audinate _netaudio-* services indicates Dante.
+        "_netaudio-cmc._udp.local.": "dante",
+        "_netaudio-arc._udp.local.": "dante",
+        "_netaudio-chan._udp.local.": "dante",
+        "_netaudio-dbc._udp.local.": "dante",
+        "_workgroup._udp.local.": "dante",
+        # NMOS / IPMX
+        "_nmos-node._tcp.local.": "nmos",
+        "_nmos-register._tcp.local.": "nmos",
+        "_nmos-query._tcp.local.": "nmos",
+        "_nmos-registration._tcp.local.": "nmos",
+        # Sennheiser SSC
+        "_ssc._udp.local.": "sennheiser_ssc",
+        "_ssc._tcp.local.": "sennheiser_ssc",
+        # Roku ECP
+        "_roku._tcp.local.": "roku_ecp",
     }
     return mapping.get(key)
 
@@ -340,14 +421,19 @@ def _service_type_to_category(service_type: str | None) -> str | None:
     key = service_type if service_type.endswith(".") else service_type + "."
     mapping = {
         "_pjlink._tcp.local.": "projector",
-        "_amx-beacon._udp.local.": "control",
-        "_crestron._tcp.local.": "control",
-        "_qsc._tcp.local.": "audio",
-        "_shure._tcp.local.": "audio",
-        "_tesira._tcp.local.": "audio",
+        "_ndi._tcp.local.": "video",
+        "_leap._tcp.local.": "control",
+        "_netaudio-cmc._udp.local.": "audio",
+        "_netaudio-arc._udp.local.": "audio",
+        "_netaudio-chan._udp.local.": "audio",
+        "_netaudio-dbc._udp.local.": "audio",
+        "_workgroup._udp.local.": "audio",
+        "_ssc._udp.local.": "audio",
+        "_ssc._tcp.local.": "audio",
         "_airplay._tcp.local.": "display",
         "_googlecast._tcp.local.": "display",
         "_raop._tcp.local.": "audio",
+        "_roku._tcp.local.": "display",
     }
     return mapping.get(key)
 
@@ -362,7 +448,12 @@ class MDNSScanner:
     for AV-relevant service types. Uses only stdlib (socket, struct, asyncio).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, control_ip: str = "") -> None:
+        """``control_ip``: bind multicast group join to this interface IP.
+        Empty string means INADDR_ANY (default route, all interfaces).
+        Required for the multi-NIC AV scenario where the control VLAN
+        is not the default route.
+        """
         self._sock: socket.socket | None = None
         self._running = False
         self._results: dict[str, MDNSResult] = {}  # keyed by IP
@@ -370,6 +461,11 @@ class MDNSScanner:
         self._hostname_to_ip: dict[str, str] = {}
         # Instance -> partial data (before we have IP)
         self._pending: dict[str, dict[str, Any]] = {}
+        # Service types observed via _services._dns-sd._udp.local.
+        # enumeration that we don't have a hard-coded mapping for. Surfaced
+        # for catalog-growth telemetry and the unknown-state UI.
+        self._unknown_service_types: set[str] = set()
+        self._control_ip = control_ip
 
     @property
     def results(self) -> dict[str, MDNSResult]:
@@ -395,7 +491,7 @@ class MDNSScanner:
         self._running = True
 
         try:
-            self._sock = _create_mdns_socket()
+            self._sock = _create_mdns_socket(control_ip=self._control_ip)
         except OSError as e:
             log.warning("Could not create mDNS socket: %s", e)
             return {}
@@ -491,6 +587,17 @@ class MDNSScanner:
                 # PTR: service_type -> instance_name
                 service_type = rec.name
                 instance_name = rec.target
+
+                # Catch-all enumeration: responses to
+                # _services._dns-sd._udp.local. carry advertised service
+                # types in the PTR target. Capture unknowns for catalog
+                # growth, but don't create a pending entry for them.
+                if service_type.lower().rstrip(".").endswith(
+                    "_services._dns-sd._udp.local"
+                ):
+                    self._track_unknown_service_type(instance_name)
+                    continue
+
                 # Extract human-readable name (everything before the service type)
                 readable = _extract_instance_name(instance_name, service_type)
 
@@ -609,11 +716,38 @@ class MDNSScanner:
                 pass
             self._sock = None
 
+    def _track_unknown_service_type(self, service_type: str) -> None:
+        """Record a service type from `_services._dns-sd._udp.` enumeration.
 
-def _create_mdns_socket() -> socket.socket:
+        Filters out hardcoded types we already query so the unknown set
+        only contains genuinely new advertisements that may be worth
+        adding to the driver catalog.
+        """
+        normalized = service_type.lower().rstrip(".") + "."
+        if normalized in {s.lower() for s in AV_SERVICE_TYPES}:
+            return
+        if normalized in self._unknown_service_types:
+            return
+        self._unknown_service_types.add(normalized)
+        log.debug("mDNS enumeration discovered unknown service type: %s", normalized)
+
+    @property
+    def unknown_service_types(self) -> set[str]:
+        """Service types observed via DNS-SD enumeration that we don't query.
+
+        Surfaced for catalog-growth telemetry and the unknown-state UI.
+        Caller receives a copy.
+        """
+        return set(self._unknown_service_types)
+
+
+def _create_mdns_socket(control_ip: str = "") -> socket.socket:
     """Create a UDP socket configured for mDNS multicast reception.
 
-    Cross-platform: works on both Windows and Linux.
+    Cross-platform: works on both Windows and Linux. When ``control_ip``
+    is set, the multicast group join binds to that interface only,
+    so on a multi-homed host (corporate / AV / control VLANs all on one
+    machine) we only receive announcements from the chosen network.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
@@ -622,13 +756,23 @@ def _create_mdns_socket() -> socket.socket:
 
     sock.bind(("", MDNS_PORT))
 
-    # Join the mDNS multicast group
+    # Join the mDNS multicast group on the chosen interface (or all interfaces).
+    iface = control_ip or "0.0.0.0"
     mreq = struct.pack(
         "4s4s",
         socket.inet_aton(MDNS_ADDR),
-        socket.inet_aton("0.0.0.0"),
+        socket.inet_aton(iface),
     )
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+    # When a control interface is selected, also pin outbound multicast
+    # so our PTR queries leave through that adapter.
+    if control_ip:
+        sock.setsockopt(
+            socket.IPPROTO_IP,
+            socket.IP_MULTICAST_IF,
+            socket.inet_aton(control_ip),
+        )
 
     # Set TTL for multicast packets (mDNS uses TTL=255)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)

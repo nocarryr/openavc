@@ -363,15 +363,72 @@ class TestServiceTypeMapping:
     def test_pjlink_protocol(self):
         assert _service_type_to_protocol("_pjlink._tcp.local.") == "pjlink"
 
+    def test_av_service_types_no_known_bogus(self):
+        """The hardcoded query list must not include service types that
+        do not exist in the wild. AMX uses DDP multicast (not mDNS);
+        Crestron uses CIP UDP/41794 (not mDNS); Lutron uses _leap not _lutron.
+        """
+        from server.discovery.mdns_scanner import AV_SERVICE_TYPES
+        bogus = {
+            "_amx-beacon._udp.local.",
+            "_crestron._tcp.local.",
+            "_lutron._tcp.local.",
+        }
+        for s in AV_SERVICE_TYPES:
+            assert s not in bogus, f"{s} is bogus and should not be queried"
+
+    def test_av_service_types_includes_dante(self):
+        """Dante is the largest single AV protocol population on most
+        modern AV LANs. The query list must include the core
+        _netaudio-* services."""
+        from server.discovery.mdns_scanner import AV_SERVICE_TYPES
+        assert "_netaudio-cmc._udp.local." in AV_SERVICE_TYPES
+        assert "_netaudio-arc._udp.local." in AV_SERVICE_TYPES
+
+    def test_av_service_types_includes_enumeration(self):
+        """The DNS-SD meta-query must be present so we can capture
+        unknown service types for catalog growth."""
+        from server.discovery.mdns_scanner import AV_SERVICE_TYPES
+        assert "_services._dns-sd._udp.local." in AV_SERVICE_TYPES
+
     def test_pjlink_protocol_no_trailing_dot(self):
         """DNS-decoded names don't have trailing dots."""
         assert _service_type_to_protocol("_pjlink._tcp.local") == "pjlink"
 
-    def test_qsc_protocol(self):
-        assert _service_type_to_protocol("_qsc._tcp.local.") == "qsc"
+    def test_dante_protocol(self):
+        # All Audinate _netaudio-* services indicate Dante.
+        assert _service_type_to_protocol("_netaudio-cmc._udp.local.") == "dante"
+        assert _service_type_to_protocol("_netaudio-arc._udp.local.") == "dante"
+        assert _service_type_to_protocol("_netaudio-chan._udp.local.") == "dante"
+        assert _service_type_to_protocol("_netaudio-dbc._udp.local.") == "dante"
 
-    def test_shure_protocol(self):
-        assert _service_type_to_protocol("_shure._tcp.local.") == "shure_dcs"
+    def test_ndi_protocol(self):
+        assert _service_type_to_protocol("_ndi._tcp.local.") == "ndi"
+
+    def test_lutron_leap_protocol(self):
+        assert _service_type_to_protocol("_leap._tcp.local.") == "lutron_leap"
+
+    def test_nmos_protocol(self):
+        assert _service_type_to_protocol("_nmos-node._tcp.local.") == "nmos"
+        assert _service_type_to_protocol("_nmos-register._tcp.local.") == "nmos"
+
+    def test_sennheiser_ssc_protocol(self):
+        assert _service_type_to_protocol("_ssc._udp.local.") == "sennheiser_ssc"
+        assert _service_type_to_protocol("_ssc._tcp.local.") == "sennheiser_ssc"
+
+    def test_unverified_qsc_returns_none(self):
+        # Unverified service types (no public docs confirming them) are
+        # intentionally NOT mapped. Driver matching via TXT records or
+        # the catch-all enumeration handles those.
+        assert _service_type_to_protocol("_qsc._tcp.local.") is None
+
+    def test_removed_amx_beacon_returns_none(self):
+        # AMX uses DDP multicast (239.255.250.250:9131), not mDNS.
+        assert _service_type_to_protocol("_amx-beacon._udp.local.") is None
+
+    def test_removed_crestron_returns_none(self):
+        # Crestron primary discovery is the CIP UDP/41794 probe.
+        assert _service_type_to_protocol("_crestron._tcp.local.") is None
 
     def test_http_no_protocol(self):
         assert _service_type_to_protocol("_http._tcp.local.") is None
@@ -388,8 +445,18 @@ class TestServiceTypeMapping:
     def test_airplay_category(self):
         assert _service_type_to_category("_airplay._tcp.local.") == "display"
 
-    def test_qsc_category(self):
-        assert _service_type_to_category("_qsc._tcp.local.") == "audio"
+    def test_dante_category(self):
+        assert _service_type_to_category("_netaudio-cmc._udp.local.") == "audio"
+        assert _service_type_to_category("_netaudio-arc._udp.local.") == "audio"
+
+    def test_ndi_category(self):
+        assert _service_type_to_category("_ndi._tcp.local.") == "video"
+
+    def test_lutron_category(self):
+        assert _service_type_to_category("_leap._tcp.local.") == "control"
+
+    def test_unverified_qsc_category_none(self):
+        assert _service_type_to_category("_qsc._tcp.local.") is None
 
     def test_unknown_category(self):
         assert _service_type_to_category("_http._tcp.local.") is None
