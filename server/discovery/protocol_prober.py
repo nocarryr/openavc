@@ -512,6 +512,231 @@ async def probe_shure_active(ip: str, port: int = 23) -> ProbeResult | None:
 
 
 # ---------------------------------------------------------------------------
+# Q-SYS QRC connect probe (TCP 1710)
+# ---------------------------------------------------------------------------
+
+# Q-SYS Cores answer JSON-RPC over TCP/1710 with a NUL-terminated framing.
+# EngineStatus is a documented, side-effect-free method.
+_QSYS_QRC_REQUEST = b'{"jsonrpc":"2.0","id":1,"method":"EngineStatus"}\x00'
+
+
+async def probe_qsys_qrc(ip: str, port: int = 1710) -> ProbeResult | None:
+    """Identify a Q-SYS Core via QRC (JSON-RPC over TCP/1710).
+
+    Sends an EngineStatus request and parses the JSON-RPC reply. The
+    reply carries Platform (e.g. "Core 110f"), DesignName, State, and
+    IsRedundant - any valid JSON-RPC envelope identifies a Q-SYS Core
+    deterministically.
+    """
+    import json
+
+    data = await _tcp_exchange(
+        ip, port, send=_QSYS_QRC_REQUEST, timeout=3.0,
+    )
+    if not data:
+        return None
+
+    # QRC framing is NUL-terminated; the response may have one or more
+    # NUL-delimited messages. Take the first complete JSON object.
+    payload = data.split(b"\x00", 1)[0].strip()
+    if not payload:
+        return None
+
+    try:
+        msg = json.loads(payload.decode("utf-8", errors="replace"))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(msg, dict):
+        return None
+
+    # JSON-RPC reply must reference our id and have a result object.
+    result_obj = msg.get("result")
+    if not isinstance(result_obj, dict):
+        return None
+
+    pr = ProbeResult(
+        protocol="qsc_qrc",
+        manufacturer="QSC",
+        category="audio",
+    )
+
+    platform = result_obj.get("Platform")
+    if isinstance(platform, str) and platform:
+        pr.model = platform
+
+    design_name = result_obj.get("DesignName")
+    if isinstance(design_name, str) and design_name:
+        pr.device_name = design_name
+
+    state = result_obj.get("State")
+    if isinstance(state, str):
+        pr.extra["qrc_state"] = state
+
+    is_redundant = result_obj.get("IsRedundant")
+    if isinstance(is_redundant, bool):
+        pr.extra["qrc_redundant"] = is_redundant
+
+    return pr
+
+
+# ---------------------------------------------------------------------------
+# Biamp Tesira TTP active probe (TCP 23)
+# ---------------------------------------------------------------------------
+
+# Tesira Text Protocol greeting on connect:
+#   "Welcome to the Tesira Text Protocol Server..."
+# Followed by a `\r\n`-terminated `+OK\r\n` ready prompt. We then send a
+# safe read-only query for the device serial number which echoes a line
+# with `+OK "value:<serial>"` on success.
+_TESIRA_TTP_QUERY = b"DEVICE get serialNumber\r\n"
+_TESIRA_TTP_RESPONSE_RE = re.compile(
+    r'\+OK\s*"?value\s*:\s*(?P<serial>[A-Za-z0-9\-]+)"?',
+    re.IGNORECASE,
+)
+
+
+async def probe_tesira_ttp(ip: str, port: int = 23) -> ProbeResult | None:
+    """Identify a Biamp Tesira processor via Tesira Text Protocol.
+
+    The TTP server greets with a distinctive welcome banner. Sending
+    ``DEVICE get serialNumber`` returns a structured ``+OK "value:..."``
+    response - any such response confirms a Tesira device.
+    """
+    responses = await _tcp_multi_exchange(
+        ip, port,
+        commands=[_TESIRA_TTP_QUERY],
+        timeout=3.0,
+        read_first=True,
+        delay=0.2,
+    )
+    if not responses:
+        return None
+
+    banner_raw = responses[0]
+    if not banner_raw:
+        return None
+    banner = banner_raw.decode("utf-8", errors="replace")
+    if not _BIAMP_BANNER_RE.search(banner):
+        return None
+
+    pr = ProbeResult(
+        protocol="biamp_tesira",
+        manufacturer="Biamp",
+        category="audio",
+    )
+
+    # The reply to our query (if any) carries the serial number.
+    if len(responses) > 1 and responses[1]:
+        reply_text = responses[1].decode("utf-8", errors="replace")
+        match = _TESIRA_TTP_RESPONSE_RE.search(reply_text)
+        if match:
+            pr.serial_number = match.group("serial")
+
+    # Firmware string sometimes appears in the welcome banner.
+    fw_match = re.search(r"version\s+(\d+\.\d+[\.\d]*)", banner, re.IGNORECASE)
+    if fw_match:
+        pr.firmware = fw_match.group(1)
+
+    return pr
+
+
+# ---------------------------------------------------------------------------
+# Yamaha RCP active probe (TCP 49280)
+# ---------------------------------------------------------------------------
+
+# Yamaha RCP (Remote Control Protocol) used by CL/QL/TF/Rivage/DM3 mixers.
+# `devstatus runmode` is a documented read-only query that returns the
+# console run mode and identifies the device class.
+_YAMAHA_RCP_QUERY = b"devstatus runmode\r\n"
+_YAMAHA_RCP_RESPONSE_RE = re.compile(
+    r"OK\s+devstatus\s+runmode\s+(?P<value>\S+)",
+    re.IGNORECASE,
+)
+
+
+async def probe_yamaha_rcp(ip: str, port: int = 49280) -> ProbeResult | None:
+    """Identify a Yamaha RCP-speaking mixer (CL, QL, TF, Rivage, DM3).
+
+    Yamaha consoles typically do not advertise on mDNS (DM3 is the
+    exception). A TCP connect on 49280 + ``devstatus runmode\\r\\n``
+    confirms RCP and returns the run mode.
+    """
+    data = await _tcp_exchange(
+        ip, port, send=_YAMAHA_RCP_QUERY, timeout=3.0,
+    )
+    if not data:
+        return None
+
+    text = data.decode("utf-8", errors="replace")
+    match = _YAMAHA_RCP_RESPONSE_RE.search(text)
+    if not match:
+        return None
+
+    pr = ProbeResult(
+        protocol="yamaha_rcp",
+        manufacturer="Yamaha",
+        category="audio",
+    )
+    pr.extra["rcp_runmode"] = match.group("value")
+    return pr
+
+
+# ---------------------------------------------------------------------------
+# ProbeResult -> Evidence bridge
+# ---------------------------------------------------------------------------
+
+# Map probe protocol -> stable probe_id used as Evidence source_id.
+# Drivers reference these IDs in their discovery hints (Phase 6).
+_PROBE_ID_FOR_PROTOCOL: dict[str, str] = {
+    "pjlink": "pjlink_class1",
+    "extron_sis": "extron_sis",
+    "biamp_tesira": "tesira_ttp",
+    "qsc_qrc": "qrc",
+    "kramer_p3000": "kramer_p3000",
+    "shure_dcs": "shure_dcs",
+    "samsung_mdc": "samsung_mdc",
+    "visca": "visca",
+    "crestron_cip": "crestron_cip_tcp",
+    "yamaha_rcp": "yamaha_rcp",
+}
+
+
+def probe_result_to_evidence(pr: ProbeResult):
+    """Convert a legacy ProbeResult into a Tier 3 Evidence record.
+
+    Bridge between the existing probe API (returns ProbeResult) and the
+    new deterministic matcher (consumes Evidence). Used by the Phase 6
+    orchestrator swap; safe to call from anywhere meanwhile.
+
+    Returns a Tier 3 Evidence record. The probe_id used as source_id
+    is the same one drivers reference in their ``active_probes`` hint
+    declarations.
+    """
+    from server.discovery.tier_matcher import evidence_active_probe
+
+    probe_id = _PROBE_ID_FOR_PROTOCOL.get(pr.protocol, pr.protocol)
+
+    response: dict[str, Any] = {}
+    if pr.manufacturer:
+        response["manufacturer"] = pr.manufacturer
+    if pr.model:
+        response["model"] = pr.model
+    if pr.device_name:
+        response["device_name"] = pr.device_name
+    if pr.firmware:
+        response["firmware"] = pr.firmware
+    if pr.serial_number:
+        response["serial_number"] = pr.serial_number
+    if pr.category:
+        response["category"] = pr.category
+    if pr.extra:
+        response["extra"] = dict(pr.extra)
+
+    return evidence_active_probe(probe_id, response=response)
+
+
+# ---------------------------------------------------------------------------
 # Main probe dispatcher (at end of file so all probe functions are available)
 # ---------------------------------------------------------------------------
 
@@ -521,11 +746,13 @@ async def probe_shure_active(ip: str, port: int = 23) -> ProbeResult | None:
 # favicon hashing) were removed in the discovery redesign because they
 # produced false positives on every web-enabled device.
 _PORT_PROBES: dict[int, list] = {
-    23: [probe_shure_active],
-    4352: [probe_pjlink],
+    23: [probe_shure_active, probe_tesira_ttp],
     1515: [probe_samsung_mdc],
-    10500: [probe_visca],
     1688: [probe_crestron_cip],
+    1710: [probe_qsys_qrc],
+    4352: [probe_pjlink],
+    10500: [probe_visca],
+    49280: [probe_yamaha_rcp],
 }
 
 
