@@ -616,27 +616,75 @@ Types: `length_prefix` (reads a length header then N bytes), `fixed_length` (mes
 
 ### Discovery Hints
 
-The `discovery` section helps OpenAVC's network discovery system identify devices on the network and match them to your driver. When a user runs a discovery scan, these hints improve how accurately your driver is suggested for detected devices.
+The `discovery` section is **required**. It tells the discovery engine which deterministic signal (Tier 1, 2, or 3) identifies your device on the network. Every driver must declare at least one strong signal — or set `manual_only: true` if the device has no verifiable announcement and must be added by hand.
+
+The matcher is deterministic. There is no scoring. A signal either fires (the device is identified) or it does not. Soft hints like OUI and SNMP PEN only contribute to the "possible" state, never to "identified."
 
 ```yaml
 discovery:
-  ports: [23]
-  mac_prefixes: ["00:05:a6"]
+  # Tier 1: passive listeners (zero packets sent)
+  mdns_services:
+    - "_pjlink._tcp.local."
+    # TXT-record filter disambiguates generic service types so two
+    # drivers don't collide on `_http._tcp`:
+    - service: "_http._tcp.local."
+      txt_match: { manufacturer: "Shure" }
+  ssdp_device_types:
+    - "urn:schemas-upnp-org:device:MediaRenderer:1"
+  amx_ddp:
+    make: "Polycom"
+    model_pattern: "SoundStructure*"   # optional, defaults to "*"
+
+  # Tier 2: vendor broadcast probes (opt-in, one packet per scan)
+  pjlink_class2: true              # responds to %2SRCH on UDP 4352
+  crestron_cip: true               # responds to UDP 41794 probe
+  onvif:                           # ONVIF cameras; manufacturer disambiguates
+    manufacturer: "Axis"
+  hiqnet: true                     # HARMAN HiQnet on UDP 3804
+  symetrix: true                   # ControlNet on UDP 49216
+
+  # Tier 3: targeted active probes (only on hosts with the open port)
+  active_probes:
+    - extron_sis
+
+  # Tier 4: enrichment hints (soft signals — never produce identified alone)
+  snmp_pen: 17049                  # IANA Private Enterprise Number
+  oui_prefixes: ["00:05:a6"]       # used for vendor display + possible-state candidates
+  hostname_patterns:
+    - "^(QSC|qsys)-"
+
+  # Opt out of automatic discovery
+  manual_only: false
 ```
 
-| Field | Type | Description |
+| Field | Tier | Description |
 |-------|------|-------------|
-| `ports` | list[int] | TCP ports this device typically listens on. Used to match against open ports found during scanning. |
-| `mac_prefixes` | list[str] | IEEE OUI prefixes (first 3 bytes of MAC address) for this manufacturer's devices. Format: `"00:05:a6"`. |
-| `mdns_services` | list[str] | mDNS/Bonjour service types the device advertises (e.g., `"_pjlink._tcp.local."`). |
-| `upnp_types` | list[str] | UPnP device type URNs the device advertises. |
-| `hostname_patterns` | list[str] | Regex patterns to match against the device's hostname (e.g., `"^DTP-.*"`). |
+| `mdns_services` | 1 | mDNS service types this device advertises. Each entry is either a bare string or `{service, txt_match}` for service-type disambiguation. |
+| `ssdp_device_types` | 1 | Full UPnP device-type URNs this device announces in SSDP `ST` / `NT` headers. |
+| `amx_ddp` | 1 | AMX Device Discovery Protocol beacon match. Provide `make` (required) and optional `model_pattern` glob. |
+| `pjlink_class2` | 2 | `true` if the device answers PJLink Class 2 SRCH broadcast. The generic `pjlink_class1` driver claims this; brand-specific projector drivers stay `manual_only`. |
+| `crestron_cip` | 2 | `true` if the device answers the Crestron CIP UDP/41794 probe. |
+| `onvif` | 2 | `true` (any ONVIF responder) or `{manufacturer: "Axis"}` to disambiguate when multiple ONVIF camera drivers coexist. |
+| `hiqnet` / `symetrix` | 2 | HARMAN HiQnet / Symetrix ControlNet broadcast probe opt-ins. |
+| `active_probes` | 3 | Targeted TCP probes from the platform allow-list: `pjlink_class1`, `extron_sis`, `tesira_ttp`, `qrc`, `kramer_p3000`, `shure_dcs`, `samsung_mdc`, `visca`, `crestron_cip_tcp`, `yamaha_rcp`. Adding a new probe ID requires landing it in `protocol_prober.py` first. |
+| `snmp_pen` | 4 | IANA Private Enterprise Number. Soft signal — produces "possible" not "identified". |
+| `oui_prefixes` | 4 | OUI prefixes (`"00:05:a6"`). Soft signal — also drives the "Unknown device, vendor: Extron" display. |
+| `hostname_patterns` | 4 | Regex patterns. Soft signal. |
+| `manual_only` | — | `true` to opt out of automatic discovery. The driver is still installable manually. Use when the device has no verifiable Tier 1/2/3 fingerprint. |
 
-All fields are optional. Even without a `discovery` section, the driver's `manufacturer`, `category`, and `default_config.port` are used as basic hints. Adding explicit discovery hints makes matching more accurate.
+#### Validation rules
+
+These are enforced at driver-load time:
+
+1. Every driver declares at least one strong signal **or** sets `manual_only: true`. Soft signals alone (`snmp_pen`, `oui_prefixes`, `hostname_patterns`) are not sufficient.
+2. Two drivers cannot claim the same Tier 1/2/3 signal without distinct TXT-record filters. Drivers fail to load on collision.
+3. `active_probes` and broadcast probe IDs must come from the platform allow-list above.
+
+CI in the community-driver repo (`openavc-drivers/scripts/build_index.py`) enforces the same rules across the whole catalog.
 
 #### Protocol Declaration
 
-If your device speaks a known protocol that OpenAVC's discovery probes can identify (PJLink, Extron SIS, Biamp Tesira, QSC Q-SYS, Kramer P3000, Samsung MDC, VISCA, etc.), declare it with the top-level `protocols` field:
+The top-level `protocols` field is metadata for catalog tagging — it does **not** affect discovery matching. The matcher uses the `discovery:` block above. Declare `protocols` so the catalog can group drivers by protocol family:
 
 ```yaml
 protocols: ["pjlink"]
@@ -1402,13 +1450,13 @@ DRIVER_INFO = {
         },
     },
 
-    # --- Protocol declarations (optional, improves discovery matching) ---
+    # --- Protocol declarations (catalog metadata) ---
     "protocols": ["extron_sis"],
 
-    # --- Discovery hints (optional, improves network scanning) ---
+    # --- Discovery hints (REQUIRED — declare a strong signal or set manual_only) ---
     "discovery": {
-        "ports": [23],
-        "mac_prefixes": ["00:05:a6"],
+        "active_probes": ["extron_sis"],
+        "oui_prefixes": ["00:05:a6"],   # soft signal for the "possible" state
     },
 }
 ```
