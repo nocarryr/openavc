@@ -1108,7 +1108,7 @@ class TestPassiveConfidenceScoring:
             "alive", "mac_known", "oui_av_mfg", "av_port_open",
             "banner_matched", "probe_confirmed", "snmp_identified",
             "mdns_advertised", "ssdp_identified", "model_known",
-            "driver_matched", "hint_matched",
+            "driver_matched", "netbios_resolved", "entity_mib_found",
         ])
         assert score <= 1.0
 

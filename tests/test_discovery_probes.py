@@ -8,7 +8,6 @@ from server.discovery.protocol_prober import (
     probe_pjlink,
     probe_samsung_mdc,
     probe_visca,
-    probe_http,
     probe_crestron_cip,
     probe_device,
     probe_device as run_protocol_probes,
@@ -304,130 +303,6 @@ class TestVISCAProbe:
 # ===== HTTP Probe Tests =====
 
 
-class TestHTTPProbe:
-    @pytest.mark.asyncio
-    async def test_crestron_server_header(self):
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Server: Crestron/2.0\r\n"
-            b"Content-Type: text/html\r\n\r\n"
-            b"<html><title>Crestron</title></html>"
-        )
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=response,
-        ):
-            result = await probe_http("192.168.1.60", 80)
-
-        assert result is not None
-        assert result.manufacturer == "Crestron"
-        assert result.category == "control"
-
-    @pytest.mark.asyncio
-    async def test_panasonic_ptz_path(self):
-        response = (
-            b"HTTP/1.1 200 OK\r\n\r\n"
-            b"<html><body>/cgi-bin/aw_ptz supported</body></html>"
-        )
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=response,
-        ):
-            result = await probe_http("192.168.1.70", 80)
-
-        assert result is not None
-        assert result.manufacturer == "Panasonic"
-        assert result.category == "camera"
-
-    @pytest.mark.asyncio
-    async def test_nec_projector_title(self):
-        response = (
-            b"HTTP/1.1 200 OK\r\n\r\n"
-            b"<html><title>NEC PA1004UL Projector</title></html>"
-        )
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=response,
-        ):
-            result = await probe_http("192.168.1.72", 80)
-
-        assert result is not None
-        assert result.manufacturer == "NEC"
-        assert result.category == "projector"
-
-    @pytest.mark.asyncio
-    async def test_samsung_title(self):
-        response = (
-            b"HTTP/1.1 200 OK\r\n\r\n"
-            b"<html><title>Samsung QM85R Display</title></html>"
-        )
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=response,
-        ):
-            result = await probe_http("192.168.1.80", 80)
-
-        assert result is not None
-        assert result.manufacturer == "Samsung"
-        assert result.category == "display"
-
-    @pytest.mark.asyncio
-    async def test_extracts_title_as_model(self):
-        response = (
-            b"HTTP/1.1 200 OK\r\n\r\n"
-            b"<html><title>Barco ClickShare CSE-200</title></html>"
-        )
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=response,
-        ):
-            result = await probe_http("192.168.1.85", 80)
-
-        assert result is not None
-        assert result.manufacturer == "Barco"
-        assert result.extra.get("http_title") == "Barco ClickShare CSE-200"
-
-    @pytest.mark.asyncio
-    async def test_no_response(self):
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            result = await probe_http("192.168.1.1", 80)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_non_http_response(self):
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=b"Not an HTTP response",
-        ):
-            result = await probe_http("192.168.1.1", 80)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_generic_web_page_no_match(self):
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Server: nginx\r\n\r\n"
-            b"<html><title>My Router Config</title></html>"
-        )
-        with patch(
-            "server.discovery.protocol_prober._tcp_exchange",
-            new_callable=AsyncMock,
-            return_value=response,
-        ):
-            result = await probe_http("192.168.1.1", 80)
-        assert result is None
-
-
 # ===== Crestron CIP Probe Tests =====
 
 
@@ -509,46 +384,29 @@ class TestProbeDevice:
         assert results[0].protocol == "samsung_mdc"
 
     @pytest.mark.asyncio
-    async def test_http_port_triggers_probe(self):
-        """Port 80 should trigger an HTTP probe."""
-        import server.discovery.protocol_prober as prober_mod
-        mock_fn = AsyncMock(return_value=ProbeResult(
-            protocol="nec_http", manufacturer="NEC", category="projector",
-        ))
-        orig = prober_mod._PORT_PROBES[80]
-        prober_mod._PORT_PROBES[80] = [mock_fn]
-        try:
-            results = await probe_device("192.168.1.72", open_ports=[80])
-        finally:
-            prober_mod._PORT_PROBES[80] = orig
-
-        assert len(results) == 1
-        assert results[0].manufacturer == "NEC"
-
-    @pytest.mark.asyncio
     async def test_multiple_ports_multiple_results(self):
-        """Device with both PJLink and HTTP ports gets both probed."""
+        """Device with both PJLink and Samsung MDC ports gets both probed."""
         import server.discovery.protocol_prober as prober_mod
         mock_pjlink = AsyncMock(return_value=ProbeResult(
             protocol="pjlink", manufacturer="NEC", category="projector",
         ))
-        mock_http = AsyncMock(return_value=ProbeResult(
-            protocol="nec_http", manufacturer="NEC", category="projector",
+        mock_samsung = AsyncMock(return_value=ProbeResult(
+            protocol="samsung_mdc", manufacturer="Samsung", category="display",
         ))
         orig_4352 = prober_mod._PORT_PROBES[4352]
-        orig_80 = prober_mod._PORT_PROBES[80]
+        orig_1515 = prober_mod._PORT_PROBES[1515]
         prober_mod._PORT_PROBES[4352] = [mock_pjlink]
-        prober_mod._PORT_PROBES[80] = [mock_http]
+        prober_mod._PORT_PROBES[1515] = [mock_samsung]
         try:
-            results = await probe_device("192.168.1.72", open_ports=[4352, 80])
+            results = await probe_device("192.168.1.72", open_ports=[4352, 1515])
         finally:
             prober_mod._PORT_PROBES[4352] = orig_4352
-            prober_mod._PORT_PROBES[80] = orig_80
+            prober_mod._PORT_PROBES[1515] = orig_1515
 
         assert len(results) == 2
         protocols = {r.protocol for r in results}
         assert "pjlink" in protocols
-        assert "nec_http" in protocols
+        assert "samsung_mdc" in protocols
 
     @pytest.mark.asyncio
     async def test_no_ports_no_banners(self):

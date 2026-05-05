@@ -599,18 +599,6 @@ class DiscoveryEngine:
                     if pr.model and "model_known" not in device.sources:
                         device.sources.append("model_known")
 
-                    # Track protocol-specific sources for confidence
-                    if pr.protocol == "https" and "tls_cert_matched" not in device.sources:
-                        if pr.manufacturer:
-                            device.sources.append("tls_cert_matched")
-                    if pr.protocol == "ssh" and "ssh_identified" not in device.sources:
-                        device.sources.append("ssh_identified")
-                    if pr.protocol == "smb" and "smb_identified" not in device.sources:
-                        if pr.device_name:
-                            device.sources.append("smb_identified")
-                    if pr.extra.get("www_auth_realm") and "www_auth_matched" not in device.sources:
-                        device.sources.append("www_auth_matched")
-
                     # Check banners for banner_matched source
                     if device.banners and "banner_matched" not in device.sources:
                         device.sources.append("banner_matched")

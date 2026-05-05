@@ -99,7 +99,12 @@ class DiscoveredDevice:
         }
 
 
-# Confidence weights — each successful identification step adds to the score
+# Confidence weights — each successful identification step adds to the score.
+# This additive heuristic system is being replaced by deterministic tier-based
+# matching (see discovery-redesign-plan.md). Dead entries that no code ever
+# set (favicon_matched, hint_matched) and entries from the removed
+# non-deterministic probes (tls_cert_matched, ssh_identified, smb_identified,
+# www_auth_matched) have been deleted.
 CONFIDENCE_WEIGHTS = {
     "alive": 0.05,
     "mac_known": 0.05,
@@ -112,15 +117,8 @@ CONFIDENCE_WEIGHTS = {
     "ssdp_identified": 0.10,
     "model_known": 0.10,
     "driver_matched": 0.20,
-    "hint_matched": 0.15,
-    # New sources from scan depth techniques
-    "tls_cert_matched": 0.15,
-    "ssh_identified": 0.05,
     "netbios_resolved": 0.10,
-    "smb_identified": 0.10,
     "entity_mib_found": 0.10,
-    "www_auth_matched": 0.10,
-    "favicon_matched": 0.10,
 }
 
 
