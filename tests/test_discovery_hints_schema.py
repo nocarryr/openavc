@@ -156,6 +156,29 @@ class TestSignalIndexBuilder:
         idx = build_signal_index(load_discovery_hints(registry))
         assert idx.driver_count() == 0
 
+    def test_onvif_manufacturer_disambiguates(self):
+        # Two camera drivers can both opt in to onvif so long as each
+        # constrains by manufacturer; the matcher resolves to the right
+        # driver from the responder's scope value.
+        registry = [
+            _drv("axis_camera", onvif={"manufacturer": "Axis"}),
+            _drv("sony_camera", onvif={"manufacturer": "Sony"}),
+        ]
+        idx = build_signal_index(load_discovery_hints(registry))
+        sony = idx.find_strong(KIND_BROADCAST, "onvif", txt={"manufacturer": "Sony"})
+        axis = idx.find_strong(KIND_BROADCAST, "onvif", txt={"manufacturer": "Axis"})
+        assert sony is not None and sony.driver_id == "sony_camera"
+        assert axis is not None and axis.driver_id == "axis_camera"
+
+    def test_onvif_unfiltered_collision_raises(self):
+        # Unfiltered claims still collide.
+        registry = [
+            _drv("a", onvif=True),
+            _drv("b", onvif=True),
+        ]
+        with pytest.raises(ValueError, match="Signal collision"):
+            build_signal_index(load_discovery_hints(registry))
+
     def test_indexing_covers_all_signal_kinds(self):
         registry = [
             _drv(

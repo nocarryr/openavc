@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 from server.discovery.result import (
     Evidence,
@@ -160,12 +160,25 @@ class SignalRule:
         )
 
     @classmethod
-    def for_broadcast(cls, driver_id: str, probe_id: str) -> "SignalRule":
+    def for_broadcast(
+        cls,
+        driver_id: str,
+        probe_id: str,
+        txt_match: dict[str, str] | None = None,
+    ) -> "SignalRule":
+        """Build a Tier 2 broadcast rule.
+
+        ``txt_match`` lets multiple drivers safely claim a generic probe
+        like ``onvif`` or ``hiqnet`` by attaching a manufacturer/model
+        filter — the responder's parsed identification fields are matched
+        against the filter at lookup time.
+        """
         return cls(
             driver_id=driver_id,
             tier=SignalTier.BROADCAST_PROBE,
             kind=KIND_BROADCAST,
             source_id=probe_id,
+            txt_match=_freeze_dict(txt_match),
         )
 
     @classmethod
@@ -565,16 +578,29 @@ def evidence_amx_ddp(make: str, model: str, raw: str | None = None) -> Evidence:
     )
 
 
-def evidence_broadcast(probe_id: str, response: dict | None = None) -> Evidence:
-    """Build an Evidence record for a Tier 2 broadcast probe response."""
+def evidence_broadcast(
+    probe_id: str,
+    response: dict | None = None,
+    txt: dict[str, str] | None = None,
+) -> Evidence:
+    """Build an Evidence record for a Tier 2 broadcast probe response.
+
+    ``txt`` carries identification fields parsed from the responder
+    (manufacturer, model, hardware id) so the matcher can distinguish
+    drivers that share a generic probe — e.g. multiple ONVIF cameras
+    each filtered by manufacturer scope.
+    """
+    data: dict[str, Any] = {
+        "kind": KIND_BROADCAST,
+        "source_id": probe_id,
+        "response": response or {},
+    }
+    if txt:
+        data["txt"] = dict(txt)
     return Evidence(
         tier=SignalTier.BROADCAST_PROBE,
         source=f"broadcast:{probe_id}",
-        data={
-            "kind": KIND_BROADCAST,
-            "source_id": probe_id,
-            "response": response or {},
-        },
+        data=data,
     )
 
 

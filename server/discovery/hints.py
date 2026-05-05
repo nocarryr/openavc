@@ -452,7 +452,12 @@ def build_signal_index(hints: list[DiscoveryHint]) -> SignalIndex:
                 hint.amx_ddp["model_pattern"],
             ))
         for probe_id in hint.broadcast_probes:
-            index.add_rule(SignalRule.for_broadcast(hint.driver_id, probe_id))
+            txt_filter: dict[str, str] | None = None
+            if probe_id == "onvif" and hint.onvif_manufacturer:
+                txt_filter = {"manufacturer": hint.onvif_manufacturer}
+            index.add_rule(SignalRule.for_broadcast(
+                hint.driver_id, probe_id, txt_match=txt_filter,
+            ))
         for probe_id in hint.active_probes:
             index.add_rule(SignalRule.for_active_probe(hint.driver_id, probe_id))
 

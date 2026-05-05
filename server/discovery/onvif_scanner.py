@@ -100,6 +100,15 @@ class ONVIFResult:
         return None
 
     def to_evidence(self) -> Evidence:
+        # The matcher disambiguates per-vendor ONVIF drivers via a
+        # ``manufacturer`` filter. Pack the parsed scope value into the
+        # ``txt`` dict so SignalIndex.find_strong() can pick the right
+        # driver among any that claim ``onvif:``.
+        txt: dict[str, str] = {}
+        if self.manufacturer:
+            txt["manufacturer"] = self.manufacturer
+        if self.hardware:
+            txt["hardware"] = self.hardware
         data: dict[str, Any] = {
             "kind": KIND_BROADCAST,
             "source_id": "onvif",
@@ -109,6 +118,8 @@ class ONVIFResult:
             data["manufacturer"] = self.manufacturer
         if self.hardware:
             data["hardware"] = self.hardware
+        if txt:
+            data["txt"] = txt
         return Evidence(
             tier=SignalTier.BROADCAST_PROBE,
             source="broadcast:onvif",
