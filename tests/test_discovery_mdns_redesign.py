@@ -8,6 +8,8 @@ unchanged.
 
 from server.discovery.mdns_scanner import MDNSResult, MDNSScanner
 from server.discovery.result import SignalTier
+from server.discovery.ssdp_scanner import SSDPResult, SSDPScanner
+from server.discovery.tier_matcher import KIND_SSDP
 
 
 class TestMDNSResultEvidence:
@@ -94,6 +96,40 @@ class TestUnknownServiceTypeTracking:
         snapshot.clear()
         # Internal set should be untouched.
         assert "_x._tcp.local." in scanner.unknown_service_types
+
+
+class TestSSDPControlIP:
+    def test_default_no_control_ip(self):
+        scanner = SSDPScanner()
+        assert scanner._control_ip == ""
+
+    def test_control_ip_passed_through(self):
+        scanner = SSDPScanner(control_ip="192.168.1.50")
+        assert scanner._control_ip == "192.168.1.50"
+
+
+class TestSSDPResultEvidence:
+    def test_with_st_emits_tier1_evidence(self):
+        r = SSDPResult(
+            ip="10.0.0.50",
+            st="urn:schemas-upnp-org:device:MediaRenderer:1",
+            usn="uuid:abc::urn:schemas-upnp-org:device:MediaRenderer:1",
+            friendly_name="Sonos Kitchen",
+            manufacturer="Sonos Inc.",
+            model_name="ZP100",
+        )
+        ev = r.to_evidence()
+        assert ev is not None
+        assert ev.tier == SignalTier.PASSIVE_LISTENER
+        assert ev.data["kind"] == KIND_SSDP
+        assert ev.data["source_id"] == "urn:schemas-upnp-org:device:MediaRenderer:1"
+        assert ev.data["manufacturer"] == "Sonos Inc."
+        assert ev.data["model"] == "ZP100"
+
+    def test_no_st_returns_none(self):
+        # No ST means we can't deterministically match.
+        r = SSDPResult(ip="10.0.0.50", usn="uuid:abc", friendly_name="thing")
+        assert r.to_evidence() is None
 
 
 class TestNewServiceTypesInQueryList:
