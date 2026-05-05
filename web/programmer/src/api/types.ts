@@ -471,16 +471,39 @@ export interface DriverResponseDef {
   set?: Record<string, unknown>;
 }
 
+// Phase 6 deterministic ``discovery:`` schema. Every driver declares
+// at least one strong (Tier 1/2/3) signal or sets manual_only: true.
+// CI rejects collisions across drivers (see openavc-drivers/scripts/
+// build_index.py). Allowed Tier 2 / Tier 3 IDs match the platform's
+// ALLOWED_BROADCAST_PROBES / ALLOWED_ACTIVE_PROBES allow-lists.
+export interface DriverDiscoveryMdnsEntry {
+  service: string;
+  txt_match?: Record<string, string>;
+}
+
 export interface DriverDiscoveryHints {
-  ports?: number[];
-  mac_prefixes?: string[];
-  protocols?: string[];
-  mdns_services?: string[];
+  // Tier 1
+  mdns_services?: Array<string | DriverDiscoveryMdnsEntry>;
+  ssdp_device_types?: string[];
+  amx_ddp?: { make: string; model_pattern?: string };
+
+  // Tier 2 — opt-ins
+  pjlink_class2?: boolean;
+  crestron_cip?: boolean;
+  onvif?: boolean | { manufacturer?: string };
+  hiqnet?: boolean;
+  symetrix?: boolean;
+
+  // Tier 3
+  active_probes?: string[];
+
+  // Tier 4 enrichment (soft signals)
+  snmp_pen?: number;
+  oui_prefixes?: string[];
   hostname_patterns?: string[];
-  // SSDP / UPnP device-type URN substrings. The discovery engine matches
-  // these against the SSDP NOTIFY / M-SEARCH `ST` and `NT` headers (e.g.
-  // "urn:schemas-upnp-org:device:MediaRenderer:1") to identify devices.
-  upnp_types?: string[];
+
+  // Opt out of automatic discovery.
+  manual_only?: boolean;
 }
 
 export interface DriverDeviceSettingDef {
