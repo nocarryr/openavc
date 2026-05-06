@@ -116,6 +116,25 @@ function stateTone(state: DeviceState): { bg: string; fg: string; label: string 
 }
 
 /** Plain-English one-liner describing the deterministic signal that produced a match. */
+// Mirrors _GENERIC_STRONG_PROBE_IDS in server/discovery/tier_matcher.py.
+// When a vendor-specific driver wins via Tier 4 soft signals over one of
+// these generic strong matches, the generic driver_id is appended as the
+// trailing alternative, and we surface a short "(also responded to ...)"
+// hint so the user understands why a second driver is offered.
+const GENERIC_PROBE_HINT: Record<string, string> = {
+  pjlink_class1: "PJLink probe",
+  pjlink_class2: "PJLink probe",
+};
+
+function genericProbeHint(alternatives: string[] | undefined): string | null {
+  if (!alternatives) return null;
+  for (const id of alternatives) {
+    const hint = GENERIC_PROBE_HINT[id];
+    if (hint) return hint;
+  }
+  return null;
+}
+
 function summarizeSource(source: string): string {
   if (!source) return "no signal";
   const [scheme, ...rest] = source.split(":");
@@ -989,6 +1008,26 @@ function IdentificationSection({
   const state: DeviceState = ident?.state ?? "unknown";
 
   if (state === "identified" && ident?.driver_id) {
+    const alts = ident.alternatives ?? [];
+    if (alts.length > 0) {
+      // Generic strong probe won (e.g. PJLink) but a vendor-specific
+      // driver matched on a soft signal — render the same dropdown as
+      // possible-state, with the vendor driver pre-selected and the
+      // generic driver as the trailing alternative.
+      return (
+        <DriverChoiceCard
+          device={device}
+          candidates={[ident.driver_id, ...alts]}
+          sourceLabel={summarizeSource(ident.source)}
+          extraNote={genericProbeHint(alts)}
+          installedDrivers={installedDrivers}
+          driverNameLookup={driverNameLookup}
+          onDeviceAdded={onDeviceAdded}
+          onDeviceUpdated={onDeviceUpdated}
+          onHide={onHide}
+        />
+      );
+    }
     return (
       <DriverAddRow
         device={device}
@@ -1004,7 +1043,7 @@ function IdentificationSection({
 
   if (state === "possible" && ident?.candidates.length) {
     return (
-      <PossibleCandidates
+      <DriverChoiceCard
         device={device}
         candidates={ident.candidates}
         sourceLabel={summarizeSource(ident.source)}
@@ -1201,12 +1240,25 @@ function DriverAddRow({
 }
 
 
-// --- Possible-state candidates ---
+// --- Driver choice card ---
+//
+// Renders the dropdown + Add + override-picker UI shared by two cases:
+//   1. possible state — candidates from Tier 4 soft signals.
+//   2. identified state with alternatives — a generic strong probe won
+//      (PJLink, unfiltered ONVIF) and one or more vendor-specific
+//      drivers also matched, so the matcher returns the vendor as the
+//      primary "best fit" and the generic driver as a trailing
+//      alternative.
+// In both cases the user picks from the dropdown and adds. An optional
+// extraNote surfaces a short parenthetical (e.g. "(also responded to
+// PJLink probe)") next to the likely-vendor line so users understand
+// why a second driver appears.
 
-function PossibleCandidates({
+function DriverChoiceCard({
   device,
   candidates,
   sourceLabel,
+  extraNote,
   installedDrivers,
   driverNameLookup,
   onDeviceAdded,
@@ -1216,6 +1268,7 @@ function PossibleCandidates({
   device: api.DiscoveredDevice;
   candidates: string[];
   sourceLabel: string;
+  extraNote?: string | null;
   installedDrivers: DriverInfo[];
   driverNameLookup: Map<string, DriverEntry>;
   onDeviceAdded: (info: { name: string; deviceId?: string }) => void;
@@ -1322,6 +1375,7 @@ function PossibleCandidates({
       {likelyVendor && (
         <div style={{ fontSize: "var(--font-size-xs)", color: "var(--text-muted)" }}>
           Likely <strong style={{ color: "var(--text)" }}>{likelyVendor}</strong> &mdash; {sourceLabel}
+          {extraNote ? ` (also responded to ${extraNote})` : ""}
         </div>
       )}
       <DriverAddRow

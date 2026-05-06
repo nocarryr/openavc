@@ -17,6 +17,7 @@ export interface IdentificationMatch {
   state: DeviceState;
   driver_id: string | null;
   candidates: string[];
+  alternatives?: string[];
   source: string;
   reason: string;
   evidence: DiscoveryEvidence[];
