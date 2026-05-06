@@ -30,6 +30,11 @@ from server.discovery.broadcast_probes import (
     probe_crestron_cip,
     probe_pjlink_class2,
 )
+from server.discovery.probe_runner import (
+    RateLimiter,
+    run_tcp_active_probe,
+    run_udp_broadcast_probe,
+)
 from server.discovery.onvif_scanner import probe_onvif
 from server.discovery.tier_matcher import (
     SignalIndex,
@@ -149,6 +154,25 @@ class ScanStatus:
             "total_hosts_scanned": self.total_hosts_scanned,
             "active_adapter": self.active_adapter,
         }
+
+
+def _broadcast_addresses_for(subnets: list[str]) -> list[str]:
+    """Return the directed broadcast address for each CIDR.
+
+    Skips invalid CIDRs and prefixes with no meaningful broadcast
+    address (/31 and /32). Mirrors the helper in broadcast_probes
+    so the engine stays self-contained.
+    """
+    out: list[str] = []
+    for cidr in subnets:
+        try:
+            net = ipaddress.IPv4Network(cidr, strict=False)
+        except ValueError:
+            continue
+        if net.prefixlen >= 31:
+            continue
+        out.append(str(net.broadcast_address))
+    return out
 
 
 class DiscoveryEngine:
@@ -680,6 +704,12 @@ class DiscoveryEngine:
                 if gentle and i < total_probes - 1:
                     await asyncio.sleep(0.05)
 
+            # Phase 9: driver-declared udp_broadcast_probe / tcp_active_probe
+            # specs. Walks self.discovery_hints and runs each declared
+            # probe; evidence is appended to per-device evidence_log
+            # the same way as built-in Tier 2/3 results.
+            await self._run_custom_probes(subnets, control_ip)
+
             # --- Phase 7: Collect Tier 1 Passive + SNMP Results ---
             await self._set_phase(7, "passive_collect", "Collecting passive and SNMP results...")
 
@@ -947,6 +977,108 @@ class DiscoveryEngine:
                 if hasattr(reply, "to_device_info"):
                     merge_device_info(device, reply.to_device_info(), "broadcast")
                 await self._emit_device_update(device, "broadcast_probe")
+
+    async def _run_custom_probes(
+        self,
+        subnets: list[str],
+        control_ip: str,
+    ) -> None:
+        """Phase 9: dispatch driver-declared UDP / TCP probes.
+
+        Walks ``self.discovery_hints`` for any declared
+        ``udp_broadcast_probe`` / ``tcp_active_probe`` specs:
+
+        - **UDP broadcasts** fire once per scan against every subnet's
+          directed broadcast address, sharing a single 10/sec
+          ``RateLimiter`` (matches the Crestron-CIP envelope used by
+          built-in probes).
+        - **TCP probes** run against every host whose port-scan
+          results include the spec's port, with a 20 ms stagger
+          (port_scanner pattern) so the SYN burst is spread.
+
+        Resulting Evidence is appended to the per-device
+        ``evidence_log`` so the deterministic matcher picks it up via
+        the same ``KIND_BROADCAST`` / ``KIND_ACTIVE_PROBE`` paths as
+        built-in probes.
+        """
+        udp_specs = [
+            h.udp_broadcast_probe for h in self.discovery_hints
+            if h.udp_broadcast_probe is not None
+        ]
+        tcp_specs = [
+            h.tcp_active_probe for h in self.discovery_hints
+            if h.tcp_active_probe is not None
+        ]
+        if not udp_specs and not tcp_specs:
+            return
+
+        rate_limiter = RateLimiter(rate_per_sec=10.0)
+
+        if udp_specs:
+            broadcasts = _broadcast_addresses_for(subnets)
+            if broadcasts:
+                udp_tasks = [
+                    run_udp_broadcast_probe(
+                        spec,
+                        targets=broadcasts,
+                        source_ip=control_ip,
+                        rate_limiter=rate_limiter,
+                    )
+                    for spec in udp_specs
+                ]
+                udp_results = await asyncio.gather(
+                    *udp_tasks, return_exceptions=True,
+                )
+                for spec, result in zip(udp_specs, udp_results):
+                    if isinstance(result, BaseException):
+                        log.debug(
+                            "Custom UDP probe %s failed",
+                            spec.probe_id, exc_info=result,
+                        )
+                        continue
+                    if not isinstance(result, dict):
+                        continue
+                    for ip, ev in result.items():
+                        device = self._get_or_create(ip)
+                        device.alive = True
+                        device.evidence_log.append(ev)
+                        await self._emit_device_update(device, "broadcast_probe")
+
+        if tcp_specs:
+            async def _run_one_tcp(spec, target, idx):
+                ev = await run_tcp_active_probe(
+                    spec,
+                    target=target,
+                    source_ip=control_ip,
+                    stagger_ms=idx * 20.0,
+                )
+                return target, spec, ev
+
+            tcp_jobs: list = []
+            for spec in tcp_specs:
+                hosts = [
+                    ip for ip, dev in self.results.items()
+                    if spec.port in (dev.open_ports or [])
+                ]
+                for idx, ip in enumerate(hosts):
+                    tcp_jobs.append(_run_one_tcp(spec, ip, idx))
+            if tcp_jobs:
+                tcp_results = await asyncio.gather(
+                    *tcp_jobs, return_exceptions=True,
+                )
+                for r in tcp_results:
+                    if isinstance(r, BaseException):
+                        log.debug(
+                            "Custom TCP probe failed", exc_info=r,
+                        )
+                        continue
+                    target, spec, ev = r
+                    if ev is None:
+                        continue
+                    device = self._get_or_create(target)
+                    device.alive = True
+                    device.evidence_log.append(ev)
+                    await self._emit_device_update(device, "protocol_probe")
 
     def _get_or_create(self, ip: str) -> DiscoveredDevice:
         """Get existing device record or create a new one."""
