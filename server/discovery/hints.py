@@ -22,31 +22,13 @@ from server.discovery.tier_matcher import (
 log = logging.getLogger("discovery.hints")
 
 
-# Tier 2 broadcast probe IDs. Each driver opting in declares the boolean
-# flag (``pjlink_class2: true`` etc.) or the ``onvif: {manufacturer: X}``
-# disambiguator.
-ALLOWED_BROADCAST_PROBES: frozenset[str] = frozenset({
-    "pjlink_class2",
-    "crestron_cip",
-    "onvif",
-    "hiqnet",
-    "symetrix",
-})
-
-# Tier 3 active probe IDs. Match the keys in
-# ``protocol_prober.py::_PROBE_ID_FOR_PROTOCOL``.
-ALLOWED_ACTIVE_PROBES: frozenset[str] = frozenset({
-    "pjlink_class1",
-    "extron_sis",
-    "tesira_ttp",
-    "qrc",
-    "kramer_p3000",
-    "shure_dcs",
-    "samsung_mdc",
-    "visca",
-    "crestron_cip_tcp",
-    "yamaha_rcp",
-})
+# Phase 9: the built-in opt-ins (``pjlink_class2: true`` etc. for
+# broadcasts, named entries in ``active_probes:`` for active probes)
+# are still gated by explicit core handlers, but unknown probe IDs no
+# longer raise. A driver that declares an active_probe ID core doesn't
+# implement is a silent no-op rather than a hard error — driver-
+# declared probes (``udp_broadcast_probe:`` / ``tcp_active_probe:``)
+# carry the wire format directly and don't need a registry.
 
 # Drivers whose IDs start with these prefixes are templates, not real
 # devices. They opt out of the discovery match entirely.
@@ -527,12 +509,6 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
         hint.broadcast_probes.append("hiqnet")
     if discovery.get("symetrix"):
         hint.broadcast_probes.append("symetrix")
-    for probe_id in hint.broadcast_probes:
-        if probe_id not in ALLOWED_BROADCAST_PROBES:
-            raise DiscoveryHintError(
-                f"{driver_id}: unknown Tier 2 broadcast probe {probe_id!r}; "
-                f"allowed: {sorted(ALLOWED_BROADCAST_PROBES)}"
-            )
 
     raw_probes = discovery.get("active_probes") or []
     if not isinstance(raw_probes, list):
@@ -552,11 +528,6 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
             raise DiscoveryHintError(
                 f"{driver_id}: active_probes entries must be strings or "
                 f"{{probe, port}} mappings"
-            )
-        if probe_id not in ALLOWED_ACTIVE_PROBES:
-            raise DiscoveryHintError(
-                f"{driver_id}: unknown Tier 3 active probe {probe_id!r}; "
-                f"allowed: {sorted(ALLOWED_ACTIVE_PROBES)}"
             )
         hint.active_probes.append(probe_id)
 

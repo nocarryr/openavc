@@ -109,9 +109,14 @@ class TestSchemaParsing:
         assert h2 is not None
         assert h2.onvif_manufacturer == "Axis"
 
-    def test_unknown_active_probe_raises(self):
-        with pytest.raises(DiscoveryHintError, match="unknown Tier 3 active probe"):
-            parse_driver_discovery(_drv("bad", active_probes=["http_banner"]))
+    def test_unknown_active_probe_accepted_as_silent_noop(self):
+        # Phase 9.5: the named-probe allow-list is gone. Unknown IDs are
+        # accepted at parse time; the runtime simply runs no probe for
+        # them. Driver-declared probes carry the wire format directly
+        # via tcp_active_probe: instead.
+        h = parse_driver_discovery(_drv("custom_probe", active_probes=["http_banner"]))
+        assert h is not None
+        assert "http_banner" in h.active_probes
 
     def test_unknown_broadcast_probe_via_explicit_dict(self):
         with pytest.raises(DiscoveryHintError, match="onvif must be a bool"):
