@@ -305,9 +305,12 @@ def build_signal_index(hints: list[DiscoveryHint]) -> SignalIndex:
     """
     index = SignalIndex()
     for hint in hints:
-        if hint.manual_only:
-            continue
-
+        # Manual-only no longer means "invisible to matcher" — it's a
+        # documentation hint that the driver expects manual IP entry. Soft
+        # signals (OUI / SNMP PEN / hostname) on a manual_only driver still
+        # register so the device surfaces as `possible` with a candidate
+        # list. A driver author who really wants the device invisible to
+        # discovery declares no signals at all.
         for entry in hint.mdns_services:
             index.add_rule(SignalRule.for_mdns(
                 hint.driver_id,

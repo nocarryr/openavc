@@ -149,12 +149,33 @@ class TestSignalIndexBuilder:
         with pytest.raises(ValueError, match="Signal collision"):
             build_signal_index(load_discovery_hints(registry))
 
-    def test_manual_only_drivers_dont_register_signals(self):
+    def test_manual_only_with_no_signals_registers_nothing(self):
+        # A manual_only driver that declares no signals still contributes
+        # nothing to the index — but only because there is nothing to
+        # register, not because manual_only filters it out.
         registry = [
             _drv("manual_widget", manual_only=True),
         ]
         idx = build_signal_index(load_discovery_hints(registry))
         assert idx.driver_count() == 0
+
+    def test_manual_only_soft_signals_register(self):
+        # Regression for the Phase 8 Task 8.1 fix: manual_only drivers
+        # used to have *all* their signals discarded by build_signal_index,
+        # so devices with a known OUI (e.g. Barco ClickShare) fell through
+        # to `unknown` even though we had Tier 4 enrichment for them.
+        # After the fix, soft signals on manual_only drivers register
+        # normally and surface the device as `possible` with the right
+        # candidate driver.
+        registry = [
+            _drv(
+                "barco_clickshare_cx",
+                manual_only=True,
+                oui_prefixes=["00:04:a5"],
+            ),
+        ]
+        idx = build_signal_index(load_discovery_hints(registry))
+        assert idx.find_soft_oui("00:04:a5:11:22:33") == ["barco_clickshare_cx"]
 
     def test_onvif_manufacturer_disambiguates(self):
         # Two camera drivers can both opt in to onvif so long as each

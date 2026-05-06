@@ -303,11 +303,16 @@ class TestDiscoveryEngine:
                     with patch("server.discovery.engine.grab_banners", new_callable=AsyncMock) as mock_banners:
                         mock_banners.return_value = {}
 
-                        # Mock Tier 1 listeners + Tier 2 broadcasts + SNMP
+                        # Mock Tier 1 listeners + Tier 2 broadcasts + SNMP.
+                        # Also mock the community catalog fetch so the signal
+                        # index is deterministically empty — otherwise the live
+                        # GitHub fetch leaks 50+ drivers into the index and
+                        # makes Extron's OUI match as `possible`.
                         with patch("server.discovery.engine.MDNSScanner") as mock_mdns_cls, \
                              patch("server.discovery.engine.SSDPScanner") as mock_ssdp_cls, \
                              patch("server.discovery.engine.AMXDDPScanner") as mock_amx_cls, \
                              patch("server.discovery.engine.SNMPScanner") as mock_snmp_cls, \
+                             patch.object(self.engine.community_index, "get_drivers", new_callable=AsyncMock, return_value=[]), \
                              patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
                              patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
                              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
