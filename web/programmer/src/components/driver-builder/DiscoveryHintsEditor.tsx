@@ -1,9 +1,15 @@
+import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type {
   DriverDefinition,
   DriverDiscoveryHints,
   DriverDiscoveryMdnsEntry,
 } from "../../api/types";
+
+// Mirror of `DISALLOWED_OPEN_PORTS` in server/discovery/hints.py.
+// Surfaced in the UI so driver authors see the rule at the point of
+// authoring rather than discovering it via a load-time error.
+const DISALLOWED_OPEN_PORTS: ReadonlySet<number> = new Set([22, 80, 443]);
 
 const ALLOWED_ACTIVE_PROBES = [
   "pjlink_class1",
@@ -294,13 +300,28 @@ export function DiscoveryHintsEditor({ draft, onUpdate }: DiscoveryHintsEditorPr
           />
         </div>
 
-        <div>
+        <div style={{ marginBottom: "var(--space-md)" }}>
           <label style={{ ...labelStyle, fontWeight: 400 }}>Hostname regex patterns</label>
           <ListEditor
             items={hints.hostname_patterns ?? []}
             onChange={(items) => update({ hostname_patterns: items.length ? items : undefined })}
             placeholder="^DTP-.*"
           />
+        </div>
+
+        <div>
+          <label style={{ ...labelStyle, fontWeight: 400 }}>Open AV ports</label>
+          <OpenPortsEditor
+            ports={hints.open_ports ?? []}
+            onChange={(ports) => update({ open_ports: ports.length ? ports : undefined })}
+          />
+          <div style={helpStyle}>
+            Vendor-specific TCP/UDP ports the device exposes (e.g.{" "}
+            <code>4352</code> for PJLink, <code>17567</code> for Lightware
+            LW3). Ports <code>{[...DISALLOWED_OPEN_PORTS].join(", ")}</code>{" "}
+            are rejected by the runtime — they would match every web or
+            SSH host on the LAN.
+          </div>
         </div>
 
         <div style={helpStyle}>
@@ -465,6 +486,121 @@ function TxtFilterEditor({
         style={{ fontSize: "11px", color: "var(--accent)" }}
       >
         + TXT pair
+      </button>
+    </div>
+  );
+}
+
+
+function OpenPortsEditor({
+  ports,
+  onChange,
+}: {
+  ports: number[];
+  onChange: (ports: number[]) => void;
+}) {
+  // Internal string buffer so blank rows can exist while the user is
+  // typing. Only finite, in-range, non-disallowed values are written
+  // back to the parent so the YAML output stays clean.
+  const [buffer, setBuffer] = useState<string[]>(() =>
+    ports.map((p) => String(p)),
+  );
+
+  // Sync down when the parent's canonical port list diverges (e.g.
+  // another editor cleared the discovery section). Skip syncs that
+  // would erase the user's in-progress edits.
+  useEffect(() => {
+    const fromParent = ports.map((p) => String(p));
+    const fromBuffer = buffer
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n) && n >= 1 && n <= 65535 && !DISALLOWED_OPEN_PORTS.has(n));
+    const same =
+      fromBuffer.length === ports.length &&
+      fromBuffer.every((n, i) => n === ports[i]);
+    if (!same) setBuffer(fromParent);
+  }, [ports]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const commit = (next: string[]) => {
+    setBuffer(next);
+    const valid: number[] = [];
+    for (const s of next) {
+      const n = parseInt(s, 10);
+      if (Number.isFinite(n) && n >= 1 && n <= 65535 && !DISALLOWED_OPEN_PORTS.has(n)) {
+        valid.push(n);
+      }
+    }
+    onChange(valid);
+  };
+
+  const portError = (raw: string): string | null => {
+    if (raw === "") return null;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || String(n) !== raw.trim()) return "not a number";
+    if (n < 1 || n > 65535) return "out of range";
+    if (DISALLOWED_OPEN_PORTS.has(n)) return "disallowed (too generic)";
+    return null;
+  };
+
+  return (
+    <div>
+      {buffer.map((raw, i) => {
+        const err = portError(raw);
+        return (
+          <div
+            key={i}
+            style={{
+              display: "flex",
+              gap: "var(--space-xs)",
+              marginBottom: "var(--space-xs)",
+              alignItems: "center",
+            }}
+          >
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={raw}
+              onChange={(e) => {
+                const next = [...buffer];
+                next[i] = e.target.value;
+                commit(next);
+              }}
+              placeholder="e.g. 4352"
+              style={{
+                flex: 1,
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--font-size-sm)",
+                borderColor: err ? "var(--danger)" : undefined,
+              }}
+            />
+            {err && (
+              <span style={{ color: "var(--danger)", fontSize: "11px" }}>
+                {err}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => commit(buffer.filter((_, j) => j !== i))}
+              style={{ padding: "2px", color: "var(--text-muted)" }}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={() => commit([...buffer, ""])}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-xs)",
+          fontSize: "var(--font-size-sm)",
+          color: "var(--accent)",
+          padding: "var(--space-xs) 0",
+        }}
+      >
+        <Plus size={12} /> Add port
       </button>
     </div>
   );

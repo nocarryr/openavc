@@ -471,11 +471,15 @@ export interface DriverResponseDef {
   set?: Record<string, unknown>;
 }
 
-// Phase 6 deterministic ``discovery:`` schema. Every driver declares
-// at least one strong (Tier 1/2/3) signal or sets manual_only: true.
-// CI rejects collisions across drivers (see openavc-drivers/scripts/
-// build_index.py). Allowed Tier 2 / Tier 3 IDs match the platform's
-// ALLOWED_BROADCAST_PROBES / ALLOWED_ACTIVE_PROBES allow-lists.
+// Phase 6 deterministic ``discovery:`` schema. After Phase 8 a driver
+// can declare any combination of strong (Tier 1/2/3) and soft (Tier 4)
+// signals — strong signals produce an ``identified`` match, soft signals
+// alone surface the device as ``possible`` with a candidate driver
+// list. ``manual_only`` is now purely a documentation hint that the
+// device expects manual IP entry. CI rejects collisions across drivers
+// (see openavc-drivers/scripts/build_index.py). Allowed Tier 2 / Tier 3
+// IDs match the platform's ALLOWED_BROADCAST_PROBES /
+// ALLOWED_ACTIVE_PROBES allow-lists.
 export interface DriverDiscoveryMdnsEntry {
   service: string;
   txt_match?: Record<string, string>;
@@ -501,6 +505,10 @@ export interface DriverDiscoveryHints {
   snmp_pen?: number;
   oui_prefixes?: string[];
   hostname_patterns?: string[];
+  // Open AV ports advertised by this device. Common ports (22, 80, 443)
+  // are rejected by the runtime validator because they would match every
+  // web/SSH host on the LAN.
+  open_ports?: number[];
 
   // Opt out of automatic discovery.
   manual_only?: boolean;
