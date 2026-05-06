@@ -33,6 +33,7 @@ from server.discovery.tier_matcher import (
     evidence_hostname,
     evidence_open_port,
     evidence_oui,
+    extract_vendor_strings,
 )
 
 # openavc-drivers/ is a sibling of openavc/ in the workspace.
@@ -193,6 +194,49 @@ def test_nec_projector_pjlink_plus_oui_picks_sharp_nec() -> None:
         evidence_oui("00:30:13:11:22:33"),
     ])
 
+    assert result.state == DeviceState.IDENTIFIED, (
+        f"expected IDENTIFIED, got {result.state} (driver={result.driver_id}, "
+        f"alternatives={result.alternatives})"
+    )
+    assert result.driver_id == "sharp_nec_projector"
+    assert "pjlink_class1" in result.alternatives
+
+
+def test_nec_pe456_via_pjlink_vendor_string_picks_sharp_nec() -> None:
+    """Phase 8.6 catalog regression — Aaron's exact PE456 case.
+
+    With Phase 8.6 wired, an NEC projector that responds to PJLink
+    Class 1 ``%1MNFR? -> NEC`` must surface ``sharp_nec_projector``
+    even when the device's OUI is *not* in the driver's
+    ``oui_prefixes`` list. The catalog's declared ``vendor_aliases``
+    is the load-bearing soft signal here — no OUI evidence emitted.
+    """
+    pjlink_info = _load_python_driver_info("projectors/pjlink_class1.py")
+    sharp_nec_info = _load_python_driver_info("projectors/sharp_nec_projector.py")
+    pjlink_hint = parse_driver_discovery(pjlink_info)
+    sharp_nec_hint = parse_driver_discovery(sharp_nec_info)
+    assert pjlink_hint is not None
+    assert sharp_nec_hint is not None
+    # Sanity: the catalog actually declares the alias the engine will
+    # extract. If this fails, sharp_nec_projector regressed.
+    assert "nec" in sharp_nec_hint.vendor_aliases
+
+    idx = build_signal_index([pjlink_hint, sharp_nec_hint])
+    matcher = TierMatcher(idx)
+
+    # Build the same evidence shape the engine produces in production:
+    # the PJLink probe lands a Tier 3 active_probe record carrying
+    # manufacturer in its response, then the engine appends Tier 4
+    # vendor_string evidence via extract_vendor_strings.
+    log: list = [
+        evidence_active_probe(
+            "pjlink_class1",
+            {"manufacturer": "NEC", "model": "PE456_Series"},
+        ),
+    ]
+    log.extend(extract_vendor_strings(log))
+
+    result = matcher.match(log)
     assert result.state == DeviceState.IDENTIFIED, (
         f"expected IDENTIFIED, got {result.state} (driver={result.driver_id}, "
         f"alternatives={result.alternatives})"
