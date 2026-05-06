@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import socket as _socket
 import time
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from server.discovery.network_scanner import get_local_subnets, ping_sweep, harvest_arp_table, netbios_sweep
@@ -37,6 +38,13 @@ from server.discovery.probe_runner import (
     RateLimiter,
     run_tcp_active_probe,
     run_udp_broadcast_probe,
+)
+from server.discovery.companion import (
+    CompanionProbe,
+    DEFAULT_PROBE_TIMEOUT_SECONDS,
+    ProbeContext,
+    load_discovery_companions,
+    run_companion,
 )
 from server.discovery.onvif_scanner import probe_onvif
 from server.discovery.tier_matcher import (
@@ -187,6 +195,10 @@ class DiscoveryEngine:
         self.signal_index: SignalIndex = SignalIndex()
         self.tier_matcher: TierMatcher = TierMatcher(self.signal_index)
         self._installed_registry: list[dict[str, Any]] = []
+        # Phase 9.7: driver-supplied Python discovery companions
+        # ({driver_id: async probe}). Populated by
+        # load_discovery_companions_from_dirs().
+        self._discovery_companions: dict[str, CompanionProbe] = {}
         self.community_index = CommunityIndexCache()
         self.community_devices = CommunityDevicesCache()
         self.results: dict[str, DiscoveredDevice] = {}
@@ -208,6 +220,21 @@ class DiscoveryEngine:
         """Read the control_interface setting from system config."""
         from server.system_config import get_system_config
         return get_system_config().get("network", "control_interface") or ""
+
+    def load_discovery_companions_from_dirs(
+        self, directories: list[Path | str],
+    ) -> None:
+        """Phase 9.7: scan directories for ``*_discovery.py`` companions.
+
+        Replaces any previously-loaded companions. The engine invokes
+        each loaded companion's ``probe()`` once per scan (alongside
+        the declarative udp_broadcast_probe / tcp_active_probe specs).
+        """
+        self._discovery_companions = load_discovery_companions(directories)
+        log.info(
+            "Loaded %d Python discovery companion(s)",
+            len(self._discovery_companions),
+        )
 
     def load_driver_hints_from_registry(self, registry: list[dict[str, Any]]) -> None:
         """Parse new-schema discovery hints + build the SignalIndex.
@@ -1024,7 +1051,11 @@ class DiscoveryEngine:
             h.tcp_active_probe for h in self.discovery_hints
             if h.tcp_active_probe is not None
         ]
-        if not udp_specs and not tcp_specs:
+        if (
+            not udp_specs
+            and not tcp_specs
+            and not self._discovery_companions
+        ):
             return
 
         rate_limiter = RateLimiter(rate_per_sec=10.0)
@@ -1094,6 +1125,27 @@ class DiscoveryEngine:
                     device.alive = True
                     device.evidence_log.append(ev)
                     await self._emit_device_update(device, "protocol_probe")
+
+        if self._discovery_companions:
+            async def _emit_for_host(host: str, ev) -> None:
+                device = self._get_or_create(host)
+                device.alive = True
+                device.evidence_log.append(ev)
+                await self._emit_device_update(device, "broadcast_probe")
+
+            companion_logger = logging.getLogger("discovery.companion.run")
+            companion_tasks = []
+            for driver_id, probe_fn in self._discovery_companions.items():
+                ctx = ProbeContext(
+                    source_ip=control_ip,
+                    target_subnets=tuple(subnets),
+                    timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
+                    log=companion_logger,
+                    _emit_for_host=_emit_for_host,
+                )
+                companion_tasks.append(run_companion(driver_id, probe_fn, ctx))
+            if companion_tasks:
+                await asyncio.gather(*companion_tasks, return_exceptions=True)
 
     def _get_or_create(self, ip: str) -> DiscoveredDevice:
         """Get existing device record or create a new one."""
