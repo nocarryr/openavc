@@ -194,6 +194,8 @@ class SignalRule:
         driver_id: str,
         probe_id: str,
         txt_match: dict[str, str] | None = None,
+        *,
+        generic: bool | None = None,
     ) -> "SignalRule":
         """Build a Tier 2 broadcast rule.
 
@@ -202,29 +204,43 @@ class SignalRule:
         filter — the responder's parsed identification fields are matched
         against the filter at lookup time.
 
-        ``generic`` is set when ``probe_id`` is in
+        ``generic`` defaults to True when ``probe_id`` is in
         ``_GENERIC_STRONG_PROBE_IDS`` *and* no ``txt_match`` filter is
-        applied. A filtered ONVIF rule is vendor-specific by
-        construction; an unfiltered one is the generic catch-all.
+        applied (a filtered ONVIF rule is vendor-specific by
+        construction; an unfiltered one is the generic catch-all). For
+        Phase 9 driver-declared probes the caller can pass an explicit
+        ``generic`` value — those probe IDs (``custom_<driver_id>_udp``)
+        aren't in the built-in generic set, so the schema's
+        ``generic: bool`` is the only source of truth.
         """
         frozen_txt = _freeze_dict(txt_match)
+        if generic is None:
+            generic = probe_id in _GENERIC_STRONG_PROBE_IDS and not frozen_txt
         return cls(
             driver_id=driver_id,
             tier=SignalTier.BROADCAST_PROBE,
             kind=KIND_BROADCAST,
             source_id=probe_id,
             txt_match=frozen_txt,
-            generic=(probe_id in _GENERIC_STRONG_PROBE_IDS and not frozen_txt),
+            generic=generic,
         )
 
     @classmethod
-    def for_active_probe(cls, driver_id: str, probe_id: str) -> "SignalRule":
+    def for_active_probe(
+        cls,
+        driver_id: str,
+        probe_id: str,
+        *,
+        generic: bool | None = None,
+    ) -> "SignalRule":
+        if generic is None:
+            generic = probe_id in _GENERIC_STRONG_PROBE_IDS
         return cls(
             driver_id=driver_id,
             tier=SignalTier.ACTIVE_PROBE,
             kind=KIND_ACTIVE_PROBE,
             source_id=probe_id,
-            generic=probe_id in _GENERIC_STRONG_PROBE_IDS,
+            generic=generic,
         )
 
     @classmethod

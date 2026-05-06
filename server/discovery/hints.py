@@ -10,6 +10,7 @@ score.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,86 @@ _TEMPLATE_PREFIXES: tuple[str, ...] = ("generic_",)
 # (1710, 4352, 23 for telnet-on-AV-gear, etc.) are fine.
 DISALLOWED_OPEN_PORTS: frozenset[int] = frozenset({22, 80, 443})
 
+# Phase 9: ports owned by built-in handlers — drivers declaring a
+# ``udp_broadcast_probe`` or ``tcp_active_probe`` cannot collide on
+# them. Drivers participating in those protocols use the named opt-in
+# (``pjlink_class2: true`` etc.) instead of a custom probe.
+DISALLOWED_UDP_BROADCAST_PROBE_PORTS: frozenset[int] = frozenset({
+    1900,   # SSDP
+    3702,   # ONVIF WS-Discovery
+    4352,   # PJLink Class 2 broadcast
+    5353,   # mDNS
+    9131,   # AMX DDP
+    41794,  # Crestron CIP broadcast
+})
+DISALLOWED_TCP_ACTIVE_PROBE_PORTS: frozenset[int] = frozenset({
+    23,     # Telnet (Extron SIS, Tesira TTP, Shure DCS)
+    1515,   # Samsung MDC
+    1688,   # Crestron CIP TCP
+    1710,   # Q-SYS QRC
+    4352,   # PJLink Class 1
+    10500,  # VISCA-IP
+    49280,  # Yamaha RCP
+})
+
+# Phase 9: cap on how long a driver-declared probe is allowed to wait
+# for a reply. Anything longer than this would stretch the scan budget
+# unreasonably; community drivers don't get to opt out.
+MAX_PROBE_TIMEOUT_MS: int = 10000
+
+# Reserved ``extract:`` keys whose values feed the Phase 8.6 vendor_string
+# tier 4 path. The probe runner lifts these into the top-level evidence
+# response/txt dict so ``extract_vendor_strings`` finds them.
+RESERVED_EXTRACT_KEYS: frozenset[str] = frozenset({"manufacturer", "make"})
+
+
+@dataclass(frozen=True)
+class ResponseMatch:
+    """Compiled matchers for one response-match block.
+
+    All matchers AND together; at least one must be present at parse
+    time.
+    """
+
+    starts_with: bytes | None = None
+    contains: str | None = None
+    regex: re.Pattern | None = None
+    regex_source: str = ""
+
+
+@dataclass(frozen=True)
+class ExtractRule:
+    """One ``extract:`` field. Either a static value or a regex+group."""
+
+    field_name: str
+    value: str | None = None        # static literal
+    regex: re.Pattern | None = None  # dynamic
+    regex_source: str = ""
+    group: int = 1
+
+
+@dataclass(frozen=True)
+class CustomProbeSpec:
+    """Driver-declared UDP broadcast or TCP active probe.
+
+    The probe ID at runtime is ``custom_<driver_id>_<kind>``; the
+    matcher's existing ``KIND_BROADCAST`` / ``KIND_ACTIVE_PROBE``
+    lookups accept it as-is — no allow-list needed.
+    """
+
+    driver_id: str
+    kind: str           # "udp" | "tcp"
+    port: int
+    send: bytes
+    response_match: ResponseMatch
+    timeout_ms: int
+    generic: bool
+    extract: tuple[ExtractRule, ...]
+
+    @property
+    def probe_id(self) -> str:
+        return f"custom_{self.driver_id}_{self.kind}"
+
 
 @dataclass
 class DiscoveryHint:
@@ -80,6 +161,14 @@ class DiscoveryHint:
     # Strong (Tier 3) active probes.
     active_probes: list[str] = field(default_factory=list)
 
+    # Phase 9: driver-declared UDP broadcast / TCP active probes.
+    # These produce ``custom_<driver_id>_udp`` / ``custom_<driver_id>_tcp``
+    # signal IDs and replace the need for vendor-specific Python probes
+    # in core for simple "send these bytes, look for this in the
+    # response" cases.
+    udp_broadcast_probe: CustomProbeSpec | None = None
+    tcp_active_probe: CustomProbeSpec | None = None
+
     # Soft (Tier 4) enrichment hints.
     snmp_pen: int | None = None
     oui_prefixes: list[str] = field(default_factory=list)
@@ -94,6 +183,245 @@ class DiscoveryHint:
 
 class DiscoveryHintError(ValueError):
     """Raised when a driver's ``discovery:`` block is structurally invalid."""
+
+
+def _parse_send(driver_id: str, kind: str, raw: Any) -> bytes:
+    """Parse a probe ``send:`` block into raw bytes.
+
+    Exactly one of ``hex`` or ``ascii`` must be present.
+    """
+    if not isinstance(raw, dict):
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.send must be a mapping with "
+            "exactly one of 'hex' or 'ascii'"
+        )
+    has_hex = "hex" in raw and raw["hex"] is not None
+    has_ascii = "ascii" in raw and raw["ascii"] is not None
+    if has_hex and has_ascii:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.send must declare exactly one "
+            "of 'hex' or 'ascii', not both"
+        )
+    if not has_hex and not has_ascii:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.send must declare one of "
+            "'hex' or 'ascii'"
+        )
+    if has_hex:
+        hex_str = raw["hex"]
+        if not isinstance(hex_str, str):
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.send.hex must be a string"
+            )
+        cleaned = hex_str.replace(" ", "").replace(":", "")
+        try:
+            return bytes.fromhex(cleaned)
+        except ValueError as exc:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.send.hex is not valid hex: {exc}"
+            ) from exc
+    ascii_str = raw["ascii"]
+    if not isinstance(ascii_str, str):
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.send.ascii must be a string"
+        )
+    return ascii_str.encode("utf-8")
+
+
+def _parse_response_match(driver_id: str, kind: str, raw: Any) -> ResponseMatch:
+    """Parse a ``response_match:`` block into a compiled ResponseMatch.
+
+    At least one of {starts_with_hex, contains, regex} must be present.
+    """
+    if not isinstance(raw, dict):
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.response_match must be a "
+            "mapping (at least one of starts_with_hex, contains, regex)"
+        )
+
+    starts_with: bytes | None = None
+    if "starts_with_hex" in raw and raw["starts_with_hex"] is not None:
+        s = raw["starts_with_hex"]
+        if not isinstance(s, str):
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.response_match.starts_with_hex "
+                "must be a string"
+            )
+        cleaned = s.replace(" ", "").replace(":", "")
+        try:
+            starts_with = bytes.fromhex(cleaned)
+        except ValueError as exc:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.response_match.starts_with_hex "
+                f"is not valid hex: {exc}"
+            ) from exc
+
+    contains: str | None = None
+    if "contains" in raw and raw["contains"] is not None:
+        c = raw["contains"]
+        if not isinstance(c, str) or not c:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.response_match.contains "
+                "must be a non-empty string"
+            )
+        contains = c
+
+    regex: re.Pattern | None = None
+    regex_source = ""
+    if "regex" in raw and raw["regex"] is not None:
+        r = raw["regex"]
+        if not isinstance(r, str) or not r:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.response_match.regex "
+                "must be a non-empty string"
+            )
+        try:
+            regex = re.compile(r)
+        except re.error as exc:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.response_match.regex "
+                f"failed to compile: {exc}"
+            ) from exc
+        regex_source = r
+
+    if starts_with is None and contains is None and regex is None:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.response_match needs at least "
+            "one of starts_with_hex, contains, regex"
+        )
+
+    return ResponseMatch(
+        starts_with=starts_with,
+        contains=contains,
+        regex=regex,
+        regex_source=regex_source,
+    )
+
+
+def _parse_extract(driver_id: str, kind: str, raw: Any) -> tuple[ExtractRule, ...]:
+    """Parse an ``extract:`` block into ExtractRule tuples.
+
+    Each entry is either a literal string (static value) or a mapping
+    ``{regex: ..., group: N}`` (dynamic capture). Reserved keys
+    (``manufacturer``, ``make``) get lifted by the runner into the
+    top-level response/txt dict for vendor_string evidence.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.extract must be a mapping of "
+            "field name to literal string or {regex, group} mapping"
+        )
+    rules: list[ExtractRule] = []
+    for field_name, spec in raw.items():
+        if not isinstance(field_name, str) or not field_name:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{kind}.extract field names must "
+                "be non-empty strings"
+            )
+        if isinstance(spec, str):
+            rules.append(ExtractRule(field_name=field_name, value=spec))
+            continue
+        if isinstance(spec, dict):
+            pattern_str = spec.get("regex")
+            if not isinstance(pattern_str, str) or not pattern_str:
+                raise DiscoveryHintError(
+                    f"{driver_id}: discovery.{kind}.extract.{field_name} "
+                    "mapping requires a non-empty 'regex' string"
+                )
+            try:
+                pattern = re.compile(pattern_str)
+            except re.error as exc:
+                raise DiscoveryHintError(
+                    f"{driver_id}: discovery.{kind}.extract.{field_name}.regex "
+                    f"failed to compile: {exc}"
+                ) from exc
+            group = spec.get("group", 1)
+            if not isinstance(group, int) or isinstance(group, bool) or group < 0:
+                raise DiscoveryHintError(
+                    f"{driver_id}: discovery.{kind}.extract.{field_name}.group "
+                    "must be a non-negative integer"
+                )
+            rules.append(ExtractRule(
+                field_name=field_name,
+                regex=pattern,
+                regex_source=pattern_str,
+                group=group,
+            ))
+            continue
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{kind}.extract.{field_name} must be a "
+            "literal string or a {regex, group} mapping"
+        )
+    return tuple(rules)
+
+
+def _parse_custom_probe(
+    driver_id: str,
+    kind: str,                       # "udp" | "tcp"
+    raw: Any,
+    *,
+    default_timeout_ms: int,
+    disallowed_ports: frozenset[int],
+) -> CustomProbeSpec:
+    """Parse one ``udp_broadcast_probe:`` / ``tcp_active_probe:`` block."""
+    if not isinstance(raw, dict):
+        block_name = "udp_broadcast_probe" if kind == "udp" else "tcp_active_probe"
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{block_name} must be a mapping"
+        )
+
+    block_name = "udp_broadcast_probe" if kind == "udp" else "tcp_active_probe"
+
+    port = raw.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{block_name}.port must be an integer "
+            "in [1, 65535]"
+        )
+    if port in disallowed_ports:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{block_name}.port {port} is reserved "
+            f"for a built-in handler. Use the named opt-in instead. "
+            f"Disallowed: {sorted(disallowed_ports)}"
+        )
+
+    send = _parse_send(driver_id, block_name, raw.get("send"))
+    response_match = _parse_response_match(
+        driver_id, block_name, raw.get("response_match"),
+    )
+
+    timeout_ms = raw.get("timeout_ms", default_timeout_ms)
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms < 1:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{block_name}.timeout_ms must be a "
+            "positive integer"
+        )
+    if timeout_ms > MAX_PROBE_TIMEOUT_MS:
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{block_name}.timeout_ms exceeds the "
+            f"max of {MAX_PROBE_TIMEOUT_MS} ms"
+        )
+
+    generic_raw = raw.get("generic", False)
+    if not isinstance(generic_raw, bool):
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{block_name}.generic must be a bool"
+        )
+
+    extract = _parse_extract(driver_id, block_name, raw.get("extract"))
+
+    return CustomProbeSpec(
+        driver_id=driver_id,
+        kind=kind,
+        port=port,
+        send=send,
+        response_match=response_match,
+        timeout_ms=timeout_ms,
+        generic=generic_raw,
+        extract=extract,
+    )
 
 
 def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
@@ -232,6 +560,25 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
             )
         hint.active_probes.append(probe_id)
 
+    # Phase 9: driver-declared probes. Both blocks are optional; either,
+    # neither, or both may be present.
+    if "udp_broadcast_probe" in discovery:
+        hint.udp_broadcast_probe = _parse_custom_probe(
+            driver_id,
+            "udp",
+            discovery["udp_broadcast_probe"],
+            default_timeout_ms=2000,
+            disallowed_ports=DISALLOWED_UDP_BROADCAST_PROBE_PORTS,
+        )
+    if "tcp_active_probe" in discovery:
+        hint.tcp_active_probe = _parse_custom_probe(
+            driver_id,
+            "tcp",
+            discovery["tcp_active_probe"],
+            default_timeout_ms=3000,
+            disallowed_ports=DISALLOWED_TCP_ACTIVE_PROBE_PORTS,
+        )
+
     if "snmp_pen" in discovery:
         pen = discovery["snmp_pen"]
         if not isinstance(pen, int) or isinstance(pen, bool) or pen < 1:
@@ -315,6 +662,8 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
         or hint.amx_ddp is not None
         or bool(hint.broadcast_probes)
         or bool(hint.active_probes)
+        or hint.udp_broadcast_probe is not None
+        or hint.tcp_active_probe is not None
         or hint.snmp_pen is not None
         or bool(hint.oui_prefixes)
         or bool(hint.hostname_patterns)
@@ -397,6 +746,26 @@ def build_signal_index(hints: list[DiscoveryHint]) -> SignalIndex:
             ))
         for probe_id in hint.active_probes:
             index.add_rule(SignalRule.for_active_probe(hint.driver_id, probe_id))
+
+        # Phase 9: register driver-declared probe IDs against the same
+        # KIND_BROADCAST / KIND_ACTIVE_PROBE namespaces. The schema's
+        # ``generic: bool`` flag flows through directly — these IDs are
+        # not in ``_GENERIC_STRONG_PROBE_IDS`` so the factory's default
+        # of ``False`` would be wrong for a driver that opts in.
+        if hint.udp_broadcast_probe is not None:
+            spec = hint.udp_broadcast_probe
+            index.add_rule(SignalRule.for_broadcast(
+                hint.driver_id,
+                spec.probe_id,
+                generic=spec.generic,
+            ))
+        if hint.tcp_active_probe is not None:
+            spec = hint.tcp_active_probe
+            index.add_rule(SignalRule.for_active_probe(
+                hint.driver_id,
+                spec.probe_id,
+                generic=spec.generic,
+            ))
 
         if hint.snmp_pen is not None:
             index.add_rule(SignalRule.for_snmp_pen(hint.driver_id, hint.snmp_pen))
