@@ -616,9 +616,11 @@ Types: `length_prefix` (reads a length header then N bytes), `fixed_length` (mes
 
 ### Discovery Hints
 
-The `discovery` section tells the matcher which network signals identify your device. Strong signals (Tier 1 / 2 / 3) produce an *identified* match; soft signals (Tier 4 — OUI prefix, hostname pattern, open port, SNMP PEN) surface the device as *possible* with a candidate driver list. Any combination is valid; declaring no signals at all logs a load-time warning (the matcher silently ignores the driver). `manual_only: true` is a documentation hint that the device expects manual IP entry and no longer affects matcher behavior.
+The `discovery` section tells the matcher which network signals identify your device. Strong signals (Tier 1 / 2 / 3) produce an *identified* match; soft signals (Tier 4 — OUI prefix, hostname pattern, open port, SNMP PEN, vendor alias) surface the device as *possible* with a candidate driver list. Any combination is valid; declaring no signals at all logs a load-time warning (the matcher silently ignores the driver). `manual_only: true` is a documentation hint that the device expects manual IP entry and no longer affects matcher behavior.
 
 The matcher is deterministic. There is no scoring. A signal either fires (the device is identified) or it does not. Soft hints like OUI and SNMP PEN only contribute to the "possible" state, never to "identified."
+
+**Best-driver-first matching.** Some strong probes (PJLink Class 1/2, unfiltered ONVIF) are *generic* — every projector / camera that speaks the standard responds, regardless of brand. When a generic probe wins the strong tier and a Tier 4 soft signal also points at a vendor-specific driver, that vendor driver becomes the primary identification and the generic driver demotes to an alternative the user can switch to via the dropdown on the Discovery card. So if your driver targets a device that also responds to PJLink/ONVIF/etc., declare every soft signal you can — `oui_prefixes`, `vendor_aliases` from probe responses, `hostname_patterns` — and your driver wins the "best fit" pick automatically.
 
 ```yaml
 discovery:
@@ -653,6 +655,12 @@ discovery:
   hostname_patterns:
     - "^(QSC|qsys)-"
   open_ports: [1710, 4352]         # AV-specific ports; 22 / 80 / 443 disallowed
+  vendor_aliases: ["NEC", "Sharp NEC", "Sharp"]
+                                   # manufacturer strings the device returns in
+                                   # generic-probe responses (PJLink %1MNFR?,
+                                   # ONVIF Manufacturer, etc.). Case-insensitive
+                                   # exact match. List every variant the firmware
+                                   # actually emits.
 
   # Opt out of automatic discovery
   manual_only: false
@@ -672,13 +680,14 @@ discovery:
 | `oui_prefixes` | 4 | OUI prefixes (`"00:05:a6"`). Soft signal — also drives the "Unknown device, vendor: Extron" display. |
 | `hostname_patterns` | 4 | Regex patterns. Soft signal. |
 | `open_ports` | 4 | AV-specific ports the device leaves open (e.g. `[1710, 4352]`). Soft signal — produces "possible" when matched. Ports 22, 80, 443 are disallowed (too generic). |
+| `vendor_aliases` | 4 | Manufacturer / make strings the device returns when responding to a generic strong probe (PJLink `%1MNFR?`, ONVIF `Manufacturer`, AMX DDP `make`). Case-insensitive exact match after whitespace strip. List every variant — `["EPSON", "Seiko Epson"]`, `["NEC", "Sharp NEC", "Sharp"]`. Multiple drivers may share an alias. |
 | `manual_only` | — | `true` to opt out of automatic discovery. The driver is still installable manually. Use when the device has no verifiable Tier 1/2/3 fingerprint. |
 
 #### Validation rules
 
 These are enforced at driver-load time:
 
-1. Any combination of strong + soft signals is valid. Soft signals alone (`snmp_pen`, `oui_prefixes`, `hostname_patterns`, `open_ports`) only produce the *possible* state, never *identified*. Declaring no signals at all logs a warning at load time but doesn't reject the driver.
+1. Any combination of strong + soft signals is valid. Soft signals alone (`snmp_pen`, `oui_prefixes`, `hostname_patterns`, `open_ports`, `vendor_aliases`) only produce the *possible* state, never *identified*. Declaring no signals at all logs a warning at load time but doesn't reject the driver.
 2. Two drivers cannot claim the same Tier 1/2/3 signal without distinct TXT-record filters. Drivers fail to load on collision.
 3. `active_probes` and broadcast probe IDs must come from the platform allow-list above.
 
