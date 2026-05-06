@@ -782,6 +782,63 @@ def evidence_hostname(hostname: str) -> Evidence:
     )
 
 
+def extract_vendor_strings(evidence_log: list[Evidence]) -> list[Evidence]:
+    """Mine Tier 1/2/3 evidence for manufacturer strings and emit Tier 4 hints.
+
+    The engine calls this after all probe phases land their strong evidence,
+    once per device, to surface ``manufacturer`` / ``make`` strings the
+    device returned in its probe responses as Tier 4 ``vendor_string``
+    evidence the matcher can consult against ``vendor_aliases``.
+
+    Looks at:
+    - ``data["response"]["manufacturer"]`` and ``["make"]`` (Tier 2 / 3 probes)
+    - ``data["txt"]["manufacturer"]`` and ``["make"]`` (Tier 1 mDNS, Tier 2 broadcast)
+    - ``data["make"]`` (AMX DDP, top-level)
+
+    De-duplicates by ``(value, source_probe_id)`` so the same string from
+    one probe doesn't get emitted twice.
+    """
+    seen: set[tuple[str, str]] = set()
+    extracted: list[Evidence] = []
+
+    def _record(value: object, source_probe_id: str) -> None:
+        if not isinstance(value, str):
+            return
+        normalized = value.strip().lower()
+        if not normalized:
+            return
+        key = (normalized, source_probe_id)
+        if key in seen:
+            return
+        seen.add(key)
+        extracted.append(evidence_vendor_string(value, source_probe_id))
+
+    for ev in evidence_log:
+        if ev.tier == SignalTier.ENRICHMENT:
+            continue  # Don't recurse on already-emitted Tier 4 records.
+
+        kind = ev.data.get("kind")
+        source_id = ev.data.get("source_id")
+        probe_label = source_id if isinstance(source_id, str) else (kind or "unknown")
+
+        response = ev.data.get("response")
+        if isinstance(response, dict):
+            _record(response.get("manufacturer"), probe_label)
+            _record(response.get("make"), probe_label)
+
+        txt = ev.data.get("txt")
+        if isinstance(txt, dict):
+            _record(txt.get("manufacturer"), probe_label)
+            _record(txt.get("make"), probe_label)
+
+        # AMX DDP carries the make at the top level of data, not inside
+        # a response dict.
+        if kind == KIND_AMX_DDP:
+            _record(ev.data.get("make"), probe_label)
+
+    return extracted
+
+
 def evidence_vendor_string(value: str, source_probe_id: str) -> Evidence:
     """Build an Evidence record for a manufacturer string lifted from a
     Tier 2/3 probe response.

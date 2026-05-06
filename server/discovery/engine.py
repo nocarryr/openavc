@@ -37,6 +37,7 @@ from server.discovery.tier_matcher import (
     evidence_hostname,
     evidence_open_port,
     evidence_oui,
+    extract_vendor_strings,
 )
 from server.discovery.result import (
     DiscoveredDevice,
@@ -743,6 +744,15 @@ class DiscoveryEngine:
                 for port in device.open_ports:
                     if self.signal_index.find_soft_open_port(port):
                         device.evidence_log.append(evidence_open_port(port))
+
+                # Mine Tier 1/2/3 probe responses for manufacturer / make
+                # strings and append Tier 4 vendor_string evidence so the
+                # matcher can pick the best-fit driver via vendor_aliases
+                # (Phase 8.6) — e.g. PJLink %1MNFR? -> "NEC" surfaces the
+                # sharp_nec_projector driver without an OUI catalog hit.
+                device.evidence_log.extend(
+                    extract_vendor_strings(device.evidence_log)
+                )
 
                 device.identification = self.tier_matcher.match(device.evidence_log)
                 await self._emit_device_update(device, "driver_match")

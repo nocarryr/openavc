@@ -29,6 +29,7 @@ from server.discovery.tier_matcher import (
     evidence_oui,
     evidence_snmp_pen,
     evidence_vendor_string,
+    extract_vendor_strings,
 )
 
 
@@ -502,6 +503,99 @@ class TestEvidenceShape:
             evidence_mdns("_http._tcp.local.", txt={"manufacturer": "Special"}),
         ])
         assert result2.state == DeviceState.IDENTIFIED
+
+
+class TestExtractVendorStrings:
+    """``extract_vendor_strings`` mines manufacturer/make from probe responses."""
+
+    def test_active_probe_response_manufacturer(self):
+        log = [
+            evidence_active_probe(
+                "pjlink_class1",
+                {"manufacturer": "NEC", "model": "PA1004UL"},
+            ),
+        ]
+        out = extract_vendor_strings(log)
+        assert len(out) == 1
+        assert out[0].data["value"] == "nec"
+        assert out[0].data["raw"] == "NEC"
+        assert out[0].data["source_probe_id"] == "pjlink_class1"
+
+    def test_broadcast_probe_txt_manufacturer(self):
+        log = [
+            evidence_broadcast(
+                "onvif",
+                response={"endpoint": "..."},
+                txt={"manufacturer": "Sony"},
+            ),
+        ]
+        out = extract_vendor_strings(log)
+        assert len(out) == 1
+        assert out[0].data["value"] == "sony"
+        assert out[0].data["source_probe_id"] == "onvif"
+
+    def test_mdns_txt_manufacturer(self):
+        log = [
+            evidence_mdns(
+                "_http._tcp.local.",
+                txt={"manufacturer": "Shure"},
+            ),
+        ]
+        out = extract_vendor_strings(log)
+        assert len(out) == 1
+        assert out[0].data["value"] == "shure"
+
+    def test_amx_ddp_make(self):
+        log = [evidence_amx_ddp("Polycom", "SoundStructureC*")]
+        out = extract_vendor_strings(log)
+        assert len(out) == 1
+        assert out[0].data["value"] == "polycom"
+        assert out[0].data["source_probe_id"] == "Polycom/SoundStructureC*"
+
+    def test_dedups_same_value_same_probe(self):
+        # Same probe response yielding manufacturer in both 'manufacturer'
+        # and 'make' fields shouldn't emit two records.
+        log = [
+            evidence_broadcast(
+                "onvif",
+                response={"manufacturer": "Sony", "make": "SONY"},
+            ),
+        ]
+        out = extract_vendor_strings(log)
+        assert len(out) == 1
+
+    def test_does_not_recurse_into_existing_vendor_strings(self):
+        # If extract_vendor_strings is called on a log that already has
+        # vendor_string Tier 4 records, it must not consume them as input.
+        log = [
+            evidence_active_probe("pjlink_class1", {"manufacturer": "NEC"}),
+            evidence_vendor_string("NEC", source_probe_id="pjlink_class1"),
+        ]
+        out = extract_vendor_strings(log)
+        # One emission from the strong evidence; the existing Tier 4 record
+        # is ignored, not re-emitted.
+        assert len(out) == 1
+
+    def test_empty_or_missing_manufacturer_emits_nothing(self):
+        log = [
+            evidence_active_probe("pjlink_class1", {"model": "PA1004UL"}),
+            evidence_active_probe("extron_sis", {"manufacturer": "  "}),
+            evidence_mdns("_test._tcp.local."),
+        ]
+        assert extract_vendor_strings(log) == []
+
+    def test_distinct_strings_from_same_probe_emit_separately(self):
+        # Manufacturer "NEC" + make "Sharp" in one response — distinct values.
+        log = [
+            evidence_active_probe(
+                "pjlink_class1",
+                {"manufacturer": "NEC", "make": "Sharp"},
+            ),
+        ]
+        out = extract_vendor_strings(log)
+        assert len(out) == 2
+        values = sorted(ev.data["value"] for ev in out)
+        assert values == ["nec", "sharp"]
 
 
 class TestDriverCount:
