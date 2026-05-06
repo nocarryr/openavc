@@ -640,6 +640,10 @@ class TierMatcher:
                 hits = self.index.find_soft_open_port(value)
                 if hits:
                     results.append((f"{KIND_OPEN_PORT}:{value}", hits))
+            elif kind == KIND_VENDOR_STRING and isinstance(value, str):
+                hits = self.index.find_soft_vendor_string(value)
+                if hits:
+                    results.append((f"{KIND_VENDOR_STRING}:{value}", hits))
 
         if not results:
             return [], ""
