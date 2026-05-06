@@ -36,6 +36,7 @@ from server.discovery.hints import (
 )
 from server.discovery.result import Evidence
 from server.discovery.tier_matcher import (
+    evidence_active_probe,
     evidence_broadcast,
 )
 
@@ -261,3 +262,98 @@ async def run_udp_broadcast_probe(
             pass
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# TCP active probe runner
+# ---------------------------------------------------------------------------
+
+
+async def run_tcp_active_probe(
+    spec: CustomProbeSpec,
+    *,
+    target: str,
+    source_ip: str,
+    stagger_ms: float = 0.0,
+) -> Evidence | None:
+    """Connect to ``target:spec.port``, send, read, match, extract.
+
+    Returns one ``Evidence`` record on a successful match, or
+    ``None`` on connect failure / timeout / non-match. The caller is
+    expected to invoke this against every host whose port-scan
+    results include ``spec.port``.
+
+    ``stagger_ms`` is a pre-connection delay (port_scanner pattern):
+    the engine spreads a batch of probes by passing increasing
+    stagger values so embedded AV devices aren't hit with a SYN
+    burst. The same ``RateLimiter`` used for UDP probes applies via
+    the engine layer for TCP — the schema's per-probe budget is
+    governed there.
+    """
+    if spec.kind != "tcp":
+        raise ValueError(f"run_tcp_active_probe got non-tcp spec: {spec.kind!r}")
+
+    if stagger_ms > 0:
+        await asyncio.sleep(stagger_ms / 1000.0)
+
+    timeout = spec.timeout_ms / 1000.0
+    local_addr = (source_ip, 0) if source_ip else None
+
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(target, spec.port, local_addr=local_addr),
+            timeout=timeout,
+        )
+    except (TimeoutError, asyncio.TimeoutError, ConnectionRefusedError, OSError) as exc:
+        log.debug(
+            "probe_runner: %s connect to %s:%d failed: %s",
+            spec.probe_id, target, spec.port, exc,
+        )
+        return None
+
+    payload = b""
+    try:
+        if spec.send:
+            writer.write(spec.send)
+            try:
+                await asyncio.wait_for(writer.drain(), timeout=timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                pass
+        try:
+            payload = await asyncio.wait_for(
+                reader.read(_MAX_RESPONSE_BYTES), timeout=timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            payload = b""
+    except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+        log.debug(
+            "probe_runner: %s read from %s:%d failed: %s",
+            spec.probe_id, target, spec.port, exc,
+        )
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (OSError, ConnectionResetError):
+            pass
+
+    if not payload:
+        return None
+    if not _matches(payload, spec.response_match):
+        return None
+
+    reserved, extracted = _apply_extract(payload, spec.extract)
+    response: dict[str, object] = {
+        "text": payload.decode("latin-1", errors="replace"),
+    }
+    # Lift manufacturer/make to top of response so extract_vendor_strings
+    # finds them; everything else lands under "extracted".
+    response.update(reserved)
+    if extracted:
+        response["extracted"] = extracted
+
+    log.debug(
+        "probe_runner: %s match from %s reserved=%s extracted=%s",
+        spec.probe_id, target, reserved, extracted,
+    )
+    return evidence_active_probe(spec.probe_id, response=response)
