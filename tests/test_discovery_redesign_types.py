@@ -88,13 +88,13 @@ class TestIdentificationMatch:
     def test_possible_factory(self):
         m = IdentificationMatch.possible(
             ["qsc_qrc", "qsc_qsys_external"],
-            "oui:00:0c:4d",
-            [Evidence(SignalTier.ENRICHMENT, "oui:00:0c:4d", {"vendor": "QSC"})],
+            "oui:00:60:74",
+            [Evidence(SignalTier.ENRICHMENT, "oui:00:60:74", {"vendor": "QSC"})],
         )
         assert m.state == DeviceState.POSSIBLE
         assert m.driver_id is None
         assert m.candidates == ["qsc_qrc", "qsc_qsys_external"]
-        assert m.source == "oui:00:0c:4d"
+        assert m.source == "oui:00:60:74"
         assert m.reason == ""
 
     def test_unknown_factory(self):

@@ -86,12 +86,12 @@ class TestSNMPInfoToEvidence:
 
 class TestOUIEvidence:
     def test_normalizes_mac_to_oui_prefix(self):
-        ev = evidence_oui("00:0C:4D:11:22:33", vendor="QSC")
+        ev = evidence_oui("00:60:74:11:22:33", vendor="QSC")
         assert ev.tier == SignalTier.ENRICHMENT
-        assert ev.source == "oui:00:0c:4d"
+        assert ev.source == "oui:00:60:74"
         assert ev.data["kind"] == KIND_OUI
-        assert ev.data["value"] == "00:0c:4d"
-        assert ev.data["mac"] == "00:0C:4D:11:22:33"
+        assert ev.data["value"] == "00:60:74"
+        assert ev.data["mac"] == "00:60:74:11:22:33"
         assert ev.data["vendor"] == "QSC"
 
     def test_normalizes_dash_separators(self):
@@ -99,7 +99,7 @@ class TestOUIEvidence:
         assert ev.data["value"] == "00:05:a6"
 
     def test_no_vendor_field_optional(self):
-        ev = evidence_oui("00:0c:4d:11:22:33")
+        ev = evidence_oui("00:60:74:11:22:33")
         assert ev.data["vendor"] is None
 
 
@@ -155,10 +155,10 @@ class TestRoundTrip:
         )
 
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:60:74"))
         matcher = TierMatcher(idx)
 
-        ev = evidence_oui("00:0c:4d:11:22:33", vendor="QSC")
+        ev = evidence_oui("00:60:74:11:22:33", vendor="QSC")
         result = matcher.match([ev])
 
         assert result.state == DeviceState.POSSIBLE

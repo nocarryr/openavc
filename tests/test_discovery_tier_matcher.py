@@ -49,8 +49,8 @@ class TestSignalRuleFactories:
         assert dict(r.txt_match) == {"manufacturer": "Shure", "model": "P300"}
 
     def test_oui_normalizes_prefix(self):
-        r = SignalRule.for_oui("qsc_qrc", "00-0C-4D-aa-bb-cc")
-        assert r.source_id == "00:0c:4d"
+        r = SignalRule.for_oui("qsc_qrc", "00-60-74-aa-bb-cc")
+        assert r.source_id == "00:60:74"
 
     def test_amx_ddp_combines_make_model(self):
         r = SignalRule.for_amx_ddp("polycom_ssc", "Polycom", "SoundStructureC*")
@@ -182,15 +182,15 @@ class TestSignalIndexCollisions:
 class TestSoftSignals:
     def test_oui_lookup_returns_all(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:0c:4d"))
-        idx.add_rule(SignalRule.for_oui("qsc_qsys_external", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:60:74"))
+        idx.add_rule(SignalRule.for_oui("qsc_qsys_external", "00:60:74"))
 
-        hits = idx.find_soft_oui("00:0c:4d:11:22:33")
+        hits = idx.find_soft_oui("00:60:74:11:22:33")
         assert set(hits) == {"qsc_qrc", "qsc_qsys_external"}
 
     def test_oui_no_match(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:60:74"))
         assert idx.find_soft_oui("aa:bb:cc:dd:ee:ff") == []
 
     def test_pen_lookup(self):
@@ -329,21 +329,21 @@ class TestTierMatcherTierOrdering:
 class TestTierMatcherPossible:
     def test_oui_only_yields_possible(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:60:74"))
         m = TierMatcher(idx)
 
-        result = m.match([evidence_oui("00:0c:4d:11:22:33")])
+        result = m.match([evidence_oui("00:60:74:11:22:33")])
         assert result.state == DeviceState.POSSIBLE
         assert result.candidates == ["qsc_qrc"]
         assert result.source.startswith("oui:")
 
     def test_oui_with_multiple_candidates(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:0c:4d"))
-        idx.add_rule(SignalRule.for_oui("qsc_qsys_external", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("qsc_qrc", "00:60:74"))
+        idx.add_rule(SignalRule.for_oui("qsc_qsys_external", "00:60:74"))
         m = TierMatcher(idx)
 
-        result = m.match([evidence_oui("00:0c:4d:aa:bb:cc")])
+        result = m.match([evidence_oui("00:60:74:aa:bb:cc")])
         assert result.state == DeviceState.POSSIBLE
         assert set(result.candidates) == {"qsc_qrc", "qsc_qsys_external"}
 
@@ -380,12 +380,12 @@ class TestTierMatcherPossible:
         # The PEN-narrow result should be first in candidates.
         idx = SignalIndex()
         for did in ("a", "b", "c", "d", "e"):
-            idx.add_rule(SignalRule.for_oui(did, "00:0c:4d"))
+            idx.add_rule(SignalRule.for_oui(did, "00:60:74"))
         idx.add_rule(SignalRule.for_snmp_pen("a", 3872))
         m = TierMatcher(idx)
 
         result = m.match([
-            evidence_oui("00:0c:4d:11:22:33"),
+            evidence_oui("00:60:74:11:22:33"),
             evidence_snmp_pen(3872),
         ])
         assert result.state == DeviceState.POSSIBLE
@@ -394,7 +394,7 @@ class TestTierMatcherPossible:
 
     def test_no_soft_hit_yields_unknown(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_oui("qsc", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("qsc", "00:60:74"))
         m = TierMatcher(idx)
 
         result = m.match([evidence_oui("aa:bb:cc:dd:ee:ff")])
@@ -465,7 +465,7 @@ class TestDriverCount:
         idx.add_rule(SignalRule.for_mdns("a", "_a._tcp.local."))
         idx.add_rule(SignalRule.for_mdns("b", "_b._tcp.local."))
         # Same driver multiple kinds counts once.
-        idx.add_rule(SignalRule.for_oui("a", "00:0c:4d"))
+        idx.add_rule(SignalRule.for_oui("a", "00:60:74"))
         assert idx.driver_count() == 2
 
     def test_driver_count_includes_hostname(self):

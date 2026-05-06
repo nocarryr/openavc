@@ -188,12 +188,12 @@ class TestSignalIndexBuilder:
     def test_oui_collision_allowed(self):
         # Soft signals (Tier 4) are allowed to overlap — produces possible state.
         registry = [
-            _drv("dsp_a", active_probes=["tesira_ttp"], oui_prefixes=["00:90:5e"]),
-            _drv("dsp_b", active_probes=["qrc"], oui_prefixes=["00:90:5e"]),
+            _drv("dsp_a", active_probes=["tesira_ttp"], oui_prefixes=["78:45:01"]),
+            _drv("dsp_b", active_probes=["qrc"], oui_prefixes=["78:45:01"]),
         ]
         hints = load_discovery_hints(registry)
         idx = build_signal_index(hints)
-        assert sorted(idx.find_soft_oui("00:90:5e:11:22:33")) == ["dsp_a", "dsp_b"]
+        assert sorted(idx.find_soft_oui("78:45:01:11:22:33")) == ["dsp_a", "dsp_b"]
 
     def test_mdns_txt_filter_disambiguates(self):
         registry = [
