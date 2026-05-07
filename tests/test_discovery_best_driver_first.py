@@ -37,7 +37,9 @@ def test_generic_pjlink_with_vendor_oui_picks_vendor() -> None:
     must surface the brand-specific driver, not the generic PJLink one.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     idx.add_rule(SignalRule.for_oui("sharp_nec_projector", "00:30:13"))
     matcher = TierMatcher(idx)
 
@@ -60,7 +62,9 @@ def test_generic_pjlink_alone_identifies_pjlink() -> None:
     alternatives=[]. Regression guard for the no-OUI case.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     matcher = TierMatcher(idx)
 
     result = matcher.match([
@@ -180,7 +184,9 @@ def test_pjlink_plus_vendor_string_picks_vendor() -> None:
     alternative.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     idx.add_rule(SignalRule.for_vendor_string("sharp_nec_projector", "NEC"))
     matcher = TierMatcher(idx)
 
@@ -205,7 +211,9 @@ def test_vendor_string_case_insensitive_match() -> None:
     (already lowercased by ``evidence_vendor_string``) — must match.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     idx.add_rule(SignalRule.for_vendor_string(
         "sharp_nec_projector", "Sharp NEC",
     ))
@@ -227,7 +235,9 @@ def test_multiple_drivers_share_vendor_alias() -> None:
     vendor strings behave like OUIs when more than one driver matches.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     idx.add_rule(SignalRule.for_vendor_string("sony_vpl", "Sony"))
     idx.add_rule(SignalRule.for_vendor_string("sony_bravia_display", "Sony"))
     matcher = TierMatcher(idx)
@@ -253,7 +263,9 @@ def test_oui_and_vendor_string_resolve_same_driver_no_dupe() -> None:
     twice. De-dup is the existing _gather_soft_candidates contract.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     idx.add_rule(SignalRule.for_oui("sharp_nec_projector", "00:30:13"))
     idx.add_rule(SignalRule.for_vendor_string("sharp_nec_projector", "NEC"))
     matcher = TierMatcher(idx)
@@ -279,7 +291,9 @@ def test_multi_vendor_oui_orders_by_specificity() -> None:
     first ordering of ``_gather_soft_candidates``.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_active_probe("pjlink_class1", "pjlink_class1"))
+    idx.add_rule(SignalRule.for_active_probe(
+        "pjlink_class1", "pjlink_class1", generic=True,
+    ))
     # Both vendors share the OUI...
     idx.add_rule(SignalRule.for_oui("vendor_a_projector", "00:60:b9"))
     idx.add_rule(SignalRule.for_oui("vendor_b_projector", "00:60:b9"))

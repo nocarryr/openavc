@@ -537,8 +537,9 @@ import asyncio
 
 async def probe(ctx):
     ctx.log.info("companion ran")
+    # Default probe_id = ctx.companion_broadcast_probe_id
+    # i.e. ``custom_<driver_id>_companion_udp``.
     await ctx.emit_broadcast(
-        "custom_fake_vendor_companion",
         "10.0.0.99",
         txt={"manufacturer": "FakeVendor"},
     )
@@ -591,6 +592,7 @@ class TestCompanionLoader:
             captured.append((host, ev))
 
         ctx = ProbeContext(
+            driver_id="vend",
             source_ip="127.0.0.1",
             target_subnets=("192.168.1.0/24",),
             timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
@@ -601,7 +603,9 @@ class TestCompanionLoader:
         assert len(captured) == 1
         host, ev = captured[0]
         assert host == "10.0.0.99"
-        assert ev.data["source_id"] == "custom_fake_vendor_companion"
+        # Default probe_id resolves to the canonical synthetic ID
+        # built from ctx.driver_id.
+        assert ev.data["source_id"] == "custom_vend_companion_udp"
         assert ev.data["txt"]["manufacturer"] == "FakeVendor"
 
     @pytest.mark.asyncio
@@ -613,6 +617,7 @@ class TestCompanionLoader:
             pass
 
         ctx = ProbeContext(
+            driver_id="hang",
             source_ip="127.0.0.1",
             target_subnets=(),
             timeout_seconds=0.5,

@@ -232,6 +232,72 @@ class TestSchemaParsing:
                 "bad", active_probes=["pjlink_class1"], vendor_aliases=["   "],
             ))
 
+    def test_companion_block_registers_synthetic_probe_ids(self):
+        # Phase 9.7: a driver shipping a sibling _discovery.py companion
+        # opts in via ``discovery.companion: {generic: bool}``. The
+        # parser stores a CompanionSpec; build_signal_index registers
+        # two synthetic SignalRule records under canonical IDs.
+        h = parse_driver_discovery(_drv(
+            "anchor_driver", companion={"generic": True},
+        ))
+        assert h is not None
+        assert h.companion is not None
+        assert h.companion.driver_id == "anchor_driver"
+        assert h.companion.generic is True
+        assert h.companion.broadcast_probe_id == "custom_anchor_driver_companion_udp"
+        assert h.companion.active_probe_id == "custom_anchor_driver_companion_tcp"
+
+        idx = build_signal_index([h])
+        bcast = idx.find_strong(
+            KIND_BROADCAST, "custom_anchor_driver_companion_udp",
+        )
+        assert bcast is not None
+        assert bcast.driver_id == "anchor_driver"
+        assert bcast.generic is True
+        active = idx.find_strong(
+            KIND_ACTIVE_PROBE, "custom_anchor_driver_companion_tcp",
+        )
+        assert active is not None
+        assert active.generic is True
+
+    def test_companion_generic_default_false(self):
+        h = parse_driver_discovery(_drv(
+            "specific_anchor", companion={},
+        ))
+        assert h is not None
+        assert h.companion is not None
+        assert h.companion.generic is False
+
+    def test_companion_generic_must_be_bool(self):
+        with pytest.raises(DiscoveryHintError, match="generic must be a bool"):
+            parse_driver_discovery(_drv(
+                "bad", companion={"generic": "yes"},
+            ))
+
+    def test_companion_must_be_mapping(self):
+        with pytest.raises(DiscoveryHintError, match="companion must be a mapping"):
+            parse_driver_discovery(_drv("bad", companion=True))
+
+    def test_companion_rejects_unknown_keys(self):
+        with pytest.raises(DiscoveryHintError, match="unknown keys"):
+            parse_driver_discovery(_drv(
+                "bad", companion={"generic": True, "extra_field": "x"},
+            ))
+
+    def test_companion_alone_satisfies_signal_requirement(self, caplog):
+        # A discovery-anchor driver may host nothing but a companion +
+        # soft fallbacks. No "never participate in matching" warning.
+        import logging
+        with caplog.at_level(logging.WARNING, logger="discovery.hints"):
+            h = parse_driver_discovery({
+                "id": "anchor_only",
+                "name": "Anchor Only",
+                "discovery": {"companion": {"generic": True}},
+            })
+        assert h is not None
+        assert h.companion is not None
+        assert "never participate in matching" not in caplog.text
+
     def test_vendor_aliases_alone_satisfies_signal_requirement(self, caplog):
         # A driver with only vendor_aliases (no strong signal, no other
         # soft signal) must load without warning — vendor_aliases is a
@@ -251,9 +317,14 @@ class TestSchemaParsing:
 
 class TestSignalIndexBuilder:
     def test_strong_collision_raises(self):
+        # Two drivers can't both claim the same companion synthetic ID.
+        # ``companion`` is keyed off ``driver_id``, so collision can
+        # only happen if two driver entries share an id (caught upstream
+        # by build_index.py). For a clean strong-tier collision test we
+        # use unfiltered ONVIF, the only remaining built-in named opt-in.
         registry = [
-            _drv("a", crestron_cip=True),
-            _drv("b", crestron_cip=True),
+            _drv("a", onvif=True),
+            _drv("b", onvif=True),
         ]
         hints = load_discovery_hints(registry)
         with pytest.raises(ValueError, match="Signal collision"):
@@ -348,8 +419,9 @@ class TestSignalIndexBuilder:
                 mdns_services=["_pjlink._tcp.local."],
                 ssdp_device_types=["urn:schemas-upnp-org:device:MediaRenderer:1"],
                 amx_ddp={"make": "Polycom", "model_pattern": "Sound*"},
-                pjlink_class2=True,
-                active_probes=["pjlink_class1"],
+                onvif={"manufacturer": "Polycom"},
+                active_probes=["extron_sis"],
+                companion={"generic": True},
                 snmp_pen=17049,
                 oui_prefixes=["00:05:a6"],
                 hostname_patterns=["^kitchen-"],
@@ -360,8 +432,17 @@ class TestSignalIndexBuilder:
         idx = build_signal_index(load_discovery_hints(registry))
         assert idx.find_strong(KIND_MDNS, "_pjlink._tcp.local.") is not None
         assert idx.find_strong(KIND_SSDP, "urn:schemas-upnp-org:device:MediaRenderer:1") is not None
-        assert idx.find_strong(KIND_BROADCAST, "pjlink_class2") is not None
-        assert idx.find_strong(KIND_ACTIVE_PROBE, "pjlink_class1") is not None
+        assert idx.find_strong(
+            KIND_BROADCAST, "onvif", txt={"manufacturer": "Polycom"},
+        ) is not None
+        assert idx.find_strong(KIND_ACTIVE_PROBE, "extron_sis") is not None
+        # Companion auto-registers two synthetic IDs for kitchen_sink.
+        assert idx.find_strong(
+            KIND_BROADCAST, "custom_kitchen_sink_companion_udp",
+        ) is not None
+        assert idx.find_strong(
+            KIND_ACTIVE_PROBE, "custom_kitchen_sink_companion_tcp",
+        ) is not None
         assert idx.find_soft_pen(17049) == ["kitchen_sink"]
         assert idx.find_soft_oui("00:05:a6:aa:bb:cc") == ["kitchen_sink"]
         assert idx.find_soft_hostname("kitchen-pjlink-1") == ["kitchen_sink"]

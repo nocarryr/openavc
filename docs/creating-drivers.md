@@ -648,18 +648,25 @@ discovery:
     model_pattern: "SoundStructure*"   # optional, defaults to "*"
 
   # Tier 2: vendor broadcast probes (opt-in, one packet per scan)
-  pjlink_class2: true              # responds to %2SRCH on UDP 4352
-  crestron_cip: true               # responds to UDP 41794 probe
   onvif:                           # ONVIF cameras; manufacturer disambiguates
     manufacturer: "Axis"
-  # Vendor-specific broadcast probes (HiQnet, Symetrix, NovaStar, etc.)
-  # ship in their respective drivers via udp_broadcast_probe or a
-  # sibling _discovery.py companion. Platform opt-ins above are reserved
-  # for cross-vendor open standards.
+  # ONVIF is the only built-in named opt-in. PJLink Class 2 SRCH and
+  # Crestron CIP discovery now ship as `_discovery.py` companions on
+  # their respective drivers (see Companion section below). Other
+  # vendor-specific broadcast probes go in udp_broadcast_probe or a
+  # companion.
 
   # Tier 3: targeted active probes (only on hosts with the open port)
   active_probes:
     - extron_sis
+
+  # Phase 9.7: sibling _discovery.py companion declaration.
+  # Set when the driver ships a `<driver_id>_discovery.py` next to
+  # the YAML / Python file. The platform auto-registers two synthetic
+  # probe IDs (Tier 2 broadcast + Tier 3 active) the companion emits
+  # with via ctx.emit_broadcast / ctx.emit_active.
+  companion:
+    generic: true                  # cross-vendor anchor (PJLink, Crestron CIP, ...)
 
   # Tier 4: enrichment hints (soft signals — never produce identified alone)
   snmp_pen: 17049                  # IANA Private Enterprise Number
@@ -683,12 +690,11 @@ discovery:
 | `mdns_services` | 1 | mDNS service types this device advertises. Each entry is either a bare string or `{service, txt_match}` for service-type disambiguation. |
 | `ssdp_device_types` | 1 | Full UPnP device-type URNs this device announces in SSDP `ST` / `NT` headers. |
 | `amx_ddp` | 1 | AMX Device Discovery Protocol beacon match. Provide `make` (required) and optional `model_pattern` glob. |
-| `pjlink_class2` | 2 | `true` if the device answers PJLink Class 2 SRCH broadcast. The generic `pjlink_class1` driver claims this; brand-specific projector drivers stay `manual_only`. |
-| `crestron_cip` | 2 | `true` if the device answers the Crestron CIP UDP/41794 probe. |
-| `onvif` | 2 | `true` (any ONVIF responder) or `{manufacturer: "Axis"}` to disambiguate when multiple ONVIF camera drivers coexist. |
-| `active_probes` | 3 | Targeted TCP probes by name. Built-in handlers: `pjlink_class1`, `extron_sis`, `tesira_ttp`, `qrc`, `kramer_p3000`, `shure_dcs`, `samsung_mdc`, `visca`, `crestron_cip_tcp`, `yamaha_rcp`. Unknown IDs are accepted at parse time but no probe fires for them — for vendor-specific wire formats use `tcp_active_probe` below. |
+| `onvif` | 2 | `true` (any ONVIF responder) or `{manufacturer: "Axis"}` to disambiguate when multiple ONVIF camera drivers coexist. The only remaining built-in named opt-in. |
+| `active_probes` | 3 | Targeted TCP probes by name. Built-in handlers: `extron_sis`, `tesira_ttp`, `qrc`, `kramer_p3000`, `shure_dcs`, `samsung_mdc`, `visca`, `crestron_cip_tcp`, `yamaha_rcp`. PJLink Class 1 ships as a `_discovery.py` companion now (see `companion` below) — not a built-in active probe. Unknown IDs are accepted at parse time but no probe fires for them — for vendor-specific wire formats use `tcp_active_probe` below. |
 | `udp_broadcast_probe` | 2 | Driver-declared UDP broadcast probe (Phase 9). Sub-fields: `port`, `send: {hex|ascii}`, `response_match: {starts_with_hex, contains, regex}`, optional `timeout_ms` (≤10000), `generic` flag, `extract` rules. Reserved extract keys `manufacturer` / `make` feed the Tier 4 vendor_string path. Built-in handler ports (mDNS/SSDP/ONVIF/AMX DDP/PJLink/Crestron CIP) are reserved. |
 | `tcp_active_probe` | 3 | Driver-declared TCP active probe (Phase 9). Same shape as `udp_broadcast_probe`. Runs against every host whose port scan hit `port`. Built-in active-probe handler ports (23, 1515, 1688, 1710, 4352, 10500, 49280) are reserved. |
+| `companion` | 2+3 | Sibling `_discovery.py` companion declaration (Phase 9.7). Sub-fields: `generic: bool` (default `false`). Auto-registers two synthetic probe IDs `custom_<driver_id>_companion_(udp\|tcp)` so the matcher binds companion-emitted evidence back to your driver. Use when the wire format needs Python (multi-step handshakes, binary parsers, broadcast-then-per-host TCP follow-ups). Set `generic: true` for cross-vendor anchors so the matcher demotes this driver to an alternative when a vendor-specific peer matches via `vendor_aliases` / OUI / hostname soft signals. |
 | `snmp_pen` | 4 | IANA Private Enterprise Number. Soft signal — produces "possible" not "identified". |
 | `oui_prefixes` | 4 | OUI prefixes (`"00:05:a6"`). Soft signal — also drives the "Unknown device, vendor: Extron" display. |
 | `hostname_patterns` | 4 | Regex patterns. Soft signal. |
@@ -704,7 +710,7 @@ These are enforced at driver-load time:
 2. Two drivers cannot claim the same Tier 1/2/3 signal without distinct TXT-record filters. Drivers fail to load on collision.
 3. `udp_broadcast_probe` / `tcp_active_probe` blocks must declare exactly one of `send.hex` / `send.ascii`, at least one of `response_match.{starts_with_hex, contains, regex}`, a `port` outside the built-in handler reserved set, and `timeout_ms ≤ 10000`. Regex patterns are compiled at load time — invalid patterns fail validation.
 4. The `extract` block's `manufacturer` and `make` keys are reserved: their values are lifted to the top of the evidence record so a peer driver can claim the device via `vendor_aliases`. Other extract keys are recorded as evidence metadata.
-5. When a driver's wire format requires multi-step handshakes or framing too dynamic for `udp_broadcast_probe` / `tcp_active_probe`, ship a sibling `<driver_id>_discovery.py` Python module next to the `.avcdriver`. It exposes `async def probe(ctx)`; the platform binds sockets to the configured source IP and enforces a hard wall-clock timeout (default 10 s, capped at 30 s).
+5. When a driver's wire format requires multi-step handshakes, binary parsers, or per-host TCP follow-ups too dynamic for `udp_broadcast_probe` / `tcp_active_probe`, ship a sibling `<driver_id>_discovery.py` Python module next to the `.avcdriver` and declare `discovery.companion: {generic: bool}` in the driver. The companion exposes `async def probe(ctx)`; the platform binds sockets to the configured source IP, enforces a hard wall-clock timeout (default 10 s, capped at 30 s), and auto-registers two synthetic probe IDs `custom_<driver_id>_companion_(udp|tcp)` so the matcher binds the emitted evidence back to your driver. **The schema declaration is required** — without it the evidence won't drive identification. See PJLink (`projectors/pjlink_class1_discovery.py`) and Crestron CIP (`utility/crestron_cip_discovery.py`) for canonical examples of the discovery anchor driver pattern.
 
 CI in the community-driver repo (`openavc-drivers/scripts/build_index.py`) enforces the same rules across the whole catalog.
 

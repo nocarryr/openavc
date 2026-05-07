@@ -80,20 +80,25 @@ def test_validate_accepts_strong_signal_discovery():
         "id": "strong_signal",
         "name": "Strong",
         "transport": "tcp",
-        "discovery": {"active_probes": ["pjlink_class1"]},
+        "discovery": {"active_probes": ["extron_sis"]},
         "commands": {"power_on": {"string": "X\r"}},
     })
     assert errors == []
 
 
-def test_validate_rejects_unknown_active_probe():
+def test_validate_accepts_unknown_active_probe_as_silent_noop():
+    # Phase 9.5: the named-probe allow-list was dropped. Unknown probe
+    # IDs in ``active_probes:`` parse fine and simply never fire at
+    # runtime — vendor-specific wire formats use ``tcp_active_probe``
+    # or a ``_discovery.py`` companion instead.
     errors = validate_driver_definition({
-        "id": "bogus_probe",
-        "name": "Bogus",
+        "id": "unknown_probe_driver",
+        "name": "Unknown probe",
         "transport": "tcp",
-        "discovery": {"active_probes": ["http_banner"]},
+        "discovery": {"active_probes": ["something_unregistered"]},
+        "commands": {"power_on": {"string": "X\r"}},
     })
-    assert any("active probe" in e for e in errors), errors
+    assert errors == []
 
 
 def test_validate_skips_generic_templates():

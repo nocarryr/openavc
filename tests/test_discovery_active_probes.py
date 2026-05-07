@@ -245,22 +245,21 @@ class TestYamahaRCPDispatch:
 
 
 class TestProbeResultToEvidence:
-    def test_pjlink_emits_active_probe_evidence(self):
+    def test_extron_emits_active_probe_evidence(self):
         pr = ProbeResult(
-            protocol="pjlink",
-            manufacturer="NEC",
-            model="PA1004UL",
-            device_name="Room 101",
+            protocol="extron_sis",
+            manufacturer="Extron",
+            model="DTP CrossPoint 84",
             firmware="1.02",
-            category="projector",
+            category="switcher",
         )
         ev = probe_result_to_evidence(pr)
         assert ev.tier == SignalTier.ACTIVE_PROBE
-        assert ev.source == "probe:pjlink_class1"
+        assert ev.source == "probe:extron_sis"
         assert ev.data["kind"] == KIND_ACTIVE_PROBE
-        assert ev.data["source_id"] == "pjlink_class1"
-        assert ev.data["response"]["manufacturer"] == "NEC"
-        assert ev.data["response"]["model"] == "PA1004UL"
+        assert ev.data["source_id"] == "extron_sis"
+        assert ev.data["response"]["manufacturer"] == "Extron"
+        assert ev.data["response"]["model"] == "DTP CrossPoint 84"
 
     def test_qsc_qrc_uses_qrc_probe_id(self):
         pr = ProbeResult(protocol="qsc_qrc", manufacturer="QSC", model="Core 110f")
@@ -287,13 +286,13 @@ class TestProbeResultToEvidence:
 
     def test_extra_carries_through(self):
         pr = ProbeResult(
-            protocol="pjlink",
-            manufacturer="NEC",
-            extra={"lamp_hours": 12345, "pjlink_class": "2"},
+            protocol="extron_sis",
+            manufacturer="Extron",
+            extra={"firmware_build": "12345", "model_code": "abc"},
         )
         ev = probe_result_to_evidence(pr)
-        assert ev.data["response"]["extra"]["lamp_hours"] == 12345
-        assert ev.data["response"]["extra"]["pjlink_class"] == "2"
+        assert ev.data["response"]["extra"]["firmware_build"] == "12345"
+        assert ev.data["response"]["extra"]["model_code"] == "abc"
 
 
 # ===== Sanity: existing probes still registered =====
@@ -302,10 +301,12 @@ class TestProbeResultToEvidence:
 class TestExistingProbesPreserved:
     """Adding new Tier 3 probes must not break the existing dispatch table."""
 
-    def test_pjlink_still_on_4352(self):
-        from server.discovery.protocol_prober import probe_pjlink
-        assert 4352 in _PORT_PROBES
-        assert probe_pjlink in _PORT_PROBES[4352]
+    def test_pjlink_class1_no_longer_built_in(self):
+        # Phase 9.7: PJLink Class 1 (TCP 4352) discovery is owned by
+        # the pjlink_class1 sibling _discovery.py companion now, not
+        # by a built-in port handler. Port 4352 should NOT appear in
+        # _PORT_PROBES.
+        assert 4352 not in _PORT_PROBES
 
     def test_samsung_mdc_still_on_1515(self):
         from server.discovery.protocol_prober import probe_samsung_mdc

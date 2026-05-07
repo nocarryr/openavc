@@ -23,7 +23,6 @@ const DISALLOWED_TCP_PROBE_PORTS: ReadonlySet<number> = new Set([
 ]);
 
 const ALLOWED_ACTIVE_PROBES = [
-  "pjlink_class1",
   "extron_sis",
   "tesira_ttp",
   "qrc",
@@ -186,54 +185,96 @@ export function DiscoveryHintsEditor({ draft, onUpdate }: DiscoveryHintsEditorPr
         </div>
       </div>
 
-      {/* Tier 2 */}
+      {/* Tier 2 — ONVIF only; PJLink/CIP moved to companions */}
       <div style={sectionStyle}>
         <label style={labelStyle}>Tier 2 — broadcast probes</label>
-        <div style={checkboxRow}>
-          <input
-            id="discovery-pjlink2"
-            type="checkbox"
-            checked={!!hints.pjlink_class2}
-            onChange={(e) => update({ pjlink_class2: e.target.checked || undefined })}
-          />
-          <label htmlFor="discovery-pjlink2">PJLink Class 2 SRCH (UDP 4352)</label>
-        </div>
-        <div style={checkboxRow}>
-          <input
-            id="discovery-cip"
-            type="checkbox"
-            checked={!!hints.crestron_cip}
-            onChange={(e) => update({ crestron_cip: e.target.checked || undefined })}
-          />
-          <label htmlFor="discovery-cip">Crestron CIP (UDP 41794)</label>
+        <div style={{ ...helpStyle, marginBottom: "var(--space-sm)" }}>
+          ONVIF is the only built-in named opt-in. PJLink Class 2 and
+          Crestron CIP discovery now ship as sibling{" "}
+          <code>_discovery.py</code> companions on their respective
+          drivers — declare those via the <strong>Companion</strong>{" "}
+          section below.
         </div>
 
-        <div style={{ marginTop: "var(--space-sm)" }}>
-          <div style={checkboxRow}>
-            <input
-              id="discovery-onvif"
-              type="checkbox"
-              checked={onvifEnabled}
-              onChange={(e) => updateOnvif(e.target.checked ? "on" : "off")}
-            />
-            <label htmlFor="discovery-onvif">ONVIF WS-Discovery</label>
-          </div>
-          {onvifEnabled && (
-            <input
-              type="text"
-              placeholder="Filter by manufacturer (e.g. Axis)"
-              value={onvifManufacturer}
-              onChange={(e) => updateOnvif("manufacturer", e.target.value)}
-              style={{ marginLeft: "var(--space-md)", marginTop: "var(--space-xs)", width: "60%" }}
-            />
-          )}
-          <div style={helpStyle}>
-            Multiple camera drivers can opt in to ONVIF as long as each
-            constrains by manufacturer. The matcher uses the responder's
-            <code>Scopes</code> field to disambiguate.
-          </div>
+        <div style={checkboxRow}>
+          <input
+            id="discovery-onvif"
+            type="checkbox"
+            checked={onvifEnabled}
+            onChange={(e) => updateOnvif(e.target.checked ? "on" : "off")}
+          />
+          <label htmlFor="discovery-onvif">ONVIF WS-Discovery</label>
         </div>
+        {onvifEnabled && (
+          <input
+            type="text"
+            placeholder="Filter by manufacturer (e.g. Axis)"
+            value={onvifManufacturer}
+            onChange={(e) => updateOnvif("manufacturer", e.target.value)}
+            style={{ marginLeft: "var(--space-md)", marginTop: "var(--space-xs)", width: "60%" }}
+          />
+        )}
+        <div style={helpStyle}>
+          Multiple camera drivers can opt in to ONVIF as long as each
+          constrains by manufacturer. The matcher uses the responder's
+          <code>Scopes</code> field to disambiguate.
+        </div>
+      </div>
 
+      {/* Phase 9.7: companion declaration */}
+      <div style={sectionStyle}>
+        <label style={labelStyle}>Companion ( _discovery.py )</label>
+        <div style={{ ...helpStyle, marginBottom: "var(--space-sm)" }}>
+          Set when this driver ships a sibling{" "}
+          <code>{"<driver_id>_discovery.py"}</code> file alongside its
+          driver definition. The platform auto-registers two synthetic
+          probe IDs (Tier 2 broadcast + Tier 3 active) the companion
+          emits with — that's how the matcher binds companion-emitted
+          evidence back to your driver.
+        </div>
+        <div style={checkboxRow}>
+          <input
+            id="discovery-companion"
+            type="checkbox"
+            checked={hints.companion !== undefined}
+            onChange={(e) => {
+              if (e.target.checked) {
+                update({ companion: { generic: false } });
+              } else {
+                const { companion: _drop, ...rest } = hints;
+                onUpdate({ discovery: rest });
+              }
+            }}
+          />
+          <label htmlFor="discovery-companion">
+            Driver ships a <code>_discovery.py</code> companion
+          </label>
+        </div>
+        {hints.companion !== undefined && (
+          <div style={{ marginLeft: "var(--space-md)", marginTop: "var(--space-xs)" }}>
+            <div style={checkboxRow}>
+              <input
+                id="discovery-companion-generic"
+                type="checkbox"
+                checked={!!hints.companion?.generic}
+                onChange={(e) =>
+                  update({ companion: { generic: e.target.checked } })
+                }
+              />
+              <label htmlFor="discovery-companion-generic">
+                Cross-vendor anchor (generic)
+              </label>
+            </div>
+            <div style={helpStyle}>
+              Set <code>generic</code> when the companion identifies
+              devices from multiple vendors (PJLink projectors, Crestron
+              family, etc.). The matcher demotes this driver to an
+              alternative when a vendor-specific peer driver matches
+              the same device via <code>vendor_aliases</code>, OUI, or
+              hostname soft signals.
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Phase 9: driver-declared custom probes */}
@@ -297,8 +338,11 @@ export function DiscoveryHintsEditor({ draft, onUpdate }: DiscoveryHintsEditorPr
         </div>
         <div style={helpStyle}>
           Targeted TCP probes that fire when the device responds to a port
-          scan. Adding a new probe ID requires landing it in
-          <code>protocol_prober.py</code> first.
+          scan. Adding a new built-in probe ID requires landing it in
+          <code>protocol_prober.py</code> first; otherwise use{" "}
+          <strong>tcp_active_probe</strong> above for declarative wire
+          formats or a <code>_discovery.py</code> companion (Companion
+          section) for anything that needs Python.
         </div>
       </div>
 

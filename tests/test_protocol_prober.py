@@ -5,7 +5,6 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 from server.discovery.protocol_prober import (
     probe_banner,
-    probe_pjlink,
     probe_samsung_mdc,
     probe_visca,
     probe_crestron_cip,
@@ -140,80 +139,9 @@ class TestProbeBannerDispatcher:
         assert results[0].manufacturer == "Extron"
 
 
-# ===== PJLink Probe Tests =====
-
-
-class TestPJLinkProbe:
-    @pytest.mark.asyncio
-    async def test_successful_probe(self):
-        """Test PJLink probe with mocked TCP responses."""
-        responses = [
-            b"PJLINK 0\r",         # Greeting
-            b"%1CLSS=1\r",         # Class 1
-            b"%1INF1=NEC\r",       # Manufacturer
-            b"%1INF2=PA1004UL\r",  # Product
-            b"%1NAME=Room101\r",   # Name
-            b"%1LAMP=12345 1\r",   # Lamp hours
-        ]
-        with patch(
-            "server.discovery.protocol_prober._tcp_multi_exchange",
-            new_callable=AsyncMock,
-            return_value=responses,
-        ):
-            result = await probe_pjlink("192.168.1.72")
-
-        assert result is not None
-        assert result.protocol == "pjlink"
-        assert result.manufacturer == "NEC"
-        assert result.model == "PA1004UL"
-        assert result.device_name == "Room101"
-        assert result.category == "projector"
-        assert result.extra.get("pjlink_class") == "1"
-        assert result.extra.get("lamp_hours") == 12345
-
-    @pytest.mark.asyncio
-    async def test_auth_required_still_identifies(self):
-        """PJLink with auth still gets identified as PJLink."""
-        responses = [
-            b"PJLINK 1 abcdef\r",  # Auth required
-            b"%1CLSS=ERRA\r",      # Error (no auth)
-            b"%1INF1=ERRA\r",
-            b"%1INF2=ERRA\r",
-            b"%1NAME=ERRA\r",
-            b"%1LAMP=ERRA\r",
-        ]
-        with patch(
-            "server.discovery.protocol_prober._tcp_multi_exchange",
-            new_callable=AsyncMock,
-            return_value=responses,
-        ):
-            result = await probe_pjlink("192.168.1.72")
-
-        assert result is not None
-        assert result.protocol == "pjlink"
-        assert result.category == "projector"
-        # Fields may be None since auth was required
-        assert result.manufacturer is None  # ERRA is filtered
-
-    @pytest.mark.asyncio
-    async def test_no_response(self):
-        with patch(
-            "server.discovery.protocol_prober._tcp_multi_exchange",
-            new_callable=AsyncMock,
-            return_value=[],
-        ):
-            result = await probe_pjlink("192.168.1.72")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_non_pjlink_response(self):
-        with patch(
-            "server.discovery.protocol_prober._tcp_multi_exchange",
-            new_callable=AsyncMock,
-            return_value=[b"Something else\r"],
-        ):
-            result = await probe_pjlink("192.168.1.72")
-        assert result is None
+# PJLink Class 1 + Class 2 discovery moved to a sibling _discovery.py
+# companion (Phase 9.7); the parser tests live in
+# openavc-drivers/tests/test_pjlink_class1_discovery.py.
 
 
 # ===== Samsung MDC Probe Tests =====
@@ -349,22 +277,22 @@ class TestProbeDevice:
         assert extron.protocol == "extron_sis"
 
     @pytest.mark.asyncio
-    async def test_pjlink_port_triggers_probe(self):
-        """Port 4352 should trigger a PJLink probe."""
+    async def test_visca_port_triggers_probe(self):
+        """Port 10500 (VISCA-IP) should trigger a VISCA probe."""
         import server.discovery.protocol_prober as prober_mod
         mock_fn = AsyncMock(return_value=ProbeResult(
-            protocol="pjlink", manufacturer="NEC", model="PA1004UL", category="projector",
+            protocol="visca", manufacturer="Sony", category="camera",
         ))
-        orig = prober_mod._PORT_PROBES[4352]
-        prober_mod._PORT_PROBES[4352] = [mock_fn]
+        orig = prober_mod._PORT_PROBES[10500]
+        prober_mod._PORT_PROBES[10500] = [mock_fn]
         try:
-            results = await probe_device("192.168.1.72", open_ports=[4352])
+            results = await probe_device("192.168.1.72", open_ports=[10500])
         finally:
-            prober_mod._PORT_PROBES[4352] = orig
+            prober_mod._PORT_PROBES[10500] = orig
 
         assert len(results) == 1
-        assert results[0].protocol == "pjlink"
-        assert results[0].manufacturer == "NEC"
+        assert results[0].protocol == "visca"
+        assert results[0].manufacturer == "Sony"
 
     @pytest.mark.asyncio
     async def test_samsung_port_triggers_probe(self):
@@ -385,27 +313,27 @@ class TestProbeDevice:
 
     @pytest.mark.asyncio
     async def test_multiple_ports_multiple_results(self):
-        """Device with both PJLink and Samsung MDC ports gets both probed."""
+        """Device with both VISCA and Samsung MDC ports gets both probed."""
         import server.discovery.protocol_prober as prober_mod
-        mock_pjlink = AsyncMock(return_value=ProbeResult(
-            protocol="pjlink", manufacturer="NEC", category="projector",
+        mock_visca = AsyncMock(return_value=ProbeResult(
+            protocol="visca", manufacturer="Sony", category="camera",
         ))
         mock_samsung = AsyncMock(return_value=ProbeResult(
             protocol="samsung_mdc", manufacturer="Samsung", category="display",
         ))
-        orig_4352 = prober_mod._PORT_PROBES[4352]
+        orig_10500 = prober_mod._PORT_PROBES[10500]
         orig_1515 = prober_mod._PORT_PROBES[1515]
-        prober_mod._PORT_PROBES[4352] = [mock_pjlink]
+        prober_mod._PORT_PROBES[10500] = [mock_visca]
         prober_mod._PORT_PROBES[1515] = [mock_samsung]
         try:
-            results = await probe_device("192.168.1.72", open_ports=[4352, 1515])
+            results = await probe_device("192.168.1.72", open_ports=[10500, 1515])
         finally:
-            prober_mod._PORT_PROBES[4352] = orig_4352
+            prober_mod._PORT_PROBES[10500] = orig_10500
             prober_mod._PORT_PROBES[1515] = orig_1515
 
         assert len(results) == 2
         protocols = {r.protocol for r in results}
-        assert "pjlink" in protocols
+        assert "visca" in protocols
         assert "samsung_mdc" in protocols
 
     @pytest.mark.asyncio
@@ -418,12 +346,12 @@ class TestProbeDevice:
         """Probe that throws an exception should not crash the dispatcher."""
         import server.discovery.protocol_prober as prober_mod
         mock_fn = AsyncMock(side_effect=ConnectionRefusedError("refused"))
-        orig = prober_mod._PORT_PROBES[4352]
-        prober_mod._PORT_PROBES[4352] = [mock_fn]
+        orig = prober_mod._PORT_PROBES[10500]
+        prober_mod._PORT_PROBES[10500] = [mock_fn]
         try:
-            results = await probe_device("192.168.1.72", open_ports=[4352])
+            results = await probe_device("192.168.1.72", open_ports=[10500])
         finally:
-            prober_mod._PORT_PROBES[4352] = orig
+            prober_mod._PORT_PROBES[10500] = orig
         # Should not crash, just return empty or skip the failed probe
         assert isinstance(results, list)
 
@@ -477,35 +405,31 @@ class TestEngineWithProbes:
              patch("server.discovery.engine.SSDPScanner") as ssdp_cls, \
              patch("server.discovery.engine.AMXDDPScanner") as amx_cls, \
              patch("server.discovery.engine.SNMPScanner") as snmp_cls, \
-             patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
-             patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
 
             self._configure_passive_mocks(mdns_cls, ssdp_cls, snmp_cls, amx_cls)
-            mock_ping.return_value = ["192.168.1.72"]
-            mock_arp.return_value = {"192.168.1.72": "04:fe:31:aa:bb:cc"}
-            mock_ports.return_value = [4352, 80]
+            mock_ping.return_value = ["192.168.1.50"]
+            mock_arp.return_value = {"192.168.1.50": "00:05:a6:12:34:56"}
+            mock_ports.return_value = [23]
             mock_banners.return_value = {}
             mock_probes.return_value = [
                 ProbeResult(
-                    protocol="pjlink",
-                    manufacturer="NEC",
-                    model="PA1004UL",
-                    device_name="Room101 Projector",
-                    category="projector",
+                    protocol="extron_sis",
+                    manufacturer="Extron",
+                    model="DTP CrossPoint 84",
+                    category="switcher",
                 ),
             ]
 
             await engine._scan_pipeline(["192.168.1.0/24"])
 
-        device = engine.results.get("192.168.1.72")
+        device = engine.results.get("192.168.1.50")
         assert device is not None
-        assert device.manufacturer == "NEC"
-        assert device.model == "PA1004UL"
-        assert device.device_name == "Room101 Projector"
-        assert "pjlink" in device.protocols
-        assert any(e.source == "probe:pjlink_class1" for e in device.evidence_log)
+        assert device.manufacturer == "Extron"
+        assert device.model == "DTP CrossPoint 84"
+        assert "extron_sis" in device.protocols
+        assert any(e.source == "probe:extron_sis" for e in device.evidence_log)
 
     @pytest.mark.asyncio
     async def test_pipeline_banner_enriches_device(self):
@@ -523,8 +447,6 @@ class TestEngineWithProbes:
              patch("server.discovery.engine.SSDPScanner") as ssdp_cls, \
              patch("server.discovery.engine.AMXDDPScanner") as amx_cls, \
              patch("server.discovery.engine.SNMPScanner") as snmp_cls, \
-             patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
-             patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
 

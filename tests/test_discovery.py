@@ -313,8 +313,6 @@ class TestDiscoveryEngine:
                              patch("server.discovery.engine.AMXDDPScanner") as mock_amx_cls, \
                              patch("server.discovery.engine.SNMPScanner") as mock_snmp_cls, \
                              patch.object(self.engine.community_index, "get_drivers", new_callable=AsyncMock, return_value=[]), \
-                             patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
-                             patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
                              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
                              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
                             mock_mdns = MagicMock()

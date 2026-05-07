@@ -163,13 +163,14 @@ def _load_python_driver_info(rel_path: str) -> dict:
 
 
 def test_nec_projector_pjlink_plus_oui_picks_sharp_nec() -> None:
-    """Real-catalog regression for Phase 8.5.
+    """Real-catalog regression for Phase 8.5 / 9.7.
 
-    ``pjlink_class1.py`` declares the generic PJLink Class 1 active probe;
+    ``pjlink_class1.py`` declares the PJLink Class 1 + Class 2 discovery
+    via a sibling _discovery.py companion (``companion: {generic: true}``);
     ``sharp_nec_projector.py`` declares NEC OUI prefixes. With both signals
-    present (a Sharp/NEC projector responding to PJLink probe on its NEC-
-    OUI MAC), the matcher must prefer the brand-specific driver and
-    expose PJLink as an alternative.
+    present (a Sharp/NEC projector identified by the companion's TCP probe
+    on its NEC-OUI MAC), the matcher must prefer the brand-specific driver
+    and expose PJLink as an alternative.
     """
     pjlink_info = _load_python_driver_info("projectors/pjlink_class1.py")
     sharp_nec_info = _load_python_driver_info("projectors/sharp_nec_projector.py")
@@ -180,15 +181,17 @@ def test_nec_projector_pjlink_plus_oui_picks_sharp_nec() -> None:
     sharp_nec_hint = parse_driver_discovery(sharp_nec_info)
     assert pjlink_hint is not None
     assert sharp_nec_hint is not None
-    assert "pjlink_class1" in pjlink_hint.active_probes
+    assert pjlink_hint.companion is not None
+    assert pjlink_hint.companion.generic is True
     assert "00:30:13" in sharp_nec_hint.oui_prefixes
 
     idx = build_signal_index([pjlink_hint, sharp_nec_hint])
     matcher = TierMatcher(idx)
 
+    # Companion emits Tier 3 evidence under its canonical synthetic ID.
     result = matcher.match([
         evidence_active_probe(
-            "pjlink_class1",
+            pjlink_hint.companion.active_probe_id,
             {"manufacturer": "NEC", "model": "PA1004UL"},
         ),
         evidence_oui("00:30:13:11:22:33"),
@@ -203,13 +206,15 @@ def test_nec_projector_pjlink_plus_oui_picks_sharp_nec() -> None:
 
 
 def test_nec_pe456_via_pjlink_vendor_string_picks_sharp_nec() -> None:
-    """Phase 8.6 catalog regression — Aaron's exact PE456 case.
+    """Phase 8.6 / 9.7 catalog regression — Aaron's exact PE456 case.
 
-    With Phase 8.6 wired, an NEC projector that responds to PJLink
-    Class 1 ``%1MNFR? -> NEC`` must surface ``sharp_nec_projector``
-    even when the device's OUI is *not* in the driver's
-    ``oui_prefixes`` list. The catalog's declared ``vendor_aliases``
-    is the load-bearing soft signal here — no OUI evidence emitted.
+    An NEC projector that responds to PJLink Class 1 ``%1MNFR? -> NEC``
+    must surface ``sharp_nec_projector`` even when the device's OUI is
+    *not* in the driver's ``oui_prefixes`` list. The catalog's declared
+    ``vendor_aliases`` is the load-bearing soft signal — no OUI evidence
+    emitted. After Phase 9.7 the PJLink probe runs as a sibling
+    ``_discovery.py`` companion; the matcher consumes evidence under the
+    companion's canonical synthetic Tier 3 ID.
     """
     pjlink_info = _load_python_driver_info("projectors/pjlink_class1.py")
     sharp_nec_info = _load_python_driver_info("projectors/sharp_nec_projector.py")
@@ -217,6 +222,7 @@ def test_nec_pe456_via_pjlink_vendor_string_picks_sharp_nec() -> None:
     sharp_nec_hint = parse_driver_discovery(sharp_nec_info)
     assert pjlink_hint is not None
     assert sharp_nec_hint is not None
+    assert pjlink_hint.companion is not None
     # Sanity: the catalog actually declares the alias the engine will
     # extract. If this fails, sharp_nec_projector regressed.
     assert "nec" in sharp_nec_hint.vendor_aliases
@@ -225,12 +231,12 @@ def test_nec_pe456_via_pjlink_vendor_string_picks_sharp_nec() -> None:
     matcher = TierMatcher(idx)
 
     # Build the same evidence shape the engine produces in production:
-    # the PJLink probe lands a Tier 3 active_probe record carrying
-    # manufacturer in its response, then the engine appends Tier 4
-    # vendor_string evidence via extract_vendor_strings.
+    # the companion's TCP probe lands a Tier 3 active_probe record
+    # carrying manufacturer in its response, then the engine appends
+    # Tier 4 vendor_string evidence via extract_vendor_strings.
     log: list = [
         evidence_active_probe(
-            "pjlink_class1",
+            pjlink_hint.companion.active_probe_id,
             {"manufacturer": "NEC", "model": "PE456_Series"},
         ),
     ]

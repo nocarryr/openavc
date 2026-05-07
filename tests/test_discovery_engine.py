@@ -396,8 +396,6 @@ class TestScanPipeline:
              patch("server.discovery.engine.SSDPScanner", mock_ssdp_cls), \
              patch("server.discovery.engine.AMXDDPScanner", mock_amx_cls), \
              patch("server.discovery.engine.SNMPScanner", mock_snmp_cls), \
-             patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
-             patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
             await self.engine._scan_pipeline(["192.168.1.0/30"])
@@ -418,8 +416,6 @@ class TestScanPipeline:
              patch("server.discovery.engine.SSDPScanner", mock_ssdp_cls), \
              patch("server.discovery.engine.AMXDDPScanner", mock_amx_cls), \
              patch("server.discovery.engine.SNMPScanner", mock_snmp_cls), \
-             patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
-             patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
 
@@ -455,8 +451,6 @@ class TestScanPipeline:
              patch("server.discovery.engine.SSDPScanner", mock_ssdp_cls), \
              patch("server.discovery.engine.AMXDDPScanner", mock_amx_cls), \
              patch("server.discovery.engine.SNMPScanner", mock_snmp_cls), \
-             patch("server.discovery.engine.probe_pjlink_class2", new_callable=AsyncMock, return_value={}), \
-             patch("server.discovery.engine.probe_crestron_cip", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
             await self.engine._scan_pipeline(["192.168.1.0/24"])
@@ -497,8 +491,11 @@ class TestDriverMatching:
                 "manufacturer": "Generic",
                 "transport": "tcp",
                 "discovery": {
-                    "active_probes": ["pjlink_class1"],
-                    "pjlink_class2": True,
+                    # Phase 9.7: PJLink discovery is hosted by the
+                    # sibling _discovery.py companion. The companion
+                    # block auto-registers two synthetic SignalRules.
+                    "companion": {"generic": True},
+                    "open_ports": [4352],
                 },
             }
         ]

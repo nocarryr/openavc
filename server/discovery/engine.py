@@ -30,10 +30,6 @@ from server.discovery.mdns_scanner import (
 from server.discovery.ssdp_scanner import SSDPScanner
 from server.discovery.snmp_scanner import SNMPScanner
 from server.discovery.amx_ddp_scanner import AMXDDPScanner
-from server.discovery.broadcast_probes import (
-    probe_crestron_cip,
-    probe_pjlink_class2,
-)
 from server.discovery.probe_runner import (
     RateLimiter,
     run_tcp_active_probe,
@@ -171,8 +167,7 @@ def _broadcast_addresses_for(subnets: list[str]) -> list[str]:
     """Return the directed broadcast address for each CIDR.
 
     Skips invalid CIDRs and prefixes with no meaningful broadcast
-    address (/31 and /32). Mirrors the helper in broadcast_probes
-    so the engine stays self-contained.
+    address (/31 and /32).
     """
     out: list[str] = []
     for cidr in subnets:
@@ -968,40 +963,30 @@ class DiscoveryEngine:
         control_ip: str,
         alive_ips: list[str],
     ) -> None:
-        """Send Tier 2 broadcast probes (PJLink Class 2, Crestron CIP, ONVIF).
+        """Send the built-in Tier 2 ONVIF broadcast probe.
 
-        Each probe family is opt-in per driver; we send the probe only if
-        at least one driver claims the corresponding ``broadcast_probes``
-        signal in its discovery hints. Runs all three concurrently with a
-        short ceiling to fit inside the active-probe phase.
+        ONVIF is the only remaining built-in Tier 2 named opt-in: PJLink
+        Class 2 and Crestron CIP discovery now ship as ``_discovery.py``
+        companions (see Discovery Spec §11). The probe fires only if at
+        least one driver claims ``onvif:`` (any form) in its discovery
+        hints.
 
-        Network-safety: every socket binds to ``control_ip`` when set so
-        the OS doesn't pick a Docker / VPN source IP that would be dropped
-        by ``rp_filter`` on multi-homed hosts. See network-safety preserve
-        list in the redesign plan.
+        Network-safety: the socket binds to ``control_ip`` when set so
+        the OS doesn't pick a Docker / VPN source IP that would be
+        dropped by ``rp_filter`` on multi-homed hosts.
         """
+        del alive_ips  # ONVIF is multicast — no per-host targeting.
         wanted: set[str] = set()
         for hint in self.discovery_hints:
             wanted.update(hint.broadcast_probes)
-        if not wanted:
+        if "onvif" not in wanted:
             return
 
-        tasks: list[asyncio.Task] = []
-        if "pjlink_class2" in wanted:
-            tasks.append(asyncio.create_task(probe_pjlink_class2(
-                subnets, duration=5.0, control_ip=control_ip,
-            )))
-        if "crestron_cip" in wanted and alive_ips:
-            tasks.append(asyncio.create_task(probe_crestron_cip(
-                list(alive_ips), duration=3.0, control_ip=control_ip,
-            )))
-        if "onvif" in wanted:
-            tasks.append(asyncio.create_task(probe_onvif(
+        tasks: list[asyncio.Task] = [
+            asyncio.create_task(probe_onvif(
                 duration=4.0, control_ip=control_ip,
-            )))
-
-        if not tasks:
-            return
+            )),
+        ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
@@ -1137,6 +1122,7 @@ class DiscoveryEngine:
             companion_tasks = []
             for driver_id, probe_fn in self._discovery_companions.items():
                 ctx = ProbeContext(
+                    driver_id=driver_id,
                     source_ip=control_ip,
                     target_subnets=tuple(subnets),
                     timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,

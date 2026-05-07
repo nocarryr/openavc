@@ -141,91 +141,11 @@ async def _tcp_multi_exchange(
     return responses
 
 
-# ---------------------------------------------------------------------------
-# PJLink Probe (port 4352)
-# ---------------------------------------------------------------------------
-
-async def probe_pjlink(ip: str, port: int = 4352) -> ProbeResult | None:
-    """Identify a PJLink projector.
-
-    PJLink devices send a greeting on connect:
-      "PJLINK 0\\r"  (no auth)
-      "PJLINK 1 <random>\\r"  (auth required)
-
-    Then we query:
-      %1CLSS  → Class (1 or 2)
-      %1INF1  → Manufacturer
-      %1INF2  → Product name
-      %1NAME  → User-assigned name
-      %1LAMP  → Lamp hours
-    """
-    responses = await _tcp_multi_exchange(
-        ip, port,
-        commands=[
-            b"%1CLSS\r",
-            b"%1INF1\r",
-            b"%1INF2\r",
-            b"%1NAME\r",
-            b"%1LAMP\r",
-        ],
-        read_first=True,
-        delay=0.15,
-    )
-
-    if not responses:
-        return None
-
-    # Check greeting — must be present and valid
-    greeting_raw = responses[0]
-    if not greeting_raw:
-        return None
-    greeting = greeting_raw.decode("utf-8", errors="replace").strip()
-    if not greeting.startswith("PJLINK"):
-        return None
-
-    result = ProbeResult(protocol="pjlink", category="projector")
-
-    def _parse_resp(data: bytes | None, prefix: str) -> str | None:
-        if not data:
-            return None
-        text = data.decode("utf-8", errors="replace").strip()
-        if text.startswith(prefix + "="):
-            val = text[len(prefix) + 1:].strip()
-            if val and val != "ERR" and not val.startswith("ERR"):
-                return val
-        return None
-
-    # Parse responses (index 0 = greeting, 1-5 = command responses)
-    # Each response may be None if it timed out — _parse_resp handles this
-    if len(responses) > 1:
-        cls = _parse_resp(responses[1], "%1CLSS")
-        if cls:
-            result.extra["pjlink_class"] = cls
-
-    if len(responses) > 2:
-        mfg = _parse_resp(responses[2], "%1INF1")
-        if mfg:
-            result.manufacturer = mfg
-
-    if len(responses) > 3:
-        product = _parse_resp(responses[3], "%1INF2")
-        if product:
-            result.model = product
-
-    if len(responses) > 4:
-        name = _parse_resp(responses[4], "%1NAME")
-        if name:
-            result.device_name = name
-
-    if len(responses) > 5:
-        lamp_raw = _parse_resp(responses[5], "%1LAMP")
-        if lamp_raw:
-            # Format: "12345 1" (hours, lamp on/off)
-            parts = lamp_raw.split()
-            if parts and parts[0].isdigit():
-                result.extra["lamp_hours"] = int(parts[0])
-
-    return result
+# PJLink Class 1 + Class 2 discovery moved to a sibling
+# ``pjlink_class1_discovery.py`` companion in openavc-drivers/projectors/
+# (Phase 9.7 discovery anchor driver pattern). The platform no longer
+# ships a built-in handler for it — the companion does the SRCH
+# broadcast plus per-responder TCP/4352 INFO query.
 
 
 # ---------------------------------------------------------------------------
@@ -316,19 +236,12 @@ def _probe_banner_shure(banner: str) -> ProbeResult | None:
     )
 
 
-def _probe_banner_pjlink(banner: str) -> ProbeResult | None:
-    """Match a PJLink greeting banner."""
-    if not banner.startswith("PJLINK"):
-        return None
-    return ProbeResult(
-        protocol="pjlink",
-        category="projector",
-    )
+# PJLink banner matching is handled by the pjlink_class1 companion's
+# TCP/4352 probe (Phase 9.7); not duplicated here.
 
 
 # All banner matchers, tried in order
 _BANNER_PROBES = [
-    _probe_banner_pjlink,
     _probe_banner_extron,
     _probe_banner_biamp,
     _probe_banner_qsc,
@@ -689,7 +602,6 @@ async def probe_yamaha_rcp(ip: str, port: int = 49280) -> ProbeResult | None:
 # Map probe protocol -> stable probe_id used as Evidence source_id.
 # Drivers reference these IDs in their discovery hints (Phase 6).
 _PROBE_ID_FOR_PROTOCOL: dict[str, str] = {
-    "pjlink": "pjlink_class1",
     "extron_sis": "extron_sis",
     "biamp_tesira": "tesira_ttp",
     "qsc_qrc": "qrc",
@@ -750,7 +662,9 @@ _PORT_PROBES: dict[int, list] = {
     1515: [probe_samsung_mdc],
     1688: [probe_crestron_cip],
     1710: [probe_qsys_qrc],
-    4352: [probe_pjlink],
+    # TCP 4352 (PJLink Class 1) is probed by the pjlink_class1 sibling
+    # companion (openavc-drivers/projectors/pjlink_class1_discovery.py),
+    # not by a built-in port handler.
     10500: [probe_visca],
     49280: [probe_yamaha_rcp],
 }

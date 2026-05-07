@@ -65,8 +65,8 @@ log = logging.getLogger("discovery.tier_matcher")
 KIND_MDNS = "mdns"
 KIND_SSDP = "ssdp"
 KIND_AMX_DDP = "amx_ddp"
-KIND_BROADCAST = "broadcast"     # PJLink Class 2 SRCH, Crestron CIP, ONVIF, HiQnet, Symetrix
-KIND_ACTIVE_PROBE = "probe"      # PJLink Class 1, Extron SIS, Samsung MDC, etc.
+KIND_BROADCAST = "broadcast"     # ONVIF (built-in named opt-in) + driver-declared / companion probes
+KIND_ACTIVE_PROBE = "probe"      # Extron SIS, Samsung MDC, Q-SYS QRC, ... + driver-declared / companion probes
 
 KIND_OUI = "oui"                       # Tier 4 soft
 KIND_SNMP_PEN = "snmp_pen"             # Tier 4 soft
@@ -89,13 +89,14 @@ _SOFT_KINDS = {
 # should still consult Tier 4 soft signals for a vendor-specific
 # alternative and return the vendor-specific driver as primary.
 #
-# Add new entries here when a generic catch-all probe lands in the
-# catalog (e.g. a generic SNMP sysObjectID matcher). When Phase 9 ships
-# driver-declarative probes, those will need a parallel ``generic:``
-# declaration in their schema.
+# After Phase 9.7, only ONVIF remains as a built-in named opt-in. PJLink
+# Class 1 + Class 2 and Crestron CIP shipped as ``_discovery.py``
+# companions ride the schema's ``discovery.companion.generic: true``
+# flag instead — that registers their synthetic IDs with
+# ``SignalRule.generic = True`` directly. New built-in cross-vendor
+# probes belong here only when they're shipped as platform handlers,
+# not as companions.
 _GENERIC_STRONG_PROBE_IDS: frozenset[str] = frozenset({
-    "pjlink_class1",   # Tier 3 active probe (TCP 4352)
-    "pjlink_class2",   # Tier 2 broadcast probe (UDP 4352)
     "onvif",           # Tier 2 broadcast — generic only when unfiltered
 })
 
@@ -114,10 +115,12 @@ class SignalRule:
             - ``KIND_MDNS``: service type, e.g. ``"_netaudio-cmc._udp.local."``
             - ``KIND_SSDP``: UPnP device type URN
             - ``KIND_AMX_DDP``: ``"<Make>/<ModelGlob>"``, e.g. ``"Polycom/SoundStructure*"``
-            - ``KIND_BROADCAST``: probe id, e.g. ``"pjlink_class2"``, ``"crestron_cip"``,
-              ``"onvif"``, or a Phase 9 driver-declared ``"custom_<driver_id>_udp"``
-            - ``KIND_ACTIVE_PROBE``: probe id, e.g. ``"pjlink_class1"``, ``"extron_sis"``,
-              ``"samsung_mdc"``, ``"visca"``, ``"qrc"``
+            - ``KIND_BROADCAST``: probe id, e.g. ``"onvif"``, a Phase 9
+              driver-declared ``"custom_<driver_id>_udp"``, or a Phase
+              9.7 companion-declared ``"custom_<driver_id>_companion_udp"``
+            - ``KIND_ACTIVE_PROBE``: probe id, e.g. ``"extron_sis"``,
+              ``"samsung_mdc"``, ``"visca"``, ``"qrc"``, or a synthetic
+              ``"custom_<driver_id>_<udp|tcp|companion_udp|companion_tcp>"``
             - ``KIND_OUI``: 6-char OUI prefix, lowercase, e.g. ``"00:0c:4d"``
             - ``KIND_SNMP_PEN``: integer Private Enterprise Number as string
             - ``KIND_HOSTNAME``: regex source string (compiled lazily by the index)

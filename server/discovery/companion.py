@@ -59,8 +59,25 @@ class ProbeContext:
     ``emit_active``, or ``emit_oui``. Each call routes the resulting
     Evidence to the matching device record in the engine's results
     dict, so the matcher picks it up the same way as built-in probes.
+
+    Canonical synthetic probe IDs
+    -----------------------------
+    A companion declared via ``discovery.companion`` in the driver's
+    .avcdriver auto-registers two ``SignalRule`` records — one Tier 2
+    broadcast, one Tier 3 active — under the IDs:
+
+      ``custom_<driver_id>_companion_udp`` → Tier 2 (broadcast)
+      ``custom_<driver_id>_companion_tcp`` → Tier 3 (active)
+
+    Use ``emit_broadcast`` / ``emit_active`` with no ``probe_id``
+    argument to emit under those canonical IDs (matching the
+    auto-registered rules so the matcher identifies the device as
+    this companion's driver). Pass an explicit ``probe_id`` only
+    when emitting evidence that overlaps with a different driver's
+    registered probe — rare; you'll usually let the default fire.
     """
 
+    driver_id: str
     source_ip: str
     target_subnets: tuple[str, ...]
     timeout_seconds: float
@@ -68,22 +85,35 @@ class ProbeContext:
     # Engine-supplied callback. Treat as private to the companion API.
     _emit_for_host: Callable[[str, Evidence], Awaitable[None]] = field(repr=False)
 
+    @property
+    def companion_broadcast_probe_id(self) -> str:
+        """Canonical Tier 2 synthetic ID for this companion."""
+        return f"custom_{self.driver_id}_companion_udp"
+
+    @property
+    def companion_active_probe_id(self) -> str:
+        """Canonical Tier 3 synthetic ID for this companion."""
+        return f"custom_{self.driver_id}_companion_tcp"
+
     async def emit_broadcast(
         self,
-        probe_id: str,
         host: str,
         *,
+        probe_id: str | None = None,
         response: dict[str, Any] | None = None,
         txt: dict[str, str] | None = None,
     ) -> None:
         """Emit a Tier 2 broadcast probe response from ``host``.
 
-        Reserved keys (``manufacturer``, ``make``) inside ``txt`` are
-        lifted to the Phase 8.6 vendor_string path automatically by
-        the engine's ``extract_vendor_strings`` finalize step.
+        Defaults ``probe_id`` to ``custom_<driver_id>_companion_udp``
+        — the canonical synthetic ID auto-registered when the driver
+        declares ``discovery.companion``. Reserved keys
+        (``manufacturer``, ``make``) inside ``txt`` are lifted to the
+        Phase 8.6 vendor_string path automatically by the engine's
+        ``extract_vendor_strings`` finalize step.
         """
         ev = evidence_broadcast(
-            probe_id,
+            probe_id or self.companion_broadcast_probe_id,
             response=response or {"ip": host},
             txt=txt,
         )
@@ -91,12 +121,19 @@ class ProbeContext:
 
     async def emit_active(
         self,
-        probe_id: str,
         host: str,
         response: dict[str, Any],
+        *,
+        probe_id: str | None = None,
     ) -> None:
-        """Emit a Tier 3 active probe response."""
-        ev = evidence_active_probe(probe_id, response=response)
+        """Emit a Tier 3 active probe response.
+
+        Defaults ``probe_id`` to ``custom_<driver_id>_companion_tcp``.
+        """
+        ev = evidence_active_probe(
+            probe_id or self.companion_active_probe_id,
+            response=response,
+        )
         await self._emit_for_host(host, ev)
 
     async def emit_oui(

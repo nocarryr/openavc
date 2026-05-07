@@ -22,12 +22,13 @@ from server.discovery.tier_matcher import (
 log = logging.getLogger("discovery.hints")
 
 
-# Phase 9: the built-in opt-ins (``pjlink_class2: true`` etc. for
-# broadcasts, named entries in ``active_probes:`` for active probes)
-# are still gated by explicit core handlers, but unknown probe IDs no
-# longer raise. A driver that declares an active_probe ID core doesn't
-# implement is a silent no-op rather than a hard error — driver-
-# declared probes (``udp_broadcast_probe:`` / ``tcp_active_probe:``)
+# Phase 9.7: ONVIF is the only remaining built-in Tier 2 named opt-in.
+# PJLink Class 1 + Class 2 and Crestron CIP discovery now ship as
+# ``_discovery.py`` companions in their respective drivers (see the
+# discovery anchor driver pattern in OpenAVC-Discovery-Spec.md §11).
+# A driver that declares an unknown ``active_probes:`` ID is a silent
+# no-op rather than a hard error — driver-declared probes
+# (``udp_broadcast_probe:`` / ``tcp_active_probe:`` / ``companion:``)
 # carry the wire format directly and don't need a registry.
 
 # Drivers whose IDs start with these prefixes are templates, not real
@@ -41,22 +42,23 @@ DISALLOWED_OPEN_PORTS: frozenset[int] = frozenset({22, 80, 443})
 
 # Phase 9: ports owned by built-in handlers — drivers declaring a
 # ``udp_broadcast_probe`` or ``tcp_active_probe`` cannot collide on
-# them. Drivers participating in those protocols use the named opt-in
-# (``pjlink_class2: true`` etc.) instead of a custom probe.
+# them. Drivers that need PJLink (UDP 4352) or Crestron CIP (UDP 41794)
+# discovery use the ``companion:`` block + a ``_discovery.py`` sibling
+# instead — see the discovery anchor driver pattern.
 DISALLOWED_UDP_BROADCAST_PROBE_PORTS: frozenset[int] = frozenset({
     1900,   # SSDP
-    3702,   # ONVIF WS-Discovery
-    4352,   # PJLink Class 2 broadcast
+    3702,   # ONVIF WS-Discovery (named opt-in)
+    4352,   # PJLink Class 2 broadcast (companion-owned)
     5353,   # mDNS
     9131,   # AMX DDP
-    41794,  # Crestron CIP broadcast
+    41794,  # Crestron CIP broadcast (companion-owned)
 })
 DISALLOWED_TCP_ACTIVE_PROBE_PORTS: frozenset[int] = frozenset({
     23,     # Telnet (Extron SIS, Tesira TTP, Shure DCS)
     1515,   # Samsung MDC
     1688,   # Crestron CIP TCP
     1710,   # Q-SYS QRC
-    4352,   # PJLink Class 1
+    4352,   # PJLink Class 1 (companion-owned)
     10500,  # VISCA-IP
     49280,  # Yamaha RCP
 })
@@ -120,6 +122,40 @@ class CustomProbeSpec:
         return f"custom_{self.driver_id}_{self.kind}"
 
 
+@dataclass(frozen=True)
+class CompanionSpec:
+    """Driver-declared sibling ``_discovery.py`` companion.
+
+    The companion file does the actual probing (multi-step handshakes,
+    binary parsers, pre-broadcast-then-per-host TCP follow-ups — wire
+    formats too dynamic for the declarative ``udp_broadcast_probe`` /
+    ``tcp_active_probe`` blocks). Declaring ``discovery.companion`` on
+    the driver auto-registers two ``SignalRule`` records — one for
+    Tier 2 broadcast evidence, one for Tier 3 active evidence — under
+    canonical synthetic IDs the companion emits with:
+
+      ``custom_<driver_id>_companion_udp``  → Tier 2 (broadcast)
+      ``custom_<driver_id>_companion_tcp``  → Tier 3 (active)
+
+    This is the "discovery anchor driver" pattern documented in the
+    Discovery Spec §11. Set ``generic: true`` for cross-vendor probes
+    (PJLink, Crestron CIP family) so the matcher demotes the anchor
+    driver to an alternative when a vendor-specific peer driver
+    matches via soft signals.
+    """
+
+    driver_id: str
+    generic: bool
+
+    @property
+    def broadcast_probe_id(self) -> str:
+        return f"custom_{self.driver_id}_companion_udp"
+
+    @property
+    def active_probe_id(self) -> str:
+        return f"custom_{self.driver_id}_companion_tcp"
+
+
 @dataclass
 class DiscoveryHint:
     """The Phase 6 deterministic discovery hints for a single driver."""
@@ -150,6 +186,17 @@ class DiscoveryHint:
     # response" cases.
     udp_broadcast_probe: CustomProbeSpec | None = None
     tcp_active_probe: CustomProbeSpec | None = None
+
+    # Phase 9.7: sibling ``_discovery.py`` companion declaration.
+    # When set, the loader auto-registers SignalRules for the canonical
+    # synthetic IDs ``custom_<driver_id>_companion_udp`` (Tier 2) and
+    # ``custom_<driver_id>_companion_tcp`` (Tier 3). The companion emits
+    # evidence with those IDs via ``ctx.emit_broadcast`` /
+    # ``ctx.emit_active``. ``generic`` flows through to the SignalRule
+    # so the matcher's best-driver-first logic can demote a cross-vendor
+    # anchor driver to an alternative when a peer driver matches via
+    # soft signals (PJLink + Crestron-CIP family use this).
+    companion: CompanionSpec | None = None
 
     # Soft (Tier 4) enrichment hints.
     snmp_pen: int | None = None
@@ -487,11 +534,10 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
             )
         hint.amx_ddp = {"make": make, "model_pattern": str(model_pattern)}
 
-    # Tier 2 probe opt-ins.
-    if discovery.get("pjlink_class2"):
-        hint.broadcast_probes.append("pjlink_class2")
-    if discovery.get("crestron_cip"):
-        hint.broadcast_probes.append("crestron_cip")
+    # Tier 2 probe opt-ins. ONVIF is the only remaining built-in
+    # named opt-in; PJLink Class 2 and Crestron CIP discovery now
+    # ship as ``_discovery.py`` companions on their respective
+    # drivers (see the ``companion:`` block below).
     if "onvif" in discovery:
         onvif_block = discovery["onvif"]
         if onvif_block is True:
@@ -543,6 +589,32 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
             discovery["tcp_active_probe"],
             default_timeout_ms=3000,
             disallowed_ports=DISALLOWED_TCP_ACTIVE_PROBE_PORTS,
+        )
+
+    # Phase 9.7: companion declaration. Drivers shipping a sibling
+    # ``_discovery.py`` opt in here so the loader registers
+    # ``SignalRule`` records for the canonical synthetic probe IDs
+    # the companion emits with.
+    if "companion" in discovery:
+        comp_block = discovery["companion"]
+        if not isinstance(comp_block, dict):
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.companion must be a mapping "
+                "(use ``companion: {generic: bool}``)"
+            )
+        generic_raw = comp_block.get("generic", False)
+        if not isinstance(generic_raw, bool):
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.companion.generic must be a bool"
+            )
+        unknown = set(comp_block.keys()) - {"generic"}
+        if unknown:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.companion has unknown keys: "
+                f"{sorted(unknown)}. Only ``generic`` is supported."
+            )
+        hint.companion = CompanionSpec(
+            driver_id=driver_id, generic=generic_raw,
         )
 
     if "snmp_pen" in discovery:
@@ -630,6 +702,7 @@ def parse_driver_discovery(driver_info: dict[str, Any]) -> DiscoveryHint | None:
         or bool(hint.active_probes)
         or hint.udp_broadcast_probe is not None
         or hint.tcp_active_probe is not None
+        or hint.companion is not None
         or hint.snmp_pen is not None
         or bool(hint.oui_prefixes)
         or bool(hint.hostname_patterns)
@@ -731,6 +804,21 @@ def build_signal_index(hints: list[DiscoveryHint]) -> SignalIndex:
                 hint.driver_id,
                 spec.probe_id,
                 generic=spec.generic,
+            ))
+
+        # Phase 9.7: companion declaration auto-registers two synthetic
+        # probe IDs the companion emits with.
+        if hint.companion is not None:
+            comp = hint.companion
+            index.add_rule(SignalRule.for_broadcast(
+                hint.driver_id,
+                comp.broadcast_probe_id,
+                generic=comp.generic,
+            ))
+            index.add_rule(SignalRule.for_active_probe(
+                hint.driver_id,
+                comp.active_probe_id,
+                generic=comp.generic,
             ))
 
         if hint.snmp_pen is not None:

@@ -508,11 +508,10 @@ export interface DriverDiscoveryHints {
   ssdp_device_types?: string[];
   amx_ddp?: { make: string; model_pattern?: string };
 
-  // Tier 2 — opt-ins (cross-vendor open standards). Vendor-specific
-  // wire formats use the udp_broadcast_probe block below or a sibling
-  // *_discovery.py companion.
-  pjlink_class2?: boolean;
-  crestron_cip?: boolean;
+  // Tier 2 — ONVIF is the only remaining built-in named opt-in.
+  // PJLink Class 2 + Crestron CIP discovery now ship as sibling
+  // _discovery.py companions on their respective drivers (see
+  // discovery.companion below).
   onvif?: boolean | { manufacturer?: string };
 
   // Tier 3
@@ -523,6 +522,15 @@ export interface DriverDiscoveryHints {
   // probe ID and runs alongside the named built-in probes.
   udp_broadcast_probe?: DriverDiscoveryCustomProbe;
   tcp_active_probe?: DriverDiscoveryCustomProbe;
+
+  // Phase 9.7 sibling _discovery.py companion declaration. When set,
+  // the matcher auto-registers two synthetic SignalRules
+  // (custom_<driver_id>_companion_udp / _tcp) under canonical IDs the
+  // companion emits with via ctx.emit_broadcast / ctx.emit_active.
+  // generic=true marks a cross-vendor anchor driver (PJLink, Crestron
+  // CIP family) so the matcher demotes it to an alternative when a
+  // peer driver matches via vendor_aliases / OUI / hostname.
+  companion?: { generic?: boolean };
 
   // Tier 4 enrichment (soft signals)
   snmp_pen?: number;
