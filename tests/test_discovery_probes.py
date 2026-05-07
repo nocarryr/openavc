@@ -21,6 +21,7 @@ openavc-drivers, drop a fixture here); no per-driver test code.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -40,14 +41,17 @@ OPENAVC_ROOT = TESTS_DIR.parent
 WORKSPACE_ROOT = OPENAVC_ROOT.parent
 BUILTIN_DEFINITIONS_DIR = OPENAVC_ROOT / "server" / "drivers" / "definitions"
 COMMUNITY_DRIVERS_DIR = WORKSPACE_ROOT / "openavc-drivers"
+COMMUNITY_INDEX = COMMUNITY_DRIVERS_DIR / "index.json"
 
 
 def _load_driver_files(directories: list[Path]) -> list[dict[str, Any]]:
-    """Recursively load every ``*.avcdriver`` from the given directories.
+    """Recursively load every ``*.avcdriver`` from the given directories,
+    plus parse ``openavc-drivers/index.json`` for Python drivers.
 
-    Returns the raw parsed YAML dicts so callers can feed them to
-    ``parse_driver_discovery`` without going through the runtime driver
-    registry (which only exists in a started server).
+    Python drivers carry ``DRIVER_INFO`` in code, so they don't show up
+    in a YAML scan. ``build_index.py`` already extracts the discovery
+    block from each Python driver into ``index.json``, so reading the
+    catalog index gives us all drivers regardless of format.
     """
     driver_defs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -68,6 +72,22 @@ def _load_driver_files(directories: list[Path]) -> list[dict[str, Any]]:
                 continue
             seen_ids.add(driver_id)
             driver_defs.append(data)
+
+    if COMMUNITY_INDEX.exists():
+        try:
+            catalog = json.loads(COMMUNITY_INDEX.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            catalog = {}
+        for entry in catalog.get("drivers") or []:
+            if not isinstance(entry, dict):
+                continue
+            driver_id = entry.get("id")
+            if not isinstance(driver_id, str) or not driver_id:
+                continue
+            if driver_id in seen_ids:
+                continue
+            seen_ids.add(driver_id)
+            driver_defs.append(entry)
     return driver_defs
 
 
