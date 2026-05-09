@@ -2,603 +2,887 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type {
   DriverDefinition,
-  DriverDiscoveryCustomProbe,
+  DriverDiscoveryAmxDdpFingerprint,
+  DriverDiscoveryConfig,
   DriverDiscoveryExtractRule,
-  DriverDiscoveryHints,
-  DriverDiscoveryMdnsEntry,
+  DriverDiscoveryMdnsFingerprint,
+  DriverDiscoveryProbe,
+  DriverDiscoveryPython,
+  DriverDiscoverySsdpFingerprint,
 } from "../../api/types";
 
-// Mirror of `DISALLOWED_OPEN_PORTS` in server/discovery/hints.py.
-// Surfaced in the UI so driver authors see the rule at the point of
-// authoring rather than discovering it via a load-time error.
+// Mirror of DISALLOWED_OPEN_PORTS in server/discovery/hints.py — surfaced
+// here so the rule shows at authoring time, not as a load-time error.
 const DISALLOWED_OPEN_PORTS: ReadonlySet<number> = new Set([22, 80, 443]);
 
-// Mirrors of DISALLOWED_UDP_BROADCAST_PROBE_PORTS and
-// DISALLOWED_TCP_ACTIVE_PROBE_PORTS in server/discovery/hints.py.
-const DISALLOWED_UDP_PROBE_PORTS: ReadonlySet<number> = new Set([
-  1900, 3702, 4352, 5353, 9131, 41794,
-]);
-const DISALLOWED_TCP_PROBE_PORTS: ReadonlySet<number> = new Set([
-  23, 1515, 1688, 1710, 4352, 10500, 49280,
-]);
+// Style tokens.
+const SECTION: React.CSSProperties = {
+  marginBottom: "var(--space-lg)",
+  paddingBottom: "var(--space-md)",
+  borderBottom: "1px solid var(--border-color)",
+};
+const H2: React.CSSProperties = {
+  fontSize: "var(--font-size-md)",
+  fontWeight: 700,
+  marginBottom: "var(--space-xs)",
+};
+const INTRO: React.CSSProperties = {
+  fontSize: "var(--font-size-sm)",
+  color: "var(--text-muted)",
+  marginBottom: "var(--space-md)",
+};
+const LABEL: React.CSSProperties = {
+  display: "block",
+  fontSize: "var(--font-size-sm)",
+  fontWeight: 600,
+  color: "var(--text-secondary)",
+  marginTop: "var(--space-md)",
+  marginBottom: "var(--space-xs)",
+};
+const HELP: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-muted)",
+  marginTop: "var(--space-xs)",
+};
+const ROW: React.CSSProperties = {
+  display: "flex",
+  gap: "var(--space-xs)",
+  alignItems: "center",
+  marginBottom: "var(--space-xs)",
+};
+const CARD: React.CSSProperties = {
+  padding: "var(--space-sm)",
+  border: "1px solid var(--border-color)",
+  borderRadius: "var(--radius)",
+  marginBottom: "var(--space-sm)",
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--space-xs)",
+};
+const ADD: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "var(--space-xs)",
+  fontSize: "var(--font-size-sm)",
+  color: "var(--accent)",
+  padding: "var(--space-xs) 0",
+};
+const MONO: React.CSSProperties = {
+  flex: 1,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--font-size-sm)",
+};
+const FIELD_W: React.CSSProperties = { width: 110 };
 
-const ALLOWED_ACTIVE_PROBES = [
-  "extron_sis",
-  "tesira_ttp",
-  "qrc",
-  "kramer_p3000",
-  "shure_dcs",
-  "samsung_mdc",
-  "visca",
-  "crestron_cip_tcp",
-  "yamaha_rcp",
-] as const;
+// ---------------------------------------------------------------------------
+// Sugar — collapse fingerprint records to bare strings when only the
+// required field is set, so YAML output stays minimal.
+// ---------------------------------------------------------------------------
+
+const readMdns = (raw: string | DriverDiscoveryMdnsFingerprint) =>
+  typeof raw === "string" ? { service: raw } : raw;
+
+const writeMdns = (
+  fp: DriverDiscoveryMdnsFingerprint,
+): string | DriverDiscoveryMdnsFingerprint => {
+  const txt = fp.txt && Object.keys(fp.txt).length > 0 ? fp.txt : undefined;
+  if (!txt && !fp.cross_vendor) return fp.service;
+  return {
+    service: fp.service,
+    ...(txt && { txt }),
+    ...(fp.cross_vendor && { cross_vendor: true as const }),
+  };
+};
+
+const readSsdp = (raw: string | DriverDiscoverySsdpFingerprint) =>
+  typeof raw === "string" ? { device_type: raw } : raw;
+
+const writeSsdp = (fp: DriverDiscoverySsdpFingerprint) =>
+  fp.cross_vendor ? fp : fp.device_type;
+
+const readPython = (raw: string | DriverDiscoveryPython) =>
+  typeof raw === "string" ? { file: raw } : raw;
+
+const writePython = (fp: DriverDiscoveryPython) =>
+  fp.cross_vendor ? fp : fp.file;
+
+// ---------------------------------------------------------------------------
+// Top-level
+// ---------------------------------------------------------------------------
 
 interface DiscoveryHintsEditorProps {
   draft: DriverDefinition;
   onUpdate: (partial: Partial<DriverDefinition>) => void;
 }
 
-export function DiscoveryHintsEditor({ draft, onUpdate }: DiscoveryHintsEditorProps) {
-  const hints: DriverDiscoveryHints = draft.discovery ?? {};
+export function DiscoveryHintsEditor({
+  draft,
+  onUpdate,
+}: DiscoveryHintsEditorProps) {
+  const cfg: DriverDiscoveryConfig = draft.discovery ?? {};
 
-  const update = (partial: Partial<DriverDiscoveryHints>) => {
-    onUpdate({ discovery: { ...hints, ...partial } });
+  // Drop empty arrays / undefined fields so the persisted YAML stays clean.
+  const update = (next: DriverDiscoveryConfig) => {
+    const t: DriverDiscoveryConfig = {};
+    if (next.mdns?.length) t.mdns = next.mdns;
+    if (next.ssdp?.length) t.ssdp = next.ssdp;
+    if (next.amx_ddp?.length) t.amx_ddp = next.amx_ddp;
+    if (next.tcp_probe) t.tcp_probe = next.tcp_probe;
+    if (next.udp_probe) t.udp_probe = next.udp_probe;
+    if (next.python) t.python = next.python;
+    if (next.oui?.length) t.oui = next.oui;
+    if (next.hostname?.length) t.hostname = next.hostname;
+    if (next.port_open?.length) t.port_open = next.port_open;
+    if (next.manufacturer_alias?.length)
+      t.manufacturer_alias = next.manufacturer_alias;
+    if (next.snmp_pen != null) t.snmp_pen = next.snmp_pen;
+    onUpdate({ discovery: Object.keys(t).length > 0 ? t : undefined });
   };
-
-  const updateOnvif = (kind: "off" | "on" | "manufacturer", manufacturer = "") => {
-    if (kind === "off") {
-      const { onvif: _drop, ...rest } = hints;
-      onUpdate({ discovery: rest });
-    } else if (kind === "on") {
-      update({ onvif: true });
-    } else {
-      update({ onvif: { manufacturer } });
-    }
-  };
-
-  const labelStyle: React.CSSProperties = {
-    display: "block",
-    fontSize: "var(--font-size-sm)",
-    color: "var(--text-secondary)",
-    marginBottom: "var(--space-xs)",
-    fontWeight: 600,
-  };
-
-  const sectionStyle: React.CSSProperties = {
-    marginBottom: "var(--space-lg)",
-    paddingBottom: "var(--space-md)",
-    borderBottom: "1px solid var(--border-color)",
-  };
-
-  const helpStyle: React.CSSProperties = {
-    fontSize: "11px",
-    color: "var(--text-muted)",
-    marginTop: "var(--space-xs)",
-  };
-
-  const checkboxRow: React.CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "var(--space-xs)",
-    marginBottom: "var(--space-xs)",
-  };
-
-  const onvifEnabled = hints.onvif !== undefined && hints.onvif !== false;
-  const onvifManufacturer =
-    typeof hints.onvif === "object" && hints.onvif !== null
-      ? hints.onvif.manufacturer ?? ""
-      : "";
 
   return (
     <div>
-      <p style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", marginBottom: "var(--space-md)" }}>
-        Discovery hints map this driver to network signals. Strong
-        signals (Tier 1 / 2 / 3) produce an <strong>identified</strong>
-        match; soft signals (Tier 4 — OUI, hostname, open port, SNMP
-        PEN) surface the device as <strong>possible</strong> with a
-        candidate driver list. Any combination is valid. Check
-        <strong> Manual only</strong> only if the device expects manual
-        IP entry and has no network announcement at all.
-      </p>
-
-      {/* Manual only */}
-      <div style={sectionStyle}>
-        <div style={checkboxRow}>
-          <input
-            id="discovery-manual-only"
-            type="checkbox"
-            checked={!!hints.manual_only}
-            onChange={(e) => update({ manual_only: e.target.checked || undefined })}
-          />
-          <label htmlFor="discovery-manual-only" style={{ fontWeight: 600 }}>
-            Manual only
-          </label>
-        </div>
-        <div style={helpStyle}>
-          Documentation hint that this device expects manual IP entry — it
-          has no network announcement and no useful soft signal. Does not
-          affect matcher behavior; any signals declared elsewhere on this
-          driver still register normally.
-        </div>
-      </div>
-
-      {/* Tier 1 */}
-      <div style={sectionStyle}>
-        <label style={labelStyle}>Tier 1 — passive listeners</label>
-
-        <div style={{ marginBottom: "var(--space-md)" }}>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>mDNS service types</label>
-          <MdnsServicesEditor
-            entries={hints.mdns_services ?? []}
-            onChange={(items) => update({ mdns_services: items.length ? items : undefined })}
-          />
-          <div style={helpStyle}>
-            e.g. <code>_pjlink._tcp.local.</code>. Add a TXT-record filter
-            when the service type is generic (<code>_http._tcp.local.</code>)
-            so two drivers don't collide.
-          </div>
-        </div>
-
-        <div style={{ marginBottom: "var(--space-md)" }}>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>SSDP / UPnP device-type URNs</label>
-          <ListEditor
-            items={hints.ssdp_device_types ?? []}
-            onChange={(items) => update({ ssdp_device_types: items.length ? items : undefined })}
-            placeholder="urn:schemas-upnp-org:device:MediaRenderer:1"
-          />
-        </div>
-
-        <div>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>AMX DDP beacon (Make / Model pattern)</label>
-          <div style={{ display: "flex", gap: "var(--space-xs)" }}>
-            <input
-              type="text"
-              placeholder="Make (e.g. Polycom)"
-              value={hints.amx_ddp?.make ?? ""}
-              onChange={(e) => {
-                const make = e.target.value;
-                if (!make) {
-                  const { amx_ddp: _drop, ...rest } = hints;
-                  onUpdate({ discovery: rest });
-                } else {
-                  update({
-                    amx_ddp: { make, model_pattern: hints.amx_ddp?.model_pattern ?? "*" },
-                  });
-                }
-              }}
-              style={{ flex: 1 }}
-            />
-            <input
-              type="text"
-              placeholder="Model pattern (e.g. SoundStructure*)"
-              value={hints.amx_ddp?.model_pattern ?? ""}
-              disabled={!hints.amx_ddp?.make}
-              onChange={(e) =>
-                update({
-                  amx_ddp: { make: hints.amx_ddp!.make, model_pattern: e.target.value || "*" },
-                })
-              }
-              style={{ flex: 1 }}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Tier 2 — ONVIF only; PJLink/CIP moved to companions */}
-      <div style={sectionStyle}>
-        <label style={labelStyle}>Tier 2 — broadcast probes</label>
-        <div style={{ ...helpStyle, marginBottom: "var(--space-sm)" }}>
-          ONVIF is the only built-in named opt-in. PJLink Class 2 and
-          Crestron CIP discovery now ship as sibling{" "}
-          <code>_discovery.py</code> companions on their respective
-          drivers — declare those via the <strong>Companion</strong>{" "}
-          section below.
-        </div>
-
-        <div style={checkboxRow}>
-          <input
-            id="discovery-onvif"
-            type="checkbox"
-            checked={onvifEnabled}
-            onChange={(e) => updateOnvif(e.target.checked ? "on" : "off")}
-          />
-          <label htmlFor="discovery-onvif">ONVIF WS-Discovery</label>
-        </div>
-        {onvifEnabled && (
-          <input
-            type="text"
-            placeholder="Filter by manufacturer (e.g. Axis)"
-            value={onvifManufacturer}
-            onChange={(e) => updateOnvif("manufacturer", e.target.value)}
-            style={{ marginLeft: "var(--space-md)", marginTop: "var(--space-xs)", width: "60%" }}
-          />
-        )}
-        <div style={helpStyle}>
-          Multiple camera drivers can opt in to ONVIF as long as each
-          constrains by manufacturer. The matcher uses the responder's
-          <code>Scopes</code> field to disambiguate.
-        </div>
-      </div>
-
-      {/* Phase 9.7: companion declaration */}
-      <div style={sectionStyle}>
-        <label style={labelStyle}>Companion ( _discovery.py )</label>
-        <div style={{ ...helpStyle, marginBottom: "var(--space-sm)" }}>
-          Set when this driver ships a sibling{" "}
-          <code>{"<driver_id>_discovery.py"}</code> file alongside its
-          driver definition. The platform auto-registers two synthetic
-          probe IDs (Tier 2 broadcast + Tier 3 active) the companion
-          emits with — that's how the matcher binds companion-emitted
-          evidence back to your driver.
-        </div>
-        <div style={checkboxRow}>
-          <input
-            id="discovery-companion"
-            type="checkbox"
-            checked={hints.companion !== undefined}
-            onChange={(e) => {
-              if (e.target.checked) {
-                update({ companion: { generic: false } });
-              } else {
-                const { companion: _drop, ...rest } = hints;
-                onUpdate({ discovery: rest });
-              }
-            }}
-          />
-          <label htmlFor="discovery-companion">
-            Driver ships a <code>_discovery.py</code> companion
-          </label>
-        </div>
-        {hints.companion !== undefined && (
-          <div style={{ marginLeft: "var(--space-md)", marginTop: "var(--space-xs)" }}>
-            <div style={checkboxRow}>
-              <input
-                id="discovery-companion-generic"
-                type="checkbox"
-                checked={!!hints.companion?.generic}
-                onChange={(e) =>
-                  update({ companion: { generic: e.target.checked } })
-                }
-              />
-              <label htmlFor="discovery-companion-generic">
-                Cross-vendor anchor (generic)
-              </label>
-            </div>
-            <div style={helpStyle}>
-              Set <code>generic</code> when the companion identifies
-              devices from multiple vendors (PJLink projectors, Crestron
-              family, etc.). The matcher demotes this driver to an
-              alternative when a vendor-specific peer driver matches
-              the same device via <code>vendor_aliases</code>, OUI, or
-              hostname soft signals.
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Phase 9: driver-declared custom probes */}
-      <div style={sectionStyle}>
-        <label style={labelStyle}>Tier 2/3 — custom probes (driver-declared)</label>
-        <div style={{ ...helpStyle, marginBottom: "var(--space-sm)" }}>
-          When a vendor's discovery wire format isn't covered by a built-in
-          opt-in above, declare it here. The runtime sends your{" "}
-          <code>send</code> bytes, listens for <code>response_match</code>,
-          and emits Tier 2 (UDP) or Tier 3 (TCP) evidence with whatever
-          your <code>extract</code> rules pull out. <strong>Reserved
-          extract keys:</strong> <code>manufacturer</code> and <code>make</code>{" "}
-          feed the Phase 8.6 vendor_string soft-signal path automatically —
-          set them when the response carries a manufacturer string and a
-          peer driver might want to claim it via <code>vendor_aliases</code>.
-        </div>
-
-        <CustomProbeEditor
-          kind="udp"
-          probe={hints.udp_broadcast_probe}
-          disallowedPorts={DISALLOWED_UDP_PROBE_PORTS}
-          onChange={(p) => update({ udp_broadcast_probe: p })}
-        />
-        <CustomProbeEditor
-          kind="tcp"
-          probe={hints.tcp_active_probe}
-          disallowedPorts={DISALLOWED_TCP_PROBE_PORTS}
-          onChange={(p) => update({ tcp_active_probe: p })}
-        />
-
-        <div style={{ ...helpStyle, marginTop: "var(--space-sm)" }}>
-          For protocols that need multi-step handshakes, encrypted
-          payloads, or framing too dynamic for these blocks, ship a
-          sibling <code>{"<driver_id>_discovery.py"}</code> module
-          alongside the driver file (Phase 9 Python companion).
-        </div>
-      </div>
-
-      {/* Tier 3 */}
-      <div style={sectionStyle}>
-        <label style={labelStyle}>Tier 3 — active probes</label>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-sm)" }}>
-          {ALLOWED_ACTIVE_PROBES.map((probe) => {
-            const checked = (hints.active_probes ?? []).includes(probe);
-            return (
-              <label key={probe} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(e) => {
-                    const current = new Set(hints.active_probes ?? []);
-                    if (e.target.checked) current.add(probe);
-                    else current.delete(probe);
-                    update({ active_probes: current.size ? Array.from(current) : undefined });
-                  }}
-                />
-                <code style={{ fontSize: "11px" }}>{probe}</code>
-              </label>
-            );
-          })}
-        </div>
-        <div style={helpStyle}>
-          Targeted TCP probes that fire when the device responds to a port
-          scan. Adding a new built-in probe ID requires landing it in
-          <code>protocol_prober.py</code> first; otherwise use{" "}
-          <strong>tcp_active_probe</strong> above for declarative wire
-          formats or a <code>_discovery.py</code> companion (Companion
-          section) for anything that needs Python.
-        </div>
-      </div>
-
-      {/* Tier 4 enrichment */}
-      <div style={sectionStyle}>
-        <label style={labelStyle}>Tier 4 — soft enrichment hints</label>
-
-        <div style={{ marginBottom: "var(--space-md)" }}>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>SNMP PEN (IANA Private Enterprise Number)</label>
-          <input
-            type="number"
-            placeholder="e.g. 17049 for Extron"
-            value={hints.snmp_pen ?? ""}
-            onChange={(e) => {
-              const n = parseInt(e.target.value);
-              update({ snmp_pen: !isNaN(n) && n > 0 ? n : undefined });
-            }}
-            style={{ width: "200px" }}
-          />
-        </div>
-
-        <div style={{ marginBottom: "var(--space-md)" }}>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>OUI prefixes (MAC vendor blocks)</label>
-          <ListEditor
-            items={hints.oui_prefixes ?? []}
-            onChange={(items) => update({ oui_prefixes: items.length ? items : undefined })}
-            placeholder="00:05:a6"
-          />
-        </div>
-
-        <div style={{ marginBottom: "var(--space-md)" }}>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>Hostname regex patterns</label>
-          <ListEditor
-            items={hints.hostname_patterns ?? []}
-            onChange={(items) => update({ hostname_patterns: items.length ? items : undefined })}
-            placeholder="^DTP-.*"
-          />
-        </div>
-
-        <div>
-          <label style={{ ...labelStyle, fontWeight: 400 }}>Open AV ports</label>
-          <OpenPortsEditor
-            ports={hints.open_ports ?? []}
-            onChange={(ports) => update({ open_ports: ports.length ? ports : undefined })}
-          />
-          <div style={helpStyle}>
-            Vendor-specific TCP/UDP ports the device exposes (e.g.{" "}
-            <code>4352</code> for PJLink, <code>17567</code> for Lightware
-            LW3). Ports <code>{[...DISALLOWED_OPEN_PORTS].join(", ")}</code>{" "}
-            are rejected by the runtime — they would match every web or
-            SSH host on the LAN.
-          </div>
-        </div>
-
-        <div style={helpStyle}>
-          Soft signals never produce <em>identified</em> alone — they only
-          contribute to the <em>possible</em> state.
-        </div>
-      </div>
+      <FingerprintsSection cfg={cfg} update={update} />
+      <HintsSection cfg={cfg} update={update} />
+      <AdvancedSection />
+      <HelpSection />
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Fingerprints
+// ---------------------------------------------------------------------------
 
-function MdnsServicesEditor({
-  entries,
-  onChange,
+function FingerprintsSection({
+  cfg,
+  update,
 }: {
-  entries: Array<string | DriverDiscoveryMdnsEntry>;
-  onChange: (entries: Array<string | DriverDiscoveryMdnsEntry>) => void;
+  cfg: DriverDiscoveryConfig;
+  update: (next: DriverDiscoveryConfig) => void;
 }) {
-  const update = (i: number, next: string | DriverDiscoveryMdnsEntry) => {
-    const out = [...entries];
-    out[i] = next;
-    onChange(out);
-  };
-
-  const remove = (i: number) => onChange(entries.filter((_, j) => j !== i));
-
   return (
-    <div>
-      {entries.map((entry, i) => {
-        const service = typeof entry === "string" ? entry : entry.service;
-        const txtMatch =
-          typeof entry === "object" && entry !== null && entry.txt_match
-            ? entry.txt_match
-            : null;
-        return (
-          <div
-            key={i}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "var(--space-xs)",
-              marginBottom: "var(--space-sm)",
-              padding: "var(--space-xs)",
-              border: "1px solid var(--border-color)",
-              borderRadius: "var(--radius)",
-            }}
-          >
-            <div style={{ display: "flex", gap: "var(--space-xs)", alignItems: "center" }}>
-              <input
-                type="text"
-                value={service}
-                placeholder="_pjlink._tcp.local."
-                onChange={(e) => {
-                  if (txtMatch) update(i, { service: e.target.value, txt_match: txtMatch });
-                  else update(i, e.target.value);
-                }}
-                style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: "var(--font-size-sm)" }}
-              />
-              <button
-                type="button"
-                onClick={() =>
-                  update(
-                    i,
-                    txtMatch
-                      ? service
-                      : { service, txt_match: { manufacturer: "" } },
-                  )
-                }
-                style={{ fontSize: "11px", color: "var(--accent)" }}
-              >
-                {txtMatch ? "Drop filter" : "Add filter"}
-              </button>
-              <button
-                type="button"
-                onClick={() => remove(i)}
-                style={{ padding: "2px", color: "var(--text-muted)" }}
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-            {txtMatch && (
-              <TxtFilterEditor
-                txtMatch={txtMatch}
-                onChange={(next) => update(i, { service, txt_match: next })}
-              />
-            )}
-          </div>
-        );
-      })}
-      <button
-        type="button"
-        onClick={() => onChange([...entries, ""])}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--space-xs)",
-          fontSize: "var(--font-size-sm)",
-          color: "var(--accent)",
-          padding: "var(--space-xs) 0",
-        }}
-      >
-        <Plus size={12} /> Add mDNS service
-      </button>
+    <div style={SECTION}>
+      <div style={H2}>Fingerprints</div>
+      <div style={INTRO}>
+        A fingerprint identifies the device on its own — one match is
+        enough for the platform to claim the device for this driver.
+        Add any combination below.
+      </div>
+
+      <MdnsList
+        items={(cfg.mdns ?? []).map(readMdns)}
+        onChange={(next) => update({ ...cfg, mdns: next.map(writeMdns) })}
+      />
+      <SsdpList
+        items={(cfg.ssdp ?? []).map(readSsdp)}
+        onChange={(next) => update({ ...cfg, ssdp: next.map(writeSsdp) })}
+      />
+      <AmxDdpList
+        items={cfg.amx_ddp ?? []}
+        onChange={(next) => update({ ...cfg, amx_ddp: next })}
+      />
+      <ProbeBlock
+        kind="tcp"
+        probe={cfg.tcp_probe}
+        onChange={(p) => update({ ...cfg, tcp_probe: p })}
+      />
+      <ProbeBlock
+        kind="udp"
+        probe={cfg.udp_probe}
+        onChange={(p) => update({ ...cfg, udp_probe: p })}
+      />
+      <PythonBlock
+        python={cfg.python ? readPython(cfg.python) : undefined}
+        onChange={(p) =>
+          update({ ...cfg, python: p ? writePython(p) : undefined })
+        }
+      />
     </div>
   );
 }
 
-
-function TxtFilterEditor({
-  txtMatch,
+function MdnsList({
+  items,
   onChange,
 }: {
-  txtMatch: Record<string, string>;
-  onChange: (next: Record<string, string>) => void;
+  items: DriverDiscoveryMdnsFingerprint[];
+  onChange: (next: DriverDiscoveryMdnsFingerprint[]) => void;
 }) {
-  const entries = Object.entries(txtMatch);
+  const setAt = (
+    i: number,
+    patch: Partial<DriverDiscoveryMdnsFingerprint>,
+  ) => {
+    const next = [...items];
+    next[i] = { ...next[i], ...patch };
+    onChange(next);
+  };
+  const remove = (i: number) => onChange(items.filter((_, j) => j !== i));
   return (
-    <div style={{ marginLeft: "var(--space-md)" }}>
-      {entries.map(([k, v], idx) => (
-        <div key={idx} style={{ display: "flex", gap: "var(--space-xs)", marginBottom: 2 }}>
-          <input
-            type="text"
-            placeholder="key (e.g. manufacturer)"
-            value={k}
-            onChange={(e) => {
-              const newKey = e.target.value;
-              const next: Record<string, string> = {};
-              entries.forEach(([kk, vv], j) => {
-                next[j === idx ? newKey : kk] = vv;
-              });
-              onChange(next);
-            }}
-            style={{ width: 140, fontFamily: "var(--font-mono)", fontSize: "11px" }}
+    <div>
+      <label style={LABEL}>mDNS announcement</label>
+      {items.map((item, i) => (
+        <div key={i} style={CARD}>
+          <div style={ROW}>
+            <input
+              type="text"
+              value={item.service}
+              placeholder="_pjlink._tcp.local."
+              onChange={(e) => setAt(i, { service: e.target.value })}
+              style={MONO}
+            />
+            <CrossVendorToggle
+              checked={!!item.cross_vendor}
+              onChange={(v) => setAt(i, { cross_vendor: v || undefined })}
+            />
+            <RemoveButton onClick={() => remove(i)} />
+          </div>
+          <TxtFilterEditor
+            txt={item.txt}
+            onChange={(txt) => setAt(i, { txt })}
           />
-          <input
-            type="text"
-            placeholder="value (e.g. Shure)"
-            value={v}
-            onChange={(e) => {
-              const next = { ...txtMatch, [k]: e.target.value };
-              onChange(next);
-            }}
-            style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: "11px" }}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              const next = { ...txtMatch };
-              delete next[k];
-              onChange(next);
-            }}
-            style={{ padding: "2px", color: "var(--text-muted)" }}
-          >
-            <Trash2 size={12} />
-          </button>
         </div>
       ))}
       <button
         type="button"
-        onClick={() => onChange({ ...txtMatch, "": "" })}
-        style={{ fontSize: "11px", color: "var(--accent)" }}
+        onClick={() => onChange([...items, { service: "" }])}
+        style={ADD}
       >
-        + TXT pair
+        <Plus size={12} /> Add mDNS service
+      </button>
+      <div style={HELP}>
+        Add a TXT-record filter when the service type is generic (
+        <code>_http._tcp.local.</code>) so two drivers don't collide.
+      </div>
+    </div>
+  );
+}
+
+function SsdpList({
+  items,
+  onChange,
+}: {
+  items: DriverDiscoverySsdpFingerprint[];
+  onChange: (next: DriverDiscoverySsdpFingerprint[]) => void;
+}) {
+  const setAt = (
+    i: number,
+    patch: Partial<DriverDiscoverySsdpFingerprint>,
+  ) => {
+    const next = [...items];
+    next[i] = { ...next[i], ...patch };
+    onChange(next);
+  };
+  return (
+    <div>
+      <label style={LABEL}>SSDP / UPnP device type</label>
+      {items.map((item, i) => (
+        <div key={i} style={ROW}>
+          <input
+            type="text"
+            value={item.device_type}
+            placeholder="urn:schemas-upnp-org:device:MediaRenderer:1"
+            onChange={(e) => setAt(i, { device_type: e.target.value })}
+            style={MONO}
+          />
+          <CrossVendorToggle
+            checked={!!item.cross_vendor}
+            onChange={(v) => setAt(i, { cross_vendor: v || undefined })}
+          />
+          <RemoveButton
+            onClick={() => onChange(items.filter((_, j) => j !== i))}
+          />
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange([...items, { device_type: "" }])}
+        style={ADD}
+      >
+        <Plus size={12} /> Add SSDP type
       </button>
     </div>
   );
 }
 
+function AmxDdpList({
+  items,
+  onChange,
+}: {
+  items: DriverDiscoveryAmxDdpFingerprint[];
+  onChange: (next: DriverDiscoveryAmxDdpFingerprint[]) => void;
+}) {
+  const setAt = (
+    i: number,
+    patch: Partial<DriverDiscoveryAmxDdpFingerprint>,
+  ) => {
+    const next = [...items];
+    next[i] = { ...next[i], ...patch };
+    onChange(next);
+  };
+  return (
+    <div>
+      <label style={LABEL}>AMX device beacon</label>
+      {items.map((item, i) => (
+        <div key={i} style={ROW}>
+          <input
+            type="text"
+            placeholder="Make (e.g. Polycom)"
+            value={item.make}
+            onChange={(e) => setAt(i, { make: e.target.value })}
+            style={{ flex: 1 }}
+          />
+          <input
+            type="text"
+            placeholder="Model pattern (e.g. SoundStructure*)"
+            value={item.model_pattern ?? ""}
+            onChange={(e) =>
+              setAt(i, { model_pattern: e.target.value || undefined })
+            }
+            style={{ flex: 1 }}
+          />
+          <CrossVendorToggle
+            checked={!!item.cross_vendor}
+            onChange={(v) => setAt(i, { cross_vendor: v || undefined })}
+          />
+          <RemoveButton
+            onClick={() => onChange(items.filter((_, j) => j !== i))}
+          />
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange([...items, { make: "" }])}
+        style={ADD}
+      >
+        <Plus size={12} /> Add AMX beacon
+      </button>
+      <div style={HELP}>
+        AMX devices broadcast a UDP beacon on port 9131. Match on
+        manufacturer name and (optionally) a model glob.
+      </div>
+    </div>
+  );
+}
 
-function OpenPortsEditor({
+function ProbeBlock({
+  kind,
+  probe,
+  onChange,
+}: {
+  kind: "tcp" | "udp";
+  probe?: DriverDiscoveryProbe;
+  onChange: (probe: DriverDiscoveryProbe | undefined) => void;
+}) {
+  const labelText = kind === "tcp" ? "TCP probe" : "UDP probe";
+
+  if (!probe) {
+    return (
+      <div>
+        <label style={LABEL}>{labelText}</label>
+        <button
+          type="button"
+          onClick={() =>
+            onChange(
+              kind === "tcp"
+                ? { port: 5000 }
+                : { port: 6000, send_ascii: "", expect: "" },
+            )
+          }
+          style={ADD}
+        >
+          <Plus size={12} /> Add {labelText}
+        </button>
+        <div style={HELP}>
+          {kind === "tcp"
+            ? "Connect on a vendor port. Optionally send a query and match the response."
+            : "Broadcast a query on a vendor port and match the reply."}
+        </div>
+      </div>
+    );
+  }
+
+  // "send" mode: ascii / hex / none (none = TCP connect-only).
+  const sendMode: "ascii" | "hex" | "none" =
+    probe.send_hex !== undefined
+      ? "hex"
+      : probe.send_ascii !== undefined
+        ? "ascii"
+        : "none";
+
+  const setSendMode = (next: "ascii" | "hex" | "none") => {
+    const carry =
+      probe.send_ascii !== undefined ? probe.send_ascii : probe.send_hex ?? "";
+    const { send_ascii: _a, send_hex: _h, ...rest } = probe;
+    if (next === "none") onChange(rest);
+    else if (next === "ascii") onChange({ ...rest, send_ascii: carry });
+    else onChange({ ...rest, send_hex: carry });
+  };
+
+  const setSend = (val: string) => {
+    const { send_ascii: _a, send_hex: _h, ...rest } = probe;
+    if (sendMode === "ascii") onChange({ ...rest, send_ascii: val });
+    else if (sendMode === "hex") onChange({ ...rest, send_hex: val });
+  };
+
+  const expectField = (
+    label: string,
+    key: "expect" | "expect_regex" | "expect_hex",
+    placeholder: string,
+  ) => (
+    <div style={ROW}>
+      <span style={FIELD_W}>{label}</span>
+      <input
+        type="text"
+        placeholder={placeholder}
+        value={probe[key] ?? ""}
+        onChange={(e) =>
+          onChange({ ...probe, [key]: e.target.value || undefined })
+        }
+        style={MONO}
+      />
+    </div>
+  );
+
+  return (
+    <div>
+      <label style={LABEL}>{labelText}</label>
+      <div style={CARD}>
+        <div style={ROW}>
+          <span style={FIELD_W}>Port</span>
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={probe.port || ""}
+            onChange={(e) =>
+              onChange({ ...probe, port: parseInt(e.target.value) || 0 })
+            }
+            style={{ width: 120 }}
+          />
+          <span style={{ flex: 1 }} />
+          <CrossVendorToggle
+            checked={!!probe.cross_vendor}
+            onChange={(v) =>
+              onChange({ ...probe, cross_vendor: v || undefined })
+            }
+          />
+          <RemoveButton onClick={() => onChange(undefined)} />
+        </div>
+
+        <div style={ROW}>
+          <span style={FIELD_W}>Send</span>
+          <select
+            value={sendMode}
+            onChange={(e) =>
+              setSendMode(e.target.value as "ascii" | "hex" | "none")
+            }
+          >
+            {kind === "tcp" && <option value="none">connect-only</option>}
+            <option value="ascii">ASCII</option>
+            <option value="hex">Hex</option>
+          </select>
+          {sendMode !== "none" && (
+            <input
+              type="text"
+              placeholder={sendMode === "hex" ? "00010203" : "QUERY\\r\\n"}
+              value={
+                sendMode === "hex"
+                  ? probe.send_hex ?? ""
+                  : probe.send_ascii ?? ""
+              }
+              onChange={(e) => setSend(e.target.value)}
+              style={MONO}
+            />
+          )}
+        </div>
+
+        {expectField("Expect (substring)", "expect", "NovaStar")}
+        {expectField("Expect (regex)", "expect_regex", "^NS-([A-Z0-9]+)")}
+        {expectField("Expect (hex prefix)", "expect_hex", "AA55")}
+        <div style={HELP}>
+          Combine matchers as needed — they all AND together.
+          {kind === "udp" && " UDP probes need at least one matcher."}
+          {kind === "tcp" &&
+            sendMode !== "none" &&
+            " TCP probes that send bytes also need at least one matcher."}
+        </div>
+
+        <div style={ROW}>
+          <span style={FIELD_W}>Manufacturer</span>
+          <input
+            type="text"
+            placeholder="Acme"
+            value={probe.extract_manufacturer ?? ""}
+            onChange={(e) =>
+              onChange({
+                ...probe,
+                extract_manufacturer: e.target.value || undefined,
+              })
+            }
+            style={{ flex: 1 }}
+          />
+        </div>
+        <div style={{ ...HELP, marginTop: 0 }}>
+          Static manufacturer string the response confirms — feeds the
+          manufacturer-alias hint path so peer vendor drivers can claim
+          the device.
+        </div>
+
+        <div style={ROW}>
+          <span style={FIELD_W}>Timeout (ms)</span>
+          <input
+            type="number"
+            min={1}
+            max={10000}
+            placeholder={kind === "tcp" ? "3000" : "2000"}
+            value={probe.timeout_ms ?? ""}
+            onChange={(e) =>
+              onChange({
+                ...probe,
+                timeout_ms: parseInt(e.target.value) || undefined,
+              })
+            }
+            style={{ width: 120 }}
+          />
+        </div>
+
+        <label style={{ ...LABEL, marginTop: 0 }}>
+          Extract metadata (optional)
+        </label>
+        <ExtractEditor
+          rules={probe.extract ?? {}}
+          onChange={(rules) =>
+            onChange({
+              ...probe,
+              extract: Object.keys(rules).length > 0 ? rules : undefined,
+            })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+function PythonBlock({
+  python,
+  onChange,
+}: {
+  python: DriverDiscoveryPython | undefined;
+  onChange: (python: DriverDiscoveryPython | undefined) => void;
+}) {
+  if (!python) {
+    return (
+      <div>
+        <label style={LABEL}>Python escape hatch</label>
+        <button
+          type="button"
+          onClick={() => onChange({ file: "" })}
+          style={ADD}
+        >
+          <Plus size={12} /> Add Python file
+        </button>
+        <div style={HELP}>
+          Use when the wire format needs multi-step handshakes,
+          encrypted payloads, or framing too dynamic for the
+          declarative TCP/UDP probe blocks. Path is relative to the
+          driver file. The module must export{" "}
+          <code>async def probe(ctx) -&gt; None</code>.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <label style={LABEL}>Python escape hatch</label>
+      <div style={ROW}>
+        <input
+          type="text"
+          placeholder="./pjlink_class1_discovery.py"
+          value={python.file}
+          onChange={(e) => onChange({ ...python, file: e.target.value })}
+          style={MONO}
+        />
+        <CrossVendorToggle
+          checked={!!python.cross_vendor}
+          onChange={(v) =>
+            onChange({ ...python, cross_vendor: v || undefined })
+          }
+        />
+        <RemoveButton onClick={() => onChange(undefined)} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Hints
+// ---------------------------------------------------------------------------
+
+function HintsSection({
+  cfg,
+  update,
+}: {
+  cfg: DriverDiscoveryConfig;
+  update: (next: DriverDiscoveryConfig) => void;
+}) {
+  return (
+    <div style={SECTION}>
+      <div style={H2}>Hints</div>
+      <div style={INTRO}>
+        Hints don't identify a device alone, but combining several
+        narrows the candidates down to a "possible" match.
+      </div>
+
+      <label style={LABEL}>OUI prefixes (MAC vendor)</label>
+      <StringList
+        items={cfg.oui ?? []}
+        onChange={(next) => update({ ...cfg, oui: next })}
+        placeholder="00:0e:dd"
+      />
+
+      <label style={LABEL}>Hostname patterns (regex)</label>
+      <StringList
+        items={cfg.hostname ?? []}
+        onChange={(next) => update({ ...cfg, hostname: next })}
+        placeholder="^MXA"
+      />
+
+      <label style={LABEL}>Open ports</label>
+      <PortList
+        ports={cfg.port_open ?? []}
+        onChange={(next) => update({ ...cfg, port_open: next })}
+      />
+      <div style={HELP}>
+        Vendor-specific TCP/UDP ports the device exposes (e.g.{" "}
+        <code>4352</code> for PJLink, <code>17567</code> for Lightware
+        LW3). Ports <code>22</code>, <code>80</code>, <code>443</code>{" "}
+        are rejected — they would match every web/SSH host on the LAN.
+      </div>
+
+      <label style={LABEL}>Manufacturer aliases</label>
+      <StringList
+        items={cfg.manufacturer_alias ?? []}
+        onChange={(next) => update({ ...cfg, manufacturer_alias: next })}
+        placeholder="Sharp NEC"
+      />
+      <div style={HELP}>
+        Names the matcher should treat as belonging to this driver
+        when another driver's probe response carries them
+        (case-insensitive).
+      </div>
+
+      <label style={LABEL}>SNMP enterprise number</label>
+      <input
+        type="number"
+        placeholder="17049"
+        value={cfg.snmp_pen ?? ""}
+        onChange={(e) => {
+          const n = parseInt(e.target.value);
+          update({ ...cfg, snmp_pen: !isNaN(n) && n > 0 ? n : undefined });
+        }}
+        style={{ width: 200 }}
+      />
+      <div style={HELP}>
+        IANA Private Enterprise Number (e.g. 17049 for Extron).
+        Surfaces when SNMP is enabled in the discovery scan.
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Advanced + Help
+// ---------------------------------------------------------------------------
+
+function AdvancedSection() {
+  return (
+    <div style={SECTION}>
+      <div style={H2}>Advanced</div>
+      <label style={LABEL}>Cross-vendor fingerprints</label>
+      <div style={INTRO}>
+        Toggle <strong>cross-vendor</strong> on a fingerprint when the
+        same wire signal is emitted by more than one vendor's devices —
+        PJLink projectors from any manufacturer, Crestron family
+        devices on CIP, ONVIF-compliant cameras. The matcher treats
+        this driver as a fallback: if a peer driver claims the same
+        device through a manufacturer alias, OUI, or hostname hint,
+        this entry demotes to <em>alternative</em>.
+      </div>
+      <label style={LABEL}>Manual-only devices</label>
+      <div style={INTRO}>
+        If your device has no network announcement and no useful soft
+        signal, leave both <em>Fingerprints</em> and <em>Hints</em>{" "}
+        empty. Integrators add it manually from the Add Device dialog;
+        document the manual-add steps under Help → Setup on the
+        General tab so they know what host / port to enter.
+      </div>
+    </div>
+  );
+}
+
+function HelpSection() {
+  return (
+    <div>
+      <div style={H2}>Help</div>
+      <div style={INTRO}>
+        A typical driver declares one fingerprint plus one or two
+        hints:
+      </div>
+      <pre
+        style={{
+          background: "var(--bg-secondary)",
+          border: "1px solid var(--border-color)",
+          borderRadius: "var(--radius)",
+          padding: "var(--space-sm)",
+          fontSize: "var(--font-size-sm)",
+          marginBottom: "var(--space-md)",
+          whiteSpace: "pre-wrap",
+        }}
+      >
+{`discovery:
+  mdns: "_pjlink._tcp.local."
+  oui:
+    - "00:0e:dd"`}
+      </pre>
+      <div style={INTRO}>
+        See the{" "}
+        <a
+          href="https://docs.openavc.com/creating-drivers/#discovery-hints"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Discovery section of creating-drivers
+        </a>{" "}
+        for the full schema reference.
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tiny shared bits
+// ---------------------------------------------------------------------------
+
+function CrossVendorToggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <label
+      title="Cross-vendor: signal shared by multiple manufacturers; demote this driver when a peer claims via a vendor-specific hint."
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 11,
+        color: "var(--text-muted)",
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      cross-vendor
+    </label>
+  );
+}
+
+function RemoveButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{ padding: 2, color: "var(--text-muted)" }}
+      title="Remove"
+    >
+      <Trash2 size={14} />
+    </button>
+  );
+}
+
+function StringList({
+  items,
+  onChange,
+  placeholder,
+}: {
+  items: string[];
+  onChange: (items: string[]) => void;
+  placeholder?: string;
+}) {
+  return (
+    <div>
+      {items.map((item, i) => (
+        <div key={i} style={ROW}>
+          <input
+            type="text"
+            value={item}
+            onChange={(e) => {
+              const next = [...items];
+              next[i] = e.target.value;
+              onChange(next);
+            }}
+            placeholder={placeholder}
+            style={MONO}
+          />
+          <RemoveButton
+            onClick={() => onChange(items.filter((_, j) => j !== i))}
+          />
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange([...items, ""])}
+        style={ADD}
+      >
+        <Plus size={12} /> Add
+      </button>
+    </div>
+  );
+}
+
+function PortList({
   ports,
   onChange,
 }: {
   ports: number[];
   onChange: (ports: number[]) => void;
 }) {
-  // Internal string buffer so blank rows can exist while the user is
-  // typing. Only finite, in-range, non-disallowed values are written
-  // back to the parent so the YAML output stays clean.
-  const [buffer, setBuffer] = useState<string[]>(() =>
-    ports.map((p) => String(p)),
-  );
+  // String buffer so blank rows can exist while typing; only finite,
+  // in-range, non-disallowed values flow back to the parent.
+  const [buffer, setBuffer] = useState<string[]>(() => ports.map(String));
 
-  // Sync down when the parent's canonical port list diverges (e.g.
-  // another editor cleared the discovery section). Skip syncs that
-  // would erase the user's in-progress edits.
   useEffect(() => {
-    const fromParent = ports.map((p) => String(p));
     const fromBuffer = buffer
       .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n) && n >= 1 && n <= 65535 && !DISALLOWED_OPEN_PORTS.has(n));
+      .filter(
+        (n) =>
+          Number.isFinite(n) &&
+          n >= 1 &&
+          n <= 65535 &&
+          !DISALLOWED_OPEN_PORTS.has(n),
+      );
     const same =
       fromBuffer.length === ports.length &&
       fromBuffer.every((n, i) => n === ports[i]);
-    if (!same) setBuffer(fromParent);
-  }, [ports]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!same) setBuffer(ports.map(String));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ports]);
 
   const commit = (next: string[]) => {
     setBuffer(next);
     const valid: number[] = [];
     for (const s of next) {
       const n = parseInt(s, 10);
-      if (Number.isFinite(n) && n >= 1 && n <= 65535 && !DISALLOWED_OPEN_PORTS.has(n)) {
+      if (
+        Number.isFinite(n) &&
+        n >= 1 &&
+        n <= 65535 &&
+        !DISALLOWED_OPEN_PORTS.has(n)
+      ) {
         valid.push(n);
       }
     }
@@ -610,7 +894,8 @@ function OpenPortsEditor({
     const n = parseInt(raw, 10);
     if (!Number.isFinite(n) || String(n) !== raw.trim()) return "not a number";
     if (n < 1 || n > 65535) return "out of range";
-    if (DISALLOWED_OPEN_PORTS.has(n)) return "disallowed (too generic)";
+    if (DISALLOWED_OPEN_PORTS.has(n))
+      return "too generic (22, 80, 443 disallowed)";
     return null;
   };
 
@@ -619,15 +904,7 @@ function OpenPortsEditor({
       {buffer.map((raw, i) => {
         const err = portError(raw);
         return (
-          <div
-            key={i}
-            style={{
-              display: "flex",
-              gap: "var(--space-xs)",
-              marginBottom: "var(--space-xs)",
-              alignItems: "center",
-            }}
-          >
+          <div key={i} style={ROW}>
             <input
               type="number"
               min={1}
@@ -638,40 +915,27 @@ function OpenPortsEditor({
                 next[i] = e.target.value;
                 commit(next);
               }}
-              placeholder="e.g. 4352"
+              placeholder="2202"
               style={{
-                flex: 1,
-                fontFamily: "var(--font-mono)",
-                fontSize: "var(--font-size-sm)",
+                ...MONO,
                 borderColor: err ? "var(--danger)" : undefined,
               }}
             />
             {err && (
-              <span style={{ color: "var(--danger)", fontSize: "11px" }}>
+              <span style={{ color: "var(--danger)", fontSize: 11 }}>
                 {err}
               </span>
             )}
-            <button
-              type="button"
+            <RemoveButton
               onClick={() => commit(buffer.filter((_, j) => j !== i))}
-              style={{ padding: "2px", color: "var(--text-muted)" }}
-            >
-              <Trash2 size={14} />
-            </button>
+            />
           </div>
         );
       })}
       <button
         type="button"
         onClick={() => commit([...buffer, ""])}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--space-xs)",
-          fontSize: "var(--font-size-sm)",
-          color: "var(--accent)",
-          padding: "var(--space-xs) 0",
-        }}
+        style={ADD}
       >
         <Plus size={12} /> Add port
       </button>
@@ -679,312 +943,72 @@ function OpenPortsEditor({
   );
 }
 
-
-function ListEditor({
-  items,
+function TxtFilterEditor({
+  txt,
   onChange,
-  placeholder,
-  inputType = "text",
 }: {
-  items: string[];
-  onChange: (items: string[]) => void;
-  placeholder?: string;
-  inputType?: string;
+  txt: Record<string, string> | undefined;
+  onChange: (txt: Record<string, string> | undefined) => void;
 }) {
+  const entries = txt ? Object.entries(txt) : [];
+  if (entries.length === 0) {
+    return (
+      <button
+        type="button"
+        onClick={() => onChange({ "": "" })}
+        style={{ ...ADD, marginLeft: "var(--space-md)" }}
+      >
+        <Plus size={12} /> Add TXT-record filter
+      </button>
+    );
+  }
+  const txtMonoSm: React.CSSProperties = {
+    fontFamily: "var(--font-mono)",
+    fontSize: 11,
+  };
   return (
-    <div>
-      {items.map((item, i) => (
-        <div
-          key={i}
-          style={{
-            display: "flex",
-            gap: "var(--space-xs)",
-            marginBottom: "var(--space-xs)",
-            alignItems: "center",
-          }}
-        >
+    <div style={{ marginLeft: "var(--space-md)" }}>
+      {entries.map(([k, v], idx) => (
+        <div key={idx} style={ROW}>
           <input
-            type={inputType}
-            value={item}
+            type="text"
+            placeholder="key (e.g. manufacturer)"
+            value={k}
             onChange={(e) => {
-              const next = [...items];
-              next[i] = e.target.value;
+              const next: Record<string, string> = {};
+              entries.forEach(([kk, vv], j) => {
+                next[j === idx ? e.target.value : kk] = vv;
+              });
               onChange(next);
             }}
-            placeholder={placeholder}
-            style={{
-              flex: 1,
-              fontFamily: "var(--font-mono)",
-              fontSize: "var(--font-size-sm)",
+            style={{ width: 160, ...txtMonoSm }}
+          />
+          <input
+            type="text"
+            placeholder="value (e.g. Shure)"
+            value={v}
+            onChange={(e) => onChange({ ...txt, [k]: e.target.value })}
+            style={{ flex: 1, ...txtMonoSm }}
+          />
+          <RemoveButton
+            onClick={() => {
+              const next = { ...txt };
+              delete next[k];
+              onChange(Object.keys(next).length > 0 ? next : undefined);
             }}
           />
-          <button
-            type="button"
-            onClick={() => onChange(items.filter((_, j) => j !== i))}
-            style={{ padding: "2px", color: "var(--text-muted)" }}
-          >
-            <Trash2 size={14} />
-          </button>
         </div>
       ))}
       <button
         type="button"
-        onClick={() => onChange([...items, ""])}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--space-xs)",
-          fontSize: "var(--font-size-sm)",
-          color: "var(--accent)",
-          padding: "var(--space-xs) 0",
-        }}
+        onClick={() => onChange({ ...(txt ?? {}), "": "" })}
+        style={{ ...ADD, fontSize: 11 }}
       >
-        <Plus size={12} /> Add
+        <Plus size={10} /> TXT pair
       </button>
     </div>
   );
 }
-
-
-function CustomProbeEditor({
-  kind,
-  probe,
-  disallowedPorts,
-  onChange,
-}: {
-  kind: "udp" | "tcp";
-  probe?: DriverDiscoveryCustomProbe;
-  disallowedPorts: ReadonlySet<number>;
-  onChange: (probe: DriverDiscoveryCustomProbe | undefined) => void;
-}) {
-  const enabled = probe !== undefined;
-  const label =
-    kind === "udp" ? "UDP broadcast probe" : "TCP active probe";
-  const idPrefix = `discovery-custom-${kind}`;
-  const portInvalid =
-    enabled && (probe!.port == null || disallowedPorts.has(probe!.port));
-
-  const update = (partial: Partial<DriverDiscoveryCustomProbe>) => {
-    onChange({ ...(probe ?? { port: 0, send: {}, response_match: {} }), ...partial });
-  };
-
-  const updateSend = (next: { hex?: string; ascii?: string }) => {
-    onChange({
-      ...(probe ?? { port: 0, send: {}, response_match: {} }),
-      send: next,
-    });
-  };
-
-  const updateMatch = (
-    next: Partial<NonNullable<DriverDiscoveryCustomProbe["response_match"]>>,
-  ) => {
-    onChange({
-      ...(probe ?? { port: 0, send: {}, response_match: {} }),
-      response_match: { ...(probe?.response_match ?? {}), ...next },
-    });
-  };
-
-  if (!enabled) {
-    return (
-      <div style={{ marginBottom: "var(--space-sm)" }}>
-        <button
-          type="button"
-          onClick={() =>
-            onChange({
-              port: kind === "udp" ? 6000 : 6107,
-              send: { ascii: "" },
-              response_match: { contains: "" },
-            })
-          }
-          style={{
-            fontSize: "var(--font-size-sm)",
-            color: "var(--accent)",
-            padding: "var(--space-xs) 0",
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--space-xs)",
-          }}
-        >
-          <Plus size={12} /> Declare {label}
-        </button>
-      </div>
-    );
-  }
-
-  const sendIsHex = probe!.send?.hex !== undefined;
-
-  return (
-    <div
-      style={{
-        marginBottom: "var(--space-md)",
-        padding: "var(--space-sm)",
-        border: "1px solid var(--border-color)",
-        borderRadius: "var(--radius)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: "var(--space-sm)",
-        }}
-      >
-        <strong style={{ fontSize: "var(--font-size-sm)" }}>{label}</strong>
-        <button
-          type="button"
-          onClick={() => onChange(undefined)}
-          style={{ padding: "2px", color: "var(--text-muted)" }}
-          title="Remove this probe"
-        >
-          <Trash2 size={14} />
-        </button>
-      </div>
-
-      <div
-        style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: "var(--space-sm)" }}
-      >
-        <label htmlFor={`${idPrefix}-port`} style={{ alignSelf: "center", fontSize: "var(--font-size-sm)" }}>
-          Port
-        </label>
-        <div>
-          <input
-            id={`${idPrefix}-port`}
-            type="number"
-            min={1}
-            max={65535}
-            value={probe!.port || ""}
-            onChange={(e) => update({ port: parseInt(e.target.value) || 0 })}
-            style={{
-              width: 120,
-              borderColor: portInvalid ? "var(--error)" : undefined,
-            }}
-          />
-          {portInvalid && (
-            <div style={{ fontSize: 11, color: "var(--error)", marginTop: 2 }}>
-              Port reserved for a built-in handler. Use the named opt-in
-              instead. Disallowed: {[...disallowedPorts].join(", ")}.
-            </div>
-          )}
-        </div>
-
-        <label style={{ alignSelf: "center", fontSize: "var(--font-size-sm)" }}>Send</label>
-        <div style={{ display: "flex", gap: "var(--space-xs)", alignItems: "center" }}>
-          <select
-            value={sendIsHex ? "hex" : "ascii"}
-            onChange={(e) =>
-              updateSend(
-                e.target.value === "hex"
-                  ? { hex: probe!.send?.hex ?? "" }
-                  : { ascii: probe!.send?.ascii ?? "" },
-              )
-            }
-          >
-            <option value="ascii">ascii</option>
-            <option value="hex">hex</option>
-          </select>
-          <input
-            type="text"
-            placeholder={sendIsHex ? "00010203" : "WHOIS\\r\\n"}
-            value={sendIsHex ? probe!.send?.hex ?? "" : probe!.send?.ascii ?? ""}
-            onChange={(e) =>
-              updateSend(sendIsHex ? { hex: e.target.value } : { ascii: e.target.value })
-            }
-            style={{ flex: 1, fontFamily: "var(--font-mono)" }}
-          />
-        </div>
-
-        <label style={{ alignSelf: "start", fontSize: "var(--font-size-sm)", paddingTop: 4 }}>
-          Response match
-        </label>
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-          <input
-            type="text"
-            placeholder="starts_with_hex (e.g. AA55)"
-            value={probe!.response_match?.starts_with_hex ?? ""}
-            onChange={(e) =>
-              updateMatch({ starts_with_hex: e.target.value || undefined })
-            }
-            style={{ fontFamily: "var(--font-mono)", fontSize: "var(--font-size-sm)" }}
-          />
-          <input
-            type="text"
-            placeholder="contains (substring, e.g. NovaStar)"
-            value={probe!.response_match?.contains ?? ""}
-            onChange={(e) =>
-              updateMatch({ contains: e.target.value || undefined })
-            }
-            style={{ fontFamily: "var(--font-mono)", fontSize: "var(--font-size-sm)" }}
-          />
-          <input
-            type="text"
-            placeholder="regex (latin-1, e.g. ^NS-([A-Z0-9]+))"
-            value={probe!.response_match?.regex ?? ""}
-            onChange={(e) =>
-              updateMatch({ regex: e.target.value || undefined })
-            }
-            style={{ fontFamily: "var(--font-mono)", fontSize: "var(--font-size-sm)" }}
-          />
-          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            All matchers AND together. At least one must be present for the
-            probe to identify a device.
-          </div>
-        </div>
-
-        <label htmlFor={`${idPrefix}-timeout`} style={{ alignSelf: "center", fontSize: "var(--font-size-sm)" }}>
-          Timeout (ms)
-        </label>
-        <input
-          id={`${idPrefix}-timeout`}
-          type="number"
-          min={1}
-          max={10000}
-          placeholder={kind === "udp" ? "2000" : "3000"}
-          value={probe!.timeout_ms ?? ""}
-          onChange={(e) => {
-            const n = parseInt(e.target.value);
-            update({ timeout_ms: !isNaN(n) && n > 0 ? n : undefined });
-          }}
-          style={{ width: 120 }}
-        />
-
-        <label style={{ alignSelf: "center", fontSize: "var(--font-size-sm)" }}>Generic</label>
-        <div>
-          <label style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
-            <input
-              type="checkbox"
-              checked={probe!.generic ?? false}
-              onChange={(e) => update({ generic: e.target.checked || undefined })}
-            />
-            <span style={{ fontSize: "var(--font-size-sm)" }}>
-              Cross-vendor probe (matches every device speaking a standard)
-            </span>
-          </label>
-          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-            Set this when the probe identifies devices from multiple vendors.
-            The matcher will demote this driver to an alternative when a
-            vendor-specific driver claims the response via{" "}
-            <code>vendor_aliases</code>.
-          </div>
-        </div>
-
-        <label style={{ alignSelf: "start", fontSize: "var(--font-size-sm)", paddingTop: 4 }}>
-          Extract
-        </label>
-        <ExtractEditor
-          rules={probe!.extract ?? {}}
-          onChange={(rules) =>
-            update({
-              extract:
-                Object.keys(rules).length > 0 ? rules : undefined,
-            })
-          }
-        />
-      </div>
-    </div>
-  );
-}
-
 
 function ExtractEditor({
   rules,
@@ -997,16 +1021,11 @@ function ExtractEditor({
 
   const setKey = (oldKey: string, newKey: string) => {
     const out: Record<string, DriverDiscoveryExtractRule> = {};
-    for (const [k, v] of entries) {
-      out[k === oldKey ? newKey : k] = v;
-    }
+    for (const [k, v] of entries) out[k === oldKey ? newKey : k] = v;
     onChange(out);
   };
-
-  const setValue = (key: string, rule: DriverDiscoveryExtractRule) => {
+  const setValue = (key: string, rule: DriverDiscoveryExtractRule) =>
     onChange({ ...rules, [key]: rule });
-  };
-
   const remove = (key: string) => {
     const out = { ...rules };
     delete out[key];
@@ -1014,10 +1033,9 @@ function ExtractEditor({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+    <div>
       {entries.map(([key, rule]) => {
         const isRegex = typeof rule === "object" && rule !== null;
-        const reserved = key === "manufacturer" || key === "make";
         return (
           <div
             key={key}
@@ -1026,6 +1044,7 @@ function ExtractEditor({
               gridTemplateColumns: "150px 80px 1fr 60px auto",
               gap: "var(--space-xs)",
               alignItems: "center",
+              marginBottom: "var(--space-xs)",
             }}
           >
             <input
@@ -1033,12 +1052,7 @@ function ExtractEditor({
               value={key}
               placeholder="field name"
               onChange={(e) => setKey(key, e.target.value)}
-              style={{
-                fontSize: "var(--font-size-sm)",
-                fontFamily: "var(--font-mono)",
-                color: reserved ? "var(--accent)" : undefined,
-              }}
-              title={reserved ? "Reserved key — feeds Tier 4 vendor_string" : undefined}
+              style={MONO}
             />
             <select
               value={isRegex ? "regex" : "literal"}
@@ -1046,8 +1060,13 @@ function ExtractEditor({
                 setValue(
                   key,
                   e.target.value === "regex"
-                    ? { regex: typeof rule === "string" ? rule : rule.regex, group: 1 }
-                    : typeof rule === "object" ? rule.regex : rule,
+                    ? {
+                        regex: typeof rule === "string" ? rule : rule.regex,
+                        group: 1,
+                      }
+                    : typeof rule === "object"
+                      ? rule.regex
+                      : rule,
                 )
               }
             >
@@ -1066,7 +1085,7 @@ function ExtractEditor({
                     : e.target.value,
                 )
               }
-              style={{ fontFamily: "var(--font-mono)", fontSize: "var(--font-size-sm)" }}
+              style={MONO}
             />
             {isRegex ? (
               <input
@@ -1074,20 +1093,17 @@ function ExtractEditor({
                 min={0}
                 value={rule.group ?? 1}
                 onChange={(e) =>
-                  setValue(key, { regex: rule.regex, group: parseInt(e.target.value) || 0 })
+                  setValue(key, {
+                    regex: rule.regex,
+                    group: parseInt(e.target.value) || 0,
+                  })
                 }
                 title="Capture group"
               />
             ) : (
               <span />
             )}
-            <button
-              type="button"
-              onClick={() => remove(key)}
-              style={{ padding: "2px", color: "var(--text-muted)" }}
-            >
-              <Trash2 size={14} />
-            </button>
+            <RemoveButton onClick={() => remove(key)} />
           </div>
         );
       })}
@@ -1099,21 +1115,13 @@ function ExtractEditor({
           while (candidate in rules) candidate = `field${++i}`;
           onChange({ ...rules, [candidate]: "" });
         }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--space-xs)",
-          fontSize: "var(--font-size-sm)",
-          color: "var(--accent)",
-          padding: "var(--space-xs) 0",
-        }}
+        style={ADD}
       >
         <Plus size={12} /> Add extract field
       </button>
-      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-        Reserved keys <code>manufacturer</code> and <code>make</code> feed
-        the Tier 4 vendor_string soft-signal path; other fields are
-        recorded as evidence metadata for the matcher's "Why?" panel.
+      <div style={HELP}>
+        Optional metadata pulled from the response. Surfaced in scan
+        results' "Why?" reveal so users see what identified the device.
       </div>
     </div>
   );

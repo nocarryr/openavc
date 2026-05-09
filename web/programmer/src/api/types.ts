@@ -471,82 +471,85 @@ export interface DriverResponseDef {
   set?: Record<string, unknown>;
 }
 
-// Phase 6 deterministic ``discovery:`` schema. After Phase 8 a driver
-// can declare any combination of strong (Tier 1/2/3) and soft (Tier 4)
-// signals — strong signals produce an ``identified`` match, soft signals
-// alone surface the device as ``possible`` with a candidate driver
-// list. ``manual_only`` is now purely a documentation hint that the
-// device expects manual IP entry. CI rejects collisions across drivers
-// (see openavc-drivers/scripts/build_index.py). Allowed Tier 2 / Tier 3
-// IDs match the platform's ALLOWED_BROADCAST_PROBES /
-// ALLOWED_ACTIVE_PROBES allow-lists.
-export interface DriverDiscoveryMdnsEntry {
+// Driver ``discovery:`` block. Schema reference:
+// ``discovery-rewrite-plan.md`` (workspace root) and the runtime parser
+// in ``openavc/server/discovery/hints.py``.
+//
+// Two kinds of declarations:
+//   * Fingerprints identify the driver alone (mDNS, SSDP, AMX-DDP, TCP
+//     probe, UDP probe, Python escape-hatch). One match is enough.
+//   * Hints narrow candidates (OUI, hostname, open port, manufacturer
+//     alias, SNMP enterprise number). Multiple hints combine to surface
+//     the device as a ``possible`` candidate.
+//
+// Each fingerprint may carry ``cross_vendor: true`` to mark a wire
+// signal shared by multiple manufacturers (PJLink projectors, Crestron
+// CIP family, ONVIF cameras). The matcher demotes such drivers to
+// ``alternative`` whenever a peer driver claims the same device via a
+// vendor-specific hint.
+
+export interface DriverDiscoveryMdnsFingerprint {
   service: string;
-  txt_match?: Record<string, string>;
+  txt?: Record<string, string>;
+  cross_vendor?: boolean;
+}
+
+export interface DriverDiscoverySsdpFingerprint {
+  device_type: string;
+  cross_vendor?: boolean;
+}
+
+export interface DriverDiscoveryAmxDdpFingerprint {
+  make: string;
+  model_pattern?: string;   // glob, default "*"
+  cross_vendor?: boolean;
 }
 
 export type DriverDiscoveryExtractRule =
-  | string                                        // static literal
-  | { regex: string; group?: number };           // dynamic capture
+  | string                                  // static literal
+  | { regex: string; group?: number };     // dynamic capture
 
-export interface DriverDiscoveryCustomProbe {
+export interface DriverDiscoveryProbe {
   port: number;
-  send: { hex?: string; ascii?: string };
-  response_match: {
-    starts_with_hex?: string;
-    contains?: string;
-    regex?: string;
-  };
+  // Exactly one of send_ascii / send_hex; both omitted means a
+  // connect-only TCP probe (UDP probes must include one).
+  send_ascii?: string;
+  send_hex?: string;
+  // expect / expect_regex / expect_hex are AND-ed when more than one
+  // is set. UDP probes require at least one matcher; TCP probes that
+  // send bytes also need one.
+  expect?: string;
+  expect_regex?: string;
+  expect_hex?: string;
+  cross_vendor?: boolean;
   timeout_ms?: number;
-  generic?: boolean;
+  // Sugar for an ``extract.manufacturer`` literal. Feeds the
+  // manufacturer-alias hint path so peer vendor drivers can claim the
+  // device.
+  extract_manufacturer?: string;
   extract?: Record<string, DriverDiscoveryExtractRule>;
 }
 
-export interface DriverDiscoveryHints {
-  // Tier 1
-  mdns_services?: Array<string | DriverDiscoveryMdnsEntry>;
-  ssdp_device_types?: string[];
-  amx_ddp?: { make: string; model_pattern?: string };
+export interface DriverDiscoveryPython {
+  file: string;
+  cross_vendor?: boolean;
+}
 
-  // Tier 2 — ONVIF is the only remaining built-in named opt-in.
-  // PJLink Class 2 + Crestron CIP discovery now ship as sibling
-  // _discovery.py companions on their respective drivers (see
-  // discovery.companion below).
-  onvif?: boolean | { manufacturer?: string };
+export interface DriverDiscoveryConfig {
+  // Fingerprints — any one alone identifies this driver.
+  mdns?: Array<string | DriverDiscoveryMdnsFingerprint>;
+  ssdp?: Array<string | DriverDiscoverySsdpFingerprint>;
+  amx_ddp?: DriverDiscoveryAmxDdpFingerprint[];
+  tcp_probe?: DriverDiscoveryProbe;
+  udp_probe?: DriverDiscoveryProbe;
+  python?: string | DriverDiscoveryPython;
 
-  // Tier 3
-  active_probes?: string[];
-
-  // Phase 9 driver-declared probes. Vendor-specific wire formats that
-  // don't fit a built-in opt-in. Each gets a custom_<driver_id>_(udp|tcp)
-  // probe ID and runs alongside the named built-in probes.
-  udp_broadcast_probe?: DriverDiscoveryCustomProbe;
-  tcp_active_probe?: DriverDiscoveryCustomProbe;
-
-  // Phase 9.7 sibling _discovery.py companion declaration. When set,
-  // the matcher auto-registers two synthetic SignalRules
-  // (custom_<driver_id>_companion_udp / _tcp) under canonical IDs the
-  // companion emits with via ctx.emit_broadcast / ctx.emit_active.
-  // generic=true marks a cross-vendor anchor driver (PJLink, Crestron
-  // CIP family) so the matcher demotes it to an alternative when a
-  // peer driver matches via vendor_aliases / OUI / hostname.
-  companion?: { generic?: boolean };
-
-  // Tier 4 enrichment (soft signals)
-  snmp_pen?: number;
-  oui_prefixes?: string[];
-  hostname_patterns?: string[];
-  // Open AV ports advertised by this device. Common ports (22, 80, 443)
-  // are rejected by the runtime validator because they would match every
-  // web/SSH host on the LAN.
-  open_ports?: number[];
-  // Phase 8.6: manufacturer / make strings the driver claims when a
-  // strong-tier probe response carries that field. Used by the
-  // best-driver-first matcher to disambiguate generic probes.
-  vendor_aliases?: string[];
-
-  // Opt out of automatic discovery.
-  manual_only?: boolean;
+  // Hints — combine to narrow candidates.
+  oui?: string[];
+  hostname?: string[];
+  port_open?: number[];           // 22, 80, 443 are rejected at parse time
+  manufacturer_alias?: string[];  // case-insensitive
+  snmp_pen?: number;              // IANA Private Enterprise Number
 }
 
 export interface DriverDeviceSettingDef {
@@ -594,7 +597,7 @@ export interface DriverDefinition {
   responses: DriverResponseDef[];
   polling: { interval?: number; queries?: string[] };
   frame_parser?: { type: string; [key: string]: unknown } | null;
-  discovery?: DriverDiscoveryHints;
+  discovery?: DriverDiscoveryConfig;
   device_settings?: Record<string, DriverDeviceSettingDef>;
   simulator?: DriverSimulatorDef;
   help?: { overview?: string; setup?: string };
