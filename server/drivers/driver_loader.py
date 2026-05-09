@@ -36,6 +36,28 @@ REQUIRED_FIELDS = {"id", "name", "transport"}
 # File extension for driver definitions
 DRIVER_EXTENSION = ".avcdriver"
 
+# Sibling companion files that live next to drivers but aren't drivers
+# themselves. Discovery companions (`<id>_discovery.py`) expose
+# ``async def probe(ctx)`` for the discovery engine; Python simulators
+# (`<id>_sim.py`) expose a Simulator class for the device simulator.
+# Neither has a ``DRIVER_INFO`` constant or a BaseDriver subclass, so
+# the runtime loader silently skips them — but they would otherwise
+# leak into the Code tab and the Installed Drivers panel as if they
+# were standalone Python drivers. Filter them at the listing layer
+# alongside underscore-prefixed files (which are conventional
+# helpers / private modules).
+_COMPANION_SUFFIXES: tuple[str, ...] = ("_discovery.py", "_sim.py")
+
+
+def _is_driver_file(filepath: Path) -> bool:
+    """Return False for companion / helper .py files that aren't drivers."""
+    name = filepath.name
+    if name.startswith("_"):
+        return False
+    if any(name.endswith(suf) for suf in _COMPANION_SUFFIXES):
+        return False
+    return True
+
 
 def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
     """
@@ -263,7 +285,7 @@ def load_python_drivers(directories: list[Path | str]) -> int:
             continue
 
         for filepath in sorted(dir_path.glob("*.py")):
-            if filepath.name.startswith("_"):
+            if not _is_driver_file(filepath):
                 continue
 
             driver_class = load_python_driver_file(filepath)
@@ -413,7 +435,7 @@ def list_python_drivers(directories: list[Path | str]) -> list[dict[str, Any]]:
             continue
 
         for filepath in sorted(dir_path.glob("*.py")):
-            if filepath.name.startswith("_"):
+            if not _is_driver_file(filepath):
                 continue
 
             entry: dict[str, Any] = {

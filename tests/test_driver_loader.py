@@ -197,3 +197,53 @@ def test_load_driver_files_registers(tmp_path):
     registry = get_driver_registry()
     ids = [d["id"] for d in registry]
     assert "test_loader_driver" in ids
+
+
+def test_list_python_drivers_skips_companions(tmp_path):
+    """``list_python_drivers`` must not list ``_discovery.py`` /
+    ``_sim.py`` companions or underscore-prefixed helpers as drivers.
+
+    Regression test for the bug where YAML drivers' sibling discovery
+    companions appeared in the Code tab tree and the Installed Drivers
+    panel as if they were standalone Python drivers — clicking them
+    triggered a fetch on a stem that has no driver class behind it.
+    """
+    from server.drivers.driver_loader import list_python_drivers
+
+    # Real driver — has a class with DRIVER_INFO.
+    (tmp_path / "real_driver.py").write_text(
+        '"""A real driver."""\n'
+        "from server.drivers.base import BaseDriver\n"
+        "class RealDriver(BaseDriver):\n"
+        '    DRIVER_INFO = {"id": "real_driver", "name": "Real Driver"}\n',
+        encoding="utf-8",
+    )
+
+    # Discovery companion — has only an async probe(), no driver class.
+    (tmp_path / "real_driver_discovery.py").write_text(
+        "async def probe(ctx):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    # Python simulator companion — has a Simulator class, no driver.
+    (tmp_path / "real_driver_sim.py").write_text(
+        "class Simulator:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    # Underscore-prefixed helper — already filtered, kept for parity.
+    (tmp_path / "_helpers.py").write_text(
+        "X = 1\n",
+        encoding="utf-8",
+    )
+
+    listed = list_python_drivers([tmp_path])
+    listed_ids = [d["id"] for d in listed]
+
+    assert "real_driver" in listed_ids
+    assert "real_driver_discovery" not in listed_ids
+    assert "real_driver_sim" not in listed_ids
+    assert "_helpers" not in listed_ids
+    assert "helpers" not in listed_ids

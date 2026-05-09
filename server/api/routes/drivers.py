@@ -264,9 +264,13 @@ async def list_installed_community_drivers() -> dict[str, Any]:
                 "version": "",
             })
 
-    # Scan .py files
+    # Scan .py files (skip discovery / simulator companions and
+    # underscore-prefixed helpers — they live next to drivers but
+    # aren't drivers themselves).
+    from server.drivers.driver_loader import _is_driver_file
+
     for filepath in sorted(driver_repo.glob("*.py")):
-        if filepath.name.startswith("_"):
+        if not _is_driver_file(filepath):
             continue
         driver_id = filepath.stem
         driver_name = filepath.stem.replace("_", " ").title()
