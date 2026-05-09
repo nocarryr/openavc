@@ -33,23 +33,13 @@ DNS_TYPE_AAAA = 28   # IPv6 address (parsed but not used for discovery)
 
 DNS_CLASS_IN = 1
 
-# AV-relevant mDNS service types to query.
+# AV-relevant mDNS service types are contributed at runtime by each
+# loaded driver's ``mdns:`` fingerprint. Core ships no curated list of
+# vendor-specific service types — the matcher resolves those through
+# the SignalIndex, with the driver's own registry entry providing the
+# protocol/category labels that surface in the UI.
 #
-# This list was overhauled in the discovery redesign. Three former entries
-# were removed because the service types do not exist in the wild:
-#   - _amx-beacon._udp.local. - AMX uses DDP multicast on
-#     239.255.250.250:9131 instead. See amx_ddp_scanner.py.
-#   - _crestron._tcp.local. - Crestron primary discovery is the CIP UDP
-#     41794 probe. AirMedia receivers advertise as _airplay._tcp.
-#   - _lutron._tcp.local. - actual Lutron service type is _leap._tcp.
-# Three more were unverified hard-coded guesses removed in favor of
-# enumeration via _services._dns-sd._udp.local.:
-#   - _qsc._tcp.local., _shure._tcp.local., _tesira._tcp.local.
-# When a Q-SYS Core, Shure mixer, or Tesira processor advertises *any*
-# service that contains "qsc"/"shure"/"tesira" or carries a matching
-# manufacturer TXT record, the new TierMatcher will identify it via
-# the catch-all enumeration plus a TXT filter declared by the driver.
-# DNS-SD meta-query that enumerates every service type advertised on
+# The DNS-SD meta-query enumerates every service type advertised on
 # the network. Always included regardless of which drivers are loaded
 # so unknown service types surface to the user for catalog growth.
 DNS_SD_META_QUERY = "_services._dns-sd._udp.local."
@@ -312,20 +302,12 @@ class MDNSResult:
         elif "sn" in txt:
             info["serial_number"] = txt["sn"]
 
-        # Map service type to protocol
-        protocols = []
+        # Record the raw mDNS service type seen on the wire. Protocol
+        # / category labels come from the matched driver's registry
+        # entry once the matcher runs in finalize, so core does not
+        # ship a service-type → protocol / category dispatch.
         if self.service_type:
             info["mdns_services"] = [self.service_type]
-            proto = _service_type_to_protocol(self.service_type)
-            if proto:
-                protocols.append(proto)
-        if protocols:
-            info["protocols"] = protocols
-
-        # Map service type to category
-        category = _service_type_to_category(self.service_type)
-        if category:
-            info["category"] = category
 
         # Include port in open_ports if set
         if self.port and self.port not in (80, 443):
@@ -353,65 +335,13 @@ class MDNSResult:
         )
 
 
-def _service_type_to_protocol(service_type: str | None) -> str | None:
-    """Map mDNS service type to OpenAVC protocol name.
-
-    Only entries with documented vendor-specific service types are
-    included. Generic types (`_http._tcp`) and unverified guesses
-    (`_qsc._tcp`, `_shure._tcp`) are not mapped here — driver matching
-    via TXT records (Phase 6) handles those.
-    """
-    if not service_type:
-        return None
-    # Normalize: ensure trailing dot for lookup
-    key = service_type if service_type.endswith(".") else service_type + "."
-    mapping = {
-        "_pjlink._tcp.local.": "pjlink",
-        "_ndi._tcp.local.": "ndi",
-        "_leap._tcp.local.": "lutron_leap",
-        # Dante - any of the Audinate _netaudio-* services indicates Dante.
-        "_netaudio-cmc._udp.local.": "dante",
-        "_netaudio-arc._udp.local.": "dante",
-        "_netaudio-chan._udp.local.": "dante",
-        "_netaudio-dbc._udp.local.": "dante",
-        "_workgroup._udp.local.": "dante",
-        # NMOS / IPMX
-        "_nmos-node._tcp.local.": "nmos",
-        "_nmos-register._tcp.local.": "nmos",
-        "_nmos-query._tcp.local.": "nmos",
-        "_nmos-registration._tcp.local.": "nmos",
-        # Sennheiser SSC
-        "_ssc._udp.local.": "sennheiser_ssc",
-        "_ssc._tcp.local.": "sennheiser_ssc",
-        # Roku ECP
-        "_roku._tcp.local.": "roku_ecp",
-    }
-    return mapping.get(key)
-
-
-def _service_type_to_category(service_type: str | None) -> str | None:
-    """Map mDNS service type to device category."""
-    if not service_type:
-        return None
-    # Normalize: ensure trailing dot for lookup
-    key = service_type if service_type.endswith(".") else service_type + "."
-    mapping = {
-        "_pjlink._tcp.local.": "projector",
-        "_ndi._tcp.local.": "video",
-        "_leap._tcp.local.": "control",
-        "_netaudio-cmc._udp.local.": "audio",
-        "_netaudio-arc._udp.local.": "audio",
-        "_netaudio-chan._udp.local.": "audio",
-        "_netaudio-dbc._udp.local.": "audio",
-        "_workgroup._udp.local.": "audio",
-        "_ssc._udp.local.": "audio",
-        "_ssc._tcp.local.": "audio",
-        "_airplay._tcp.local.": "display",
-        "_googlecast._tcp.local.": "display",
-        "_raop._tcp.local.": "audio",
-        "_roku._tcp.local.": "display",
-    }
-    return mapping.get(key)
+# Service-type → protocol and service-type → category dispatch tables
+# used to live here. They were removed in the discovery rewrite — core
+# carries zero vendor-specific service-type knowledge. Drivers
+# contribute the same data implicitly: a driver that claims a service
+# type as a fingerprint also declares its protocol/category in its
+# registry entry, and the matcher pulls both together when it
+# identifies a device.
 
 
 # --- mDNS Scanner ---
@@ -797,9 +727,9 @@ def _extract_instance_name(full_name: str, service_type: str) -> str | None:
     """Extract the human-readable instance name from a PTR target.
 
     Example:
-        full_name='NEC PA1004UL._pjlink._tcp.local.'
-        service_type='_pjlink._tcp.local.'
-        returns='NEC PA1004UL'
+        full_name='Acme Foo._example._tcp.local.'
+        service_type='_example._tcp.local.'
+        returns='Acme Foo'
     """
     # Normalize: strip trailing dots
     full = full_name.rstrip(".")

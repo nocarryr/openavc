@@ -346,7 +346,7 @@ def parse_ssdp_response(text: str) -> dict[str, str] | None:
         HTTP/1.1 200 OK
         CACHE-CONTROL: max-age=1800
         LOCATION: http://192.168.1.50:49152/description.xml
-        SERVER: Linux/3.0, UPnP/1.0, Samsung/1.0
+        SERVER: Linux/3.0, UPnP/1.0, ExampleVendor/1.0
         ST: urn:schemas-upnp-org:device:MediaRenderer:1
         USN: uuid:abc123::urn:schemas-upnp-org:device:MediaRenderer:1
 
@@ -393,9 +393,9 @@ def _parse_upnp_xml(result: SSDPResult, xml_text: str) -> None:
         <root xmlns="urn:schemas-upnp-org:device-1-0">
           <device>
             <friendlyName>Living Room TV</friendlyName>
-            <manufacturer>Samsung</manufacturer>
-            <modelName>UE55</modelName>
-            <modelNumber>UN55NU8000</modelNumber>
+            <manufacturer>Acme Display Co</manufacturer>
+            <modelName>Foo-55</modelName>
+            <modelNumber>FOO-55-1000</modelNumber>
             <serialNumber>ABC123</serialNumber>
             <UDN>uuid:abc-def-123</UDN>
           </device>

@@ -65,8 +65,8 @@ log = logging.getLogger("discovery.tier_matcher")
 KIND_MDNS = "mdns"
 KIND_SSDP = "ssdp"
 KIND_AMX_DDP = "amx_ddp"
-KIND_BROADCAST = "broadcast"     # ONVIF (built-in named opt-in) + driver-declared / companion probes
-KIND_ACTIVE_PROBE = "probe"      # Extron SIS, Samsung MDC, Q-SYS QRC, ... + driver-declared / companion probes
+KIND_BROADCAST = "broadcast"     # driver-declared udp_probe / companion broadcast IDs
+KIND_ACTIVE_PROBE = "probe"      # driver-declared tcp_probe / companion active IDs
 
 KIND_OUI = "oui"                       # Tier 4 soft
 KIND_SNMP_PEN = "snmp_pen"             # Tier 4 soft
@@ -83,22 +83,14 @@ _SOFT_KINDS = {
 }
 
 
-# Strong-tier probe IDs that are definitionally cross-vendor. A driver
-# opting into one of these is claiming "this device speaks $protocol",
-# not "I am the best-fit driver for it" — so when one wins, the matcher
-# should still consult Tier 4 soft signals for a vendor-specific
-# alternative and return the vendor-specific driver as primary.
-#
-# After Phase 9.7, only ONVIF remains as a built-in named opt-in. PJLink
-# Class 1 + Class 2 and Crestron CIP shipped as ``_discovery.py``
-# companions ride the schema's ``discovery.companion.generic: true``
-# flag instead — that registers their synthetic IDs with
-# ``SignalRule.generic = True`` directly. New built-in cross-vendor
-# probes belong here only when they're shipped as platform handlers,
-# not as companions.
-_GENERIC_STRONG_PROBE_IDS: frozenset[str] = frozenset({
-    "onvif",           # Tier 2 broadcast — generic only when unfiltered
-})
+# Cross-vendor / generic flagging is per-driver. A driver declares
+# ``cross_vendor: true`` on its fingerprint when the wire response
+# identifies a protocol class but not a specific vendor — for example
+# a multi-vendor projector control protocol or an unfiltered camera
+# discovery beacon. The schema parser passes that flag through to
+# ``SignalRule.generic`` at index-build time, and the matcher consults
+# enrichment evidence (OUI / hostname / manufacturer alias) to pick a
+# vendor-specific peer when a generic rule wins.
 
 
 @dataclass(frozen=True)
@@ -112,19 +104,22 @@ class SignalRule:
             namespaces so an mDNS service and an active probe with the
             same string can't collide.
         source_id: Stable identifier within the kind:
-            - ``KIND_MDNS``: service type, e.g. ``"_netaudio-cmc._udp.local."``
+            - ``KIND_MDNS``: service type, e.g. ``"_example._tcp.local."``
             - ``KIND_SSDP``: UPnP device type URN
-            - ``KIND_AMX_DDP``: ``"<Make>/<ModelGlob>"``, e.g. ``"Polycom/SoundStructure*"``
-            - ``KIND_BROADCAST``: probe id, e.g. ``"onvif"``, a Phase 9
-              driver-declared ``"custom_<driver_id>_udp"``, or a Phase
-              9.7 companion-declared ``"custom_<driver_id>_companion_udp"``
-            - ``KIND_ACTIVE_PROBE``: probe id, e.g. ``"extron_sis"``,
-              ``"samsung_mdc"``, ``"visca"``, ``"qrc"``, or a synthetic
-              ``"custom_<driver_id>_<udp|tcp|companion_udp|companion_tcp>"``
+            - ``KIND_AMX_DDP``: ``"<Make>/<ModelGlob>"``
+            - ``KIND_BROADCAST``: ``custom_<driver_id>_udp`` for a
+              declarative ``udp_probe:`` or
+              ``custom_<driver_id>_companion_udp`` for a Python
+              companion's broadcast ID.
+            - ``KIND_ACTIVE_PROBE``: ``custom_<driver_id>_tcp`` for a
+              declarative ``tcp_probe:`` or
+              ``custom_<driver_id>_companion_tcp`` for a Python
+              companion's active ID.
             - ``KIND_OUI``: 6-char OUI prefix, lowercase, e.g. ``"00:0c:4d"``
             - ``KIND_SNMP_PEN``: integer Private Enterprise Number as string
             - ``KIND_HOSTNAME``: regex source string (compiled lazily by the index)
-            - ``KIND_VENDOR_STRING``: lowercased manufacturer alias, e.g. ``"nec"``
+            - ``KIND_OPEN_PORT``: port number as string, e.g. ``"4352"``
+            - ``KIND_VENDOR_STRING``: lowercased manufacturer alias
         txt_match: Optional TXT-record filter. The signal matches only
             when every key in this dict is present in the observed TXT
             and matches the value (case-insensitive). Used to disambiguate
@@ -133,12 +128,11 @@ class SignalRule:
         evidence_data: Optional static data merged into the evidence
             record when this rule matches. Used to pre-fill manufacturer
             / model when the signal alone implies them.
-        generic: True when this rule matches a definitionally cross-
-            vendor strong-tier probe (PJLink, unfiltered ONVIF, etc.).
-            Set by the factory methods based on
-            ``_GENERIC_STRONG_PROBE_IDS`` — never by drivers. When a
-            generic rule wins, ``TierMatcher.match()`` consults Tier 4
-            soft signals for a vendor-specific alternative.
+        generic: True when this rule's fingerprint identifies a protocol
+            class but not a specific vendor (driver declared
+            ``cross_vendor: true``). When a generic rule wins, the
+            matcher consults enrichment evidence for a vendor-specific
+            peer driver and demotes the generic to alternative.
     """
 
     driver_id: str
@@ -207,33 +201,25 @@ class SignalRule:
         probe_id: str,
         txt_match: dict[str, str] | None = None,
         *,
-        generic: bool | None = None,
+        generic: bool = False,
     ) -> "SignalRule":
-        """Build a Tier 2 broadcast rule.
+        """Build a broadcast-probe rule.
 
-        ``txt_match`` lets multiple drivers safely claim a generic probe
-        like ``onvif`` by attaching a manufacturer/model filter — the
-        responder's parsed identification fields are matched against the
-        filter at lookup time.
+        ``txt_match`` lets multiple drivers safely claim a shared probe
+        ID by attaching a manufacturer/model filter — the responder's
+        parsed identification fields are matched against the filter at
+        lookup time.
 
-        ``generic`` defaults to True when ``probe_id`` is in
-        ``_GENERIC_STRONG_PROBE_IDS`` *and* no ``txt_match`` filter is
-        applied (a filtered ONVIF rule is vendor-specific by
-        construction; an unfiltered one is the generic catch-all). For
-        Phase 9 driver-declared probes the caller can pass an explicit
-        ``generic`` value — those probe IDs (``custom_<driver_id>_udp``)
-        aren't in the built-in generic set, so the schema's
-        ``generic: bool`` is the only source of truth.
+        ``generic`` mirrors the driver's ``cross_vendor:`` flag. When
+        true, a winning match consults enrichment evidence for a
+        vendor-specific peer to demote to alternative.
         """
-        frozen_txt = _freeze_dict(txt_match)
-        if generic is None:
-            generic = probe_id in _GENERIC_STRONG_PROBE_IDS and not frozen_txt
         return cls(
             driver_id=driver_id,
             tier=SignalTier.BROADCAST_PROBE,
             kind=KIND_BROADCAST,
             source_id=probe_id,
-            txt_match=frozen_txt,
+            txt_match=_freeze_dict(txt_match),
             generic=generic,
         )
 
@@ -243,10 +229,9 @@ class SignalRule:
         driver_id: str,
         probe_id: str,
         *,
-        generic: bool | None = None,
+        generic: bool = False,
     ) -> "SignalRule":
-        if generic is None:
-            generic = probe_id in _GENERIC_STRONG_PROBE_IDS
+        """Build an active-probe rule. ``generic`` mirrors ``cross_vendor:``."""
         return cls(
             driver_id=driver_id,
             tier=SignalTier.ACTIVE_PROBE,
@@ -591,11 +576,12 @@ class TierMatcher:
     ) -> IdentificationMatch:
         """Build the IdentificationMatch for a winning strong-tier rule.
 
-        Vendor-specific rules stand alone — soft signals are ignored.
-        Generic rules (PJLink, unfiltered ONVIF) are protocol-class
-        winners; if a Tier 4 soft signal also produced a vendor-specific
-        candidate, that vendor driver becomes the primary "best fit"
-        and the generic driver demotes to the trailing alternative.
+        Vendor-specific rules stand alone — enrichment signals are
+        ignored. Generic rules (``cross_vendor: true``) are
+        protocol-class winners; if an enrichment signal also produced a
+        vendor-specific candidate, that vendor driver becomes the
+        primary "best fit" and the generic driver demotes to the
+        trailing alternative.
         """
         if not rule.generic:
             return IdentificationMatch.identified(
@@ -607,9 +593,9 @@ class TierMatcher:
         soft_candidates, soft_source = self._gather_soft_candidates(evidence_log)
         vendor_alternatives = [c for c in soft_candidates if c != rule.driver_id]
         if not vendor_alternatives:
-            # Generic match with no vendor-specific soft candidate — fall
-            # back to the same shape as a vendor-specific identify. This
-            # is the regression-guard case (PJLink alone, no OUI hit).
+            # Generic match with no vendor-specific enrichment candidate
+            # — fall back to the same shape as a vendor-specific
+            # identify.
             return IdentificationMatch.identified(
                 driver_id=rule.driver_id,
                 source=f"{rule.kind}:{rule.source_id}",
@@ -740,12 +726,13 @@ def evidence_broadcast(
     response: dict | None = None,
     txt: dict[str, str] | None = None,
 ) -> Evidence:
-    """Build an Evidence record for a Tier 2 broadcast probe response.
+    """Build an Evidence record for a broadcast probe response.
 
     ``txt`` carries identification fields parsed from the responder
     (manufacturer, model, hardware id) so the matcher can distinguish
-    drivers that share a generic probe — e.g. multiple ONVIF cameras
-    each filtered by manufacturer scope.
+    drivers that share a generic probe — e.g. several drivers claim a
+    common discovery beacon, each adding a different manufacturer
+    filter to their fingerprint.
     """
     data: dict[str, Any] = {
         "kind": KIND_BROADCAST,
@@ -873,13 +860,13 @@ def extract_vendor_strings(evidence_log: list[Evidence]) -> list[Evidence]:
 
 def evidence_vendor_string(value: str, source_probe_id: str) -> Evidence:
     """Build an Evidence record for a manufacturer string lifted from a
-    Tier 2/3 probe response.
+    fingerprint probe response.
 
     ``value`` is normalized to ``.strip().lower()``; the original raw
     string is preserved in ``data["raw"]`` for the "Why?" UI reveal.
-    ``source_probe_id`` records which strong-tier probe produced the
-    string (``"pjlink_class1"``, ``"onvif"``, ...) — also surfaced in
-    the audit trail.
+    ``source_probe_id`` records which fingerprint probe produced the
+    string (the canonical synthetic ID from ``hints.py``) — also
+    surfaced in the audit trail.
     """
     normalized = value.strip().lower()
     return Evidence(

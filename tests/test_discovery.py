@@ -11,7 +11,7 @@ from server.discovery.result import (
     merge_device_info,
 )
 from server.discovery.network_scanner import get_local_subnets, _parse_cidr
-from server.discovery.port_scanner import AV_PORTS, BANNER_PORTS
+from server.discovery.port_scanner import BANNER_PORTS, BASELINE_PORTS
 from server.discovery.engine import DiscoveryEngine, ScanStatus
 
 
@@ -19,66 +19,54 @@ from server.discovery.engine import DiscoveryEngine, ScanStatus
 
 
 class TestOUIDatabase:
+    """Core ships an empty table; drivers register OUIs at startup via
+    ``add_prefix``. These tests validate the runtime registration path."""
+
     def setup_method(self):
         self.db = OUIDatabase()
+        # Simulate the engine populating the table from a driver hint.
+        self.db.add_prefix("00:05:a6", "Acme Switcher Co", "switcher")
+        self.db.add_prefix("8c:71:f8", "Acme Display Co", "display")
 
-    def test_lookup_known_extron_mac(self):
+    def test_lookup_registered_prefix(self):
         result = self.db.lookup("00:05:A6:12:34:56")
         assert result is not None
-        assert result[0] == "Extron"
+        assert result[0] == "Acme Switcher Co"
         assert result[1] == "switcher"
 
-    def test_lookup_known_crestron_mac(self):
-        result = self.db.lookup("00:10:7F:AA:BB:CC")
-        assert result is not None
-        assert result[0] == "Crestron"
-        assert result[1] == "control"
-
-    def test_lookup_samsung_mac(self):
-        result = self.db.lookup("8c:71:f8:11:22:33")
-        assert result is not None
-        assert result[0] == "Samsung"
-        assert result[1] == "display"
-
-    def test_lookup_unknown_mac_returns_none(self):
+    def test_lookup_unregistered_returns_none(self):
         result = self.db.lookup("AA:BB:CC:DD:EE:FF")
         assert result is None
 
     def test_lookup_normalizes_dash_format(self):
         result = self.db.lookup("00-05-A6-12-34-56")
         assert result is not None
-        assert result[0] == "Extron"
+        assert result[0] == "Acme Switcher Co"
 
     def test_lookup_normalizes_no_separator(self):
         result = self.db.lookup("0005A6123456")
         assert result is not None
-        assert result[0] == "Extron"
+        assert result[0] == "Acme Switcher Co"
 
     def test_lookup_case_insensitive(self):
         result = self.db.lookup("00:05:a6:12:34:56")
         assert result is not None
-        assert result[0] == "Extron"
-
-    def test_is_av_manufacturer_true(self):
-        assert self.db.is_av_manufacturer("00:05:A6:12:34:56") is True  # Extron
-
-    def test_is_av_manufacturer_false_network(self):
-        assert self.db.is_av_manufacturer("24:A4:3C:12:34:56") is False  # Ubiquiti
-
-    def test_is_av_manufacturer_false_unknown(self):
-        assert self.db.is_av_manufacturer("AA:BB:CC:DD:EE:FF") is False
-
-    def test_is_network_device(self):
-        assert self.db.is_network_device("24:A4:3C:12:34:56") is True  # Ubiquiti
-        assert self.db.is_network_device("00:05:A6:12:34:56") is False  # Extron
+        assert result[0] == "Acme Switcher Co"
 
     def test_invalid_mac_returns_none(self):
         assert self.db.lookup("invalid") is None
         assert self.db.lookup("") is None
         assert self.db.lookup("00:11") is None
 
-    def test_oui_table_has_entries(self):
-        assert len(AV_OUI_TABLE) > 50  # We should have a decent number
+    def test_default_table_is_empty(self):
+        # Core ships zero curated entries — the principle-3 contract.
+        assert AV_OUI_TABLE == {}
+
+    def test_first_registration_wins_on_collision(self):
+        self.db.add_prefix("00:05:a6", "Different Vendor", "audio")
+        # Original registration sticks.
+        result = self.db.lookup("00:05:A6:11:22:33")
+        assert result == ("Acme Switcher Co", "switcher")
 
 
 # ===== Result Model Tests =====
@@ -171,18 +159,21 @@ class TestParseCIDR:
 
 
 class TestPortConstants:
-    def test_pjlink_port_in_table(self):
-        assert 4352 in AV_PORTS
+    def test_baseline_includes_telnet(self):
+        # Telnet stays in the universal baseline because the new schema
+        # supports banner-style probes (connect + read + match) that
+        # any driver can declare against it.
+        assert 23 in BASELINE_PORTS
 
-    def test_samsung_mdc_port_in_table(self):
-        assert 1515 in AV_PORTS
+    def test_baseline_includes_web_management(self):
+        for p in (80, 443, 8080):
+            assert p in BASELINE_PORTS
 
-    def test_telnet_port_in_table(self):
-        assert 23 in AV_PORTS
-
-    def test_banner_ports_are_subset(self):
+    def test_banner_ports_are_baseline_subset(self):
+        # Banner-friendly ports must be ports we always scan, otherwise
+        # we'd never have a banner to grab.
         for p in BANNER_PORTS:
-            assert p in AV_PORTS
+            assert p in BASELINE_PORTS
 
 
 # ===== Discovery Engine Tests =====
@@ -303,17 +294,15 @@ class TestDiscoveryEngine:
                     with patch("server.discovery.engine.grab_banners", new_callable=AsyncMock) as mock_banners:
                         mock_banners.return_value = {}
 
-                        # Mock Tier 1 listeners + Tier 2 broadcasts + SNMP.
-                        # Also mock the community catalog fetch so the signal
-                        # index is deterministically empty — otherwise the live
-                        # GitHub fetch leaks 50+ drivers into the index and
-                        # makes Extron's OUI match as `possible`.
+                        # Mock passive listeners + SNMP. Mock the community
+                        # catalog fetch so the signal index is deterministically
+                        # empty — otherwise the live GitHub fetch leaks 50+
+                        # drivers into the index.
                         with patch("server.discovery.engine.MDNSScanner") as mock_mdns_cls, \
                              patch("server.discovery.engine.SSDPScanner") as mock_ssdp_cls, \
                              patch("server.discovery.engine.AMXDDPScanner") as mock_amx_cls, \
                              patch("server.discovery.engine.SNMPScanner") as mock_snmp_cls, \
                              patch.object(self.engine.community_index, "get_drivers", new_callable=AsyncMock, return_value=[]), \
-                             patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
                              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
                             mock_mdns = MagicMock()
                             mock_mdns.start = AsyncMock(return_value={})
@@ -334,25 +323,24 @@ class TestDiscoveryEngine:
         # Should have found both devices
         assert len(self.engine.results) == 2
 
-        # Check Extron device
-        extron = self.engine.results.get("192.168.1.50")
-        assert extron is not None
-        assert extron.mac == "00:05:a6:12:34:56"
-        assert extron.manufacturer == "Extron"
-        assert extron.category == "switcher"
-        assert 23 in extron.open_ports
-        # TierMatcher ran with empty signal index → unknown state.
-        assert extron.identification is not None
-        assert extron.identification.state.value == "unknown"
+        # First device — MAC + open ports merged from ARP/port scan;
+        # manufacturer / category stay blank because no driver hint
+        # registered the OUI prefix in this test (core ships an empty
+        # OUI table by design).
+        d1 = self.engine.results.get("192.168.1.50")
+        assert d1 is not None
+        assert d1.mac == "00:05:a6:12:34:56"
+        assert 23 in d1.open_ports
+        # Empty signal index → unknown identification.
+        assert d1.identification is not None
+        assert d1.identification.state.value == "unknown"
 
-        # Check NEC device
-        nec = self.engine.results.get("192.168.1.72")
-        assert nec is not None
-        assert nec.mac == "04:fe:31:aa:bb:cc"
-        assert nec.manufacturer == "NEC"
-        assert nec.category == "projector"
-        assert 4352 in nec.open_ports
-        assert 80 in nec.open_ports
+        # Second device
+        d2 = self.engine.results.get("192.168.1.72")
+        assert d2 is not None
+        assert d2.mac == "04:fe:31:aa:bb:cc"
+        assert 4352 in d2.open_ports
+        assert 80 in d2.open_ports
 
 
 # ===== Subnet Detection Tests =====

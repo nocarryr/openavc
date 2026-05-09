@@ -21,8 +21,6 @@ from server.discovery.mdns_scanner import (
     DNS_SD_META_QUERY,
     _parse_txt_rdata,
     _extract_instance_name,
-    _service_type_to_protocol,
-    _service_type_to_category,
 )
 from server.discovery.ssdp_scanner import (
     SSDPScanner,
@@ -301,45 +299,51 @@ class TestParseTxtRdata:
 
 class TestMDNSResult:
     def test_to_device_info_basic(self):
+        # Core records the raw service type as observed and the
+        # instance name as device_name. Protocol/category labels come
+        # from the matched driver later in the pipeline, not from a
+        # core dispatch table.
         result = MDNSResult(
             ip="192.168.1.50",
             hostname="projector",
             port=4352,
-            service_type="_pjlink._tcp.local.",
-            instance_name="NEC PA1004UL",
+            service_type="_example._tcp.local.",
+            instance_name="Acme Foo Box",
         )
         info = result.to_device_info()
         assert info["hostname"] == "projector"
-        assert info["device_name"] == "NEC PA1004UL"
-        assert "_pjlink._tcp.local." in info["mdns_services"]
-        assert "pjlink" in info["protocols"]
-        assert info["category"] == "projector"
+        assert info["device_name"] == "Acme Foo Box"
+        assert "_example._tcp.local." in info["mdns_services"]
+        # Core no longer derives protocol or category from the service
+        # type; those are populated by the driver match in finalize.
+        assert "protocols" not in info
+        assert "category" not in info
 
     def test_to_device_info_with_txt_records(self):
         result = MDNSResult(
             ip="192.168.1.60",
             service_type="_http._tcp.local.",
             txt_records={
-                "manufacturer": "Samsung",
-                "model": "UN55NU8000",
-                "fw": "T-KTM2AKUC-1400.5",
+                "manufacturer": "Acme Display Co",
+                "model": "Foo-55X",
+                "fw": "1.4.0.5",
                 "sn": "SER12345",
             },
         )
         info = result.to_device_info()
-        assert info["manufacturer"] == "Samsung"
-        assert info["model"] == "UN55NU8000"
-        assert info["firmware"] == "T-KTM2AKUC-1400.5"
+        assert info["manufacturer"] == "Acme Display Co"
+        assert info["model"] == "Foo-55X"
+        assert info["firmware"] == "1.4.0.5"
         assert info["serial_number"] == "SER12345"
 
     def test_to_device_info_short_txt_keys(self):
         """Test shorthand TXT keys (mf, md, fw, sn)."""
         result = MDNSResult(
             ip="192.168.1.70",
-            txt_records={"mf": "LG", "md": "OLED55"},
+            txt_records={"mf": "Acme Display Co", "md": "OLED55"},
         )
         info = result.to_device_info()
-        assert info["manufacturer"] == "LG"
+        assert info["manufacturer"] == "Acme Display Co"
         assert info["model"] == "OLED55"
 
     def test_to_device_info_minimal(self):
@@ -359,116 +363,35 @@ class TestMDNSResult:
         assert "open_ports" not in info
 
 
-class TestServiceTypeMapping:
-    def test_pjlink_protocol(self):
-        assert _service_type_to_protocol("_pjlink._tcp.local.") == "pjlink"
+class TestMdnsScannerBaseline:
+    """Drivers contribute their own mDNS service types. Core only ships
+    a small generic baseline plus the DNS-SD meta-query."""
 
-    def test_baseline_service_types_no_bogus_av_protocols(self):
-        """Phase 9.6: the hard-coded baseline carries only protocols
-        that actually advertise via mDNS. AMX uses DDP multicast (not
-        mDNS); Crestron uses CIP UDP/41794 (not mDNS); Lutron uses
-        _leap, declared by the lutron driver, not a hard-coded
-        _lutron. The baseline contains no bogus AV protocols.
-        """
-        bogus = {
-            "_amx-beacon._udp.local.",
-            "_crestron._tcp.local.",
-            "_lutron._tcp.local.",
-        }
+    def test_baseline_is_protocol_class_only(self):
+        # Baseline carries only generic / consumer protocol service
+        # types — none of the AV-vendor service types are hard-coded.
         for s in BASELINE_SERVICE_TYPES:
-            assert s not in bogus, f"{s} is bogus and should not be in baseline"
+            assert s.endswith(".local.")
+            # Bare protocol-class names — no vendor-specific drivers.
+            assert "." in s
 
-    def test_dante_queryable_via_driver_declaration(self):
-        """Phase 9.6: Dante service types are declared by the
-        dante_ddm/Audinate drivers in openavc-drivers, not hard-coded
-        in core. The MDNSScanner queries any service type passed in.
-        """
+    def test_driver_supplied_service_types_passed_through(self):
+        # Drivers contribute service types via discovery.mdns; the
+        # scanner queries whatever it receives.
         scanner = MDNSScanner(service_types=[
-            "_netaudio-cmc._udp.local.",
-            "_netaudio-arc._udp.local.",
+            "_example._udp.local.",
+            "_other._tcp.local.",
         ])
-        assert "_netaudio-cmc._udp.local." in scanner._service_types
-        assert "_netaudio-arc._udp.local." in scanner._service_types
+        assert "_example._udp.local." in scanner._service_types
+        assert "_other._tcp.local." in scanner._service_types
 
     def test_dns_sd_meta_query_always_included(self):
-        """The DNS-SD meta-query is always added so unknown service
-        types surface for catalog growth, regardless of what drivers
-        declare.
-        """
+        # Always added so unknown service types surface for catalog
+        # growth, regardless of what drivers declare.
         scanner = MDNSScanner(service_types=[])
         assert DNS_SD_META_QUERY in scanner._service_types
         scanner2 = MDNSScanner(service_types=["_foo._tcp.local."])
         assert DNS_SD_META_QUERY in scanner2._service_types
-
-    def test_pjlink_protocol_no_trailing_dot(self):
-        """DNS-decoded names don't have trailing dots."""
-        assert _service_type_to_protocol("_pjlink._tcp.local") == "pjlink"
-
-    def test_dante_protocol(self):
-        # All Audinate _netaudio-* services indicate Dante.
-        assert _service_type_to_protocol("_netaudio-cmc._udp.local.") == "dante"
-        assert _service_type_to_protocol("_netaudio-arc._udp.local.") == "dante"
-        assert _service_type_to_protocol("_netaudio-chan._udp.local.") == "dante"
-        assert _service_type_to_protocol("_netaudio-dbc._udp.local.") == "dante"
-
-    def test_ndi_protocol(self):
-        assert _service_type_to_protocol("_ndi._tcp.local.") == "ndi"
-
-    def test_lutron_leap_protocol(self):
-        assert _service_type_to_protocol("_leap._tcp.local.") == "lutron_leap"
-
-    def test_nmos_protocol(self):
-        assert _service_type_to_protocol("_nmos-node._tcp.local.") == "nmos"
-        assert _service_type_to_protocol("_nmos-register._tcp.local.") == "nmos"
-
-    def test_sennheiser_ssc_protocol(self):
-        assert _service_type_to_protocol("_ssc._udp.local.") == "sennheiser_ssc"
-        assert _service_type_to_protocol("_ssc._tcp.local.") == "sennheiser_ssc"
-
-    def test_unverified_qsc_returns_none(self):
-        # Unverified service types (no public docs confirming them) are
-        # intentionally NOT mapped. Driver matching via TXT records or
-        # the catch-all enumeration handles those.
-        assert _service_type_to_protocol("_qsc._tcp.local.") is None
-
-    def test_removed_amx_beacon_returns_none(self):
-        # AMX uses DDP multicast (239.255.250.250:9131), not mDNS.
-        assert _service_type_to_protocol("_amx-beacon._udp.local.") is None
-
-    def test_removed_crestron_returns_none(self):
-        # Crestron primary discovery is the CIP UDP/41794 probe.
-        assert _service_type_to_protocol("_crestron._tcp.local.") is None
-
-    def test_http_no_protocol(self):
-        assert _service_type_to_protocol("_http._tcp.local.") is None
-
-    def test_none_input(self):
-        assert _service_type_to_protocol(None) is None
-
-    def test_pjlink_category(self):
-        assert _service_type_to_category("_pjlink._tcp.local.") == "projector"
-
-    def test_pjlink_category_no_trailing_dot(self):
-        assert _service_type_to_category("_pjlink._tcp.local") == "projector"
-
-    def test_airplay_category(self):
-        assert _service_type_to_category("_airplay._tcp.local.") == "display"
-
-    def test_dante_category(self):
-        assert _service_type_to_category("_netaudio-cmc._udp.local.") == "audio"
-        assert _service_type_to_category("_netaudio-arc._udp.local.") == "audio"
-
-    def test_ndi_category(self):
-        assert _service_type_to_category("_ndi._tcp.local.") == "video"
-
-    def test_lutron_category(self):
-        assert _service_type_to_category("_leap._tcp.local.") == "control"
-
-    def test_unverified_qsc_category_none(self):
-        assert _service_type_to_category("_qsc._tcp.local.") is None
-
-    def test_unknown_category(self):
-        assert _service_type_to_category("_http._tcp.local.") is None
 
 
 class TestExtractInstanceName:

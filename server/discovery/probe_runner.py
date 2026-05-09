@@ -14,10 +14,10 @@ so on multi-homed hosts the probe leaves through the right NIC and
 replies route back the same way. This is non-negotiable: the runner
 refuses to send if it can't bind.
 
-A shared ``RateLimiter`` caps custom probes at 10 sends/sec globally,
-matching the Crestron CIP envelope used by built-in probes. The
-runner does not retry — a missed reply is silently a missed reply,
-which is the right behavior for a discovery probe.
+A shared ``RateLimiter`` caps custom probes at 10 sends/sec globally
+so a single scan can't flood the network with broadcasts. The runner
+does not retry — a missed reply is silently a missed reply, which is
+the right behavior for a discovery probe.
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ _MAX_RESPONSE_BYTES = 4096
 class RateLimiter:
     """Async token-bucket-style limiter, ``rate`` calls per second.
 
-    Matches the Crestron-CIP-style 10/sec cap used by built-in probes.
     A single ``RateLimiter`` instance shared across all custom probes
     in a scan keeps the global send rate bounded even when many
     drivers contribute custom probes.

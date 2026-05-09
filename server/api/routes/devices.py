@@ -226,25 +226,7 @@ async def test_device_connection(device_id: str) -> dict[str, Any]:
             writer.close()
             await writer.wait_closed()
             latency = round((_time.monotonic() - start) * 1000, 1)
-
-            # Try protocol probe if port has a known probe
-            protocol_status = None
-            try:
-                from server.discovery.protocol_prober import _PORT_PROBES
-                probe_fns = _PORT_PROBES.get(tcp_port, [])
-                if probe_fns:
-                    for fn in probe_fns:
-                        result = await _asyncio.wait_for(fn(host, tcp_port), timeout=5.0)
-                        if result is not None:
-                            protocol_status = "verified"
-                            break
-                    if protocol_status is None:
-                        protocol_status = "not_verified"
-            except Exception:
-                # Catch-all: protocol probes are best-effort, failure is non-fatal
-                protocol_status = "not_verified"
-
-            return {"success": True, "error": None, "latency_ms": latency, "protocol_status": protocol_status}
+            return {"success": True, "error": None, "latency_ms": latency}
         except _asyncio.TimeoutError:
             return {"success": False, "error": "Connection timed out (5s)", "latency_ms": None}
         except OSError as e:

@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -383,65 +382,26 @@ def parse_snmp_response(data: bytes) -> dict[str, str]:
     return result
 
 
-# --- PEN (Private Enterprise Number) Lookup ---
-# Maps IANA PEN to manufacturer name. sysObjectID format: 1.3.6.1.4.1.{PEN}.x.y.z
-# Only includes AV-relevant and common enterprise vendors.
-
-_PEN_TABLE: dict[int, str] = {
-    9: "Cisco",
-    11: "HP",
-    43: "3Com",
-    171: "D-Link",
-    207: "Allied Telesis",
-    236: "Samsung",
-    311: "Microsoft",
-    318: "APC/Schneider",
-    674: "Dell",
-    2435: "Sony",
-    2636: "Juniper",
-    3076: "Altiga/Cisco",
-    3375: "F5 Networks",
-    3872: "QSC",
-    4413: "Ubiquiti",
-    4981: "Panasonic",
-    5765: "Watchguard",
-    6486: "Alcatel-Lucent",
-    6981: "Biamp",
-    8072: "Net-SNMP",
-    9148: "AudioCodes",
-    10002: "Ubiquiti",
-    11898: "Ruckus",
-    14988: "MikroTik",
-    17049: "Extron",
-    21317: "Crestron",
-    24717: "Atlona",
-    25053: "Ruckus Wireless",
-    25506: "H3C/HPE",
-    32812: "Shure",
-    35265: "Ericsson-LG",
-    38581: "Barco",
-    41916: "AMX/Harman",
-    47196: "Aruba",
-    52040: "Christie",
-}
+# --- IANA Private Enterprise Number extraction ---
+# sysObjectID format: 1.3.6.1.4.1.{PEN}.<rest>. Core does not ship a
+# curated PEN→manufacturer table — drivers register PENs they care
+# about via the ``snmp_pen:`` hint, which feeds the matcher's
+# enrichment lookup. The plain integer extraction is a generic
+# capability; the vendor binding is per-driver.
 
 
-def lookup_pen(sys_object_id: str) -> str | None:
-    """Extract the PEN from a sysObjectID and look up the manufacturer.
-
-    sysObjectID is typically: 1.3.6.1.4.1.{PEN}.{rest}
-    Returns manufacturer name or None.
-    """
+def extract_pen(sys_object_id: str) -> int | None:
+    """Return the IANA Private Enterprise Number from a sysObjectID,
+    or None if the OID isn't in the standard PEN form."""
     prefix = "1.3.6.1.4.1."
     if not sys_object_id.startswith(prefix):
         return None
     rest = sys_object_id[len(prefix):]
     pen_str = rest.split(".")[0] if rest else ""
     try:
-        pen = int(pen_str)
+        return int(pen_str)
     except ValueError:
         return None
-    return _PEN_TABLE.get(pen)
 
 
 # --- SNMP Result ---
@@ -487,30 +447,15 @@ class SNMPInfo:
         """Return the IANA Private Enterprise Number from sysObjectID, if any.
 
         sysObjectID format: ``1.3.6.1.4.1.<PEN>.<rest>``. Returns the
-        PEN as an int when present; None otherwise. Used as a Tier 4
-        soft signal for the deterministic matcher (multiple AV drivers
-        may share a vendor PEN, so this produces ``possible`` state with
-        a candidate list rather than a deterministic match).
+        PEN as an int when present; None otherwise. Used as an
+        enrichment soft signal for the matcher; multiple drivers may
+        register the same PEN, producing a ``possible`` state with a
+        candidate list rather than a deterministic match.
         """
-        prefix = "1.3.6.1.4.1."
-        if not self.sys_object_id.startswith(prefix):
-            return None
-        rest = self.sys_object_id[len(prefix):]
-        pen_str = rest.split(".")[0] if rest else ""
-        try:
-            return int(pen_str)
-        except ValueError:
-            return None
+        return extract_pen(self.sys_object_id)
 
     def to_evidence(self):
-        """Emit a Tier 4 ENRICHMENT Evidence record, or None if no PEN.
-
-        Only the SNMP PEN match feeds the deterministic matcher's soft-
-        signal path. sysDescr text parsing remains a legacy enrichment
-        path because string regexes are inherently fuzzy and would
-        contaminate the deterministic guarantee. The TierMatcher
-        consults driver hints to map PEN -> candidate driver_ids.
-        """
+        """Emit an enrichment Evidence record, or None if no PEN."""
         if self.pen is None:
             return None
         from server.discovery.tier_matcher import evidence_snmp_pen
@@ -518,33 +463,25 @@ class SNMPInfo:
         return evidence_snmp_pen(self.pen, sysdescr=self.sys_descr or None)
 
     def to_device_info(self) -> dict[str, Any]:
-        """Convert to a dict suitable for merge_device_info()."""
+        """Convert to a dict suitable for merge_device_info().
+
+        Core does not parse vendor strings out of sysDescr — that's
+        fuzzy and inherently vendor-specific. Drivers contribute
+        manufacturer recognition via ``manufacturer_alias:`` hints,
+        and the engine's ``extract_vendor_strings`` finalize step
+        lifts strings out of probe responses for the matcher. This
+        method just surfaces the device's self-reported fields.
+        """
         info: dict[str, Any] = {}
 
         if self.sys_name:
             info["device_name"] = self.sys_name
-        if self.sys_descr:
-            info["snmp_info"] = self.to_dict()
-            # Try to extract manufacturer, model, firmware from sysDescr
-            parsed = parse_sys_descr(self.sys_descr)
-            if parsed.get("manufacturer"):
-                info["manufacturer"] = parsed["manufacturer"]
-            if parsed.get("model"):
-                info["model"] = parsed["model"]
-            if parsed.get("firmware"):
-                info["firmware"] = parsed["firmware"]
-            if parsed.get("category"):
-                info["category"] = parsed["category"]
-        elif self.to_dict():
+        if self.to_dict():
             info["snmp_info"] = self.to_dict()
 
-        # PEN lookup from sysObjectID (fallback if sysDescr didn't identify manufacturer)
-        if not info.get("manufacturer") and self.sys_object_id:
-            pen_mfg = lookup_pen(self.sys_object_id)
-            if pen_mfg:
-                info["manufacturer"] = pen_mfg
-
-        # Entity MIB enrichment (overrides sysDescr-based values if present)
+        # Entity MIB fields are device self-report (entPhysical*) — not
+        # vendor knowledge in core. They're authoritative when the
+        # device populates them.
         if self.entity_manufacturer:
             info["manufacturer"] = self.entity_manufacturer
         if self.entity_model:
@@ -555,77 +492,6 @@ class SNMPInfo:
             info["firmware"] = self.entity_firmware_rev
 
         return info
-
-
-# --- sysDescr Parsing ---
-
-# Known patterns in sysDescr strings from AV equipment
-_DESCR_PATTERNS: list[tuple[re.Pattern, dict[str, str]]] = [
-    # NEC projectors: "NEC PA1004UL Projector, Firmware V1.03"
-    (re.compile(r"(NEC)\s+(\S+).*?Projector.*?(?:Firmware\s+)?(\S+)?", re.I),
-     {"manufacturer": "NEC", "category": "projector"}),
-    # Epson projectors
-    (re.compile(r"(Epson)\s+(\S+).*?Projector", re.I),
-     {"manufacturer": "Epson", "category": "projector"}),
-    # Extron: "Extron DTP CrossPoint 84 IPCP, V1.07.0000"
-    (re.compile(r"(Extron)\s+(.+?),\s*(V\S+)", re.I),
-     {"manufacturer": "Extron", "category": "switcher"}),
-    # QSC: "QSC Q-SYS Core 110f, V9.5.0"
-    (re.compile(r"(QSC)\s+(.+?),\s*(V\S+)", re.I),
-     {"manufacturer": "QSC", "category": "audio"}),
-    # Biamp: "Biamp Tesira SERVER-IO, Firmware 4.14"
-    (re.compile(r"(Biamp)\s+(.+?),\s*(?:Firmware\s*)?(\S+)?", re.I),
-     {"manufacturer": "Biamp", "category": "audio"}),
-    # Shure: "Shure MXA910, V4.5.6"
-    (re.compile(r"(Shure)\s+(\S+).*?(?:V(\S+))?", re.I),
-     {"manufacturer": "Shure", "category": "audio"}),
-    # Crestron: "Crestron DM-MD8X8, Version 1.500"
-    (re.compile(r"(Crestron)\s+(.+?)(?:,\s*(?:Version\s*)?(\S+))?$", re.I),
-     {"manufacturer": "Crestron", "category": "control"}),
-    # Samsung displays
-    (re.compile(r"(Samsung)\s+(.+?)(?:,\s*(\S+))?$", re.I),
-     {"manufacturer": "Samsung", "category": "display"}),
-    # LG displays
-    (re.compile(r"(LG)\s+(.+?)(?:,\s*(\S+))?$", re.I),
-     {"manufacturer": "LG", "category": "display"}),
-    # Sony
-    (re.compile(r"(Sony)\s+(.+?)(?:,\s*(\S+))?$", re.I),
-     {"manufacturer": "Sony"}),
-    # Panasonic
-    (re.compile(r"(Panasonic)\s+(.+?)(?:,\s*(\S+))?$", re.I),
-     {"manufacturer": "Panasonic"}),
-]
-
-
-def parse_sys_descr(descr: str) -> dict[str, str]:
-    """Parse a sysDescr string to extract manufacturer, model, firmware, category.
-
-    Returns dict with keys: manufacturer, model, firmware, category (any may be absent).
-    """
-    result: dict[str, str] = {}
-
-    for pattern, defaults in _DESCR_PATTERNS:
-        m = pattern.match(descr.strip())
-        if m:
-            result.update(defaults)
-            groups = m.groups()
-            if len(groups) >= 2 and groups[1]:
-                result["model"] = groups[1].strip()
-            if len(groups) >= 3 and groups[2]:
-                result["firmware"] = groups[2].strip()
-            return result
-
-    # Fallback: try to extract any recognizable manufacturer name
-    descr_lower = descr.lower()
-    for mfg in ["extron", "crestron", "amx", "biamp", "qsc", "shure", "nec",
-                 "epson", "samsung", "lg", "sony", "panasonic", "barco", "christie"]:
-        if mfg in descr_lower:
-            result["manufacturer"] = mfg.capitalize()
-            if mfg in ("extron", "crestron", "amx"):
-                result["category"] = "control" if mfg == "amx" else ("switcher" if mfg == "extron" else "control")
-            break
-
-    return result
 
 
 # --- SNMP Scanner ---

@@ -1,10 +1,14 @@
 """Device discovery module for OpenAVC.
 
-Scans the local network for AV devices using multiple methods:
-- Ping sweep + ARP table harvest (MAC OUI lookup)
+Scans the local network using a mix of passive and active methods:
+- Ping sweep + ARP table harvest with OUI lookup
 - Async TCP port scanning + banner grab
-- Protocol-specific probes (PJLink, Extron SIS, etc.)  [Chunk 2]
-- mDNS / DNS-SD passive listening                       [Chunk 4]
-- SSDP / UPnP discovery                                 [Chunk 4]
-- SNMP device identification                             [Chunk 5]
+- mDNS / DNS-SD passive listening
+- SSDP / UPnP discovery
+- AMX-DDP beacon listening
+- SNMP device identification
+- Driver-declared TCP / UDP probes and Python companions
+
+Core ships no manufacturer-specific identification logic. Every
+fingerprint and hint comes from a driver's discovery declaration.
 """

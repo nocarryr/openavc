@@ -11,11 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from server.discovery.network_scanner import get_local_subnets, ping_sweep, harvest_arp_table, netbios_sweep
-from server.discovery.port_scanner import scan_host_ports, grab_banners, AV_PORTS
-from server.discovery.protocol_prober import (
-    probe_device as run_protocol_probes,
-    probe_result_to_evidence,
-)
+from server.discovery.port_scanner import scan_host_ports, grab_banners, BASELINE_PORTS
 from server.discovery.oui_database import OUIDatabase
 from server.discovery.hints import (
     DiscoveryHint,
@@ -42,7 +38,6 @@ from server.discovery.companion import (
     load_discovery_companions,
     run_companion,
 )
-from server.discovery.onvif_scanner import probe_onvif  # noqa: F401 — Step 3 deletes
 from server.discovery.tier_matcher import (
     SignalIndex,
     TierMatcher,
@@ -190,7 +185,7 @@ class DiscoveryEngine:
         self.signal_index: SignalIndex = SignalIndex()
         self.tier_matcher: TierMatcher = TierMatcher(self.signal_index)
         self._installed_registry: list[dict[str, Any]] = []
-        # Phase 9.7: driver-supplied Python discovery companions
+        # Driver-supplied Python discovery companions
         # ({driver_id: async probe}). Populated by
         # load_discovery_companions_from_dirs().
         self._discovery_companions: dict[str, CompanionProbe] = {}
@@ -219,11 +214,11 @@ class DiscoveryEngine:
     def load_discovery_companions_from_dirs(
         self, directories: list[Path | str],
     ) -> None:
-        """Phase 9.7: scan directories for ``*_discovery.py`` companions.
+        """Scan directories for ``*_discovery.py`` companions.
 
         Replaces any previously-loaded companions. The engine invokes
-        each loaded companion's ``probe()`` once per scan (alongside
-        the declarative udp_broadcast_probe / tcp_active_probe specs).
+        each loaded companion's ``probe()`` once per scan, alongside
+        the declarative ``tcp_probe:`` / ``udp_probe:`` specs.
         """
         self._discovery_companions = load_discovery_companions(directories)
         log.info(
@@ -475,22 +470,24 @@ class DiscoveryEngine:
         return await self._scan_pipeline_inner(subnets)
 
     async def _scan_pipeline_inner(self, subnets: list[str]) -> None:
-        """The core scan phases (Phase 6 four-tier orchestrator).
+        """The core scan phases.
 
         Phase layout:
           1: Subnet detection (already done)
-          2: Start Tier 1 passive listeners (mDNS + SSDP + AMX DDP)
+          2: Start passive listeners (mDNS + SSDP + AMX DDP)
           3: Ping sweep
-          4: ARP harvest + OUI lookup + hostname resolution (Tier 4 enrichment)
+          4: ARP harvest + OUI lookup + hostname resolution
           5: Port scan + banner grab
-          6: Tier 2 broadcast probes + Tier 3 active probes + SNMP (concurrent)
-          7: Collect Tier 1 + SNMP results
-          8: Run TierMatcher.match() per device + finalize
+          6: Launch SNMP scan in the background
+          7: Collect passive listener results + SNMP results, port-scan
+             passive-only hosts, then run driver-declared probes (UDP
+             broadcasts, TCP probes, Python companions)
+          8: Run the deterministic matcher per device + finalize
 
         Every signal-producing phase appends ``Evidence`` records to the
-        device's ``evidence_log``. The deterministic ``TierMatcher`` runs
-        once at finalize and produces an ``IdentificationMatch`` —
-        identified, possible, or unknown — based purely on those records.
+        device's ``evidence_log``. The matcher runs once at finalize and
+        produces an ``IdentificationMatch`` — identified, possible, or
+        unknown — based purely on those records.
         """
         gentle = self.config.get("gentle_mode", False)
         depth = self.config.get("scan_depth", "standard")
@@ -502,7 +499,7 @@ class DiscoveryEngine:
         # --- Phase 1: Subnet Detection (already done) ---
         await self._set_phase(1, "subnet_detection", "Detecting network interfaces...")
 
-        # --- Phase 2: Start Tier 1 Passive Listeners (background) ---
+        # --- Phase 2: Start Passive Listeners (background) ---
         await self._set_phase(2, "passive_listen", "Starting mDNS, SSDP, and AMX DDP listeners...")
 
         # mDNS service types come from loaded drivers' mdns: declarations
@@ -593,8 +590,8 @@ class DiscoveryEngine:
                     device = self._get_or_create(ip)
                     info: dict[str, Any] = {}
 
-                    # Hostname from reverse DNS / NetBIOS — both feed the
-                    # Tier 4 hostname soft-signal evidence record.
+                    # Hostname from reverse DNS / NetBIOS — both feed
+                    # the hostname enrichment evidence record.
                     hostname = hostnames.get(ip)
                     if hostname:
                         info["hostname"] = hostname
@@ -611,9 +608,9 @@ class DiscoveryEngine:
                     if hostname:
                         device.evidence_log.append(evidence_hostname(hostname))
 
-                    # MAC + OUI: legacy lookup keeps the friendly vendor
-                    # name visible in the UI; the deterministic matcher
-                    # consumes the Tier 4 OUI evidence record instead.
+                    # MAC + OUI: lookup keeps the friendly vendor name
+                    # visible in the UI; the matcher consumes the OUI
+                    # enrichment evidence record instead.
                     mac = arp_table.get(ip)
                     if mac:
                         info["mac"] = mac
@@ -631,32 +628,41 @@ class DiscoveryEngine:
                         await self._emit_device_update(device, "arp_harvest")
 
             # --- Phase 5: Port Scan ---
-            await self._set_phase(5, "port_scan", "Probing AV ports...")
+            await self._set_phase(5, "port_scan", "Probing device ports...")
 
-            # Build port list unconditionally — also used for passive follow-up.
-            # AV_PORTS already covers every Tier 3 active probe port. Community
-            # driver ports are merged so manual_only drivers still surface in
-            # the open-ports list for the UI.
-            port_set = set(AV_PORTS.keys())
+            # Build the scan list at runtime: every loaded driver
+            # contributes the port it declares for ``tcp_probe:`` and
+            # ``port_open:`` hints; the community catalog contributes
+            # ports of un-installed drivers so a known-but-uninstalled
+            # device still surfaces with its open ports in the UI; and
+            # a small generic baseline (SSH, Telnet, HTTP/HTTPS,
+            # alt-HTTP) covers banner reading and web management for
+            # devices we don't yet have a driver for.
+            port_set: set[int] = set(BASELINE_PORTS)
+
+            for hint in self.discovery_hints:
+                if hint.tcp_probe is not None:
+                    port_set.add(hint.tcp_probe.port)
+                for p in hint.port_open:
+                    port_set.add(p)
+
             community_drivers = await self.community_index.get_drivers()
             for drv in community_drivers:
                 for p in drv.get("ports", []):
                     if isinstance(p, int):
                         port_set.add(p)
-            # Thorough mode: add extended ports for broader coverage
+
+            # Thorough mode: add a handful of generic extended ports.
+            # No vendor labels — these are common alternate web / RTSP
+            # / management ports.
             if depth == "thorough":
-                port_set.update([
-                    554,    # RTSP (cameras, encoders)
-                    3000,   # Various web UIs
-                    4000,   # Various control protocols
-                    5060,   # SIP (VoIP, conferencing)
-                    8443,   # HTTPS alt
-                    8888,   # HTTP alt
-                    9000,   # Various web UIs
-                    10000,  # Various management
-                ])
+                port_set.update([554, 3000, 4000, 5060, 8443, 8888, 9000, 10000])
+
             port_list = sorted(port_set)
-            log.info("Port scan: %d ports (%d base + driver/community)", len(port_list), len(AV_PORTS))
+            log.info(
+                "Port scan: %d ports (%d baseline + driver/catalog)",
+                len(port_list), len(BASELINE_PORTS),
+            )
 
             if alive_ips:
                 total = len(alive_ips)
@@ -682,10 +688,18 @@ class DiscoveryEngine:
                     if gentle and i < total - 1:
                         await asyncio.sleep(0.1)
 
-            # --- Phase 6: Tier 2 Broadcast Probes + Tier 3 Active Probes + SNMP ---
+            # --- Phase 6: SNMP launch ---
+            #
+            # Driver-declared probes (UDP broadcasts + TCP active probes
+            # + Python companions) used to run here, but they need the
+            # full host inventory (passive-only mDNS/SSDP devices
+            # included) to land probes on every reachable target. They
+            # now run during phase 7 after passive collection — see
+            # ``_run_custom_probes`` below. SNMP still kicks off here in
+            # the background so its 5-second wait overlaps with the
+            # passive-listener collection window.
             await self._set_phase(6, "protocol_probe", "Identifying device protocols...")
 
-            # Start SNMP as a concurrent background task if enabled.
             if snmp_enabled and alive_ips:
                 snmp_scanner = SNMPScanner()
                 snmp_concurrency = 10 if gentle else 20
@@ -700,53 +714,7 @@ class DiscoveryEngine:
                     )
                 )
 
-            # Tier 2 broadcasts — fire one per probe family, listen for
-            # responses, append Tier 2 Evidence per responder. Each socket
-            # binds to control_ip when set (network-safety guarantee).
-            await self._run_tier2_broadcasts(subnets, control_ip, alive_ips)
-
-            # Tier 3 active probes — only on devices with open ports.
-            probe_targets = [
-                (ip, dev) for ip, dev in self.results.items()
-                if dev.open_ports
-            ]
-            total_probes = len(probe_targets)
-
-            for i, (ip, device) in enumerate(probe_targets):
-                probe_results = await run_protocol_probes(
-                    ip, device.open_ports, device.banners or None
-                )
-                for pr in probe_results:
-                    info: dict[str, Any] = {"protocols": [pr.protocol]}
-                    if pr.manufacturer:
-                        info["manufacturer"] = pr.manufacturer
-                    if pr.model:
-                        info["model"] = pr.model
-                    if pr.device_name:
-                        info["device_name"] = pr.device_name
-                    if pr.firmware:
-                        info["firmware"] = pr.firmware
-                    if pr.category:
-                        info["category"] = pr.category
-
-                    device.evidence_log.append(probe_result_to_evidence(pr))
-                    merge_device_info(device, info, "probe")
-                    await self._emit_device_update(device, "protocol_probe")
-
-                # Update progress within this phase
-                if total_probes > 0:
-                    await self._update_intra_progress((i + 1) / total_probes)
-
-                if gentle and i < total_probes - 1:
-                    await asyncio.sleep(0.05)
-
-            # Phase 9: driver-declared udp_broadcast_probe / tcp_active_probe
-            # specs. Walks self.discovery_hints and runs each declared
-            # probe; evidence is appended to per-device evidence_log
-            # the same way as built-in Tier 2/3 results.
-            await self._run_custom_probes(subnets, control_ip)
-
-            # --- Phase 7: Collect Tier 1 Passive + SNMP Results ---
+            # --- Phase 7: Collect Passive + SNMP Results ---
             await self._set_phase(7, "passive_collect", "Collecting passive and SNMP results...")
 
             # Signal passive listeners to stop. They exit their receive
@@ -759,8 +727,9 @@ class DiscoveryEngine:
             await self._collect_passive_results(mdns_task, ssdp_task, amx_ddp_task)
             await self._collect_snmp_results(snmp_task)
 
-            # Follow-up: port scan + probe devices found only by passive
-            # discovery (mDNS/SSDP) that weren't in the ping sweep
+            # Follow-up: port scan devices found only by passive discovery
+            # (mDNS/SSDP/AMX-DDP) that weren't in the ping sweep, so the
+            # custom-probe pass below sees their open ports.
             ping_found = set(alive_ips) if alive_ips else set()
             passive_only = [
                 ip for ip, dev in self.results.items()
@@ -776,46 +745,34 @@ class DiscoveryEngine:
                     open_ports = await scan_host_ports(ip, port_list, timeout=1.0)
                     if open_ports:
                         merge_device_info(device, {"open_ports": open_ports}, "port_scan")
-                        banners = await grab_banners(ip, open_ports, timeout=2.0)
-                        if banners:
-                            merge_device_info(device, {"banners": banners}, "banner")
-                        probe_results = await run_protocol_probes(
-                            ip, open_ports, banners or None,
-                        )
-                        for pr in probe_results:
-                            pinfo: dict[str, Any] = {"protocols": [pr.protocol]}
-                            if pr.manufacturer:
-                                pinfo["manufacturer"] = pr.manufacturer
-                            if pr.model:
-                                pinfo["model"] = pr.model
-                            if pr.device_name:
-                                pinfo["device_name"] = pr.device_name
-                            if pr.firmware:
-                                pinfo["firmware"] = pr.firmware
-                            if pr.category:
-                                pinfo["category"] = pr.category
-                            device.evidence_log.append(probe_result_to_evidence(pr))
-                            merge_device_info(device, pinfo, "probe")
                     await self._emit_device_update(device, "passive_followup")
 
-            # --- Phase 8: Run TierMatcher.match() per device + Finalize ---
+            # Driver-declared probes run after the full host inventory is
+            # known — UDP broadcasts, TCP probes against every host whose
+            # port-scan results include the spec port, and Python
+            # companions. Evidence lands in each device's evidence_log
+            # before the matcher runs in phase 8.
+            await self._run_custom_probes(subnets, control_ip)
+
+            # --- Phase 8: Run the matcher per device + Finalize ---
             await self._set_phase(8, "finalize", "Matching drivers...")
 
             finalize_total = len(self.results)
             for i, device in enumerate(self.results.values()):
-                # Emit Tier 4 open-port evidence for any port that's both
-                # observed open AND referenced by at least one driver's
-                # `open_ports:` list. We don't emit for every open port —
-                # bare openness on a generic port is too weak a signal.
+                # Emit open-port enrichment evidence for any port that's
+                # both observed open AND referenced by at least one
+                # driver's ``port_open:`` hint. Bare openness on a
+                # generic port is too weak to emit unconditionally.
                 for port in device.open_ports:
                     if self.signal_index.find_soft_open_port(port):
                         device.evidence_log.append(evidence_open_port(port))
 
-                # Mine Tier 1/2/3 probe responses for manufacturer / make
-                # strings and append Tier 4 vendor_string evidence so the
-                # matcher can pick the best-fit driver via vendor_aliases
-                # (Phase 8.6) — e.g. PJLink %1MNFR? -> "NEC" surfaces the
-                # sharp_nec_projector driver without an OUI catalog hit.
+                # Mine probe responses for manufacturer / make strings
+                # and append vendor_string enrichment evidence so the
+                # matcher can pick a best-fit driver via
+                # ``manufacturer_alias:`` hints — e.g. a probe response
+                # carrying ``manufacturer=NEC`` surfaces a driver that
+                # claims that alias without needing an OUI hit.
                 device.evidence_log.extend(
                     extract_vendor_strings(device.evidence_log)
                 )
@@ -854,7 +811,7 @@ class DiscoveryEngine:
         ssdp_task: asyncio.Task,
         amx_ddp_task: asyncio.Task,
     ) -> None:
-        """Wait for Tier 1 listeners and append their evidence to each device.
+        """Wait for passive listeners and append their evidence to each device.
 
         Uses a 1-second heartbeat loop so the progress bar moves steadily
         instead of appearing stuck while waiting for SSDP XML fetches.
@@ -956,52 +913,29 @@ class DiscoveryEngine:
         if snmp_results:
             log.info("SNMP enriched %d devices", len(snmp_results))
 
-    async def _run_tier2_broadcasts(
-        self,
-        subnets: list[str],
-        control_ip: str,
-        alive_ips: list[str],
-    ) -> None:
-        """Send the built-in Tier 2 ONVIF broadcast probe.
-
-        ONVIF is the only remaining built-in Tier 2 named opt-in: PJLink
-        Class 2 and Crestron CIP discovery now ship as ``_discovery.py``
-        companions (see Discovery Spec §11). The probe fires only if at
-        least one driver claims ``onvif:`` (any form) in its discovery
-        hints.
-
-        Network-safety: the socket binds to ``control_ip`` when set so
-        the OS doesn't pick a Docker / VPN source IP that would be
-        dropped by ``rp_filter`` on multi-homed hosts.
-        """
-        del subnets, control_ip, alive_ips  # nothing to dispatch yet
-        # The named ONVIF opt-in was removed in the discovery rewrite;
-        # ONVIF will return as a ``udp_probe:`` declaration on a
-        # generic community camera driver in Step 3 of the rewrite.
-        # Until then this method is a no-op and the dedicated
-        # ``probe_onvif`` helper has no caller.
-        return
-
     async def _run_custom_probes(
         self,
         subnets: list[str],
         control_ip: str,
     ) -> None:
-        """Dispatch driver-declared UDP / TCP probes.
+        """Dispatch driver-declared probes.
 
         Walks ``self.discovery_hints`` for any declared
-        ``udp_probe`` / ``tcp_probe`` specs:
+        ``udp_probe:`` / ``tcp_probe:`` / ``python:`` specs:
 
-        - **UDP broadcasts** fire once per scan against every subnet's
+        - **UDP probes** fire once per scan against every subnet's
           directed broadcast address, sharing a single 10/sec
-          ``RateLimiter`` shared across all UDP probes.
-        - **TCP probes** run against every host whose port-scan
-          results include the spec's port, with a 20 ms stagger
-          (port_scanner pattern) so the SYN burst is spread.
+          ``RateLimiter``.
+        - **TCP probes** run against every host whose port-scan results
+          include the spec's port, with a 20 ms stagger so the SYN burst
+          is spread.
+        - **Python companions** are invoked with a ``ProbeContext``
+          carrying the engine's port-scan map so the companion can
+          consume already-discovered hosts instead of re-iterating
+          subnets.
 
-        Resulting Evidence is appended to the per-device
-        ``evidence_log`` so the deterministic matcher picks it up via
-        the same ``KIND_BROADCAST`` / ``KIND_ACTIVE_PROBE`` paths.
+        Resulting Evidence is appended to each device's ``evidence_log``
+        for the matcher to consume in phase 8.
         """
         udp_specs = [
             h.udp_probe for h in self.discovery_hints

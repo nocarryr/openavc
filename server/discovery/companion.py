@@ -1,12 +1,11 @@
-"""Phase 9.7 Python ``_discovery.py`` companion API + loader.
+"""Python ``_discovery.py`` companion API + loader.
 
 Drivers whose discovery wire format can't be expressed declaratively
 (multi-step handshakes, encrypted payloads, big-endian bitfield
-framing — HiQnet is the canonical example) ship a sibling Python
-file alongside their .avcdriver:
+framing) ship a sibling Python file alongside their .avcdriver:
 
-    audio/bss_soundweb.avcdriver
-    audio/bss_soundweb_discovery.py
+    audio/example_dsp.avcdriver
+    audio/example_dsp_discovery.py
 
 The companion exposes a single async function:
 
@@ -66,19 +65,19 @@ class ProbeContext:
     which hosts answer on which TCP ports. ``hosts_by_open_port`` is
     that map — keyed by port number, valued by a tuple of IPs the
     engine observed open on that port. Companions whose protocol has
-    no native discovery layer (e.g. Tesira TTP, VISCA) should
-    consult this map instead of iterating ``target_subnets`` and
-    re-doing the port scan. Looking up an unseen port returns the
-    empty tuple via ``hosts_by_open_port.get(port, ())``.
+    no native discovery layer should consult this map instead of
+    iterating ``target_subnets`` and re-doing the port scan. Looking
+    up an unseen port returns the empty tuple via
+    ``hosts_by_open_port.get(port, ())``.
 
     Canonical synthetic probe IDs
     -----------------------------
     A companion declared via ``discovery.python`` in the driver's
-    .avcdriver auto-registers two ``SignalRule`` records — one Tier 2
-    broadcast, one Tier 3 active — under the IDs:
+    .avcdriver auto-registers two ``SignalRule`` records — one
+    broadcast, one active — under the IDs:
 
-      ``custom_<driver_id>_companion_udp`` → Tier 2 (broadcast)
-      ``custom_<driver_id>_companion_tcp`` → Tier 3 (active)
+      ``custom_<driver_id>_companion_udp`` → broadcast
+      ``custom_<driver_id>_companion_tcp`` → active
 
     Use ``emit_broadcast`` / ``emit_active`` with no ``probe_id``
     argument to emit under those canonical IDs (matching the

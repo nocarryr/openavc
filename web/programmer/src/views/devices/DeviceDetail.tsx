@@ -37,7 +37,6 @@ export function DeviceDetail({
     success: boolean;
     error: string | null;
     latency_ms: number | null;
-    protocol_status?: string | null;
   } | null>(null);
   const [testing, setTesting] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -384,11 +383,7 @@ export function DeviceDetail({
           }}
         >
           {testResult.success
-            ? `Connected successfully (${testResult.latency_ms}ms)${
-                testResult.protocol_status === "verified" ? " — protocol verified"
-                : testResult.protocol_status === "not_verified" ? " — protocol not verified"
-                : ""
-              }`
+            ? `Connected successfully (${testResult.latency_ms}ms)`
             : `Connection failed: ${testResult.error}`}
         </div>
       )}

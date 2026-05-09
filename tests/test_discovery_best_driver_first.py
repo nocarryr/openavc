@@ -105,57 +105,61 @@ def test_vendor_specific_probe_ignores_soft_candidates() -> None:
     assert result.source == "probe:extron_sis"
 
 
-def test_unfiltered_onvif_with_vendor_oui_picks_vendor() -> None:
-    """Unfiltered ONVIF broadcast + Vaddio OUI ->
-    identified=vaddio_roboshot, alternatives=[generic_onvif_camera].
+def test_cross_vendor_broadcast_with_vendor_oui_picks_vendor() -> None:
+    """Cross-vendor broadcast (declared ``cross_vendor: true``) + a
+    vendor OUI -> identified=vendor_driver,
+    alternatives=[cross_vendor_anchor].
 
-    Pins that ``onvif`` broadcast probe is generic when no txt_match
-    constrains it, and the vendor-specific OUI driver wins primary.
+    Pins the cross-vendor demotion path: when a generic broadcast
+    fingerprint wins but enrichment evidence narrows to a vendor-
+    specific driver, that vendor driver becomes primary.
     """
     idx = SignalIndex()
-    idx.add_rule(SignalRule.for_broadcast("generic_onvif_camera", "onvif"))
-    idx.add_rule(SignalRule.for_oui("vaddio_roboshot", "00:1e:c0"))
-    matcher = TierMatcher(idx)
-
-    result = matcher.match([
-        evidence_broadcast("onvif", {"endpoint": "http://10.0.0.5/onvif/device_service"}),
-        evidence_oui("00:1e:c0:aa:bb:cc"),
-    ])
-
-    assert result.state == DeviceState.IDENTIFIED
-    assert result.driver_id == "vaddio_roboshot"
-    assert result.alternatives == ["generic_onvif_camera"]
-    assert result.source == "oui:00:1e:c0"
-
-
-def test_filtered_onvif_is_not_generic() -> None:
-    """ONVIF with a manufacturer txt_match filter is vendor-specific —
-    even when a Vaddio OUI is also observed, the filtered Sony match
-    wins the strong tier and stands alone, no alternatives.
-
-    Pins the txt_match-aware ``generic`` tagging logic from Task 8.5.1.
-    """
-    idx = SignalIndex()
-    idx.add_rule(SignalRule.for_broadcast(
-        "sony_onvif_camera", "onvif",
-        txt_match={"manufacturer": "Sony"},
-    ))
-    idx.add_rule(SignalRule.for_oui("vaddio_roboshot", "00:1e:c0"))
+    # Anchor driver flags itself cross-vendor at index-build time.
+    idx.add_rule(SignalRule.for_broadcast("anchor_driver", "shared_probe", generic=True))
+    idx.add_rule(SignalRule.for_oui("vendor_driver", "00:1e:c0"))
     matcher = TierMatcher(idx)
 
     result = matcher.match([
         evidence_broadcast(
-            "onvif",
-            response={"endpoint": "http://10.0.0.5/onvif/device_service"},
-            txt={"manufacturer": "Sony"},
+            "shared_probe",
+            {"endpoint": "http://10.0.0.5/foo"},
         ),
         evidence_oui("00:1e:c0:aa:bb:cc"),
     ])
 
     assert result.state == DeviceState.IDENTIFIED
-    assert result.driver_id == "sony_onvif_camera"
+    assert result.driver_id == "vendor_driver"
+    assert result.alternatives == ["anchor_driver"]
+    assert result.source == "oui:00:1e:c0"
+
+
+def test_filtered_broadcast_is_not_generic() -> None:
+    """A broadcast rule with a TXT-match filter is vendor-specific —
+    even when an unrelated vendor's OUI is also observed, the filtered
+    rule wins the strong tier and stands alone, no alternatives.
+    """
+    idx = SignalIndex()
+    idx.add_rule(SignalRule.for_broadcast(
+        "vendor_a_driver", "shared_probe",
+        txt_match={"manufacturer": "VendorA"},
+    ))
+    idx.add_rule(SignalRule.for_oui("vendor_b_driver", "00:1e:c0"))
+    matcher = TierMatcher(idx)
+
+    result = matcher.match([
+        evidence_broadcast(
+            "shared_probe",
+            response={"endpoint": "http://10.0.0.5/foo"},
+            txt={"manufacturer": "VendorA"},
+        ),
+        evidence_oui("00:1e:c0:aa:bb:cc"),
+    ])
+
+    assert result.state == DeviceState.IDENTIFIED
+    assert result.driver_id == "vendor_a_driver"
     assert result.alternatives == []
-    assert result.source == "broadcast:onvif"
+    assert result.source == "broadcast:shared_probe"
 
 
 def test_vendor_string_alone_yields_possible() -> None:

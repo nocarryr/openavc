@@ -1,11 +1,10 @@
 """AMX DDP (Dynamic Device Discovery / "AMX Beacon") listener.
 
 Passive multicast listener on UDP 239.255.250.250:9131. Many third-party
-AV devices (Polycom audio, Epson and NEC projectors, Sony displays)
-emit a periodic AMXB beacon on this group every 30-60 seconds. The
-beacon advertises Make / Model / Revision in a self-describing ASCII
-payload, which makes it one of the most reliable Tier 1 signals
-available in pro AV networks.
+AV devices emit a periodic AMXB beacon on this group every 30-60
+seconds. The beacon advertises Make / Model / Revision in a
+self-describing ASCII payload — a high-confidence passive signal that
+identifies the device without sending any traffic.
 
 This is the same passive mechanism used by AMX NetLinx Studio and the
 AMX Device Discovery white paper. Reference implementation studied
@@ -14,7 +13,7 @@ AMX Device Discovery white paper. Reference implementation studied
 Beacon format (single UDP datagram, ASCII):
 
     AMXB<-UUID=001122334455><-SDKClass=AudioConferencer>
-        <-Make=Polycom><-Model=SoundStructureC16>
+        <-Make=AcmeCo><-Model=Foo-1234>
         <-Revision=1.0.0>[<Config-Name=...><Config-URL=http://...>]
 
 Tags are ``<Key=Value>`` or ``<-Key=Value>`` (the leading dash flags

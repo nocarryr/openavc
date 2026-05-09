@@ -396,7 +396,6 @@ class TestScanPipeline:
              patch("server.discovery.engine.SSDPScanner", mock_ssdp_cls), \
              patch("server.discovery.engine.AMXDDPScanner", mock_amx_cls), \
              patch("server.discovery.engine.SNMPScanner", mock_snmp_cls), \
-             patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
             await self.engine._scan_pipeline(["192.168.1.0/30"])
 
@@ -411,12 +410,10 @@ class TestScanPipeline:
              patch("server.discovery.engine.harvest_arp_table", new_callable=AsyncMock) as mock_arp, \
              patch("server.discovery.engine.scan_host_ports", new_callable=AsyncMock) as mock_ports, \
              patch("server.discovery.engine.grab_banners", new_callable=AsyncMock, return_value={}), \
-             patch("server.discovery.engine.run_protocol_probes", new_callable=AsyncMock, return_value=[]), \
              patch("server.discovery.engine.MDNSScanner", mock_mdns_cls), \
              patch("server.discovery.engine.SSDPScanner", mock_ssdp_cls), \
              patch("server.discovery.engine.AMXDDPScanner", mock_amx_cls), \
              patch("server.discovery.engine.SNMPScanner", mock_snmp_cls), \
-             patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
 
             mock_ping.return_value = ["192.168.1.10", "192.168.1.20"]
@@ -451,7 +448,6 @@ class TestScanPipeline:
              patch("server.discovery.engine.SSDPScanner", mock_ssdp_cls), \
              patch("server.discovery.engine.AMXDDPScanner", mock_amx_cls), \
              patch("server.discovery.engine.SNMPScanner", mock_snmp_cls), \
-             patch("server.discovery.engine.probe_onvif", new_callable=AsyncMock, return_value={}), \
              patch("server.discovery.engine._resolve_hostnames", new_callable=AsyncMock, return_value={}):
             await self.engine._scan_pipeline(["192.168.1.0/24"])
 

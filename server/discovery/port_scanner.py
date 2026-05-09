@@ -1,4 +1,11 @@
-"""Async TCP port scanner with banner grabbing."""
+"""Async TCP port scanner with banner grabbing.
+
+Core does not ship a curated list of AV ports. The engine builds the
+scan list at runtime from each loaded driver's ``tcp_probe.port`` plus
+``port_open:`` hint plus the community catalog, with a tiny universal
+baseline below for the "what kind of device is this?" sweep where no
+driver is involved yet.
+"""
 
 from __future__ import annotations
 
@@ -8,52 +15,36 @@ from typing import Callable, Awaitable
 
 log = logging.getLogger("discovery.ports")
 
-# Well-known AV device ports (always scanned regardless of driver hints)
-AV_PORTS: dict[int, str] = {
-    22: "SSH (embedded devices, AV processors)",
-    23: "Telnet (Extron, Biamp, QSC, Kramer, Shure, LG)",
-    445: "SMB (Windows devices, NAS)",
-    80: "HTTP (web management, Panasonic PTZ, REST APIs)",
-    443: "HTTPS (secure web management)",
-    1400: "Sonos UPnP",
-    1515: "Samsung MDC",
-    1688: "Crestron CIP",
-    1710: "Q-SYS QRC (JSON-RPC over TCP)",
-    3088: "Crestron XIO",
-    4352: "PJLink",
-    5000: "Kramer P3000 alt / Q-SYS QRC alt",
-    5900: "VNC",
-    7142: "AMX ICSP",
-    8080: "HTTP alt (device web UIs)",
-    9090: "HTTP alt",
-    10500: "VISCA over IP (Sony cameras)",
-    41794: "Crestron CTP",
-    49152: "Biamp Tesira alt",
-    49280: "Yamaha RCP (CL/QL/TF/Rivage/DM3)",
-    52000: "QSC Q-SYS",
-    61000: "Shure DCS alt",
-}
+# Universal baseline ports always included in every scan. These cover
+# generic web management UIs and Telnet (used by enough embedded
+# devices that grabbing banners on it is worthwhile). No vendor-
+# specific ports — drivers contribute those via their declared
+# ``tcp_probe.port`` and ``port_open:`` hints.
+BASELINE_PORTS: frozenset[int] = frozenset({22, 23, 80, 443, 8080})
 
-# Ports where devices typically send a banner immediately on connect
-BANNER_PORTS = {22, 23, 4352, 1688, 41794}
+# Ports where devices typically send a banner immediately on connect.
+# Limited to the two universal banner-friendly ports — Telnet (23) and
+# SSH (22) — since vendor-specific banner regexes were removed with
+# the legacy probe table. Drivers can still match banner contents by
+# declaring a ``tcp_probe:`` with no ``send_*`` and an ``expect:`` /
+# ``expect_regex:`` matcher, which is a generic capability.
+BANNER_PORTS: frozenset[int] = frozenset({22, 23})
 
 
 async def scan_host_ports(
     ip: str,
-    ports: list[int] | None = None,
+    ports: list[int],
     timeout: float = 1.0,
     stagger_ms: float = 20.0,
 ) -> list[int]:
     """Probe TCP ports on a single host. Returns list of open ports.
 
-    If ``ports`` is None, uses the default AV_PORTS table.
-
     ``stagger_ms`` adds a small delay between connection starts to avoid
     blasting embedded AV devices with too many SYN packets at once.
     All connections still overlap — this just spreads the initial burst.
     """
-    if ports is None:
-        ports = list(AV_PORTS.keys())
+    if not ports:
+        return []
 
     async def _check(port: int, delay: float) -> int | None:
         if delay > 0:
@@ -78,7 +69,7 @@ async def scan_host_ports(
 
 async def scan_multiple_hosts(
     hosts: list[str],
-    ports: list[int] | None = None,
+    ports: list[int],
     timeout: float = 1.0,
     concurrency: int = 20,
     on_result: Callable[[str, list[int]], Awaitable[None]] | None = None,
@@ -87,8 +78,8 @@ async def scan_multiple_hosts(
 
     Limits concurrent host scans to ``concurrency``.
     """
-    if ports is None:
-        ports = list(AV_PORTS.keys())
+    if not ports:
+        return {}
 
     log.info("Port scan: %d hosts x %d ports", len(hosts), len(ports))
     results: dict[str, list[int]] = {}
@@ -110,12 +101,7 @@ async def scan_multiple_hosts(
 async def grab_banner(ip: str, port: int, timeout: float = 2.0) -> str | None:
     """Connect to a port and read the first response (banner).
 
-    Many AV devices send a welcome string immediately on connect:
-      - Extron: "(c) 2020 Extron Electronics..."
-      - Biamp: "Welcome to the Tesira Text Protocol..."
-      - Kramer: "Welcome to Kramer..."
-      - PJLink: "PJLINK 0" or "PJLINK 1"
-
+    Many embedded devices send a welcome string immediately on connect.
     Returns the banner text or None if no data received within timeout.
     """
     try:

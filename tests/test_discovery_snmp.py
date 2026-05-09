@@ -9,7 +9,7 @@ from server.discovery.snmp_scanner import (
     SNMPInfo,
     build_snmp_get,
     parse_snmp_response,
-    parse_sys_descr,
+    extract_pen,
     ber_encode_integer,
     ber_encode_string,
     ber_encode_oid,
@@ -351,66 +351,29 @@ class TestParseSnmpResponse:
 
 
 # ============================================================
-# sysDescr Parsing Tests
+# PEN extraction tests
 # ============================================================
 
 
-class TestParseSysDescr:
-    def test_nec_projector(self):
-        result = parse_sys_descr("NEC PA1004UL Projector, Firmware V1.03")
-        assert result["manufacturer"] == "NEC"
-        assert result["model"] == "PA1004UL"
-        assert result["category"] == "projector"
+class TestExtractPen:
+    """``extract_pen`` returns a plain integer; vendor binding is per-driver."""
 
-    def test_extron_switcher(self):
-        result = parse_sys_descr("Extron DTP CrossPoint 84 IPCP, V1.07.0000")
-        assert result["manufacturer"] == "Extron"
-        assert "CrossPoint" in result["model"]
-        assert result["firmware"] == "V1.07.0000"
-        assert result["category"] == "switcher"
+    def test_standard_pen_oid(self):
+        # 1.3.6.1.4.1.<PEN>.<rest>
+        assert extract_pen("1.3.6.1.4.1.17049.1.2.3") == 17049
 
-    def test_qsc_audio(self):
-        result = parse_sys_descr("QSC Q-SYS Core 110f, V9.5.0")
-        assert result["manufacturer"] == "QSC"
-        assert "Core" in result["model"]
-        assert result["firmware"] == "V9.5.0"
-        assert result["category"] == "audio"
+    def test_root_pen_only(self):
+        assert extract_pen("1.3.6.1.4.1.42") == 42
 
-    def test_biamp_audio(self):
-        result = parse_sys_descr("Biamp Tesira SERVER-IO, Firmware 4.14")
-        assert result["manufacturer"] == "Biamp"
-        assert "SERVER-IO" in result["model"]
-        assert result["category"] == "audio"
-
-    def test_shure_audio(self):
-        result = parse_sys_descr("Shure MXA910, V4.5.6")
-        assert result["manufacturer"] == "Shure"
-        assert "MXA910" in result["model"]
-        assert result["category"] == "audio"
-
-    def test_crestron(self):
-        result = parse_sys_descr("Crestron DM-MD8X8, Version 1.500")
-        assert result["manufacturer"] == "Crestron"
-        assert "DM-MD8X8" in result["model"]
-        assert result["category"] == "control"
-
-    def test_samsung_display(self):
-        result = parse_sys_descr("Samsung QM55R")
-        assert result["manufacturer"] == "Samsung"
-        assert result["category"] == "display"
-
-    def test_fallback_manufacturer(self):
-        """Should detect manufacturer even without full pattern match."""
-        result = parse_sys_descr("Some weird Extron device format")
-        assert result.get("manufacturer") == "Extron"
-
-    def test_unknown_device(self):
-        result = parse_sys_descr("Linux router 4.19.0")
-        assert result == {}
+    def test_oid_outside_pen_branch(self):
+        # OIDs that aren't under 1.3.6.1.4.1.<PEN> have no PEN.
+        assert extract_pen("1.3.6.1.2.1.1.1.0") is None
 
     def test_empty_string(self):
-        result = parse_sys_descr("")
-        assert result == {}
+        assert extract_pen("") is None
+
+    def test_non_numeric_pen(self):
+        assert extract_pen("1.3.6.1.4.1.notanumber.1") is None
 
 
 # ============================================================
@@ -435,17 +398,36 @@ class TestSNMPInfo:
         info = SNMPInfo()
         assert info.to_dict() == {}
 
-    def test_to_device_info_with_descr(self):
+    def test_to_device_info_surfaces_self_reported_fields(self):
+        # Core no longer parses vendor strings out of sysDescr — drivers
+        # do that via manufacturer_alias hints. ``to_device_info`` just
+        # surfaces the device's self-reported sysDescr / sysName.
         info = SNMPInfo(
-            sys_descr="NEC PA1004UL Projector, Firmware V1.03",
-            sys_name="Projector-Room101",
+            sys_descr="Acme Foo 1234, Firmware V1.03",
+            sys_name="Device-Room101",
         )
         device_info = info.to_device_info()
-        assert device_info["device_name"] == "Projector-Room101"
-        assert device_info["manufacturer"] == "NEC"
-        assert device_info["model"] == "PA1004UL"
-        assert device_info["category"] == "projector"
+        assert device_info["device_name"] == "Device-Room101"
         assert "snmp_info" in device_info
+        # No manufacturer/model/category guessed from sysDescr.
+        assert "manufacturer" not in device_info
+        assert "model" not in device_info
+        assert "category" not in device_info
+
+    def test_to_device_info_uses_entity_mib_when_present(self):
+        # Entity MIB is device self-report — authoritative when set.
+        info = SNMPInfo(
+            sys_descr="some descr",
+            entity_manufacturer="Acme Co",
+            entity_model="Model 9",
+            entity_serial="SN12345",
+            entity_firmware_rev="3.2.1",
+        )
+        device_info = info.to_device_info()
+        assert device_info["manufacturer"] == "Acme Co"
+        assert device_info["model"] == "Model 9"
+        assert device_info["serial_number"] == "SN12345"
+        assert device_info["firmware"] == "3.2.1"
 
     def test_to_device_info_name_only(self):
         info = SNMPInfo(sys_name="Switch-Rack-A")
@@ -615,14 +597,20 @@ class TestEngineSNMPIntegration:
 
     @pytest.mark.asyncio
     async def test_collect_snmp_results(self):
-        """Test that SNMP results are merged into engine results."""
+        """SNMP results are merged into engine results.
+
+        Manufacturer comes from Entity MIB self-report when present,
+        not from sysDescr parsing — that's now driver hint territory.
+        """
         from server.discovery.snmp_scanner import SNMPInfo
 
         snmp_results = {
             "192.168.1.72": SNMPInfo(
-                sys_descr="NEC PA1004UL Projector, Firmware V1.03",
+                sys_descr="some-descr Projector, Firmware V1.03",
                 sys_name="Projector-Room101",
                 sys_location="Building A, Room 101",
+                entity_manufacturer="Acme Co",
+                entity_model="Model 9",
             ),
         }
 
@@ -634,7 +622,8 @@ class TestEngineSNMPIntegration:
         assert "192.168.1.72" in self.engine.results
         device = self.engine.results["192.168.1.72"]
         assert device.device_name == "Projector-Room101"
-        assert device.manufacturer == "NEC"
+        assert device.manufacturer == "Acme Co"
+        assert device.model == "Model 9"
         assert device.snmp_info is not None
         assert device.snmp_info["sysLocation"] == "Building A, Room 101"
 
@@ -654,21 +643,28 @@ class TestEngineSNMPIntegration:
 
     @pytest.mark.asyncio
     async def test_snmp_merges_with_active_results(self):
-        """SNMP info should enrich actively discovered devices."""
+        """SNMP enriches actively discovered devices.
+
+        sysDescr text is preserved verbatim in snmp_info; model /
+        firmware come from Entity MIB self-report rather than from
+        sysDescr regex parsing.
+        """
         from server.discovery.snmp_scanner import SNMPInfo
 
-        # Pre-populate from active scan
+        # Pre-populate from an earlier active scan.
         self.engine.results["192.168.1.50"] = DiscoveredDevice(
             ip="192.168.1.50",
             mac="00:05:a6:12:34:56",
-            manufacturer="Extron",
+            manufacturer="Acme Switcher Co",
         )
 
         snmp_results = {
             "192.168.1.50": SNMPInfo(
-                sys_descr="Extron DTP CrossPoint 84 IPCP, V1.07.0000",
+                sys_descr="Acme DTP CrossPoint 84 IPCP, V1.07.0000",
                 sys_name="Main-Switcher",
                 sys_location="Rack A, Room 101",
+                entity_model="DTP CrossPoint 84",
+                entity_firmware_rev="1.07.0000",
             ),
         }
 
@@ -679,8 +675,8 @@ class TestEngineSNMPIntegration:
         device = self.engine.results["192.168.1.50"]
         assert device.mac == "00:05:a6:12:34:56"  # Preserved
         assert device.device_name == "Main-Switcher"
-        assert "CrossPoint" in device.model
-        assert "V1.07" in device.firmware
+        assert device.model == "DTP CrossPoint 84"
+        assert device.firmware == "1.07.0000"
 
 
 # ============================================================
