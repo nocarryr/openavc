@@ -60,9 +60,20 @@ class ProbeContext:
     Evidence to the matching device record in the engine's results
     dict, so the matcher picks it up the same way as built-in probes.
 
+    Port-scan reuse
+    ---------------
+    By the time companions run, the engine has already discovered
+    which hosts answer on which TCP ports. ``hosts_by_open_port`` is
+    that map — keyed by port number, valued by a tuple of IPs the
+    engine observed open on that port. Companions whose protocol has
+    no native discovery layer (e.g. Tesira TTP, VISCA) should
+    consult this map instead of iterating ``target_subnets`` and
+    re-doing the port scan. Looking up an unseen port returns the
+    empty tuple via ``hosts_by_open_port.get(port, ())``.
+
     Canonical synthetic probe IDs
     -----------------------------
-    A companion declared via ``discovery.companion`` in the driver's
+    A companion declared via ``discovery.python`` in the driver's
     .avcdriver auto-registers two ``SignalRule`` records — one Tier 2
     broadcast, one Tier 3 active — under the IDs:
 
@@ -84,6 +95,12 @@ class ProbeContext:
     log: logging.Logger
     # Engine-supplied callback. Treat as private to the companion API.
     _emit_for_host: Callable[[str, Evidence], Awaitable[None]] = field(repr=False)
+    # Engine-built map of open TCP port -> tuple of IPs observed open
+    # on that port. Populated from ``self.results[ip].open_ports`` at
+    # context-construction time. Empty when the engine ran before the
+    # port-scan phase (shouldn't happen with the standard phase order)
+    # or no host answered on any scanned port.
+    hosts_by_open_port: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def companion_broadcast_probe_id(self) -> str:

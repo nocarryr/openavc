@@ -1093,6 +1093,18 @@ class DiscoveryEngine:
                 device.evidence_log.append(ev)
                 await self._emit_device_update(device, "broadcast_probe")
 
+            # Build the port -> hosts map once and share it across
+            # every companion invocation — companions consume the
+            # engine's existing port-scan results instead of
+            # re-iterating subnets to rediscover live hosts.
+            hosts_by_open_port: dict[int, list[str]] = {}
+            for ip, dev in self.results.items():
+                for port in dev.open_ports or ():
+                    hosts_by_open_port.setdefault(port, []).append(ip)
+            hosts_by_open_port_frozen: dict[int, tuple[str, ...]] = {
+                port: tuple(ips) for port, ips in hosts_by_open_port.items()
+            }
+
             companion_logger = logging.getLogger("discovery.companion.run")
             companion_tasks = []
             for driver_id, probe_fn in self._discovery_companions.items():
@@ -1103,6 +1115,7 @@ class DiscoveryEngine:
                     timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
                     log=companion_logger,
                     _emit_for_host=_emit_for_host,
+                    hosts_by_open_port=hosts_by_open_port_frozen,
                 )
                 companion_tasks.append(run_companion(driver_id, probe_fn, ctx))
             if companion_tasks:
