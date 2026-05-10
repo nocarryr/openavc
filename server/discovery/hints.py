@@ -44,7 +44,12 @@ _TEMPLATE_PREFIXES: tuple[str, ...] = ("generic_",)
 # Ports too generic to use as a hint — every web / admin / SSH device
 # on the network would match. AV-specific ports (1710, 4352, etc.) are
 # fine. Generic safety rule, not vendor-specific.
-DISALLOWED_OPEN_PORTS: frozenset[int] = frozenset({22, 80, 443})
+#
+# 8000 / 8080 / 8443 / 8888 are admin-UI alternates that show up on
+# routers, IoT, dev servers, NAS, and most web-management consoles —
+# the same false-positive class as 80/443. A driver that only matches
+# on these is matching every web admin UI on the LAN.
+DISALLOWED_OPEN_PORTS: frozenset[int] = frozenset({22, 80, 443, 8000, 8080, 8443, 8888})
 
 # Cap on how long a probe is allowed to wait for a reply. Anything
 # longer would stretch the scan budget unreasonably.

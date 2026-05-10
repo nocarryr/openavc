@@ -418,7 +418,7 @@ class TestPortOpenHint:
         with pytest.raises(DiscoveryHintError, match="out of range"):
             parse_driver_discovery(_drv("bad", port_open=[70000]))
 
-    @pytest.mark.parametrize("port", [22, 80, 443])
+    @pytest.mark.parametrize("port", [22, 80, 443, 8000, 8080, 8443, 8888])
     def test_rejects_too_generic(self, port):
         with pytest.raises(DiscoveryHintError, match="too generic"):
             parse_driver_discovery(_drv("bad", port_open=[port]))
