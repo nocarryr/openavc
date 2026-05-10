@@ -710,9 +710,10 @@ function AdvancedSection() {
       </div>
       <label style={LABEL}>Manual-only devices</label>
       <div style={INTRO}>
-        If your device has no network announcement and no useful soft
-        signal, leave both <em>Fingerprints</em> and <em>Hints</em>{" "}
-        empty. Integrators add it manually from the Add Device dialog;
+        If your device has no network announcement and no useful hint
+        (no distinctive OUI, hostname pattern, or open port), leave
+        both <em>Fingerprints</em> and <em>Hints</em> empty.
+        Integrators add it manually from the Add Device dialog;
         document the manual-add steps under Help → Setup on the
         General tab so they know what host / port to enter.
       </div>
