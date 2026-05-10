@@ -1608,9 +1608,11 @@ function describeEvidence(ev: DiscoveryEvidence): { headline: string; detail: st
       // Spec §10 rows for active probes:
       //   "TCP probe on port <port> returned <response excerpt>"   (readable text)
       //   "TCP probe on port <port> matched <regex/hex pattern>"   (binary match)
+      //   "TCP probe on port <port> answered"                       (connect-only)
       // Prefer the excerpt when the response decodes to readable
       // text; otherwise fall back to the matched pattern, then to
-      // a bare "responded" for connect-only probes.
+      // the connect-only "answered" form (companion verified the
+      // listener but didn't supply a banner or a pattern).
       let head: string;
       if (excerpt) {
         head = portLabel
@@ -1621,7 +1623,7 @@ function describeEvidence(ev: DiscoveryEvidence): { headline: string; detail: st
           ? `TCP probe ${portLabel} matched ${matchedPattern}`
           : `TCP probe matched ${matchedPattern}`;
       } else {
-        head = portLabel ? `TCP probe ${portLabel} responded` : "TCP probe responded";
+        head = portLabel ? `TCP probe ${portLabel} answered` : "TCP probe answered";
       }
       return { headline: head, detail: `probe ${probeId}` };
     }
