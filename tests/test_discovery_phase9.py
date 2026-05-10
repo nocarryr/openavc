@@ -134,11 +134,12 @@ def _next_port() -> int:
 
 class TestProbeSchemaParsing:
     def test_full_udp_block_parses(self):
+        # B9: at most one of expect / expect_regex / expect_hex per probe.
+        # Pick expect_regex here — it's the most expressive of the three
+        # for a structured fingerprint reply.
         h = _make_hint("novastar_h_series", udp_probe={
             "port": 6000,
             "send_hex": "00010203",
-            "expect_hex": "AA55",
-            "expect": "NovaStar",
             "expect_regex": r"^NS-([A-Z0-9]+)",
             "timeout_ms": 2000,
             "cross_vendor": False,
@@ -152,7 +153,6 @@ class TestProbeSchemaParsing:
         assert spec.port == 6000
         assert spec.send == bytes.fromhex("00010203")
         assert spec.probe_id == "custom_novastar_h_series_udp"
-        assert spec.response_match.starts_with == bytes.fromhex("AA55")
         assert spec.response_match.regex.pattern == r"^NS-([A-Z0-9]+)"
         assert spec.cross_vendor is False
         by_name = {r.field_name: r for r in spec.extract}
@@ -185,7 +185,7 @@ class TestProbeSchemaParsing:
             _make_hint("bad", udp_probe={
                 "port": 6000, "expect": "y",
             })
-        with pytest.raises(DiscoveryHintError, match="needs at least one"):
+        with pytest.raises(DiscoveryHintError, match="needs exactly one"):
             _make_hint("bad", udp_probe={
                 "port": 6000, "send_ascii": "x",
             })
@@ -269,14 +269,10 @@ class TestResponseMatching:
         assert _matches(b"NS-ABC123", spec.response_match) is True
         assert _matches(b"junk", spec.response_match) is False
 
-    def test_all_matchers_AND_together(self):
-        spec = self._spec_with_match(
-            starts_with_hex="AA55",
-            contains="model=",
-        )
-        assert _matches(b"\xaa\x55 model=ABC", spec.response_match) is True
-        # starts_with passes but contains fails -> overall False
-        assert _matches(b"\xaa\x55 nothing", spec.response_match) is False
+    # B9 removed the multi-matcher AND-together case from the schema —
+    # probes now declare exactly one of expect / expect_regex /
+    # expect_hex. The schema-level rejection is exercised in
+    # test_discovery_hints_schema.test_udp_rejects_multiple_matchers.
 
 
 class TestExtractRules:
