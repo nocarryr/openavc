@@ -1598,19 +1598,31 @@ function describeEvidence(ev: DiscoveryEvidence): { headline: string; detail: st
     case "probe": {
       const probeId = sourceId ?? "(unknown probe)";
       const port = typeof data.port === "number" ? (data.port as number) : null;
+      const matchedPattern = typeof data.matched_pattern === "string"
+        ? (data.matched_pattern as string) : null;
       const response = data.response && typeof data.response === "object"
         ? (data.response as Record<string, unknown>) : {};
       const text = typeof response.text === "string" ? (response.text as string) : null;
       const excerpt = text ? text.replace(/[\r\n]+/g, " ").trim().slice(0, 80) : null;
-      // Spec §10 row: "TCP probe on port <port> returned <response excerpt>"
       const portLabel = port !== null ? `on port ${port}` : null;
-      const head = excerpt
-        ? portLabel
+      // Spec §10 rows for active probes:
+      //   "TCP probe on port <port> returned <response excerpt>"   (readable text)
+      //   "TCP probe on port <port> matched <regex/hex pattern>"   (binary match)
+      // Prefer the excerpt when the response decodes to readable
+      // text; otherwise fall back to the matched pattern, then to
+      // a bare "responded" for connect-only probes.
+      let head: string;
+      if (excerpt) {
+        head = portLabel
           ? `TCP probe ${portLabel} returned "${excerpt}"`
-          : `TCP probe returned "${excerpt}"`
-        : portLabel
-          ? `TCP probe ${portLabel} responded`
-          : "TCP probe responded";
+          : `TCP probe returned "${excerpt}"`;
+      } else if (matchedPattern) {
+        head = portLabel
+          ? `TCP probe ${portLabel} matched ${matchedPattern}`
+          : `TCP probe matched ${matchedPattern}`;
+      } else {
+        head = portLabel ? `TCP probe ${portLabel} responded` : "TCP probe responded";
+      }
       return { headline: head, detail: `probe ${probeId}` };
     }
     case "oui": {

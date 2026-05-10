@@ -859,12 +859,19 @@ def evidence_active_probe(
     response: dict | None = None,
     *,
     port: int | None = None,
+    matched_pattern: str | None = None,
 ) -> Evidence:
     """Build an Evidence record for an active-probe response.
 
     ``port`` is the TCP port the probe targeted (from
-    ``tcp_probe.port``); the scan-results "Why?" reveal renders it as
-    "TCP probe on port <port> returned <excerpt>".
+    ``tcp_probe.port``) and ``matched_pattern`` is a human-readable
+    description of the regex / hex / substring matcher that the
+    response satisfied (e.g. ``"regex:Lightware"``, ``"hex:aaff..."``).
+    Both feed the scan-results "Why?" reveal: the UI prefers
+    "TCP probe on port <port> returned <excerpt>" when the response
+    decodes to readable text and falls back to "TCP probe on port
+    <port> matched <pattern>" for binary protocols whose response
+    excerpt would be gibberish.
     """
     data: dict[str, Any] = {
         "kind": KIND_ACTIVE_PROBE,
@@ -873,6 +880,8 @@ def evidence_active_probe(
     }
     if port is not None:
         data["port"] = port
+    if matched_pattern is not None:
+        data["matched_pattern"] = matched_pattern
     return Evidence(
         tier=SignalTier.ACTIVE_PROBE,
         source=f"probe:{probe_id}",

@@ -152,18 +152,25 @@ class ProbeContext:
         *,
         probe_id: str | None = None,
         port: int | None = None,
+        matched_pattern: str | None = None,
     ) -> None:
         """Emit an active-probe fingerprint match.
 
         Defaults ``probe_id`` to ``custom_<driver_id>_companion_tcp``.
-        ``port`` is the TCP port the companion connected to; pass it
-        so the scan-results "Why?" reveal can render
-        "TCP probe on port <port> returned <excerpt>".
+        ``port`` is the TCP port the companion connected to.
+        ``matched_pattern`` is a short ``kind:value`` description of the
+        matcher that fired (e.g. ``"hex:aaff..."`` /
+        ``"regex:Lightware"``). Both feed the scan-results "Why?"
+        reveal — pass them so the UI can render the full §10 phrasing
+        ("TCP probe on port <p> returned <excerpt>" when the response
+        is readable text, "TCP probe on port <p> matched <pattern>"
+        for binary protocols).
         """
         ev = evidence_active_probe(
             probe_id or self.companion_active_probe_id,
             response=response,
             port=port,
+            matched_pattern=matched_pattern,
         )
         await self._emit_for_host(host, ev)
 

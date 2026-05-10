@@ -374,6 +374,11 @@ class TestProbeRunnerIntegration:
         assert ev.data["source_id"] == "custom_fake_vendor_udp"
         assert ev.data["txt"]["manufacturer"] == "FakeVendor"
         assert ev.data["txt"]["model"] == "ABC123"
+        # Matched pattern lands on the evidence so the scan-results
+        # "Why?" reveal can render "UDP probe on port <p> matched
+        # contains:FAKE-VENDOR".
+        assert ev.data["port"] == port
+        assert ev.data["matched_pattern"] == "contains:FAKE-VENDOR"
 
     @pytest.mark.asyncio
     async def test_udp_probe_silent_on_no_responder(self):
@@ -415,6 +420,36 @@ class TestProbeRunnerIntegration:
         assert ev.data["response"]["manufacturer"] == "Lightware"
         # other fields land under 'extracted'
         assert ev.data["response"]["extracted"]["version"] == "2.7.3"
+        # Port + matched pattern feed the §10 phrasing — the UI
+        # prefers the response excerpt for readable text but falls
+        # back to "TCP probe on port <p> matched contains:Lightware"
+        # for binary protocols whose excerpt would be gibberish.
+        assert ev.data["port"] == port
+        assert ev.data["matched_pattern"] == "contains:Lightware"
+
+    @pytest.mark.asyncio
+    async def test_tcp_probe_connect_only_omits_matched_pattern(self):
+        port = _next_port()
+        # Banner-grab style: responder sends a banner once its
+        # client-recv times out (2 s). Probe declares no expect_*
+        # so the runner accepts any non-empty payload — the runner
+        # timeout has to be longer than the responder's recv timeout
+        # for the banner to land.
+        _tcp_responder(port, b"banner\n")
+        h = _make_hint("connect_only", tcp_probe={
+            "port": port,
+            "timeout_ms": 3500,
+        })
+        ev = await run_tcp_active_probe(
+            h.tcp_probe, target="127.0.0.1",
+            source_ip="127.0.0.1", stagger_ms=0,
+        )
+        assert ev is not None
+        # No `expect_*` declared, so the response_match is empty;
+        # describe_response_match() returns "" and we coerce to None
+        # rather than persisting an empty matcher string.
+        assert "matched_pattern" not in ev.data
+        assert ev.data["port"] == port
 
     @pytest.mark.asyncio
     async def test_tcp_probe_no_match_returns_none(self):
