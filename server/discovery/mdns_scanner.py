@@ -316,7 +316,7 @@ class MDNSResult:
         return info
 
     def to_evidence(self):
-        """Emit a Tier 1 Evidence record for the deterministic matcher.
+        """Emit a passive_listener Evidence record for the deterministic matcher.
 
         Returns ``None`` if this MDNSResult does not carry a service type
         (e.g. an A-record-only resolution). The caller should drop those.

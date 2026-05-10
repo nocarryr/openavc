@@ -6,20 +6,21 @@ the strongest signal observed.
 
 Design contract
 ---------------
-- A device is ``identified`` if and only if a Tier 1, 2, or 3 signal
+- A device is ``identified`` if and only if a strong signal
+  (``passive_listener`` / ``broadcast_probe`` / ``active_probe``)
   matches a deterministic SignalRule. There is no scoring; the rule
   either matches or it does not.
-- A device is ``possible`` only via Tier 4 soft signals (OUI / SNMP PEN /
-  hostname pattern), and only when the soft signal narrows the candidate
-  set down to something useful.
+- A device is ``possible`` only via ``enrichment`` soft signals
+  (OUI / SNMP PEN / hostname pattern), and only when the soft signal
+  narrows the candidate set down to something useful.
 - A device is ``unknown`` when no signal matches.
 
 Scaling
 -------
 Driver hints are indexed at load time by signal kind + id, giving O(1)
 match lookup per Evidence record. With 500 drivers each declaring a
-unique Tier 1/2/3 fingerprint, every matching device hits exactly one
-rule. The system gets BETTER as more drivers are added because the
+unique strong-signal fingerprint, every matching device hits exactly
+one rule. The system gets BETTER as more drivers are added because the
 fingerprint registry covers more devices, not because scoring becomes
 more accurate.
 
@@ -30,7 +31,7 @@ Validation invariants (enforced by SignalIndex.add_rule)
   build time so two drivers cannot both claim "I am _netaudio-cmc._udp"
   without further qualification.
 
-This module is the central coordinator. Tier-specific *evidence
+This module is the central coordinator. Per-signal *evidence
 producers* (mDNS scanner, AMX DDP listener, broadcast probes, active
 probes) live in their own modules and emit ``Evidence`` records into
 the device's ``evidence_log``. ``TierMatcher.match()`` is the consumer.
@@ -60,19 +61,19 @@ log = logging.getLogger("discovery.tier_matcher")
 
 
 # Stable strings used as the ``kind`` field on rules and evidence sources.
-# Rule kinds are scoped per-tier so a Tier 1 mdns rule cannot accidentally
-# collide with a Tier 3 active probe rule.
+# Rule kinds are scoped per signal so an mdns rule cannot accidentally
+# collide with an active-probe rule.
 KIND_MDNS = "mdns"
 KIND_SSDP = "ssdp"
 KIND_AMX_DDP = "amx_ddp"
 KIND_BROADCAST = "broadcast"     # driver-declared udp_probe / companion broadcast IDs
 KIND_ACTIVE_PROBE = "probe"      # driver-declared tcp_probe / companion active IDs
 
-KIND_OUI = "oui"                       # Tier 4 soft
-KIND_SNMP_PEN = "snmp_pen"             # Tier 4 soft
-KIND_HOSTNAME = "hostname"             # Tier 4 soft
-KIND_OPEN_PORT = "open_port"           # Tier 4 soft — AV-specific port observed open
-KIND_VENDOR_STRING = "vendor_string"   # Tier 4 soft — manufacturer string from a probe response
+KIND_OUI = "oui"                       # enrichment
+KIND_SNMP_PEN = "snmp_pen"             # enrichment
+KIND_HOSTNAME = "hostname"             # enrichment
+KIND_OPEN_PORT = "open_port"           # enrichment — AV-specific port observed open
+KIND_VENDOR_STRING = "vendor_string"   # enrichment — manufacturer string from a probe response
 
 
 _STRONG_KINDS = {
@@ -278,7 +279,7 @@ class SignalRule:
 
     @classmethod
     def for_vendor_string(cls, driver_id: str, alias: str) -> "SignalRule":
-        """Build a Tier 4 manufacturer-alias rule.
+        """Build an enrichment manufacturer-alias rule.
 
         ``alias`` is normalized to ``alias.strip().lower()`` so the
         index lookup is a plain dict hit. Multiple drivers may declare
@@ -358,17 +359,18 @@ class SignalIndex:
             ):
                 return
 
-        # Soft signals (Tier 4) deliberately allow multiple drivers per
-        # source_id — that is what produces the "possible" state with a
-        # candidate list. No collision check.
+        # Soft signals (enrichment) deliberately allow multiple drivers
+        # per source_id — that is what produces the "possible" state with
+        # a candidate list. No collision check.
         if rule.kind in _SOFT_KINDS:
             bucket.append(rule)
             return
 
-        # Strong signals (Tier 1/2/3) must be unambiguous. Two drivers
-        # cannot both claim the same (kind, source_id) with the same
-        # txt_match filter, and a generic (no-filter) rule cannot coexist
-        # with a filtered rule for the same source_id.
+        # Strong signals (passive_listener / broadcast_probe / active_probe)
+        # must be unambiguous. Two drivers cannot both claim the same
+        # (kind, source_id) with the same txt_match filter, and a generic
+        # (no-filter) rule cannot coexist with a filtered rule for the
+        # same source_id.
         for existing in bucket:
             if existing.txt_match == rule.txt_match:
                 raise ValueError(
@@ -533,8 +535,9 @@ class TierMatcher:
 
     Given the full ``evidence_log`` of a device, returns one
     ``IdentificationMatch``. First strong-tier match wins, in order
-    Tier 1 -> Tier 2 -> Tier 3. Soft signals (Tier 4) only contribute
-    to ``possible`` state when no strong tier matched.
+    passive_listener -> broadcast_probe -> active_probe. Soft signals
+    (enrichment) only contribute to ``possible`` state when no strong
+    tier matched.
     """
 
     index: SignalIndex
@@ -544,7 +547,7 @@ class TierMatcher:
 
     def match(self, evidence_log: list[Evidence]) -> IdentificationMatch:
         """Run the deterministic dispatch."""
-        # Tier 1: passive listeners
+        # passive_listener tier
         for ev in evidence_log:
             if ev.tier != SignalTier.PASSIVE_LISTENER:
                 continue
@@ -552,7 +555,7 @@ class TierMatcher:
             if rule:
                 return self._finalize_strong_match(rule, ev, evidence_log)
 
-        # Tier 2: broadcast probes
+        # broadcast_probe tier
         for ev in evidence_log:
             if ev.tier != SignalTier.BROADCAST_PROBE:
                 continue
@@ -560,7 +563,7 @@ class TierMatcher:
             if rule:
                 return self._finalize_strong_match(rule, ev, evidence_log)
 
-        # Tier 3: active probes
+        # active_probe tier
         for ev in evidence_log:
             if ev.tier != SignalTier.ACTIVE_PROBE:
                 continue
@@ -568,7 +571,7 @@ class TierMatcher:
             if rule:
                 return self._finalize_strong_match(rule, ev, evidence_log)
 
-        # Tier 4: soft signals -> possible state if any narrows the candidate set
+        # enrichment soft signals -> possible state if any narrows the candidate set
         candidates, source = self._gather_soft_candidates(evidence_log)
         if candidates:
             relevant = [
@@ -945,16 +948,16 @@ def evidence_hostname(
 
 
 def extract_vendor_strings(evidence_log: list[Evidence]) -> list[Evidence]:
-    """Mine Tier 1/2/3 evidence for manufacturer strings and emit Tier 4 hints.
+    """Mine strong-tier evidence for manufacturer strings and emit enrichment hints.
 
     The engine calls this after all probe phases land their strong evidence,
     once per device, to surface ``manufacturer`` / ``make`` strings the
-    device returned in its probe responses as Tier 4 ``vendor_string``
+    device returned in its probe responses as ``vendor_string`` enrichment
     evidence the matcher can consult against ``vendor_aliases``.
 
     Looks at:
-    - ``data["response"]["manufacturer"]`` and ``["make"]`` (Tier 2 / 3 probes)
-    - ``data["txt"]["manufacturer"]`` and ``["make"]`` (Tier 1 mDNS, Tier 2 broadcast)
+    - ``data["response"]["manufacturer"]`` and ``["make"]`` (broadcast / active probes)
+    - ``data["txt"]["manufacturer"]`` and ``["make"]`` (mDNS, broadcast probes)
     - ``data["make"]`` (AMX DDP, top-level)
 
     De-duplicates by ``(value, source_probe_id)`` so the same string from
@@ -977,7 +980,7 @@ def extract_vendor_strings(evidence_log: list[Evidence]) -> list[Evidence]:
 
     for ev in evidence_log:
         if ev.tier == SignalTier.ENRICHMENT:
-            continue  # Don't recurse on already-emitted Tier 4 records.
+            continue  # Don't recurse on already-emitted enrichment records.
 
         kind = ev.data.get("kind")
         source_id = ev.data.get("source_id")

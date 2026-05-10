@@ -96,7 +96,7 @@ class DDPBeacon:
         """Map the beacon onto the legacy ``merge_device_info`` schema.
 
         Mirrors ``MDNSResult.to_device_info`` so the engine can ingest
-        DDP results in the same flow as mDNS during the Phase 6 swap.
+        DDP results in the same flow as mDNS.
         """
         info: dict[str, Any] = {}
         if self.make:
@@ -112,7 +112,7 @@ class DDPBeacon:
         return info
 
     def to_evidence(self) -> Evidence:
-        """Emit a Tier 1 Evidence record for the deterministic matcher."""
+        """Emit a passive_listener Evidence record for the deterministic matcher."""
         ev = evidence_amx_ddp(
             make=self.make or "",
             model=self.model or "",

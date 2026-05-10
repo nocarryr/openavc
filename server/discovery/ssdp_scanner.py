@@ -110,7 +110,7 @@ class SSDPResult:
         return info
 
     def to_evidence(self):
-        """Emit a Tier 1 Evidence record for the deterministic matcher.
+        """Emit a passive_listener Evidence record for the deterministic matcher.
 
         Returns ``None`` if no UPnP device-type ST was observed (e.g.
         the response was an ssdp:all hit with only USN/Location).

@@ -1,6 +1,6 @@
-"""Phase 9 driver-declared probe runners.
+"""Driver-declared probe runners.
 
-The Phase 9 schema lets a driver declare a UDP broadcast probe or a
+The discovery schema lets a driver declare a UDP broadcast probe or a
 TCP active probe in YAML — port, send bytes, response_match, and
 optional extract rules. This module is the runtime executor: given
 a parsed ``CustomProbeSpec``, send the probe, listen for replies,
