@@ -608,20 +608,23 @@ class TierMatcher:
                 evidence=[ev],
             )
 
-        soft_candidates, soft_source = self._gather_soft_candidates(evidence_log)
-        vendor_alternatives = [c for c in soft_candidates if c != rule.driver_id]
-        if not vendor_alternatives:
-            # Generic match with no vendor-specific enrichment candidate
-            # — fall back to the same shape as a vendor-specific
-            # identify.
+        peers, soft_source = self._pick_demotion_target(
+            evidence_log, anchor=rule.driver_id,
+        )
+        if not peers:
+            # No vendor-specific peer corroborated by a soft signal — or
+            # the narrowest signal uniquely points at the anchor itself,
+            # which is positive evidence the anchor is the right driver
+            # rather than ambiguous "generic protocol observed". Fall
+            # back to the same shape as a vendor-specific identify.
             return IdentificationMatch.identified(
                 driver_id=rule.driver_id,
                 source=f"{rule.kind}:{rule.source_id}",
                 evidence=[ev],
             )
 
-        primary = vendor_alternatives[0]
-        alternatives = vendor_alternatives[1:] + [rule.driver_id]
+        primary = peers[0]
+        alternatives = peers[1:] + [rule.driver_id]
         soft_evidence = [
             e for e in evidence_log if e.tier == SignalTier.ENRICHMENT
         ]
@@ -641,14 +644,16 @@ class TierMatcher:
         txt = ev.data.get("txt") if isinstance(ev.data.get("txt"), dict) else None
         return self.index.find_strong(kind, source_id, txt)
 
-    def _gather_soft_candidates(
+    def _collect_soft_signal_results(
         self, evidence_log: list[Evidence],
-    ) -> tuple[list[str], str]:
-        """Collect candidate driver_ids from soft signals.
+    ) -> list[tuple[str, list[str]]]:
+        """Per-signal driver_id hits from every enrichment evidence record.
 
-        Returns (candidates, source_label). Source label points at the
-        signal that produced the narrowest candidate set; ties broken by
-        first observation.
+        Returns ``[(source_label, [driver_ids]), ...]`` in evidence-log
+        order. Each tuple is one signal's hit list — the smallest
+        ``len(hits)`` is the narrowest signal, used by both
+        ``_gather_soft_candidates`` (for the possible-state path) and
+        ``_pick_demotion_target`` (for cross-vendor demotion).
         """
         results: list[tuple[str, list[str]]] = []
         for ev in evidence_log:
@@ -676,6 +681,76 @@ class TierMatcher:
                 hits = self.index.find_soft_vendor_string(value)
                 if hits:
                     results.append((f"{KIND_VENDOR_STRING}:{value}", hits))
+        return results
+
+    def _pick_demotion_target(
+        self, evidence_log: list[Evidence], *, anchor: str,
+    ) -> tuple[list[str], str]:
+        """Choose vendor-specific peers to promote ahead of a cross-vendor anchor.
+
+        Walks soft signals in narrowness order (smallest hit count first;
+        source label as the deterministic tiebreak). The first signal
+        that produces a non-anchor peer is the demotion source — that
+        signal's peers come first, then any peer surfaced by broader
+        signals as alternatives.
+
+        Returns ``([], "")`` to signal "no demotion, anchor wins" in two
+        cases:
+
+        - The narrowest signal's hit set is exactly ``[anchor]``. That
+          signal specifically corroborates the anchor (a hostname pattern
+          declared only by the anchor matched, etc.), so the anchor is
+          the right driver and the broader signals' peer overlap is not
+          enough to override it. Without this guard, e.g. a Crestron CP3
+          (hostname narrows to the cross-vendor anchor ``crestron_cip``,
+          OUI / alias overlap with peer ``crestron_nvx``) is misidentified
+          as a video endpoint.
+        - No signal yields a non-anchor peer at all.
+        """
+        results = self._collect_soft_signal_results(evidence_log)
+        if not results:
+            return [], ""
+
+        # Tightest signal first; deterministic tiebreak by source label.
+        results.sort(key=lambda r: (len(r[1]), r[0]))
+
+        for source, hits in results:
+            peers = [d for d in hits if d != anchor]
+            if not peers:
+                # This signal narrows to the anchor (or to nothing useful).
+                # If it's the narrowest signal — i.e. the very first one
+                # iterated — its specificity outweighs any broader
+                # peer-overlap signal.
+                if hits == [anchor]:
+                    return [], ""
+                continue
+
+            # Build the promotion order: this signal's peers first
+            # (narrowness), then any peer surfaced by broader signals
+            # (deduped, original-order).
+            ordered: list[str] = list(dict.fromkeys(peers))
+            seen = set(ordered)
+            for src2, hits2 in results:
+                if src2 == source:
+                    continue
+                for d in hits2:
+                    if d != anchor and d not in seen:
+                        seen.add(d)
+                        ordered.append(d)
+            return ordered, source
+
+        return [], ""
+
+    def _gather_soft_candidates(
+        self, evidence_log: list[Evidence],
+    ) -> tuple[list[str], str]:
+        """Collect candidate driver_ids from soft signals.
+
+        Returns (candidates, source_label). Source label points at the
+        signal that produced the narrowest candidate set; ties broken by
+        first observation.
+        """
+        results = self._collect_soft_signal_results(evidence_log)
 
         if not results:
             return [], ""

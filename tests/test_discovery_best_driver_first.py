@@ -23,6 +23,7 @@ from server.discovery.tier_matcher import (
     TierMatcher,
     evidence_active_probe,
     evidence_broadcast,
+    evidence_hostname,
     evidence_oui,
     evidence_snmp_pen,
     evidence_vendor_string,
@@ -286,6 +287,76 @@ def test_oui_and_vendor_string_resolve_same_driver_no_dupe() -> None:
     full = [result.driver_id, *result.alternatives]
     assert full.count("sharp_nec_projector") == 1
     assert "pjlink_class1" in result.alternatives
+
+
+def test_narrow_signal_uniquely_corroborating_anchor_keeps_anchor() -> None:
+    """B2 regression: when the cross-vendor anchor's own hostname
+    pattern uniquely matches but a peer driver shares the broader OUI
+    and manufacturer alias, the anchor must win.
+
+    The concrete bug: a Crestron CP3 controller (anchor =
+    ``crestron_cip``, cross-vendor) with hostname ``CP3-AB12CD`` matches
+    the anchor's broad ``^(MC4|CP3|...)-`` regex and ONLY the anchor's
+    pattern. Both ``crestron_cip`` and ``crestron_nvx`` share the
+    Crestron OUI and the ``"crestron"`` manufacturer alias. The
+    pre-fix demotion logic filtered the anchor out and grabbed the
+    only remaining peer (``crestron_nvx``) as primary, mislabeling the
+    control system as a video endpoint.
+    """
+    idx = SignalIndex()
+    idx.add_rule(SignalRule.for_broadcast(
+        "anchor_driver", "shared_probe", generic=True,
+    ))
+    idx.add_rule(SignalRule.for_hostname("anchor_driver", "^(CP3|TSW)-"))
+    # Both drivers share the OUI + manufacturer alias.
+    idx.add_rule(SignalRule.for_oui("anchor_driver", "00:10:7f"))
+    idx.add_rule(SignalRule.for_oui("peer_driver", "00:10:7f"))
+    idx.add_rule(SignalRule.for_vendor_string("anchor_driver", "vendor"))
+    idx.add_rule(SignalRule.for_vendor_string("peer_driver", "vendor"))
+    matcher = TierMatcher(idx)
+
+    result = matcher.match([
+        evidence_broadcast("shared_probe", {"endpoint": "10.0.0.5"}),
+        evidence_hostname("CP3-AB12CD", matched_pattern="^(CP3|TSW)-"),
+        evidence_oui("00:10:7f:11:22:33"),
+        evidence_vendor_string("vendor", source_probe_id="shared_probe"),
+    ])
+
+    assert result.state == DeviceState.IDENTIFIED
+    assert result.driver_id == "anchor_driver"
+    assert result.alternatives == []
+    assert result.source == "broadcast:shared_probe"
+
+
+def test_narrow_signal_uniquely_pointing_to_peer_demotes_anchor() -> None:
+    """Companion B2 case: when the narrowest signal points uniquely to
+    a peer (not the anchor), the demotion still happens.
+
+    A Crestron DM-NVX-AB12CD device matches both ``crestron_cip``'s
+    broad hostname regex and ``crestron_nvx``'s ``^DM-NVX-`` regex
+    — at the rule-evaluation level both hostname rules fire — so the
+    test is really about a tighter rule belonging to the peer winning
+    out. We model this by giving only the peer a hostname rule.
+    """
+    idx = SignalIndex()
+    idx.add_rule(SignalRule.for_broadcast(
+        "anchor_driver", "shared_probe", generic=True,
+    ))
+    idx.add_rule(SignalRule.for_hostname("peer_driver", "^DM-NVX-"))
+    idx.add_rule(SignalRule.for_oui("anchor_driver", "00:10:7f"))
+    idx.add_rule(SignalRule.for_oui("peer_driver", "00:10:7f"))
+    matcher = TierMatcher(idx)
+
+    result = matcher.match([
+        evidence_broadcast("shared_probe", {"endpoint": "10.0.0.5"}),
+        evidence_hostname("DM-NVX-AB12CD", matched_pattern="^DM-NVX-"),
+        evidence_oui("00:10:7f:11:22:33"),
+    ])
+
+    assert result.state == DeviceState.IDENTIFIED
+    assert result.driver_id == "peer_driver"
+    assert result.alternatives == ["anchor_driver"]
+    assert result.source == "hostname:DM-NVX-AB12CD"
 
 
 def test_multi_vendor_oui_orders_by_specificity() -> None:
