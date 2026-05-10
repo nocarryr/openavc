@@ -28,24 +28,18 @@ import type { DeviceState, DiscoveryEvidence } from "../api/discoveryClient";
 import { showError } from "../store/toastStore";
 
 
+// Generic protocol fallbacks for ports the backend baseline + driver
+// catalog don't already cover. Vendor-specific labels (Samsung MDC,
+// Crestron CIP, PJLink, etc.) come from `portLabels` in the discovery
+// store — the backend builds that map from loaded drivers + community
+// catalog so it stays in sync with the catalog without UI changes.
 const PORT_LABELS: Record<number, string> = {
   23: "Telnet",
   80: "HTTP",
   443: "HTTPS",
-  1515: "Samsung MDC",
-  1688: "Crestron CIP",
-  3088: "Crestron XIO",
-  4352: "PJLink",
-  5000: "Kramer/QSC",
   5900: "VNC",
-  7142: "AMX ICSP",
   8080: "HTTP alt",
   9090: "HTTP alt",
-  10500: "VISCA",
-  41794: "Crestron CTP",
-  49152: "Biamp",
-  52000: "Q-SYS",
-  61000: "Shure",
 };
 
 const HIDDEN_KEY = "openavc_discovery_hidden_ips";
@@ -121,23 +115,11 @@ function stateTone(state: DeviceState): { bg: string; fg: string; label: string 
 // driver also matches via a hint, the matcher returns the
 // vendor-specific driver as the primary identification with the
 // cross-vendor anchor demoted to `alternatives`. The UI surfaces a
-// short "(also responded to ...)" parenthetical next to the likely
-// vendor so users understand why a second driver is offered. This
-// table maps the cross-vendor anchor driver_id to the user-friendly
-// probe name shown in that parenthetical.
-const GENERIC_PROBE_HINT: Record<string, string> = {
-  pjlink_class1: "PJLink probe",
-  pjlink_class2: "PJLink probe",
-};
-
-function genericProbeHint(alternatives: string[] | undefined): string | null {
-  if (!alternatives) return null;
-  for (const id of alternatives) {
-    const hint = GENERIC_PROBE_HINT[id];
-    if (hint) return hint;
-  }
-  return null;
-}
+// short "(probe also matches ...)" parenthetical next to the likely
+// vendor so users understand why a second driver is offered. The
+// label is the first alternative's display name from the loaded /
+// community-catalog driver lookup, so new cross-vendor anchors land
+// in the UI without per-driver code changes.
 
 // Generic fallbacks keyed by the kind prefix of an `ident.source`. Used
 // only when the device's evidence_log doesn't carry a record matching
@@ -1034,7 +1016,11 @@ function IdentificationSection({
           device={device}
           candidates={[ident.driver_id, ...alts]}
           sourceLabel={describeIdentificationSource(ident.source, device.evidence_log)}
-          extraNote={genericProbeHint(alts)}
+          extraNote={
+            alts
+              .map((id) => driverNameLookup.get(id)?.name)
+              .find((n): n is string => Boolean(n)) ?? null
+          }
           installedDrivers={installedDrivers}
           driverNameLookup={driverNameLookup}
           onDeviceAdded={onDeviceAdded}
@@ -1267,9 +1253,9 @@ function DriverAddRow({
 //      the primary "best fit" and the cross-vendor anchor as a
 //      trailing alternative.
 // In both cases the user picks from the dropdown and adds. An optional
-// extraNote surfaces a short parenthetical (e.g. "(also responded to
-// PJLink probe)") next to the likely-vendor line so users understand
-// why a second driver appears.
+// extraNote surfaces a short parenthetical (e.g. "(probe also matches
+// PJLink Class 1 Projector)") next to the likely-vendor line so users
+// understand why a second driver appears.
 
 function DriverChoiceCard({
   device,
@@ -1392,7 +1378,7 @@ function DriverChoiceCard({
       {likelyVendor && (
         <div style={{ fontSize: "var(--font-size-xs)", color: "var(--text-muted)" }}>
           Likely <strong style={{ color: "var(--text)" }}>{likelyVendor}</strong> &mdash; {sourceLabel}
-          {extraNote ? ` (also responded to ${extraNote})` : ""}
+          {extraNote ? ` (probe also matches ${extraNote})` : ""}
         </div>
       )}
       <DriverAddRow
