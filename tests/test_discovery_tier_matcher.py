@@ -1,8 +1,8 @@
 """Tests for the deterministic TierMatcher.
 
 These tests use synthetic SignalRules — driver hint loading is wired
-in Phase 6. The matcher's contract must hold regardless of where rules
-come from.
+in `hints.build_signal_index`. The matcher's contract must hold
+regardless of where rules come from.
 """
 
 import pytest
@@ -332,43 +332,43 @@ class TestTierMatcherIdentified:
         assert result.driver_id == "polycom_ssc"
 
 
-class TestTierMatcherTierOrdering:
-    def test_tier1_beats_tier2(self):
+class TestTierMatcherSignalOrdering:
+    def test_passive_listener_beats_broadcast_probe(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_mdns("driver_t1", "_qsc._tcp.local."))
-        idx.add_rule(SignalRule.for_broadcast("driver_t2", "qsc_qdp"))
+        idx.add_rule(SignalRule.for_mdns("driver_passive", "_qsc._tcp.local."))
+        idx.add_rule(SignalRule.for_broadcast("driver_broadcast", "qsc_qdp"))
         m = TierMatcher(idx)
 
         result = m.match([
             evidence_broadcast("qsc_qdp"),
             evidence_mdns("_qsc._tcp.local."),
         ])
-        # Tier 1 wins regardless of order in the evidence log.
-        assert result.driver_id == "driver_t1"
+        # passive_listener wins regardless of order in the evidence log.
+        assert result.driver_id == "driver_passive"
 
-    def test_tier2_beats_tier3(self):
+    def test_broadcast_probe_beats_active_probe(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_broadcast("driver_t2", "pjlink_class2"))
-        idx.add_rule(SignalRule.for_active_probe("driver_t3", "pjlink"))
+        idx.add_rule(SignalRule.for_broadcast("driver_broadcast", "pjlink_class2"))
+        idx.add_rule(SignalRule.for_active_probe("driver_active", "pjlink"))
         m = TierMatcher(idx)
 
         result = m.match([
             evidence_active_probe("pjlink"),
             evidence_broadcast("pjlink_class2"),
         ])
-        assert result.driver_id == "driver_t2"
+        assert result.driver_id == "driver_broadcast"
 
-    def test_tier3_beats_tier4_soft(self):
+    def test_active_probe_beats_enrichment(self):
         idx = SignalIndex()
-        idx.add_rule(SignalRule.for_active_probe("driver_t3", "extron_sis"))
-        idx.add_rule(SignalRule.for_oui("driver_t3", "00:05:a6"))
+        idx.add_rule(SignalRule.for_active_probe("driver_active", "extron_sis"))
+        idx.add_rule(SignalRule.for_oui("driver_active", "00:05:a6"))
         m = TierMatcher(idx)
 
         result = m.match([
             evidence_oui("00:05:a6:11:22:33"),
             evidence_active_probe("extron_sis"),
         ])
-        # Strong tier 3 match — not a possible state.
+        # Strong active_probe match — not a possible state.
         assert result.state == DeviceState.IDENTIFIED
 
 
@@ -566,14 +566,14 @@ class TestExtractVendorStrings:
 
     def test_does_not_recurse_into_existing_vendor_strings(self):
         # If extract_vendor_strings is called on a log that already has
-        # vendor_string Tier 4 records, it must not consume them as input.
+        # vendor_string enrichment records, it must not consume them as input.
         log = [
             evidence_active_probe("pjlink_class1", {"manufacturer": "NEC"}),
             evidence_vendor_string("NEC", source_probe_id="pjlink_class1"),
         ]
         out = extract_vendor_strings(log)
-        # One emission from the strong evidence; the existing Tier 4 record
-        # is ignored, not re-emitted.
+        # One emission from the strong evidence; the existing enrichment
+        # record is ignored, not re-emitted.
         assert len(out) == 1
 
     def test_empty_or_missing_manufacturer_emits_nothing(self):

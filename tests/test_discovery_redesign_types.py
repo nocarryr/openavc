@@ -152,7 +152,7 @@ class TestDiscoveredDeviceIntegration:
         assert out["evidence_log"] == []
 
     def test_to_dict_omits_legacy_keys(self):
-        # The Phase 6 cleanup removed `matched_drivers`, `confidence`,
+        # The matcher rewrite removed `matched_drivers`, `confidence`,
         # and `sources` from the JSON shape entirely.
         d = DiscoveredDevice(ip="192.168.1.10")
         out = d.to_dict()

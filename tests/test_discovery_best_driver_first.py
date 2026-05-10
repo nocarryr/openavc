@@ -1,12 +1,12 @@
-"""Best-driver-first matching (Phase 8.5).
+"""Best-driver-first matching.
 
 When a *generic* strong-tier probe (PJLink, unfiltered ONVIF) wins the
-strong-tier race, the matcher consults Tier 4 soft signals for a
+strong-tier race, the matcher consults enrichment soft signals for a
 vendor-specific driver. If found, the vendor driver becomes the primary
 identification and the generic driver demotes to a trailing alternative.
 
 These tests pin the contract from
-``discovery-redesign-plan.md`` §"Phase 8.5 — Best-driver-first matching":
+``OpenAVC-Discovery-Spec.md`` §6 (Cross-Vendor Demotion):
 
 - Generic + vendor soft candidate -> vendor primary, generic alternative.
 - Generic alone -> generic primary, no alternatives (regression guard).
@@ -164,7 +164,7 @@ def test_filtered_broadcast_is_not_generic() -> None:
 
 
 def test_vendor_string_alone_yields_possible() -> None:
-    """No strong probe, only a Tier 4 vendor_string evidence ->
+    """No strong probe, only an enrichment vendor_string evidence ->
     ``possible`` with the matching driver as candidate. Same shape as
     OUI-only or hostname-only soft matches.
     """
@@ -182,10 +182,10 @@ def test_vendor_string_alone_yields_possible() -> None:
 
 
 def test_pjlink_plus_vendor_string_picks_vendor() -> None:
-    """The Phase 8.6 regression case: PJLink active probe response
-    carries ``manufacturer="NEC"``, no OUI is in the catalog for the
-    device's actual MAC, but the vendor_string Tier 4 evidence drives
-    the matcher to pick sharp_nec_projector and demote PJLink to
+    """Regression case: PJLink active probe response carries
+    ``manufacturer="NEC"``, no OUI is in the catalog for the device's
+    actual MAC, but the vendor_string enrichment evidence drives the
+    matcher to pick sharp_nec_projector and demote PJLink to
     alternative.
     """
     idx = SignalIndex()
@@ -200,7 +200,7 @@ def test_pjlink_plus_vendor_string_picks_vendor() -> None:
             "pjlink_class1",
             {"manufacturer": "NEC", "model": "PE456_Series"},
         ),
-        # Engine emits this Tier 4 record from the probe response —
+        # Engine emits this enrichment record from the probe response —
         # simulated here for unit-level isolation.
         evidence_vendor_string("NEC", source_probe_id="pjlink_class1"),
     ])

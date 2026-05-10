@@ -13,7 +13,7 @@ from server.discovery.tier_matcher import KIND_SSDP
 
 
 class TestMDNSResultEvidence:
-    def test_with_service_type_emits_tier1_evidence(self):
+    def test_with_service_type_emits_passive_listener_evidence(self):
         r = MDNSResult(
             ip="10.0.0.50",
             service_type="_netaudio-cmc._udp.local.",
@@ -30,7 +30,7 @@ class TestMDNSResultEvidence:
 
     def test_a_record_only_returns_none(self):
         # A-record-only resolutions don't carry a service type and
-        # cannot produce a Tier 1 identification on their own.
+        # cannot produce a passive_listener identification on their own.
         r = MDNSResult(ip="10.0.0.50")
         assert r.to_evidence() is None
 
@@ -80,9 +80,8 @@ class TestUnknownServiceTypeTracking:
             "_pjlink._tcp.local.",
             "_netaudio-cmc._udp.local.",
         ])
-        # Phase 9.6: types the scanner is configured to query are
-        # "known"; observing them in the DNS-SD enumeration is not
-        # "unknown".
+        # Types the scanner is configured to query are "known";
+        # observing them in the DNS-SD enumeration is not "unknown".
         scanner._track_unknown_service_type("_pjlink._tcp.local.")
         scanner._track_unknown_service_type("_netaudio-cmc._udp.local.")
         assert scanner.unknown_service_types == set()
@@ -113,7 +112,7 @@ class TestSSDPControlIP:
 
 
 class TestSSDPResultEvidence:
-    def test_with_st_emits_tier1_evidence(self):
+    def test_with_st_emits_passive_listener_evidence(self):
         r = SSDPResult(
             ip="10.0.0.50",
             st="urn:schemas-upnp-org:device:MediaRenderer:1",
@@ -136,8 +135,8 @@ class TestSSDPResultEvidence:
         assert r.to_evidence() is None
 
 
-class TestPhase9DriverDeclaredServiceTypes:
-    """Phase 9.6: service types come from driver catalog declarations.
+class TestDriverDeclaredServiceTypes:
+    """Service types come from driver catalog declarations.
 
     The hard-coded AV_SERVICE_TYPES list is gone. The MDNSScanner
     accepts a ``service_types`` constructor argument and queries

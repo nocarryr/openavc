@@ -130,7 +130,7 @@ class TestDDPBeaconAccessors:
         info = b.to_device_info()
         assert info == {"manufacturer": "Epson", "model": "PL725"}
 
-    def test_to_evidence_emits_tier1(self):
+    def test_to_evidence_emits_passive_listener(self):
         b = DDPBeacon(
             ip="10.0.0.5",
             raw="AMXB<-Make=Polycom><-Model=SSC16>",

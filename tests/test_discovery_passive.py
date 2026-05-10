@@ -936,7 +936,7 @@ class TestEnginePassiveIntegration:
 
     @pytest.mark.asyncio
     async def test_collect_passive_results_mdns(self):
-        """mDNS results merge into engine results + emit Tier 1 evidence."""
+        """mDNS results merge into engine results + emit passive_listener evidence."""
         mdns_results = {
             "192.168.1.72": MDNSResult(
                 ip="192.168.1.72",
@@ -966,7 +966,7 @@ class TestEnginePassiveIntegration:
 
     @pytest.mark.asyncio
     async def test_collect_passive_results_ssdp(self):
-        """SSDP results merge into engine results + emit Tier 1 evidence."""
+        """SSDP results merge into engine results + emit passive_listener evidence."""
         ssdp_results = {
             "192.168.1.50": SSDPResult(
                 ip="192.168.1.50",

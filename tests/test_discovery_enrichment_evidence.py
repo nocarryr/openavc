@@ -1,7 +1,7 @@
-"""Tests for Tier 4 enrichment Evidence emission.
+"""Tests for enrichment Evidence emission.
 
-The deterministic matcher consumes Tier 4 soft signals (SNMP PEN,
-OUI, hostname pattern) to produce ``possible`` state when no Tier
+The deterministic matcher consumes enrichment soft signals (SNMP PEN,
+OUI, hostname pattern) to produce ``possible`` state when no strong
 1/2/3 strong match exists. These tests verify the producers - SNMP
 PEN extraction from sysObjectID, plus the standalone evidence
 helpers in tier_matcher used by the engine for OUI and hostname
@@ -19,7 +19,7 @@ from server.discovery.tier_matcher import (
 )
 
 
-# ===== SNMP PEN -> Tier 4 evidence =====
+# ===== SNMP PEN -> enrichment evidence =====
 
 
 class TestSNMPInfoPENAccessor:
@@ -53,7 +53,7 @@ class TestSNMPInfoPENAccessor:
 
 
 class TestSNMPInfoToEvidence:
-    def test_with_extron_pen_emits_tier4(self):
+    def test_with_extron_pen_emits_enrichment(self):
         info = SNMPInfo(
             sys_object_id="1.3.6.1.4.1.17049.1.2.3",
             sys_descr="Extron DTP CrossPoint 84 IPCP, V1.07.0000",
@@ -81,7 +81,7 @@ class TestSNMPInfoToEvidence:
         assert info.to_evidence() is None
 
 
-# ===== OUI -> Tier 4 evidence (engine-emitted) =====
+# ===== OUI -> enrichment evidence (engine-emitted) =====
 
 
 class TestOUIEvidence:
@@ -103,7 +103,7 @@ class TestOUIEvidence:
         assert ev.data["vendor"] is None
 
 
-# ===== Hostname -> Tier 4 evidence (engine-emitted) =====
+# ===== Hostname -> enrichment evidence (engine-emitted) =====
 
 
 class TestHostnameEvidence:
