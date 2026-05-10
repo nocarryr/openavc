@@ -783,8 +783,8 @@ class DiscoveryEngine:
                 # and append vendor_string enrichment evidence so the
                 # matcher can pick a best-fit driver via
                 # ``manufacturer_alias:`` hints — e.g. a probe response
-                # carrying ``manufacturer=NEC`` surfaces a driver that
-                # claims that alias without needing an OUI hit.
+                # carrying ``manufacturer=<vendor>`` surfaces a driver
+                # that claims that alias without needing an OUI hit.
                 device.evidence_log.extend(
                     extract_vendor_strings(device.evidence_log)
                 )

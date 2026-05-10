@@ -132,9 +132,9 @@ class ProbeContext:
 
         ``port`` is the UDP port the companion broadcast to and
         ``matched_pattern`` is a short ``kind:value`` description of the
-        matcher that fired (e.g. ``"hex:417274..."`` /
-        ``"regex:NovaStar"``). Both feed the scan-results "Why?" reveal
-        — pass them so the UI can render the full §10 phrasing.
+        matcher that fired (e.g. ``"hex:deadbeef"`` /
+        ``"regex:<vendor-pattern>"``). Both feed the scan-results "Why?"
+        reveal — pass them so the UI can render the full §10 phrasing.
         """
         ev = evidence_broadcast(
             probe_id or self.companion_broadcast_probe_id,

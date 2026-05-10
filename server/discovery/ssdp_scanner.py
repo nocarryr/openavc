@@ -144,8 +144,9 @@ def _st_to_category(st: str | None) -> str | None:
     """Map SSDP search target to device category.
 
     MediaRenderer and MediaServer are too broad to categorize reliably
-    (Sonos is a MediaRenderer but is audio, not display). Category is
-    better determined by manufacturer, protocol probes, and driver matching.
+    (a wireless audio speaker is a MediaRenderer but is audio, not
+    display). Category is better determined by manufacturer, protocol
+    probes, and driver matching.
     """
     # Intentionally returns None — broad UPnP types are ambiguous.
     # Specific category comes from OUI, protocol probes, or driver match.

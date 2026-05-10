@@ -701,10 +701,11 @@ class TierMatcher:
           signal specifically corroborates the anchor (a hostname pattern
           declared only by the anchor matched, etc.), so the anchor is
           the right driver and the broader signals' peer overlap is not
-          enough to override it. Without this guard, e.g. a Crestron CP3
-          (hostname narrows to the cross-vendor anchor ``crestron_cip``,
-          OUI / alias overlap with peer ``crestron_nvx``) is misidentified
-          as a video endpoint.
+          enough to override it. Without this guard, a device whose
+          hostname pattern narrows uniquely to the cross-vendor anchor
+          but whose OUI / manufacturer alias also overlaps a peer driver
+          (a vendor-specific sibling under the same OUI block) would be
+          misidentified as the peer.
         - No signal yields a non-anchor peer at all.
         """
         results = self._collect_soft_signal_results(evidence_log)
@@ -833,8 +834,8 @@ def evidence_broadcast(
     ``port`` is the UDP port the probe targeted (from
     ``udp_probe.port``) and ``matched_pattern`` is a human-readable
     description of the regex / hex / substring matcher that the
-    response satisfied (e.g. ``"regex:NovaStar"``,
-    ``"hex:417274..."``). Both feed the scan-results "Why?" reveal.
+    response satisfied (e.g. ``"regex:<vendor-pattern>"``,
+    ``"hex:deadbeef"``). Both feed the scan-results "Why?" reveal.
     """
     data: dict[str, Any] = {
         "kind": KIND_BROADCAST,

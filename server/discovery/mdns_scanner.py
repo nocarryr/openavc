@@ -270,7 +270,7 @@ class MDNSResult:
     hostname: str | None = None
     port: int | None = None
     service_type: str | None = None       # e.g., "_http._tcp.local."
-    instance_name: str | None = None      # e.g., "NEC PA1004UL"
+    instance_name: str | None = None      # e.g., "<vendor> <model>"
     txt_records: dict[str, str] = field(default_factory=dict)
 
     def to_device_info(self) -> dict[str, Any]:

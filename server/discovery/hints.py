@@ -111,9 +111,9 @@ def describe_response_match(match: ResponseMatch) -> str:
 
     Used by the probe runner to bake the matched pattern into evidence
     records so the scan-results "Why?" reveal can render lines like
-    "UDP probe on port 6454 matched regex:NovaStar". Format is stable
-    enough for the React UI to split on the first colon and render
-    "kind = value" with appropriate styling.
+    "UDP probe on port 6454 matched regex:<vendor-pattern>". Format is
+    stable enough for the React UI to split on the first colon and
+    render "kind = value" with appropriate styling.
 
     Empty string when the matcher has no declared sub-matcher (a
     connect-only TCP probe — banner-grab style).
@@ -406,7 +406,7 @@ def _parse_response_match(
     """Pull ``expect:``, ``expect_regex:``, or ``expect_hex:`` out of a probe block.
 
     Spec §2 rule 3: exactly one matcher per probe. Mixing them silently
-    AND-matches both, which produces "matched hex:abcd, regex:Sony"
+    AND-matches both, which produces "matched hex:abcd, regex:<vendor>"
     output that's almost never the author's intent. If ``require_match``
     is True, exactly one must be present — UDP probes need a matcher to
     filter junk, but a connect-only TCP probe can succeed on connect
