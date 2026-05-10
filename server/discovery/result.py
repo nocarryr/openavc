@@ -297,3 +297,57 @@ def merge_device_info(
         existing.snmp_info = new_info["snmp_info"]
     if new_info.get("ssdp_info") and not existing.ssdp_info:
         existing.ssdp_info = new_info["ssdp_info"]
+
+
+# Keys ``device_info_from_evidence`` lifts out of probe evidence into a
+# dict that ``merge_device_info`` knows how to absorb.
+_PROBE_DEVICE_INFO_KEYS: tuple[str, ...] = (
+    "mac", "hostname", "manufacturer", "model", "device_name",
+    "firmware", "serial_number", "category",
+)
+
+
+def device_info_from_evidence(ev: Evidence) -> dict[str, Any]:
+    """Pull merge-able device info out of a probe-emitted evidence record.
+
+    Probe evidence shows up in three layouts depending on who built it:
+
+    - **UDP broadcast** (``probe_runner.run_udp_broadcast_probe``): the
+      device-info fields land in ``data["txt"]`` at top level —
+      ``response`` only holds ``{"ip": sender}``.
+    - **TCP active** (``probe_runner.run_tcp_active_probe``): reserved
+      keys (``manufacturer`` / ``make``) live at the top of
+      ``data["response"]``; everything else from ``extract:`` rules
+      goes under ``data["response"]["extracted"]``. ``response.text``
+      is the raw payload and is ignored here.
+    - **Companion** (``ProbeContext.emit_broadcast`` /
+      ``emit_active``): the companion author chooses the shape — info
+      may sit at ``data["response"]`` top level (typical), under
+      ``response["extracted"]`` if they mirror the runner, or in
+      ``data["txt"]`` if they mirror the UDP runner.
+
+    All three layouts are scanned; first non-None value per key wins.
+    The probe-runner ``make`` alias is folded into ``manufacturer`` so
+    the device card renders a single vendor regardless of which key
+    the driver extracted.
+    """
+    info: dict[str, Any] = {}
+
+    def _absorb(src: Any) -> None:
+        if not isinstance(src, dict):
+            return
+        for key in _PROBE_DEVICE_INFO_KEYS:
+            val = src.get(key)
+            if val is not None and key not in info:
+                info[key] = val
+        if "manufacturer" not in info:
+            make = src.get("make")
+            if make is not None:
+                info["manufacturer"] = make
+
+    response = ev.data.get("response")
+    _absorb(response)
+    if isinstance(response, dict):
+        _absorb(response.get("extracted"))
+    _absorb(ev.data.get("txt"))
+    return info

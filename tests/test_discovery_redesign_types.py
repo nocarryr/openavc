@@ -11,6 +11,7 @@ from server.discovery.result import (
     Evidence,
     IdentificationMatch,
     SignalTier,
+    device_info_from_evidence,
 )
 
 
@@ -158,3 +159,112 @@ class TestDiscoveredDeviceIntegration:
         assert "matched_drivers" not in out
         assert "confidence" not in out
         assert "sources" not in out
+
+
+class TestDeviceInfoFromEvidence:
+    """device_info_from_evidence lifts hostname/model/firmware out of the
+    three probe evidence shapes so the engine's merge_device_info call
+    surfaces the data on the device card. Regression test for the audit's
+    B1 finding (passive listeners merged; probes did not)."""
+
+    def test_udp_broadcast_shape(self):
+        # probe_runner.run_udp_broadcast_probe puts extracted fields in
+        # data.txt at top level; data.response only carries the IP.
+        ev = Evidence(
+            SignalTier.BROADCAST_PROBE,
+            "broadcast:custom_foo_udp",
+            data={
+                "kind": "broadcast",
+                "source_id": "custom_foo_udp",
+                "response": {"ip": "10.0.0.5"},
+                "txt": {"manufacturer": "Foo", "model": "Bar-100", "firmware": "1.2.3"},
+            },
+        )
+        assert device_info_from_evidence(ev) == {
+            "manufacturer": "Foo", "model": "Bar-100", "firmware": "1.2.3",
+        }
+
+    def test_tcp_active_shape(self):
+        # probe_runner.run_tcp_active_probe nests extract: outputs under
+        # data.response.extracted; reserved keys (manufacturer/make) are
+        # at top of data.response. data.response.text is raw payload.
+        ev = Evidence(
+            SignalTier.ACTIVE_PROBE,
+            "probe:custom_extron_sis_tcp",
+            data={
+                "kind": "probe",
+                "source_id": "custom_extron_sis_tcp",
+                "response": {
+                    "text": "V1.18 DTP-T-USW-333",
+                    "manufacturer": "Extron",
+                    "extracted": {"model": "DTP-T-USW-333", "firmware": "1.18"},
+                },
+                "port": 23,
+            },
+        )
+        assert device_info_from_evidence(ev) == {
+            "manufacturer": "Extron", "model": "DTP-T-USW-333", "firmware": "1.18",
+        }
+
+    def test_companion_shape_top_level_response(self):
+        # A Python companion can put device-info fields directly at the
+        # top of data.response (crestron_cip's emit pattern).
+        ev = Evidence(
+            SignalTier.BROADCAST_PROBE,
+            "broadcast:custom_crestron_cip_companion_udp",
+            data={
+                "kind": "broadcast",
+                "source_id": "custom_crestron_cip_companion_udp",
+                "response": {
+                    "hostname": "CP3-12345",
+                    "model": "CP3",
+                    "firmware": "2.001.0042",
+                },
+                "port": 41794,
+            },
+        )
+        assert device_info_from_evidence(ev) == {
+            "hostname": "CP3-12345", "model": "CP3", "firmware": "2.001.0042",
+        }
+
+    def test_make_alias_folds_into_manufacturer(self):
+        # 'make' is a probe extract alias; the device card has only one
+        # vendor field, so fold it into manufacturer.
+        ev = Evidence(
+            SignalTier.BROADCAST_PROBE, "broadcast:custom_x",
+            data={
+                "kind": "broadcast", "source_id": "custom_x",
+                "response": {"ip": "1.1.1.1"},
+                "txt": {"make": "Aliased"},
+            },
+        )
+        assert device_info_from_evidence(ev) == {"manufacturer": "Aliased"}
+
+    def test_explicit_manufacturer_wins_over_make(self):
+        ev = Evidence(
+            SignalTier.BROADCAST_PROBE, "broadcast:custom_x",
+            data={
+                "kind": "broadcast", "source_id": "custom_x",
+                "response": {"manufacturer": "Real", "make": "Alias"},
+            },
+        )
+        assert device_info_from_evidence(ev) == {"manufacturer": "Real"}
+
+    def test_empty_response_yields_empty(self):
+        ev = Evidence(
+            SignalTier.BROADCAST_PROBE, "broadcast:foo",
+            data={"kind": "broadcast", "source_id": "foo", "response": {"ip": "1.1.1.1"}},
+        )
+        assert device_info_from_evidence(ev) == {}
+
+    def test_passive_listener_evidence_safe(self):
+        # mDNS/SSDP evidence isn't supposed to be passed here, but it
+        # shouldn't crash if it is — passive paths already merge their
+        # own to_device_info().
+        ev = Evidence(
+            SignalTier.PASSIVE_LISTENER, "mdns:_pjlink._tcp.",
+            data={"kind": "mdns", "source_id": "_pjlink._tcp.",
+                  "txt": {"vendor": "Sony"}},
+        )
+        # 'vendor' isn't a recognized key — returns empty.
+        assert device_info_from_evidence(ev) == {}

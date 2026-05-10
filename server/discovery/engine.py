@@ -48,6 +48,7 @@ from server.discovery.tier_matcher import (
 )
 from server.discovery.result import (
     DiscoveredDevice,
+    device_info_from_evidence,
     merge_device_info,
 )
 
@@ -993,6 +994,12 @@ class DiscoveryEngine:
                         device = self._get_or_create(ip)
                         device.alive = True
                         device.evidence_log.append(ev)
+                        # Lift extracted hostname/model/firmware/etc. onto the
+                        # device record so the card and the export report show
+                        # them. Passive listeners do this; probes need to too.
+                        info = device_info_from_evidence(ev)
+                        if info:
+                            merge_device_info(device, info, "broadcast_probe")
                         await self._emit_device_update(device, "broadcast_probe")
 
         if tcp_specs:
@@ -1029,6 +1036,9 @@ class DiscoveryEngine:
                     device = self._get_or_create(target)
                     device.alive = True
                     device.evidence_log.append(ev)
+                    info = device_info_from_evidence(ev)
+                    if info:
+                        merge_device_info(device, info, "protocol_probe")
                     await self._emit_device_update(device, "protocol_probe")
 
         if self._discovery_companions:
@@ -1036,6 +1046,9 @@ class DiscoveryEngine:
                 device = self._get_or_create(host)
                 device.alive = True
                 device.evidence_log.append(ev)
+                info = device_info_from_evidence(ev)
+                if info:
+                    merge_device_info(device, info, "companion")
                 await self._emit_device_update(device, "broadcast_probe")
 
             # Build the port -> hosts map once and share it across
