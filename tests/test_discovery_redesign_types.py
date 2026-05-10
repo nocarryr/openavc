@@ -1,8 +1,7 @@
-"""Tests for the deterministic identification types added in the discovery redesign.
+"""Tests for the deterministic identification types.
 
-These types live alongside the legacy ``DriverMatch`` /
-``DiscoveredDevice.confidence`` fields until the orchestrator swap.
-See ``server/discovery/result.py`` and ``discovery-redesign-plan.md``.
+See ``server/discovery/result.py`` for the type definitions and
+``OpenAVC-Discovery-Spec.md`` §5 for the matcher contract.
 """
 
 from server.discovery.result import (

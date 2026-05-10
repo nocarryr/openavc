@@ -4,7 +4,7 @@ Validates that ``parse_driver_discovery`` accepts well-formed blocks
 in the new fingerprints + hints shape, rejects malformed ones, and
 that ``build_signal_index`` raises on fingerprint collisions.
 
-Schema reference: ``discovery-rewrite-plan.md`` (workspace root).
+Schema reference: ``OpenAVC-Discovery-Spec.md`` §2 (workspace root).
 """
 
 import pytest

@@ -36,7 +36,7 @@ producers* (mDNS scanner, AMX DDP listener, broadcast probes, active
 probes) live in their own modules and emit ``Evidence`` records into
 the device's ``evidence_log``. ``TierMatcher.match()`` is the consumer.
 
-See discovery-redesign-plan.md for the full architecture.
+See ``OpenAVC-Discovery-Spec.md`` for the full architecture.
 """
 
 from __future__ import annotations

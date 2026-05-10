@@ -472,7 +472,7 @@ export interface DriverResponseDef {
 }
 
 // Driver ``discovery:`` block. Schema reference:
-// ``discovery-rewrite-plan.md`` (workspace root) and the runtime parser
+// ``OpenAVC-Discovery-Spec.md`` §2 (workspace root) and the runtime parser
 // in ``openavc/server/discovery/hints.py``.
 //
 // Two kinds of declarations:

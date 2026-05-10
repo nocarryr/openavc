@@ -19,7 +19,7 @@ fingerprint matches, the matcher consults peer drivers' hints; if a
 vendor-specific peer matches, it wins and the cross-vendor driver
 demotes to alternative.
 
-Schema reference: ``discovery-rewrite-plan.md`` (workspace root).
+Schema reference: ``OpenAVC-Discovery-Spec.md`` §2 (workspace root).
 """
 
 from __future__ import annotations
