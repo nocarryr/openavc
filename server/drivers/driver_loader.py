@@ -158,6 +158,27 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
     return errors
 
 
+def companion_relpath_from_def(driver_def: dict[str, Any]) -> str | None:
+    """Return the relative ``discovery.python.file`` path if declared.
+
+    Used by ``load_driver_file`` and by the ``/drivers/upload`` REST
+    route to spot YAMLs that declare a Python companion before
+    accepting them. Returns ``None`` when no ``python:`` declaration is
+    present (any other discovery fingerprint type stands alone).
+    """
+    discovery = driver_def.get("discovery") or {}
+    if not isinstance(discovery, dict):
+        return None
+    block = discovery.get("python")
+    if isinstance(block, str):
+        return block or None
+    if isinstance(block, dict):
+        path = block.get("file")
+        if isinstance(path, str) and path:
+            return path
+    return None
+
+
 def load_driver_file(filepath: Path) -> dict[str, Any] | None:
     """
     Load and validate a single driver definition file (.avcdriver YAML).
@@ -182,6 +203,22 @@ def load_driver_file(filepath: Path) -> dict[str, Any] | None:
             + "; ".join(errors)
         )
         return None
+
+    # Companion existence check: a ``python:`` declaration that points at
+    # a missing file would auto-register two SignalRules under
+    # ``custom_<id>_companion_(udp|tcp)`` at hint-load time, but no
+    # evidence producer would ever fire — the device would be matchable
+    # in theory and silently invisible in practice. Reject up front.
+    companion_relpath = companion_relpath_from_def(driver_def)
+    if companion_relpath:
+        companion_path = (filepath.parent / companion_relpath).resolve()
+        if not companion_path.is_file():
+            log.warning(
+                f"Driver {filepath.name} declares discovery.python "
+                f"file={companion_relpath!r} but no such file exists "
+                f"at {companion_path}; skipping driver"
+            )
+            return None
 
     return driver_def
 

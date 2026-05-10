@@ -353,6 +353,35 @@ async def upload_driver(request: Request) -> dict[str, Any]:
     # Register the driver
     try:
         if filename.endswith(".avcdriver"):
+            # Companion check: a YAML that declares discovery.python won't
+            # actually function unless the sibling _discovery.py is also
+            # present in driver_repo/. load_driver_file would log + return
+            # None below, but the user gets the generic 'Invalid driver
+            # definition file' message — surface a more useful one here.
+            import yaml as _yaml_peek
+            from server.drivers.driver_loader import companion_relpath_from_def
+            try:
+                _peek = _yaml_peek.safe_load(content)
+            except _yaml_peek.YAMLError:
+                _peek = None
+            if isinstance(_peek, dict):
+                companion_relpath = companion_relpath_from_def(_peek)
+                if companion_relpath:
+                    companion_filename = _PurePosixPath(companion_relpath).name
+                    companion_path = driver_repo / companion_filename
+                    if not companion_path.is_file():
+                        filepath.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Driver {filename} declares a Python "
+                                f"companion ({companion_relpath!r}) but "
+                                f"{companion_filename!r} is not in the "
+                                "driver library yet. Upload the "
+                                "_discovery.py file first, then re-upload "
+                                "this driver."
+                            ),
+                        )
             driver_def = load_driver_file(filepath)
             if driver_def is None:
                 filepath.unlink(missing_ok=True)
