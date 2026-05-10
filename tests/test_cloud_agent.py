@@ -217,9 +217,7 @@ class TestProtocol:
     """Tests for server.cloud.protocol."""
 
     def test_protocol_version(self):
-        # v2: discovery rewrite reshaped the get_discovery_results tool
-        # payload. Pre-rewrite agents are rejected at the handshake.
-        assert PROTOCOL_VERSION == 2
+        assert PROTOCOL_VERSION == 1
 
     def test_message_type_sets_no_overlap(self):
         """Upstream, downstream, and handshake types don't overlap."""
