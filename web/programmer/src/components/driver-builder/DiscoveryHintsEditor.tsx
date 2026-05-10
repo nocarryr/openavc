@@ -748,7 +748,7 @@ function HelpSection() {
       <div style={INTRO}>
         See the{" "}
         <a
-          href="https://docs.openavc.com/creating-drivers/#discovery-hints"
+          href="https://docs.openavc.com/creating-drivers/#discovery"
           target="_blank"
           rel="noreferrer"
         >

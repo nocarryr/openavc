@@ -684,7 +684,7 @@ export function DriverEditor({
 
         {activeTab === "discovery" && (
           <>
-            <LearnMore href={DOCS.discovery} label="Discovery hints reference" />
+            <LearnMore href={DOCS.discovery} label="Discovery reference" />
             <IssueList issues={issuesFor(effectiveIssues, "discovery")} />
             <DiscoveryHintsEditor draft={draft} onUpdate={onUpdate} />
           </>

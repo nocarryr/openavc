@@ -32,6 +32,6 @@ export const DOCS = {
   deviceSettings: `${DOCS_BASE}/creating-drivers/#device_settings-entry`,
 
   // Single-section tabs
-  discovery: `${DOCS_BASE}/creating-drivers/#discovery-hints`,
+  discovery: `${DOCS_BASE}/creating-drivers/#discovery`,
   simulation: `${DOCS_BASE}/writing-simulators/`,
 };
