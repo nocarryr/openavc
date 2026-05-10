@@ -644,6 +644,8 @@ The `discovery:` block tells the matcher which network signals identify your dev
 - **Fingerprints** identify the driver alone. One match is enough. Result state: *identified*.
 - **Hints** narrow candidates. Several hints together produce a *possible* match with a candidate driver list. Result state: *possible*.
 
+**Choosing a fingerprint type.** Most AV devices announce themselves passively over one of three multicast channels. Pick the one your device actually emits. `mdns:` matches the device's Bonjour / Avahi service-type announcement (e.g. `_pjlink._tcp.local.`) and is the common case for projectors, displays, and networked audio gear. `ssdp:` matches the UPnP device-type URN advertised in SSDP NOTIFY (e.g. `urn:schemas-upnp-org:device:MediaRenderer:1`) and shows up on media renderers, smart displays, and consumer-grade AV devices. `amx_ddp:` matches the AMXB make / model beacon many AV control-system devices emit on multicast `239.255.250.250:9131`; provide a `make` string and an optional `model_pattern` glob. When the device doesn't announce, fall back to `tcp_probe:` or `udp_probe:` to actively send a control-port query and match the response. Reach for `python:` only when the wire format is too dynamic for the declarative blocks (multi-step handshakes, binary parsing, broadcast-then-per-host TCP follow-ups).
+
 A driver with no `discovery:` block at all is invisible to the matcher (still installable manually). The loader logs a warning so you notice.
 
 The matcher is deterministic — there is no scoring. A signal either fires or it does not. Fingerprints always beat hint accumulation when both fire.
