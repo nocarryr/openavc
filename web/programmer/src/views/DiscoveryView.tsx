@@ -116,11 +116,15 @@ function stateTone(state: DeviceState): { bg: string; fg: string; label: string 
 }
 
 /** Plain-English one-liner describing the deterministic signal that produced a match. */
-// Mirrors _GENERIC_STRONG_PROBE_IDS in server/discovery/tier_matcher.py.
-// When a vendor-specific driver wins via Tier 4 soft signals over one of
-// these generic strong matches, the generic driver_id is appended as the
-// trailing alternative, and we surface a short "(also responded to ...)"
-// hint so the user understands why a second driver is offered.
+// When a cross-vendor anchor driver matches (a fingerprint declared
+// `cross_vendor: true`, e.g. PJLink) and a vendor-specific peer
+// driver also matches via a hint, the matcher returns the
+// vendor-specific driver as the primary identification with the
+// cross-vendor anchor demoted to `alternatives`. The UI surfaces a
+// short "(also responded to ...)" parenthetical next to the likely
+// vendor so users understand why a second driver is offered. This
+// table maps the cross-vendor anchor driver_id to the user-friendly
+// probe name shown in that parenthetical.
 const GENERIC_PROBE_HINT: Record<string, string> = {
   pjlink_class1: "PJLink probe",
   pjlink_class2: "PJLink probe",
@@ -141,23 +145,25 @@ function summarizeSource(source: string): string {
   const tail = rest.join(":");
   switch (scheme) {
     case "mdns":
-      return `mDNS announcement (${tail})`;
+      return `mDNS announcement on ${tail}`;
     case "ssdp":
-      return `SSDP/UPnP announcement${tail ? ` (${tail})` : ""}`;
+      return `SSDP NOTIFY${tail ? ` for ${tail}` : ""}`;
     case "amx_ddp":
       return `AMX DDP beacon${tail ? ` (${tail})` : ""}`;
     case "broadcast":
-      return `${tail.replace(/_/g, " ")} broadcast probe`;
+      return `UDP probe ${tail}`;
     case "probe":
-      return `${tail.replace(/_/g, " ")} TCP probe`;
-    case "snmp":
-      return `SNMP ${tail}`;
+      return `TCP probe ${tail}`;
     case "oui":
-      return `MAC OUI ${tail}`;
+      return `OUI lookup matched ${tail}`;
+    case "snmp_pen":
+      return `SNMP enterprise number ${tail}`;
     case "hostname":
-      return `hostname pattern (${tail})`;
-    case "soft":
-      return "ambiguous soft signal";
+      return `Hostname ${tail} matched a driver pattern`;
+    case "vendor_string":
+      return `Manufacturer alias matched ${tail}`;
+    case "open_port":
+      return `Port ${tail} observed open`;
     default:
       return source;
   }
@@ -1010,10 +1016,10 @@ function IdentificationSection({
   if (state === "identified" && ident?.driver_id) {
     const alts = ident.alternatives ?? [];
     if (alts.length > 0) {
-      // Generic strong probe won (e.g. PJLink) but a vendor-specific
-      // driver matched on a soft signal — render the same dropdown as
+      // Cross-vendor anchor matched (e.g. PJLink) and a vendor-specific
+      // peer matched via a hint — render the same dropdown as
       // possible-state, with the vendor driver pre-selected and the
-      // generic driver as the trailing alternative.
+      // cross-vendor anchor as the trailing alternative.
       return (
         <DriverChoiceCard
           device={device}
@@ -1243,12 +1249,14 @@ function DriverAddRow({
 // --- Driver choice card ---
 //
 // Renders the dropdown + Add + override-picker UI shared by two cases:
-//   1. possible state — candidates from Tier 4 soft signals.
-//   2. identified state with alternatives — a generic strong probe won
-//      (PJLink, unfiltered ONVIF) and one or more vendor-specific
-//      drivers also matched, so the matcher returns the vendor as the
-//      primary "best fit" and the generic driver as a trailing
-//      alternative.
+//   1. possible state — candidates narrowed by hint matches (OUI,
+//      hostname, manufacturer alias, etc.) without a fingerprint
+//      strong enough to identify on its own.
+//   2. identified state with alternatives — a cross-vendor anchor
+//      matched (e.g. PJLink) and one or more vendor-specific peers
+//      also matched via hints, so the matcher returns the vendor as
+//      the primary "best fit" and the cross-vendor anchor as a
+//      trailing alternative.
 // In both cases the user picks from the dropdown and adds. An optional
 // extraNote surfaces a short parenthetical (e.g. "(also responded to
 // PJLink probe)") next to the likely-vendor line so users understand
@@ -1506,6 +1514,119 @@ function ManualDriverPicker({
 
 
 // --- Evidence list ("Why?" reveal) ---
+//
+// Renders each evidence record using the user-facing phrasing from the
+// Discovery spec §10 — dispatched on `data.kind` rather than the
+// internal tier value. The raw `data.kind` strings (`mdns`, `ssdp`,
+// `amx_ddp`, `broadcast`, `probe`, `oui`, `snmp_pen`, `hostname`,
+// `open_port`, `vendor_string`) are stable per the API contract in
+// spec §11; the strings below are the natural-English versions of
+// those.
+
+function describeEvidence(ev: DiscoveryEvidence): { headline: string; detail: string | null } {
+  const data = ev.data as Record<string, unknown>;
+  const kind = typeof data.kind === "string" ? (data.kind as string) : null;
+  const sourceId = typeof data.source_id === "string" ? (data.source_id as string) : null;
+
+  const txtExcerpt = (txt: Record<string, unknown>): string =>
+    Object.entries(txt)
+      .slice(0, 4)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v.slice(0, 60) : JSON.stringify(v).slice(0, 60)}`)
+      .join(", ");
+
+  switch (kind) {
+    case "mdns": {
+      const service = sourceId ?? "(unknown service)";
+      const txt = data.txt && typeof data.txt === "object" ? (data.txt as Record<string, unknown>) : null;
+      const instance = typeof data.instance === "string" ? (data.instance as string) : null;
+      const parts: string[] = [];
+      if (instance) parts.push(`instance ${instance}`);
+      if (txt && Object.keys(txt).length > 0) parts.push(`TXT ${txtExcerpt(txt)}`);
+      return {
+        headline: `mDNS announcement on ${service}`,
+        detail: parts.length > 0 ? parts.join("; ") : null,
+      };
+    }
+    case "ssdp": {
+      const urn = sourceId ?? "(unknown device type)";
+      const fields: string[] = [];
+      for (const f of ["manufacturer", "model", "friendly_name", "server"] as const) {
+        const v = data[f];
+        if (typeof v === "string" && v) fields.push(`${f}: ${v}`);
+      }
+      return {
+        headline: `SSDP NOTIFY for ${urn}`,
+        detail: fields.length > 0 ? fields.join("; ") : null,
+      };
+    }
+    case "amx_ddp": {
+      const make = typeof data.make === "string" ? data.make : "?";
+      const model = typeof data.model === "string" ? data.model : "?";
+      return { headline: `AMX DDP beacon (make=${make}, model=${model})`, detail: null };
+    }
+    case "broadcast": {
+      const probeId = sourceId ?? "(unknown probe)";
+      const response = data.response && typeof data.response === "object"
+        ? (data.response as Record<string, unknown>) : {};
+      const ip = typeof response.ip === "string" ? (response.ip as string) : null;
+      const txt = data.txt && typeof data.txt === "object" ? (data.txt as Record<string, unknown>) : null;
+      const parts: string[] = [];
+      if (ip) parts.push(`response from ${ip}`);
+      if (txt && Object.keys(txt).length > 0) parts.push(txtExcerpt(txt));
+      return {
+        headline: `UDP probe ${probeId} matched`,
+        detail: parts.length > 0 ? parts.join("; ") : null,
+      };
+    }
+    case "probe": {
+      const probeId = sourceId ?? "(unknown probe)";
+      const response = data.response && typeof data.response === "object"
+        ? (data.response as Record<string, unknown>) : {};
+      const text = typeof response.text === "string" ? (response.text as string) : null;
+      const excerpt = text ? text.replace(/[\r\n]+/g, " ").trim().slice(0, 80) : null;
+      return {
+        headline: excerpt
+          ? `TCP probe ${probeId} returned "${excerpt}"`
+          : `TCP probe ${probeId} responded`,
+        detail: null,
+      };
+    }
+    case "oui": {
+      const prefix = typeof data.value === "string" ? (data.value as string) : "(unknown prefix)";
+      const vendor = typeof data.vendor === "string" ? (data.vendor as string) : null;
+      return {
+        headline: vendor
+          ? `OUI lookup matched ${prefix} → ${vendor}`
+          : `OUI lookup matched ${prefix}`,
+        detail: null,
+      };
+    }
+    case "hostname": {
+      const hostname = typeof data.value === "string" ? (data.value as string) : "(unknown hostname)";
+      return { headline: `Hostname ${hostname} matched a driver pattern`, detail: null };
+    }
+    case "snmp_pen": {
+      const pen = typeof data.value === "number" || typeof data.value === "string"
+        ? String(data.value) : "(unknown)";
+      const sysdescr = typeof data.sysdescr === "string" ? (data.sysdescr as string) : null;
+      return { headline: `SNMP enterprise number ${pen}`, detail: sysdescr };
+    }
+    case "vendor_string": {
+      const value = typeof data.value === "string" ? (data.value as string) : "(unknown)";
+      const raw = typeof data.raw === "string" && data.raw !== value ? (data.raw as string) : null;
+      return {
+        headline: `Manufacturer alias matched ${value}`,
+        detail: raw ? `from probe response "${raw}"` : null,
+      };
+    }
+    case "open_port": {
+      const port = data.value;
+      return { headline: `Port ${port} observed open`, detail: null };
+    }
+    default:
+      return { headline: ev.source || "(no signal)", detail: null };
+  }
+}
 
 function EvidenceList({ evidence }: { evidence: DiscoveryEvidence[] }) {
   if (evidence.length === 0) {
@@ -1520,20 +1641,18 @@ function EvidenceList({ evidence }: { evidence: DiscoveryEvidence[] }) {
       marginTop: 4, padding: "var(--space-sm)",
       background: "var(--bg-input)", borderRadius: "var(--radius)",
       fontSize: "var(--font-size-xs)", color: "var(--text-muted)",
-      fontFamily: "monospace",
     }}>
-      {evidence.map((e, i) => (
-        <div key={i} style={{ marginBottom: 4 }}>
-          <span style={{ color: "var(--accent)" }}>[{e.tier}]</span> {e.source}
-          {Object.keys(e.data).length > 0 && (
-            <span style={{ marginLeft: 8 }}>
-              {Object.entries(e.data).slice(0, 4).map(([k, v]) =>
-                `${k}=${typeof v === "string" ? v.substring(0, 60) : JSON.stringify(v).substring(0, 60)}`,
-              ).join(", ")}
-            </span>
-          )}
-        </div>
-      ))}
+      {evidence.map((e, i) => {
+        const { headline, detail } = describeEvidence(e);
+        return (
+          <div key={i} style={{ marginBottom: 4 }}>
+            <span style={{ color: "var(--text)" }}>{headline}</span>
+            {detail && (
+              <span style={{ marginLeft: 8, fontStyle: "italic" }}>{detail}</span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
