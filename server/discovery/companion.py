@@ -103,12 +103,12 @@ class ProbeContext:
 
     @property
     def companion_broadcast_probe_id(self) -> str:
-        """Canonical Tier 2 synthetic ID for this companion."""
+        """Canonical synthetic ID for this companion's broadcast probe."""
         return f"custom_{self.driver_id}_companion_udp"
 
     @property
     def companion_active_probe_id(self) -> str:
-        """Canonical Tier 3 synthetic ID for this companion."""
+        """Canonical synthetic ID for this companion's active probe."""
         return f"custom_{self.driver_id}_companion_tcp"
 
     async def emit_broadcast(
@@ -119,13 +119,13 @@ class ProbeContext:
         response: dict[str, Any] | None = None,
         txt: dict[str, str] | None = None,
     ) -> None:
-        """Emit a Tier 2 broadcast probe response from ``host``.
+        """Emit a broadcast-probe fingerprint match from ``host``.
 
         Defaults ``probe_id`` to ``custom_<driver_id>_companion_udp``
         — the canonical synthetic ID auto-registered when the driver
-        declares ``discovery.companion``. Reserved keys
-        (``manufacturer``, ``make``) inside ``txt`` are lifted to the
-        Phase 8.6 vendor_string path automatically by the engine's
+        declares ``discovery.python``. Reserved keys (``manufacturer``,
+        ``make``) inside ``txt`` are lifted to the manufacturer-alias
+        enrichment path automatically by the engine's
         ``extract_vendor_strings`` finalize step.
         """
         ev = evidence_broadcast(
@@ -142,7 +142,7 @@ class ProbeContext:
         *,
         probe_id: str | None = None,
     ) -> None:
-        """Emit a Tier 3 active probe response.
+        """Emit an active-probe fingerprint match.
 
         Defaults ``probe_id`` to ``custom_<driver_id>_companion_tcp``.
         """
@@ -159,7 +159,7 @@ class ProbeContext:
         *,
         vendor: str | None = None,
     ) -> None:
-        """Emit a Tier 4 OUI evidence record bound to ``host``."""
+        """Emit an OUI enrichment record bound to ``host``."""
         ev = evidence_oui(mac, vendor)
         await self._emit_for_host(host, ev)
 
