@@ -152,6 +152,45 @@ def test_send_command_device_not_found(client):
     assert resp.status_code in (404, 500)
 
 
+def test_device_update_preserves_pending_settings(client, tmp_path):
+    """Regression for A4: PUT /devices/{id} must preserve pending_settings.
+
+    Previously the route built a fresh DeviceConfig(...) without copying
+    `pending_settings` from the existing record, so renaming or re-enabling
+    a device silently dropped any queued settings — the next reconnect's
+    _apply_pending_settings() would then have nothing to apply.
+    """
+    from unittest.mock import patch
+    from server.core.project_loader import DeviceConfig
+
+    c, engine = client
+    existing = DeviceConfig(
+        id="dev1",
+        driver="generic_tcp",
+        name="Original Name",
+        config={"host": "10.0.0.1", "port": 23},
+        enabled=True,
+        pending_settings={"brightness": 75, "input": "hdmi1"},
+    )
+    engine.project.devices = [existing]
+    engine.project.connections = {}
+    engine.project_path = str(tmp_path / "test.avc")
+    engine.resolved_device_config = MagicMock(
+        return_value={"id": "dev1", "config": {"host": "10.0.0.1"}}
+    )
+    engine.devices.update_device = AsyncMock()
+
+    with patch("server.api.routes.devices.save_project"):
+        resp = c.put("/api/devices/dev1", json={"name": "Renamed"})
+
+    assert resp.status_code == 200
+    updated = engine.project.devices[0]
+    assert updated.name == "Renamed"
+    assert updated.pending_settings == {"brightness": 75, "input": "hdmi1"}, (
+        "pending_settings was dropped on edit — A4 regressed"
+    )
+
+
 # ── Macro endpoints ──
 
 

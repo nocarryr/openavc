@@ -101,6 +101,10 @@ async def update_device(device_id: str, body: DeviceUpdateRequest) -> dict[str, 
         name=new_name,
         config=new_config,
         enabled=existing.enabled if body.enabled is None else body.enabled,
+        # Preserve queued device settings — re-connect applies them via
+        # _apply_pending_settings(). Constructing a fresh DeviceConfig from
+        # the request body alone would silently drop them on every edit.
+        pending_settings=existing.pending_settings,
     )
 
     # Update project config, save, and hot-swap device
