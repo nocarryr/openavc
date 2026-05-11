@@ -853,6 +853,11 @@ class Engine:
                 modified=datetime.now(timezone.utc).isoformat(),
             )
         )
+        # save_project writes via tempfile.mkstemp(dir=path.parent) and a
+        # .avc.bak sibling, both of which require the parent directory to
+        # exist. Without this, fresh installs / OPENAVC_PROJECT pointed at
+        # a not-yet-created directory crash startup with FileNotFoundError.
+        self.project_path.parent.mkdir(parents=True, exist_ok=True)
         save_project(self.project_path, empty)
         return empty
 
