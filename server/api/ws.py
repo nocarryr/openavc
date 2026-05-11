@@ -292,10 +292,23 @@ async def _handle_message(
             return
         input_idx = msg.get("input")
         output_idx = msg.get("output")
+        audio_flag = bool(msg.get("audio"))
+        mute_val = msg.get("mute")
+        # Dispatch to one of three binding slots based on the message shape:
+        #   - mute present (bool)      -> mute_route binding ($output, $mute)
+        #   - audio=true               -> audio_route binding ($input, $output)
+        #   - otherwise                -> route binding ($input, $output)
+        if mute_val is not None:
+            event_type = "mute_route"
+            data = {"output": output_idx, "mute": bool(mute_val)}
+        elif audio_flag:
+            event_type = "audio_route"
+            data = {"input": input_idx, "output": output_idx}
+        else:
+            event_type = "route"
+            data = {"input": input_idx, "output": output_idx}
         try:
-            await _engine.handle_ui_event("route", element_id, {
-                "input": input_idx, "output": output_idx,
-            })
+            await _engine.handle_ui_event(event_type, element_id, data)
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.route failed: {e}")

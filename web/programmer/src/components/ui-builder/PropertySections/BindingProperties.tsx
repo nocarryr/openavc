@@ -113,6 +113,8 @@ export function BindingProperties({
       case "change":
       case "submit":
       case "route":
+      case "audio_route":
+      case "mute_route":
       case "select": {
         const arr = binding as Record<string, unknown>[];
         if (!Array.isArray(arr) || arr.length === 0) return "Not configured";
@@ -268,7 +270,8 @@ export function BindingProperties({
           </div>
         );
       }
-      case "route": {
+      case "route":
+      case "audio_route": {
         const routeActions = (element.bindings[slot] as Record<string, unknown>[] | undefined) ?? [];
         return (
           <div>
@@ -280,6 +283,22 @@ export function BindingProperties({
             />
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
               Use $input and $output in command parameters to reference the routed input/output numbers.
+            </div>
+          </div>
+        );
+      }
+      case "mute_route": {
+        const muteActions = (element.bindings[slot] as Record<string, unknown>[] | undefined) ?? [];
+        return (
+          <div>
+            <PressBindingEditor
+              value={muteActions}
+              project={project}
+              onChange={(v) => handleBindingChange(slot, v)}
+              onClear={() => handleBindingChange(slot, null)}
+            />
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
+              Use $output and $mute in command parameters. $mute is true when muting, false when unmuting.
             </div>
           </div>
         );
@@ -339,6 +358,11 @@ export function BindingProperties({
     }
   };
 
+  const slotLabel: Record<string, string> = {
+    audio_route: "Audio Route",
+    mute_route: "Mute Route",
+  };
+
   const slotHelp: Record<string, string> = {
     press: "Action to perform when the element is pressed or clicked.",
     release: "Action to perform when the element is released (after press).",
@@ -350,7 +374,9 @@ export function BindingProperties({
     change: "Action to perform when the element's value changes (select, slider).",
     variable: "Binds the element to a project variable for two-way state sync.",
     submit: "Action to perform when the keypad value is submitted.",
-    route: "Action to perform when a matrix route is made.",
+    route: "Action to perform when a matrix crosspoint is selected (video / primary route).",
+    audio_route: "Action to perform when audio-follow-video is enabled and a route is made. Use $input and $output.",
+    mute_route: "Action to perform when an output's mute button is toggled. Use $output and $mute (bool).",
     items: "Bind list items to a state key pattern for dynamic population.",
     select: "Action to perform when a list item is selected.",
     selected: "State key that tracks the currently selected item in the list.",
@@ -373,7 +399,7 @@ export function BindingProperties({
   const getSlotDangling = (slot: string): string | null => {
     const binding = element.bindings[slot];
     if (!binding) return null;
-    if (["press", "release", "hold", "change", "submit", "route", "select"].includes(slot)) {
+    if (["press", "release", "hold", "change", "submit", "route", "audio_route", "mute_route", "select"].includes(slot)) {
       const actions = Array.isArray(binding) ? binding : [binding];
       for (const a of actions as Record<string, unknown>[]) {
         const d = getActionDangling(a);
@@ -400,7 +426,7 @@ export function BindingProperties({
 
   const isBindingIncomplete = (slot: string, binding: Record<string, unknown> | Record<string, unknown>[] | undefined): boolean => {
     if (!binding) return false;
-    if (slot === "press" || slot === "release" || slot === "hold" || slot === "change" || slot === "submit" || slot === "route" || slot === "select") {
+    if (slot === "press" || slot === "release" || slot === "hold" || slot === "change" || slot === "submit" || slot === "route" || slot === "audio_route" || slot === "mute_route" || slot === "select") {
       const actions = Array.isArray(binding) ? binding : [binding];
       return actions.some(isActionIncomplete);
     }
@@ -480,7 +506,7 @@ export function BindingProperties({
         const isEditing = editingSlot === slot;
         const hasBinding = !!element.bindings[slot];
         const binding = element.bindings[slot] as Record<string, unknown> | undefined;
-        const isTestable = (slot === "press" || slot === "release" || slot === "hold" || slot === "change" || slot === "submit" || slot === "route" || slot === "select") && hasBinding;
+        const isTestable = (slot === "press" || slot === "release" || slot === "hold" || slot === "change" || slot === "submit" || slot === "route" || slot === "audio_route" || slot === "mute_route" || slot === "select") && hasBinding;
         const incomplete = hasBinding && isBindingIncomplete(slot, binding);
         const dangling = hasBinding ? getSlotDangling(slot) : null;
 
@@ -508,7 +534,7 @@ export function BindingProperties({
                 }}
               >
                 <span style={{ fontWeight: 500, textTransform: "capitalize", display: "flex", alignItems: "center", gap: 4 }}>
-                  {slot}
+                  {slotLabel[slot] ?? slot}
                   {slotHelp[slot] && (
                     <span title={slotHelp[slot]}>
                       <HelpCircle size={12} style={{ color: "var(--text-muted)", opacity: 0.6 }} />

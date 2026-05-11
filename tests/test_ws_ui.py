@@ -83,7 +83,17 @@ TEST_PROJECT = {
                                 "action": "state.set",
                                 "key": "device.sw.output_$output_source",
                                 "value": "$input",
-                            }
+                            },
+                            "audio_route": {
+                                "action": "state.set",
+                                "key": "var.audio_route_called",
+                                "value": "yes",
+                            },
+                            "mute_route": {
+                                "action": "state.set",
+                                "key": "var.mute_route_called",
+                                "value": "yes",
+                            },
                         },
                     },
                     {
@@ -258,6 +268,51 @@ async def test_ws_route_dispatches_event(engine_and_client):
 
     # The key has $output placeholder — set literally by the UI action executor
     assert engine.state.get("device.sw.output_$output_source") == "$input"
+
+
+async def test_ws_route_with_audio_fires_audio_route_binding(engine_and_client):
+    """ui.route with audio=true triggers the element's audio_route binding."""
+    engine, client = engine_and_client
+    engine.state.set("var.audio_route_called", "no", source="system")
+
+    with client.websocket_connect("/ws?client=panel") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+        websocket.send_json({
+            "type": "ui.route",
+            "element_id": "matrix1",
+            "input": 1,
+            "output": 2,
+            "audio": True,
+        })
+
+        time.sleep(0.1)
+
+    # audio_route binding fired (sets var.audio_route_called=yes)
+    assert engine.state.get("var.audio_route_called") == "yes"
+
+
+async def test_ws_route_with_mute_fires_mute_route_binding(engine_and_client):
+    """ui.route with mute present triggers the element's mute_route binding."""
+    engine, client = engine_and_client
+    engine.state.set("var.mute_route_called", "no", source="system")
+
+    with client.websocket_connect("/ws?client=panel") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+        websocket.send_json({
+            "type": "ui.route",
+            "element_id": "matrix1",
+            "output": 2,
+            "mute": True,
+        })
+
+        time.sleep(0.1)
+
+    # mute_route binding fired (sets var.mute_route_called=yes)
+    assert engine.state.get("var.mute_route_called") == "yes"
 
 
 # ---------------------------------------------------------------------------

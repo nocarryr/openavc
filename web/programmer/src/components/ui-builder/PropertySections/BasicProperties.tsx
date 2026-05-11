@@ -847,6 +847,11 @@ export function BasicProperties({
             />
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Route audio with video</span>
           </FieldRow>
+          {element.matrix_config?.audio_follow_video && !(element.bindings as Record<string, unknown>)?.audio_route && (
+            <div style={{ fontSize: 10, color: "var(--color-warning)", padding: "0 0 0 76px", fontStyle: "italic" }}>
+              Add an Audio Route binding in the Bindings tab to send the audio route command.
+            </div>
+          )}
           <FieldRow label="Show Lock">
             <input
               type="checkbox"
@@ -863,6 +868,11 @@ export function BasicProperties({
             />
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Mute buttons per output</span>
           </FieldRow>
+          {element.matrix_config?.show_mute !== false && !(element.bindings as Record<string, unknown>)?.mute_route && (
+            <div style={{ fontSize: 10, color: "var(--color-warning)", padding: "0 0 0 76px", fontStyle: "italic" }}>
+              Add a Mute Route binding in the Bindings tab to wire the mute buttons to a command.
+            </div>
+          )}
           <MatrixLabelEditor
             title="Input Labels"
             labels={element.matrix_config?.input_labels || []}

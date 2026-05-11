@@ -370,7 +370,7 @@ async def test_ui_change_valid_value():
 
 @pytest.mark.asyncio
 async def test_ui_route_dispatches():
-    """ui.route dispatches input/output to engine."""
+    """ui.route without audio/mute dispatches to the route binding."""
     ws = FakeWS()
     engine = _make_engine()
     with patch("server.api.ws._engine", engine):
@@ -378,6 +378,50 @@ async def test_ui_route_dispatches():
             ws, {"type": "ui.route", "element_id": "matrix1", "input": 1, "output": 3}, "panel"
         )
     engine.handle_ui_event.assert_awaited_once_with("route", "matrix1", {"input": 1, "output": 3})
+
+
+@pytest.mark.asyncio
+async def test_ui_route_audio_dispatches_to_audio_route():
+    """ui.route with audio=true dispatches to the audio_route binding."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api.ws._engine", engine):
+        await _handle_message(
+            ws,
+            {"type": "ui.route", "element_id": "matrix1", "input": 2, "output": 4, "audio": True},
+            "panel",
+        )
+    engine.handle_ui_event.assert_awaited_once_with(
+        "audio_route", "matrix1", {"input": 2, "output": 4}
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_route_mute_dispatches_to_mute_route():
+    """ui.route with mute present dispatches to the mute_route binding with $mute data."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api.ws._engine", engine):
+        await _handle_message(
+            ws, {"type": "ui.route", "element_id": "matrix1", "output": 2, "mute": True}, "panel"
+        )
+    engine.handle_ui_event.assert_awaited_once_with(
+        "mute_route", "matrix1", {"output": 2, "mute": True}
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_route_unmute_dispatches_to_mute_route():
+    """ui.route with mute=false (unmute) still routes to mute_route, not the plain route."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api.ws._engine", engine):
+        await _handle_message(
+            ws, {"type": "ui.route", "element_id": "matrix1", "output": 2, "mute": False}, "panel"
+        )
+    engine.handle_ui_event.assert_awaited_once_with(
+        "mute_route", "matrix1", {"output": 2, "mute": False}
+    )
 
 
 # ── Panel allowed types completeness check ──

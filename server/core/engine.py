@@ -734,8 +734,10 @@ class Engine:
             device_id = action_def.get("device", "")
             command = action_def.get("command", "")
             params = dict(action_def.get("params", {}))
-            # Replace $value placeholder with actual value from UI event,
-            # applying output range scaling if configured on the element
+            # Replace placeholders with actual values from the UI event,
+            # applying output range scaling if configured on the element.
+            # $input / $output come from matrix route / audio_route bindings;
+            # $mute comes from mute_route bindings.
             for k, v in params.items():
                 if v == "$value":
                     params[k] = self._scale_value_forward(element, data.get("value"))
@@ -743,6 +745,8 @@ class Engine:
                     params[k] = data.get("input")
                 elif v == "$output":
                     params[k] = data.get("output")
+                elif v == "$mute":
+                    params[k] = data.get("mute")
             try:
                 await self.devices.send_command(device_id, command, params)
             except Exception:  # Catch-all: driver send_command may raise arbitrary errors

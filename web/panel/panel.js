@@ -1563,7 +1563,11 @@ class PanelApp {
         const outputKeyPattern = config.output_key_pattern || '';
         const matrixStyle = element.matrix_style || 'crosspoint';
         const showLock = config.show_lock !== false;
-        const showMute = config.show_mute !== false;
+        // Mute buttons only render when there is a mute_route binding wired up —
+        // otherwise clicking them sends a route command the engine has no action
+        // for. The Programmer surfaces a warning next to "Show Mute" when this
+        // gate is keeping the buttons hidden.
+        const showMute = config.show_mute !== false && !!element.bindings?.mute_route;
         // Merge theme element_defaults so crosspoint colors come from the
         // theme, not just per-element overrides.
         const style = this.getThemedStyle('matrix', element.style);
