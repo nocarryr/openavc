@@ -154,13 +154,13 @@ The Discovery panel is inside the **Devices** view. Click **Devices** in the sid
 2. Select the subnet(s) to scan (auto-detected from your network interfaces)
 3. Click **Start Scan**
 
-The scan runs through several phases: ping sweep, port scanning, protocol probes, passive discovery (mDNS/SSDP), SNMP queries, and hostname resolution. Progress is shown in real time.
+The scan runs through several phases: ping sweep, port scanning, device probes (TCP/UDP), passive discovery (mDNS/SSDP), SNMP queries, and hostname resolution. Progress is shown in real time.
 
 ### Working with Results
 
 Each discovered device lands in one of three states:
 
-- **Identified** — a fingerprint matched a driver. The device card shows the driver and a one-line evidence string (e.g. "mDNS announcement on `_pjlink._tcp.local.`"). Click **Add to Project** to add it with a pre-filled config. When more than one driver fits the same device (a generic protocol probe matched alongside a vendor-specific peer), the card offers the alternatives in a dropdown — the best fit comes first.
+- **Identified** — a fingerprint matched a driver. The device card shows the driver and a one-line evidence string (e.g. "mDNS announcement on `_pjlink._tcp.local.`"). Click **Add to Project** to add it with a pre-filled config. When more than one driver fits the same device (a cross-vendor probe matched alongside a vendor-specific peer), the card offers the alternatives in a dropdown — the best fit comes first.
 - **Possible** — hints (OUI lookup, hostname pattern, open port, manufacturer alias) narrowed the device to a candidate list, but no fingerprint identified it outright. Confirm the right driver and add.
 - **Unknown** — the device is on the network but no driver matched. The card shows what we know (IP, MAC, OUI vendor, open ports). Pick a driver manually or hide the device.
 
@@ -171,7 +171,7 @@ If the suggested driver is a community driver you haven't installed yet, click *
 ### Scan Options
 
 - **Scan Depth.** Choose how deep the scanner goes:
-  - **Quick.** Fast re-scan. Ping sweep, port scanning, protocol probes, and short passive listening window. Skips NetBIOS name resolution and SNMP Entity MIB.
+  - **Quick.** Fast re-scan. Ping sweep, port scanning, device probes, and short passive listening window. Skips NetBIOS name resolution and SNMP Entity MIB.
   - **Standard** (recommended). Full scan including NetBIOS/SMB for Windows device names and SNMP Entity MIB for detailed hardware info. Longer passive listening window for mDNS and SSDP devices.
   - **Thorough.** Extended port range, longest passive listening window. Takes longer but finds everything on the network.
 - **SNMP.** Enable SNMP v2c queries for richer device identification (community string configurable).
