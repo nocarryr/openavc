@@ -587,16 +587,16 @@ class ${classNameFrom(info.id)}(BaseDriver):
         "transport": "serial",
         "delimiter": "\\r",
         "default_config": {
-            "com_port": "",
-            "baud_rate": 9600,
-            "data_bits": 8,
+            "port": "",
+            "baudrate": 9600,
+            "bytesize": 8,
             "parity": "N",
-            "stop_bits": 1,
+            "stopbits": 1,
             "poll_interval": 15,
         },
         "config_schema": {
-            "com_port": {"type": "string", "label": "COM Port", "required": True},
-            "baud_rate": {
+            "port": {"type": "string", "label": "Serial Port", "required": True},
+            "baudrate": {
                 "type": "integer",
                 "label": "Baud Rate",
                 "default": 9600,
