@@ -299,15 +299,6 @@ export interface PythonDriverInfo {
   devices_using: string[];
 }
 
-export interface ScheduleConfig {
-  id: string;
-  type: string;
-  expression: string;
-  event: string;
-  enabled: boolean;
-  description: string;
-}
-
 export interface ISCConfig {
   enabled: boolean;
   shared_state: string[];
@@ -398,7 +389,6 @@ export interface ProjectConfig {
   macros: MacroConfig[];
   ui: UIConfig;
   scripts: ScriptConfig[];
-  schedules: ScheduleConfig[];
   isc: ISCConfig;
 }
 

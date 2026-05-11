@@ -516,18 +516,17 @@ function EventEditor({
   const project = useProjectStore((s) => s.project);
   const devices = project?.devices ?? [];
   const macros = project?.macros ?? [];
-  const schedules = project?.schedules ?? [];
 
   const [category, setCategory] = useState(0);
 
   const catDef = EVENT_CATEGORIES[category];
-  const options = catDef?.options(devices, macros, schedules) ?? [];
+  const options = catDef?.options(devices, macros) ?? [];
   const isCustom = catDef?.label === "Custom";
 
   // Build all event suggestions for autocomplete (8.8)
   const allSuggestions = EVENT_CATEGORIES
     .filter((c) => c.label !== "Custom")
-    .flatMap((c) => c.options(devices, macros, schedules));
+    .flatMap((c) => c.options(devices, macros));
   // Also add script events from configured scripts
   const scripts = project?.scripts ?? [];
   for (const s of scripts) {
@@ -622,7 +621,7 @@ function EventEditor({
         </div>
       ) : (
         <div style={hintStyle}>
-          No events available in this category. Add devices, macros, or schedules first.
+          No events available in this category. Add devices or macros first.
         </div>
       )}
 

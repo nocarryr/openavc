@@ -1,4 +1,4 @@
-import type { TriggerConfig, DeviceConfig, MacroConfig, ScheduleConfig } from "../../api/types";
+import type { TriggerConfig, DeviceConfig, MacroConfig } from "../../api/types";
 
 export interface TriggerTypeInfo {
   type: string;
@@ -225,7 +225,7 @@ export interface EventOption {
 
 export interface EventCategory {
   label: string;
-  options: (devices: DeviceConfig[], macros: MacroConfig[], schedules: ScheduleConfig[]) => EventOption[];
+  options: (devices: DeviceConfig[], macros: MacroConfig[]) => EventOption[];
 }
 
 export const EVENT_CATEGORIES: EventCategory[] = [
@@ -245,14 +245,6 @@ export const EVENT_CATEGORIES: EventCategory[] = [
         { label: `${m.name} Completed`, pattern: `macro.completed.${m.id}` },
         { label: `${m.name} Error`, pattern: `macro.error.${m.id}` },
       ]),
-  },
-  {
-    label: "Schedule Events",
-    options: (_, __, schedules) =>
-      schedules.map((s) => ({
-        label: s.description || s.id,
-        pattern: s.event || `schedule.${s.id}`,
-      })),
   },
   {
     label: "System Events",
