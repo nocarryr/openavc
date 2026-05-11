@@ -187,6 +187,11 @@ async def install_plugin(plugin_id: str, file_url: str) -> dict[str, Any]:
                 )
                 log.info(f"Installed plugin '{plugin_id}' from directory")
 
+        # Reject the install up front if the plugin needs a newer OpenAVC.
+        # Without this, the plugin's pip deps would be installed first and
+        # the incompatibility wouldn't surface until enable.
+        _check_min_openavc_version(plugin_id, plugin_dir)
+
         # Install pip dependencies if we can find them
         await _install_pip_deps(plugin_id, plugin_dir)
 
@@ -837,6 +842,72 @@ def _install_native_dep_command(dep_name: str, platform_info: dict) -> None:
             )
     except (OSError, subprocess.SubprocessError) as e:
         log.warning(f"Could not run install command for '{dep_name}': {e}")
+
+
+def _extract_min_openavc_version(plugin_dir: Path) -> str | None:
+    """Find the plugin's declared min_openavc_version without importing it.
+
+    Walks every .py file in plugin_dir, parses the AST, and returns the
+    first `"min_openavc_version": "..."` value it finds inside any dict
+    literal. The convention is that this lives in PLUGIN_INFO, but the
+    scan is shape-tolerant so it also catches near-misses (e.g. devs who
+    keep min_openavc_version on the class rather than in the dict).
+
+    Returns None when the plugin file doesn't declare a minimum — those
+    plugins install unconditionally.
+    """
+    import ast
+
+    for py_file in plugin_dir.glob("*.py"):
+        try:
+            content = py_file.read_text(encoding="utf-8")
+            if "min_openavc_version" not in content:
+                continue
+            tree = ast.parse(content)
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "min_openavc_version"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    return value.value
+    return None
+
+
+def _check_min_openavc_version(plugin_id: str, plugin_dir: Path) -> None:
+    """Raise ValueError if the plugin requires a newer OpenAVC than running.
+
+    Called during install (before pip deps install + class registration)
+    so the user doesn't pay for a download that's going to fail to enable
+    later anyway. Mirrors the runtime check in PluginLoader.validate_manifest.
+    """
+    min_version = _extract_min_openavc_version(plugin_dir)
+    if not min_version:
+        return
+    from server.version import __version__
+    try:
+        from packaging.version import Version, InvalidVersion
+    except ImportError:
+        # packaging is a hard dependency; if it's missing something else
+        # is very wrong — fail open rather than block the install.
+        return
+    try:
+        if Version(__version__) < Version(min_version):
+            raise ValueError(
+                f"Plugin '{plugin_id}' requires OpenAVC v{min_version} or later "
+                f"(current: v{__version__}). Upgrade OpenAVC, then reinstall."
+            )
+    except InvalidVersion:
+        # Bad version string in PLUGIN_INFO is a plugin authoring bug,
+        # not a runtime blocker. Let it through; validate_manifest will
+        # surface it on enable.
+        return
 
 
 def _parse_native_deps(plugin_dir: Path) -> list[dict]:
