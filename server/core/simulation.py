@@ -187,44 +187,8 @@ class SimulationManager:
             raise RuntimeError(f"Failed to start simulator process: {e}")
 
         # Wait for the simulator to start up
-        # Read stderr for startup messages (uvicorn logs to stderr)
         try:
-            ready = False
-            start_output = []
-            for _ in range(40):  # Up to 4 seconds
-                await asyncio.sleep(0.1)
-                if self._process.returncode is not None:
-                    # Process exited — read all output for error message
-                    stderr = ""
-                    if self._process.stderr:
-                        stderr = (await self._process.stderr.read()).decode(errors="replace")
-                    stdout = ""
-                    if self._process.stdout:
-                        stdout = (await self._process.stdout.read()).decode(errors="replace")
-                    raise RuntimeError(
-                        f"Simulator exited with code {self._process.returncode}. "
-                        f"stderr: {stderr[:500]} stdout: {stdout[:500]}"
-                    )
-                # Check if stderr has "Uvicorn running" (means it's ready)
-                if self._process.stderr:
-                    try:
-                        chunk = await asyncio.wait_for(
-                            self._process.stderr.read(4096), timeout=0.05
-                        )
-                        if chunk:
-                            text = chunk.decode(errors="replace")
-                            start_output.append(text)
-                            if "Uvicorn running" in text or "Application startup complete" in text:
-                                ready = True
-                                break
-                    except asyncio.TimeoutError:
-                        pass
-
-            if not ready and self._process.returncode is None:
-                # Process is running but didn't report ready — assume it's ok
-                log.warning("Simulator started but readiness not confirmed; proceeding")
-                ready = True
-
+            await self._await_simulator_ready(self._process)
         except RuntimeError:
             raise
         except Exception as e:
@@ -306,6 +270,62 @@ class SimulationManager:
             "devices": dict(self._sim_ports),
             "ui_url": self._sim_ui_url,
         }
+
+    async def _await_simulator_ready(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        """Block until the simulator subprocess reports it's accepting traffic.
+
+        Uvicorn logs ``Uvicorn running on …`` or ``Application startup complete``
+        to stderr once it's ready. We poll stderr in 100 ms slices for up to
+        4 seconds, log each line as we see it so misbehaving startups aren't
+        invisible (the drain tasks only start AFTER this loop exits), and
+        raise if the process exits early.
+
+        Returns silently on success. Raises RuntimeError if the process exits
+        during startup; warns and returns if it stays up but never prints the
+        ready marker (probably fine — older uvicorn versions phrased it
+        differently).
+        """
+        ready = False
+        for _ in range(40):  # Up to 4 seconds
+            await asyncio.sleep(0.1)
+            if process.returncode is not None:
+                stderr = ""
+                if process.stderr:
+                    stderr = (await process.stderr.read()).decode(errors="replace")
+                stdout = ""
+                if process.stdout:
+                    stdout = (await process.stdout.read()).decode(errors="replace")
+                raise RuntimeError(
+                    f"Simulator exited with code {process.returncode}. "
+                    f"stderr: {stderr[:500]} stdout: {stdout[:500]}"
+                )
+            if process.stderr:
+                try:
+                    chunk = await asyncio.wait_for(
+                        process.stderr.read(4096), timeout=0.05
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if not chunk:
+                    continue
+                text = chunk.decode(errors="replace")
+                # Forward each startup line so a misbehaving simulator's
+                # diagnostics aren't lost. The drain tasks only start AFTER
+                # this loop returns, so anything emitted here is otherwise
+                # discarded the moment we hit the "ready" condition.
+                for line in text.splitlines():
+                    if line.strip():
+                        log.info("simulator.stderr: %s", line)
+                if "Uvicorn running" in text or "Application startup complete" in text:
+                    ready = True
+                    break
+
+        if not ready and process.returncode is None:
+            # Process is running but didn't report ready — assume it's ok.
+            log.warning("Simulator started but readiness not confirmed; proceeding")
 
     async def _drain_stream(self, stream: asyncio.StreamReader | None, label: str) -> None:
         """Read a subprocess pipe forever, forwarding lines to our logger.
