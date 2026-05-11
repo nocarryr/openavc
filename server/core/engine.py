@@ -1254,6 +1254,12 @@ class Engine:
             self.isc = None
             from server.api.isc_ws import set_isc_manager
             set_isc_manager(None)
+            # Unbind the script API proxy. Otherwise scripts calling
+            # isc.send_to() / isc.broadcast() reach the stopped manager
+            # and surface a misleading ConnectionError instead of the
+            # intended "ISC not enabled" RuntimeError.
+            from server.core.script_api import isc as isc_proxy
+            isc_proxy._bind(None)
         elif not self.isc and isc_should_run:
             # ISC was off but project enabled it
             await self._start_isc()
