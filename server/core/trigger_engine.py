@@ -92,7 +92,11 @@ class TriggerEngine:
                 trigger_id = trigger.get("id", "")
                 if trigger_id:
                     ts = _TriggerState(trigger, macro_id, macro_name)
-                    # Restore persisted cooldown timestamp
+                    # Restore cooldown timestamp from state. The state store is
+                    # in-memory, so this preserves cooldowns across hot-reload
+                    # (load_triggers is called again on project reload) but not
+                    # across full server restart — StatePersister only watches
+                    # variables flagged persist=True, never system.* keys.
                     persisted = self.state.get(f"system.trigger.{trigger_id}.last_fired")
                     if persisted and isinstance(persisted, (int, float)):
                         ts.last_fired = float(persisted)
@@ -498,7 +502,9 @@ class TriggerEngine:
         trigger_type = t.get("type", "unknown")
 
         ts.last_fired = time.time()
-        # Persist cooldown timestamp so it survives restarts
+        # Stash cooldown timestamp in the in-memory state store so it's
+        # picked up by load_triggers on a hot-reload (see paired read).
+        # Not durable across server restart — see comment in load_triggers.
         self.state.set(f"system.trigger.{trigger_id}.last_fired", ts.last_fired, source="system")
         self._active_trigger_chain.add(trigger_id)
 
