@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from server.cloud.protocol import AI_TOOL_RESULT, extract_payload
+from server.core.condition_eval import _OPERATOR_ALIASES as _COND_ALIASES
 from server.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -343,12 +344,15 @@ _STEP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "wait_until": ("condition",),
 }
 _VALID_TRIGGER_TYPES = frozenset(("schedule", "state_change", "event", "startup"))
-_VALID_CONDITION_OPS = frozenset((
+# Accept both canonical operator names and the user-facing aliases that
+# condition_eval normalizes at runtime (==, !=, >=, equals, greater_than, …).
+# Otherwise the AI tools reject macros loaded from human-edited project files
+# that use the aliases the project format docs and triggerHelpers emit.
+_CANONICAL_CONDITION_OPS = frozenset((
     "eq", "ne", "gt", "lt", "gte", "lte", "truthy", "falsy",
 ))
-_VALID_STATE_TRIGGER_OPS = frozenset((
-    "any", "eq", "ne", "gt", "lt", "gte", "lte", "truthy", "falsy",
-))
+_VALID_CONDITION_OPS = frozenset(_CANONICAL_CONDITION_OPS | _COND_ALIASES.keys())
+_VALID_STATE_TRIGGER_OPS = frozenset({"any"} | _VALID_CONDITION_OPS)
 _VALID_OVERLAP_MODES = frozenset(("skip", "queue", "allow"))
 
 

@@ -300,3 +300,85 @@ def test_build_ai_tool_result():
     assert msg["payload"]["success"] is True
     assert msg["payload"]["result"] == {"devices": []}
     assert "sig" in msg
+
+
+# ===========================================================================
+# A29 — Macro/trigger validators must accept the same operator aliases that
+# the runtime (condition_eval) normalizes. Otherwise AI-driven updates to
+# project files containing aliases like '==' or 'equals' silently fail.
+# ===========================================================================
+
+
+class TestValidatorOperatorAliases:
+    """Validator should accept all canonical names plus condition_eval aliases."""
+
+    def test_condition_eval_aliases_in_valid_set(self):
+        from server.core.condition_eval import _OPERATOR_ALIASES
+        from server.cloud.ai_tool_handler import _VALID_CONDITION_OPS, _VALID_STATE_TRIGGER_OPS
+
+        for alias in _OPERATOR_ALIASES:
+            assert alias in _VALID_CONDITION_OPS, (
+                f"Alias '{alias}' is normalized by condition_eval but rejected "
+                f"by the AI validator — drift will silently break AI tool calls "
+                f"that pass through existing macros."
+            )
+            assert alias in _VALID_STATE_TRIGGER_OPS
+
+    def test_conditional_step_accepts_alias(self):
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        for op in ("equals", "==", "greater_than", ">=", "!=", "less_or_equal"):
+            step = {
+                "action": "conditional",
+                "condition": {"key": "var.foo", "operator": op, "value": 1},
+                "then_steps": [],
+                "else_steps": [],
+            }
+            errs = _validate_macro_step(step, "test")
+            assert not errs, f"alias '{op}' rejected: {errs}"
+
+    def test_wait_until_step_accepts_alias(self):
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        step = {
+            "action": "wait_until",
+            "condition": {"key": "device.proj1.power", "operator": "==", "value": "on"},
+            "timeout": 60,
+        }
+        errs = _validate_macro_step(step, "test")
+        assert not errs, f"alias rejected: {errs}"
+
+    def test_skip_if_accepts_alias(self):
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        step = {
+            "action": "device.command",
+            "device": "proj1",
+            "command": "power_on",
+            "skip_if": {"key": "device.proj1.power", "operator": "equals", "value": "on"},
+        }
+        errs = _validate_macro_step(step, "test")
+        assert not errs, f"alias rejected in skip_if: {errs}"
+
+    def test_trigger_guards_accept_alias(self):
+        from server.cloud.ai_tool_handler import _validate_trigger
+        trigger = {
+            "type": "state_change",
+            "state_key": "device.proj1.power",
+            "state_operator": ">=",  # alias for gte
+            "state_value": 50,
+            "conditions": [
+                {"key": "var.room_active", "operator": "==", "value": True},
+            ],
+        }
+        errs = _validate_trigger(trigger, "test")
+        assert not errs, f"alias rejected in trigger: {errs}"
+
+    def test_unknown_operator_still_rejected(self):
+        """Sanity check: the widening doesn't accept arbitrary strings."""
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        step = {
+            "action": "conditional",
+            "condition": {"key": "var.foo", "operator": "snorgle", "value": 1},
+            "then_steps": [],
+            "else_steps": [],
+        }
+        errs = _validate_macro_step(step, "test")
+        assert errs, "Garbage operator should still be rejected"
