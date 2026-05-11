@@ -91,13 +91,6 @@ class SystemToolsMixin:
         wait_timeout = input.get("timeout", 120)
         category = input.get("category")
 
-        # ``min_confidence`` from the cloud-side tool description is
-        # silently ignored — the deterministic matcher has no numeric
-        # confidence anymore (devices are ``identified`` / ``possible`` /
-        # ``unknown``). The cloud-side description is being dropped in
-        # B3 / B4; until then we accept and ignore the field rather
-        # than KeyError on the absent ``confidence`` column.
-
         # If wait=True, poll until scan completes (or timeout)
         if wait:
             wait_timeout = max(5, min(wait_timeout, 180))
