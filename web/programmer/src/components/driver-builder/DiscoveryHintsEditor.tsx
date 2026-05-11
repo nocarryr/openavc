@@ -110,6 +110,13 @@ const writePython = (fp: DriverDiscoveryPython) =>
 // Top-level
 // ---------------------------------------------------------------------------
 
+// Schema fields the update() function below knows how to persist. Keep in
+// sync with DriverDiscoveryConfig in api/types.ts.
+const KNOWN_DISCOVERY_KEYS: ReadonlySet<string> = new Set([
+  "mdns", "ssdp", "amx_ddp", "tcp_probe", "udp_probe", "python",
+  "oui", "hostname", "port_open", "manufacturer_alias", "snmp_pen",
+]);
+
 interface DiscoveryHintsEditorProps {
   draft: DriverDefinition;
   onUpdate: (partial: Partial<DriverDefinition>) => void;
@@ -123,6 +130,18 @@ export function DiscoveryHintsEditor({
 
   // Drop empty arrays / undefined fields so the persisted YAML stays clean.
   const update = (next: DriverDiscoveryConfig) => {
+    // Dev-time guard: future fields added to DriverDiscoveryConfig will
+    // silently disappear from edits unless they're handled below. Warn
+    // loudly so the omission gets noticed during development.
+    for (const key of Object.keys(next)) {
+      if (!KNOWN_DISCOVERY_KEYS.has(key)) {
+        console.warn(
+          `DiscoveryHintsEditor: unknown discovery field "${key}" will be ` +
+          "dropped on save. Add it to KNOWN_DISCOVERY_KEYS and the per-key " +
+          "handling below.",
+        );
+      }
+    }
     const t: DriverDiscoveryConfig = {};
     if (next.mdns?.length) t.mdns = next.mdns;
     if (next.ssdp?.length) t.ssdp = next.ssdp;
