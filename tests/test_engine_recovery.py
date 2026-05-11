@@ -1,9 +1,6 @@
 """Tests for Engine project-load recovery paths."""
 
 import json
-from pathlib import Path
-
-import pytest
 
 from server.core.engine import Engine
 
