@@ -513,6 +513,14 @@ class Engine:
                 groups_data = [g.model_dump() for g in self.project.device_groups]
                 self.macros.load_groups(groups_data)
 
+                # Stop triggers before reloading/starting again. The normal
+                # reload path stops triggers up front (line 436) and only
+                # restarts at the end; if the exception fired after that
+                # restart succeeded, `start()` already populated the listener
+                # lists. Calling `start()` again without `stop()` first would
+                # stack a second set of state/event subscriptions on top of
+                # the existing ones, causing triggers to fire 2x per change.
+                await self.triggers.stop()
                 self.triggers.load_triggers(macros_data)
                 await self.triggers.start()
 
