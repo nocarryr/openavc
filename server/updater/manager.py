@@ -37,7 +37,12 @@ class UpdateManager:
     Updates state keys via the state_store for real-time UI feedback.
     """
 
-    def __init__(self, state_store=None, data_dir: Path | None = None):
+    def __init__(
+        self,
+        state_store=None,
+        data_dir: Path | None = None,
+        project_path: Path | None = None,
+    ):
         self._state = state_store
         self._checker = UpdateChecker()
         self._deployment_type = detect_deployment_type()
@@ -52,6 +57,14 @@ class UpdateManager:
             self._data_dir = get_system_config().data_dir
         else:
             self._data_dir = data_dir
+
+        # Project file path — used so the pre-update backup can also archive
+        # project.avc + state.json + scripts/ + assets/ when OPENAVC_PROJECT
+        # points outside data_dir.
+        if project_path is None:
+            from server import config as server_config
+            project_path = Path(server_config.PROJECT_PATH)
+        self._project_path = project_path
 
         # Load update history
         self._load_history()
@@ -324,7 +337,7 @@ class UpdateManager:
             # Step 1: Backup
             self._set_state("system.update_status", "backing_up")
             from server.updater.backup import create_backup, cleanup_old_backups
-            backup_path = create_backup(self._data_dir, __version__)
+            backup_path = create_backup(self._data_dir, __version__, project_path=self._project_path)
             cleanup_old_backups(self._data_dir)
             log.info("Pre-update backup created: %s", backup_path)
 
@@ -393,7 +406,7 @@ class UpdateManager:
             # Step 1: Backup
             self._set_state("system.update_status", "backing_up")
             from server.updater.backup import create_backup, cleanup_old_backups
-            backup_path = create_backup(self._data_dir, __version__)
+            backup_path = create_backup(self._data_dir, __version__, project_path=self._project_path)
             cleanup_old_backups(self._data_dir)
             log.info("Pre-update backup created: %s", backup_path)
 
@@ -529,7 +542,7 @@ class UpdateManager:
         self._set_state("system.update_status", "backing_up")
         try:
             from server.updater.backup import create_backup
-            create_backup(self._data_dir, __version__)
+            create_backup(self._data_dir, __version__, project_path=self._project_path)
         except Exception as e:
             log.warning("Pre-rollback backup failed: %s", e)
 

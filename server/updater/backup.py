@@ -15,11 +15,22 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def create_backup(data_dir: Path, current_version: str) -> Path:
+def create_backup(
+    data_dir: Path,
+    current_version: str,
+    project_path: Path | None = None,
+) -> Path:
     """Create a pre-update backup of user data.
 
     Archives: projects/, drivers/, system.json, and any plugin configs.
     Stores in: {data_dir}/backups/pre-update-v{version}-{timestamp}.zip
+
+    When ``project_path`` points outside ``data_dir`` (set via
+    ``OPENAVC_PROJECT`` to keep project files on a different volume,
+    typical for production deployments), the rglob of ``data_dir/projects``
+    won't reach it. Its parent directory is archived under
+    ``external-project/`` instead so state.json, scripts/, and assets/
+    travel with the backup.
 
     Returns the path to the created backup file.
     """
@@ -75,9 +86,40 @@ def create_backup(data_dir: Path, current_version: str) -> Path:
         if cloud_json.exists():
             zf.write(cloud_json, "cloud.json")
 
+        # Back up the project file and its siblings when it lives outside
+        # data_dir. Without this, OPENAVC_PROJECT users would lose project.avc,
+        # state.json (persistent variables), scripts/, and assets/ on a
+        # failed update.
+        if project_path is not None and project_path.exists():
+            external_dir = _project_external_dir(project_path, data_dir)
+            if external_dir is not None:
+                for file_path in external_dir.rglob("*"):
+                    if file_path.is_file():
+                        rel = file_path.relative_to(external_dir).as_posix()
+                        zf.write(file_path, f"external-project/{rel}")
+
     size_mb = backup_path.stat().st_size / (1024 * 1024)
     log.info("Backup created: %s (%.1f MB)", backup_path, size_mb)
     return backup_path
+
+
+def _project_external_dir(project_path: Path, data_dir: Path) -> Path | None:
+    """Return the project's parent directory if it sits outside data_dir.
+
+    Returns None when the project lives inside ``data_dir`` (already covered
+    by the regular `projects/` rglob) so we don't archive everything twice.
+    """
+    try:
+        project_path = project_path.resolve()
+        data_dir = data_dir.resolve()
+    except OSError:
+        return None
+    try:
+        project_path.relative_to(data_dir)
+    except ValueError:
+        # Not a subpath of data_dir — external.
+        return project_path.parent
+    return None
 
 
 def list_backups(data_dir: Path) -> list[dict]:
