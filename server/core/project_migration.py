@@ -11,9 +11,12 @@ log = get_logger(__name__)
 
 CURRENT_VERSION = "0.4.0"
 
-# Connection-related config fields that belong in the connections table
+# Connection-related config fields that belong in the connections table.
+# Names match what BaseDriver reads at runtime (server/drivers/base.py):
+# `port` (string for serial, int for TCP/UDP/OSC/HTTP) and `baudrate` for serial.
+# Older `com_port`/`baud_rate` are translated by migrate_0_1_to_0_2.
 CONNECTION_FIELDS = {
-    "host", "port", "com_port", "baud_rate", "username", "password",
+    "host", "port", "baudrate", "username", "password",
     "base_url", "ssl",
 }
 
@@ -21,17 +24,30 @@ CONNECTION_FIELDS = {
 def migrate_0_1_to_0_2(data: dict) -> dict:
     """
     Migrate from 0.1.0 to 0.2.0:
+    - Rename serial fields com_port -> port, baud_rate -> baudrate so they
+      match what BaseDriver reads after resolved_device_config merges the
+      connections table back into device.config
     - Move connection fields from device.config to connections table
     - Add empty driver_dependencies (populated on save)
     - Bump version
     """
     connections: dict[str, dict] = {}
+    serial_renames = (("com_port", "port"), ("baud_rate", "baudrate"))
 
     for device in data.get("devices", []):
         device_id = device.get("id", "")
         config = device.get("config", {})
-        conn_overrides: dict = {}
 
+        # Rename legacy serial field names BEFORE moving to connections table.
+        # If both legacy and new are present (e.g. mixed manual edits), the
+        # new name wins.
+        for old_name, new_name in serial_renames:
+            if old_name in config and new_name not in config:
+                config[new_name] = config.pop(old_name)
+            elif old_name in config:
+                config.pop(old_name)
+
+        conn_overrides: dict = {}
         for key in list(config.keys()):
             if key in CONNECTION_FIELDS:
                 conn_overrides[key] = config.pop(key)

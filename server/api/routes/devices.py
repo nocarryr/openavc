@@ -164,11 +164,11 @@ async def test_device_connection(device_id: str) -> dict[str, Any]:
 
     if transport == "serial":
         # Test serial port open/close
-        com_port = cfg.get("port", cfg.get("com_port", ""))
-        baud = cfg.get("baud_rate", cfg.get("baud", 9600))
+        serial_port = cfg.get("port", "")
+        baud = cfg.get("baudrate", 9600)
         try:
             import serial
-            ser = serial.Serial(com_port, baud, timeout=2)
+            ser = serial.Serial(serial_port, baud, timeout=2)
             ser.close()
             latency = round((_time.monotonic() - start) * 1000, 1)
             return {"success": True, "error": None, "latency_ms": latency}

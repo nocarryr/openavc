@@ -36,7 +36,13 @@ TEST_PROJECT_OLD = {
             "id": "display1",
             "driver": "samsung_mdc",
             "name": "Test Display",
-            "config": {"host": "10.0.0.50", "port": 1515, "com_port": "COM3"},
+            "config": {"host": "10.0.0.50", "port": 1515},
+        },
+        {
+            "id": "relay_controller",
+            "driver": "generic_serial",
+            "name": "Relay Controller",
+            "config": {"com_port": "COM3", "baud_rate": 19200, "poll_interval": 5},
         },
     ],
 }
@@ -119,16 +125,36 @@ class TestMigration:
         assert migrated["connections"]["projector1"]["host"] == "192.168.1.100"
         assert migrated["connections"]["projector1"]["port"] == 4352
 
-        # display1 had host, port, AND com_port
+        # display1 (TCP) — host + port move
         disp_config = migrated["devices"][1]["config"]
         assert "host" not in disp_config
         assert "port" not in disp_config
-        assert "com_port" not in disp_config
 
         disp_conn = migrated["connections"]["display1"]
         assert disp_conn["host"] == "10.0.0.50"
         assert disp_conn["port"] == 1515
-        assert disp_conn["com_port"] == "COM3"
+
+    def test_serial_field_names_translated_to_runtime_names(self):
+        """A3 regression: legacy v0.1.0 serial fields com_port/baud_rate must be
+        translated to port/baudrate during migration so BaseDriver finds them.
+        """
+        data = copy.deepcopy(TEST_PROJECT_OLD)
+        migrated, _ = migrate_project(data)
+
+        relay_config = migrated["devices"][2]["config"]
+        # Both old names should be gone from device.config
+        assert "com_port" not in relay_config
+        assert "baud_rate" not in relay_config
+        # Non-connection fields stay
+        assert relay_config["poll_interval"] == 5
+
+        # New names land in the connections table where BaseDriver can read
+        # them after resolved_device_config merges them back in.
+        relay_conn = migrated["connections"]["relay_controller"]
+        assert relay_conn["port"] == "COM3"
+        assert relay_conn["baudrate"] == 19200
+        assert "com_port" not in relay_conn
+        assert "baud_rate" not in relay_conn
 
     def test_migration_is_idempotent(self):
         """Running migration on an already-migrated project changes nothing."""
