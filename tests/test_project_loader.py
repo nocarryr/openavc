@@ -424,6 +424,48 @@ def test_matrix_element():
     assert el.matrix_config["input_count"] == 4
 
 
+def test_installer_seed_project_matches_v04_schema():
+    """Regression for A5: the starter project bundled with every fresh
+    install must validate against the v0.4.0 loader schema with NO extra
+    fields at the top level, ui.settings, ui.pages[0], ui.pages[0].grid,
+    or isc. Extras are silently preserved by extra='allow', which means
+    bad field names accumulate forever and the documented field names
+    (element_stagger_ms, background, shared_state, etc.) get loader
+    defaults instead of seed values.
+    """
+    seed_path = Path(__file__).parent.parent / "installer" / "seed" / "default" / "project.avc"
+    data = json.loads(seed_path.read_text(encoding="utf-8"))
+    project = ProjectConfig(**data)
+
+    # Top-level
+    extras = set(data.keys()) - set(ProjectConfig.model_fields.keys())
+    assert extras == set(), f"Top-level extras: {extras}"
+    # device_groups required at top level for v0.4.0
+    assert "device_groups" in data
+
+    # ui.settings — must use element_stagger_ms, not legacy element_entry_*
+    ui_settings_extras = set(data["ui"]["settings"].keys()) - set(
+        type(project.ui.settings).model_fields.keys()
+    )
+    assert ui_settings_extras == set(), f"ui.settings extras: {ui_settings_extras}"
+
+    # ui.pages[0] — no `icon`, `group`, `overlays`, or page-level background_*
+    page_extras = set(data["ui"]["pages"][0].keys()) - set(
+        type(project.ui.pages[0]).model_fields.keys()
+    )
+    assert page_extras == set(), f"ui.pages[0] extras: {page_extras}"
+
+    # ui.pages[0].grid — only columns, rows
+    grid_extras = set(data["ui"]["pages"][0]["grid"].keys()) - set(
+        type(project.ui.pages[0].grid).model_fields.keys()
+    )
+    assert grid_extras == set(), f"grid extras: {grid_extras}"
+
+    # isc — uses shared_state, auth_key, enabled (not instance_name, shared_variables)
+    isc_extras = set(data["isc"].keys()) - set(type(project.isc).model_fields.keys())
+    assert isc_extras == set(), f"isc extras: {isc_extras}"
+
+
 def test_list_element():
     """List element with items loads."""
     data = {

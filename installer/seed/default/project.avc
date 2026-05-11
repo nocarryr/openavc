@@ -8,6 +8,7 @@
         "modified": "2026-01-01T00:00:00.000000"
     },
     "devices": [],
+    "device_groups": [],
     "connections": {},
     "driver_dependencies": [],
     "plugin_dependencies": [],
@@ -28,39 +29,29 @@
             "page_transition": "none",
             "page_transition_duration": 200,
             "element_entry": "none",
-            "element_entry_duration": 150,
-            "element_entry_delay": 30,
-            "background_image": "",
-            "background_size": "cover",
-            "background_position": "center",
-            "background_opacity": 1.0
+            "element_stagger_ms": 30,
+            "element_stagger_style": "fade-up"
         },
         "pages": [
             {
                 "id": "main",
                 "name": "Main",
-                "icon": "layout-dashboard",
-                "group": "",
-                "elements": [],
+                "page_type": "page",
                 "grid": {
                     "columns": 12,
-                    "row_height": 60,
-                    "gap": 8,
-                    "padding": 16
+                    "rows": 8
                 },
-                "overlays": [],
-                "background_image": "",
-                "background_size": "cover",
-                "background_position": "center",
-                "background_opacity": 1.0
+                "elements": []
             }
         ],
-        "master_elements": []
+        "master_elements": [],
+        "page_groups": []
     },
     "scripts": [],
     "isc": {
-        "instance_name": "",
-        "shared_variables": [],
+        "enabled": false,
+        "shared_state": [],
+        "auth_key": "",
         "peers": []
     }
 }
