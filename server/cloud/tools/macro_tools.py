@@ -153,6 +153,7 @@ class MacroToolsMixin:
             steps=steps,
             triggers=triggers,
             stop_on_error=input.get("stop_on_error", False),
+            cancel_group=input.get("cancel_group"),
         )
         engine.project.macros.append(new_macro)
         save_project(engine.project_path, engine.project)
@@ -197,6 +198,7 @@ class MacroToolsMixin:
             steps=steps,
             triggers=triggers,
             stop_on_error=input.get("stop_on_error", existing.stop_on_error),
+            cancel_group=input.get("cancel_group", existing.cancel_group),
         )
         engine.project.macros[macro_idx] = updated
         save_project(engine.project_path, engine.project)

@@ -424,6 +424,26 @@ async def test_add_macro(handler, mock_agent, mock_engine):
 
 
 @pytest.mark.asyncio
+async def test_add_macro_with_cancel_group(handler, mock_agent, mock_engine):
+    """A11: add_macro must persist cancel_group when provided."""
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        with patch("server.core.project_loader.save_project"):
+            msg = _make_tool_call_msg("add_macro", {
+                "id": "system_on",
+                "name": "System On",
+                "steps": [{"action": "device.command", "device": "projector1", "command": "power_on"}],
+                "cancel_group": "system_power",
+            })
+            await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    macro = next(m for m in mock_engine.project.macros if m.id == "system_on")
+    assert macro.cancel_group == "system_power"
+
+
+@pytest.mark.asyncio
 async def test_add_macro_duplicate(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("add_macro", {"id": "all_off", "name": "Duplicate"})
@@ -457,6 +477,47 @@ async def test_update_macro(handler, mock_agent, mock_engine):
     assert len(macro.steps) == 1
     # Triggers should remain from original since not specified in update
     assert len(macro.triggers) == 1
+
+
+@pytest.mark.asyncio
+async def test_update_macro_preserves_existing_cancel_group(handler, mock_agent, mock_engine):
+    """A11: update_macro must keep existing cancel_group when not specified."""
+    # Seed an existing cancel_group on the all_off macro.
+    target = next(m for m in mock_engine.project.macros if m.id == "all_off")
+    target.cancel_group = "system_power"
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        with patch("server.core.project_loader.save_project"):
+            # Only change the name — cancel_group not provided.
+            msg = _make_tool_call_msg("update_macro", {
+                "macro_id": "all_off",
+                "name": "Everything Off",
+            })
+            await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    macro = next(m for m in mock_engine.project.macros if m.id == "all_off")
+    assert macro.cancel_group == "system_power", "existing cancel_group was wiped"
+
+
+@pytest.mark.asyncio
+async def test_update_macro_sets_cancel_group(handler, mock_agent, mock_engine):
+    """A11: update_macro must apply cancel_group when explicitly set."""
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        with patch("server.core.project_loader.save_project"):
+            msg = _make_tool_call_msg("update_macro", {
+                "macro_id": "all_off",
+                "cancel_group": "system_power",
+            })
+            await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    macro = next(m for m in mock_engine.project.macros if m.id == "all_off")
+    assert macro.cancel_group == "system_power"
 
 
 @pytest.mark.asyncio
