@@ -97,6 +97,25 @@ async def _initialize_engine(app: FastAPI) -> None:
             [DRIVER_DEFINITIONS_DIR, DRIVER_REPO_DIR],
         )
 
+        # Wire cloud-driven restart: the cloud agent emits
+        # system.restart_requested after rate-limiting and sending its
+        # command_result. The on-host service manager (NSSM / systemd /
+        # Docker restart policy) brings the process back up.
+        async def _on_restart_requested(_event: str, data: dict) -> None:
+            mode = (data or {}).get("mode", "graceful")
+            log.warning("Cloud-driven restart requested (mode=%s); exiting in 2s", mode)
+            # Brief delay so the command_result WS frame and log line flush
+            # before the process exits.
+            await asyncio.sleep(0 if mode == "hard" else 2)
+            try:
+                if app.state.engine_ready:
+                    await engine.stop()
+            except Exception:
+                log.exception("Error during graceful shutdown before restart")
+            os._exit(0)
+
+        engine.events.on("system.restart_requested", _on_restart_requested)
+
         app.state.engine_ready = True
         log.info("=" * 60)
         log.info(f"  Panel UI:    http://localhost:{config.HTTP_PORT}/panel")

@@ -14,6 +14,7 @@ from server.cloud.protocol import (
     COMMAND, CONFIG_PUSH, RESTART, DIAGNOSTIC, SOFTWARE_UPDATE,
     GET_PROJECT, GET_DEVICE_COMMANDS,
     COMMAND_RESULT, PROJECT_DATA, DEVICE_COMMANDS_DATA,
+    DIAGNOSTIC_RESULT,
     extract_payload,
 )
 from server.utils.logger import get_logger
@@ -213,9 +214,14 @@ class CommandHandler:
     async def _handle_diagnostic(
         self, payload: dict[str, Any], request_id: str, user_name: str
     ) -> None:
-        """Handle a network diagnostic request (placeholder for future)."""
+        """Handle a network diagnostic request from the cloud.
+
+        Implements the five action types from spec §13.12:
+            ping, tcp_check, traceroute, dns_lookup, port_scan
+        """
         action = payload.get("action", "")
         target = payload.get("target", "")
+        params = payload.get("params") or {}
         log.info(f"Cloud diagnostic: {user_name} → {action} {target}")
 
         await self._events.emit("cloud.diagnostic", {
@@ -225,10 +231,40 @@ class CommandHandler:
             "request_id": request_id,
         })
 
-        # Diagnostics module not yet implemented
-        await self._send_result(
-            request_id, False, error="Diagnostics not yet implemented"
-        )
+        try:
+            if action == "ping":
+                result = await _diagnostic_ping(target, params)
+            elif action == "tcp_check":
+                result = await _diagnostic_tcp_check(target, params)
+            elif action == "dns_lookup":
+                result = await _diagnostic_dns_lookup(target, params)
+            elif action == "traceroute":
+                result = await _diagnostic_traceroute(target, params)
+            elif action == "port_scan":
+                result = await _diagnostic_port_scan(target, params)
+            else:
+                await self._send_diagnostic_result(
+                    request_id, False, error=f"Unknown diagnostic action: {action}",
+                )
+                return
+            await self._send_diagnostic_result(request_id, True, result=result)
+        except Exception as e:
+            log.exception("Diagnostic %s failed", action)
+            await self._send_diagnostic_result(request_id, False, error=str(e))
+
+    async def _send_diagnostic_result(
+        self, request_id: str, success: bool,
+        result: Any = None, error: str | None = None,
+    ) -> None:
+        """Send a diagnostic_result message (separate from generic command_result)."""
+        if not request_id:
+            return
+        await self._agent.send_message(DIAGNOSTIC_RESULT, {
+            "request_id": request_id,
+            "success": success,
+            "result": result,
+            "error": error,
+        })
 
     async def _handle_software_update(
         self, payload: dict[str, Any], request_id: str, user_name: str
@@ -414,3 +450,145 @@ class CommandHandler:
             "result": result,
             "error": error,
         })
+
+
+# --- Diagnostic action implementations (module-level so they're easy to test) ---
+
+
+def _clamp(value: Any, lo: int, hi: int, default: int) -> int:
+    """Clamp an int-like value to [lo, hi], falling back to `default`."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+async def _diagnostic_ping(target: str, params: dict) -> dict:
+    """ICMP-ish ping using the OS `ping` binary (cross-platform)."""
+    import asyncio
+    import sys
+    count = _clamp(params.get("count"), 1, 20, 4)
+    timeout_s = _clamp(params.get("timeout"), 1, 30, 2)
+
+    if sys.platform == "win32":
+        cmd = ["ping", "-n", str(count), "-w", str(timeout_s * 1000), target]
+    else:
+        cmd = ["ping", "-c", str(count), "-W", str(timeout_s), target]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    output = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
+    return {
+        "exit_code": proc.returncode,
+        "reachable": proc.returncode == 0,
+        "output": output.strip(),
+        "count": count,
+    }
+
+
+async def _diagnostic_tcp_check(target: str, params: dict) -> dict:
+    """Probe a TCP port. Target is the host; port comes from params."""
+    import asyncio
+    port = _clamp(params.get("port"), 1, 65535, 0)
+    if port == 0:
+        return {"open": False, "error": "port required for tcp_check"}
+    timeout_s = _clamp(params.get("timeout"), 1, 30, 3)
+
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(target, port), timeout=timeout_s,
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return {"open": True, "host": target, "port": port}
+    except asyncio.TimeoutError:
+        return {"open": False, "host": target, "port": port, "error": "timeout"}
+    except (ConnectionRefusedError, OSError) as e:
+        return {"open": False, "host": target, "port": port, "error": str(e)}
+
+
+async def _diagnostic_dns_lookup(target: str, params: dict) -> dict:
+    """Resolve a hostname. Optional record_type narrows the family (A/AAAA)."""
+    import asyncio
+    import socket
+    record_type = (params.get("record_type") or "A").upper()
+    family = {
+        "A": socket.AF_INET,
+        "AAAA": socket.AF_INET6,
+    }.get(record_type, 0)
+
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            target, None, family=family, type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror as e:
+        return {"resolved": False, "host": target, "error": str(e)}
+
+    addrs = sorted({info[4][0] for info in infos})
+    return {
+        "resolved": True,
+        "host": target,
+        "record_type": record_type,
+        "addresses": addrs,
+    }
+
+
+async def _diagnostic_traceroute(target: str, params: dict) -> dict:
+    """Trace the route to a host. Uses the OS `traceroute`/`tracert` binary."""
+    import asyncio
+    import sys
+    max_hops = _clamp(params.get("max_hops"), 1, 64, 30)
+    timeout_s = _clamp(params.get("timeout"), 1, 30, 2)
+
+    if sys.platform == "win32":
+        cmd = ["tracert", "-h", str(max_hops), "-w", str(timeout_s * 1000), target]
+    else:
+        cmd = ["traceroute", "-m", str(max_hops), "-w", str(timeout_s), target]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return {"error": f"{cmd[0]} not installed on this system"}
+    stdout, stderr = await proc.communicate()
+    output = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
+    return {
+        "exit_code": proc.returncode,
+        "output": output.strip(),
+        "max_hops": max_hops,
+    }
+
+
+# Common AV ports baseline; cloud `params.ports` can override.
+_DEFAULT_AV_PORTS = [22, 23, 80, 443, 4352, 5000, 8080, 8443, 1515, 1702, 2001, 9090]
+
+
+async def _diagnostic_port_scan(target: str, params: dict) -> dict:
+    """Scan a host's TCP ports. Reuses the discovery PortScanner."""
+    from server.discovery.port_scanner import scan_host_ports
+
+    raw_ports = params.get("ports") or _DEFAULT_AV_PORTS
+    ports: list[int] = []
+    for p in raw_ports:
+        try:
+            n = int(p)
+            if 1 <= n <= 65535:
+                ports.append(n)
+        except (TypeError, ValueError):
+            continue
+    if not ports:
+        return {"host": target, "open": [], "scanned": 0}
+
+    open_ports = await scan_host_ports(target, ports, timeout=1.5)
+    return {
+        "host": target,
+        "scanned": len(ports),
+        "open": open_ports,
+    }

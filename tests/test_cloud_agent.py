@@ -1086,3 +1086,166 @@ class TestAgentCapabilityGating:
                 f"Gated capability '{required}' not in DEFAULT_CAPABILITIES "
                 f"({DEFAULT_CAPABILITIES}) — vocabulary drift"
             )
+
+
+# ===========================================================================
+# A21 — Diagnostic actions. The agent now implements all five spec §13.12
+# actions instead of returning "not yet implemented".
+# ===========================================================================
+
+
+class TestDiagnosticActions:
+    """Tests for the five diagnostic action implementations on the agent."""
+
+    @pytest.mark.asyncio
+    async def test_dns_lookup_resolves(self):
+        """DNS lookup returns at least one address for a well-known host."""
+        from server.cloud.command_handler import _diagnostic_dns_lookup
+        result = await _diagnostic_dns_lookup("localhost", {"record_type": "A"})
+        assert result["resolved"] is True
+        assert result["host"] == "localhost"
+        assert len(result["addresses"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_dns_lookup_fails_gracefully(self):
+        """Unresolvable hostname returns resolved=False with the error string."""
+        from server.cloud.command_handler import _diagnostic_dns_lookup
+        result = await _diagnostic_dns_lookup(
+            "definitely-not-a-real-host-12345.invalid", {"record_type": "A"},
+        )
+        assert result["resolved"] is False
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_tcp_check_requires_port(self):
+        """tcp_check returns an error if `port` is missing from params."""
+        from server.cloud.command_handler import _diagnostic_tcp_check
+        result = await _diagnostic_tcp_check("127.0.0.1", {})
+        assert result["open"] is False
+        assert "port required" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_tcp_check_to_closed_port(self):
+        """tcp_check returns open=False for a port that's almost certainly closed locally."""
+        from server.cloud.command_handler import _diagnostic_tcp_check
+        result = await _diagnostic_tcp_check("127.0.0.1", {"port": 1, "timeout": 1})
+        assert result["open"] is False
+
+    @pytest.mark.asyncio
+    async def test_tcp_check_to_open_port(self):
+        """tcp_check returns open=True when an asyncio server is bound to the port."""
+        import asyncio
+        from server.cloud.command_handler import _diagnostic_tcp_check
+
+        async def _handle(reader, writer):
+            writer.close()
+
+        server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            result = await _diagnostic_tcp_check("127.0.0.1", {"port": port, "timeout": 2})
+            assert result["open"] is True
+            assert result["host"] == "127.0.0.1"
+            assert result["port"] == port
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_port_scan_finds_open_port(self):
+        """port_scan returns the open ports from the requested list."""
+        import asyncio
+        from server.cloud.command_handler import _diagnostic_port_scan
+
+        async def _handle(reader, writer):
+            writer.close()
+
+        server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            result = await _diagnostic_port_scan(
+                "127.0.0.1", {"ports": [port, 1, 2, 3]},
+            )
+            assert port in result["open"]
+            assert result["scanned"] == 4
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_handle_diagnostic_dispatches_action(self):
+        """_handle_diagnostic in CommandHandler routes to the right action and
+        sends a DIAGNOSTIC_RESULT (not COMMAND_RESULT) message back."""
+        from server.cloud.command_handler import CommandHandler
+        from server.cloud.protocol import DIAGNOSTIC_RESULT
+        from server.core.state_store import StateStore
+        from server.core.event_bus import EventBus
+        from server.core.device_manager import DeviceManager
+
+        state = StateStore()
+        events = EventBus()
+        devices = DeviceManager(state, events)
+
+        sent = []
+
+        class MockAgent:
+            _config = {}
+            async def send_message(self, msg_type, payload):
+                sent.append((msg_type, payload))
+
+        handler = CommandHandler(MockAgent(), devices, events)
+
+        msg = {
+            "type": "diagnostic",
+            "payload": {
+                "request_id": "diag-1",
+                "action": "dns_lookup",
+                "target": "localhost",
+                "params": {"record_type": "A"},
+                "user_id": "u",
+                "user_name": "tester",
+            },
+        }
+        await handler.handle(msg)
+
+        # Must send DIAGNOSTIC_RESULT, not COMMAND_RESULT
+        assert len(sent) == 1
+        assert sent[0][0] == DIAGNOSTIC_RESULT
+        assert sent[0][1]["request_id"] == "diag-1"
+        assert sent[0][1]["success"] is True
+        assert sent[0][1]["result"]["resolved"] is True
+
+    @pytest.mark.asyncio
+    async def test_handle_diagnostic_unknown_action(self):
+        """Unknown action returns success=False with a descriptive error."""
+        from server.cloud.command_handler import CommandHandler
+        from server.core.state_store import StateStore
+        from server.core.event_bus import EventBus
+        from server.core.device_manager import DeviceManager
+
+        state = StateStore()
+        events = EventBus()
+        devices = DeviceManager(state, events)
+
+        sent = []
+
+        class MockAgent:
+            _config = {}
+            async def send_message(self, msg_type, payload):
+                sent.append((msg_type, payload))
+
+        handler = CommandHandler(MockAgent(), devices, events)
+
+        msg = {
+            "type": "diagnostic",
+            "payload": {
+                "request_id": "diag-bad",
+                "action": "snorgle",
+                "target": "x",
+                "user_id": "u",
+                "user_name": "tester",
+            },
+        }
+        await handler.handle(msg)
+        assert sent[0][1]["success"] is False
+        assert "snorgle" in sent[0][1]["error"]
