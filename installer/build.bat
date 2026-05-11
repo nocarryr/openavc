@@ -22,6 +22,14 @@ echo.
 
 cd /d "%~dp0.."
 
+REM Read version from pyproject.toml (source of truth) so installer artifacts
+REM match the running version. Without this, setup.iss falls back to its
+REM "0.0.0-dev" marker and the installer is named OpenAVC-Setup-0.0.0-dev.exe.
+for /f "delims=" %%i in ('python installer\get-version.py') do set VERSION=%%i
+if "%VERSION%"=="" (echo FAILED: could not read version from pyproject.toml & exit /b 1)
+echo Building installer for version %VERSION%
+echo.
+
 REM Step 1: Build frontends
 echo [1/5] Building Programmer UI...
 cd web\programmer
@@ -71,12 +79,12 @@ if not exist %ISCC% (
     echo ERROR: Inno Setup 6 not found. Install from https://jrsoftware.org/isdl.php
     exit /b 1
 )
-%ISCC% installer\setup.iss
+%ISCC% /DMyAppVersion=%VERSION% installer\setup.iss
 if errorlevel 1 (echo FAILED: Inno Setup & exit /b 1)
 echo       Done.
 echo.
 
 echo ============================================================
 echo  Build complete!
-echo  Installer: dist\OpenAVC-Setup-0.4.1.exe
+echo  Installer: dist\OpenAVC-Setup-%VERSION%.exe
 echo ============================================================

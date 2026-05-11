@@ -10,7 +10,13 @@
 ;   pyinstaller installer/tray.spec --noconfirm
 
 #define MyAppName "OpenAVC"
-#define MyAppVersion "0.4.1"
+; MyAppVersion is normally injected by build.bat (or CI) via ISCC /DMyAppVersion=...
+; The fallback below only takes effect if neither path supplies it, in which
+; case the resulting installer's filename intentionally screams that the
+; version didn't propagate.
+#ifndef MyAppVersion
+#define MyAppVersion "0.0.0-dev"
+#endif
 #define MyAppPublisher "OpenAVC"
 #define MyAppURL "https://openavc.com"
 #define MyAppExeName "openavc-server.exe"

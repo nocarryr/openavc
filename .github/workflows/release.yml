@@ -135,13 +135,8 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Set version in setup.iss
-        shell: bash
-        run: |
-          sed -i "s/^#define MyAppVersion \".*\"/#define MyAppVersion \"$VERSION\"/" installer/setup.iss
-
       - name: Build installer
-        run: iscc installer/setup.iss
+        run: iscc /DMyAppVersion=${{ env.VERSION }} installer/setup.iss
 
       - name: Sign installer
         if: env.SIGNING_ENABLED != ''
