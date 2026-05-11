@@ -45,12 +45,17 @@ class Issue:
     """A single validation issue."""
 
     def __init__(self, severity: str, check: str, message: str):
-        self.severity = severity  # "error" or "warning"
+        self.severity = severity  # "error" | "warning" | "info"
         self.check = check  # e.g., "state_coverage", "command_coverage"
         self.message = message
 
     def __str__(self) -> str:
-        icon = "ERROR" if self.severity == "error" else "WARN "
+        if self.severity == "error":
+            icon = "ERROR"
+        elif self.severity == "warning":
+            icon = "WARN "
+        else:
+            icon = "INFO "
         return f"  {icon} [{self.check}] {self.message}"
 
 
@@ -72,6 +77,10 @@ class ValidationResult:
         return [i for i in self.issues if i.severity == "warning"]
 
     @property
+    def infos(self) -> list[Issue]:
+        return [i for i in self.issues if i.severity == "info"]
+
+    @property
     def passed(self) -> bool:
         return len(self.errors) == 0
 
@@ -80,6 +89,9 @@ class ValidationResult:
 
     def warning(self, check: str, message: str) -> None:
         self.issues.append(Issue("warning", check, message))
+
+    def info(self, check: str, message: str) -> None:
+        self.issues.append(Issue("info", check, message))
 
 
 # ── YAML driver validation ──
@@ -141,7 +153,7 @@ def _check_state_coverage(
 
     for var_name, var_def in state_vars.items():
         if var_name not in sim_initial:
-            # Check if auto-gen would provide a default
+            # Check what auto-gen will produce for the missing variable.
             var_type = var_def.get("type", "string")
             if var_type == "integer":
                 default = var_def.get("min", 0)
@@ -154,13 +166,16 @@ def _check_state_coverage(
                 default = values[0] if values else ""
             else:
                 default = ""
-            # Auto-gen provides a default, but the simulator section overrides
-            # initial_state completely — warn that the variable is relying on
-            # auto-gen defaults which may not be appropriate.
-            result.warning(
+            # The simulator section merges per-key into the auto-generated
+            # initial state (see yaml_auto._merge_simulator_section), so the
+            # variable is fine — it'll start with the auto-gen default. This
+            # is purely informational: surface the value the simulator will
+            # actually boot with so authors can spot and override anything
+            # inappropriate.
+            result.info(
                 "state_coverage",
-                f"'{var_name}' not in simulator initial_state "
-                f"(auto-gen default: {default!r})"
+                f"'{var_name}' will use auto-gen default {default!r}. "
+                f"Add to simulator.initial_state to override."
             )
 
 
@@ -836,24 +851,32 @@ def main():
     # Print results
     total_errors = 0
     total_warnings = 0
+    total_infos = 0
     passed = 0
     failed = 0
 
     for r in results:
         if args.summary:
             status = "PASS" if r.passed else "FAIL"
-            issue_str = ""
-            if r.errors or r.warnings:
-                parts = []
-                if r.errors:
-                    parts.append(f"{len(r.errors)} errors")
-                if r.warnings:
-                    parts.append(f"{len(r.warnings)} warnings")
-                issue_str = f" ({', '.join(parts)})"
+            parts = []
+            if r.errors:
+                parts.append(f"{len(r.errors)} errors")
+            if r.warnings:
+                parts.append(f"{len(r.warnings)} warnings")
+            if r.infos:
+                parts.append(f"{len(r.infos)} infos")
+            issue_str = f" ({', '.join(parts)})" if parts else ""
             print(f"{status} {r.driver_id} [{r.driver_type}]{issue_str}")
         else:
+            if r.errors:
+                status = "FAIL"
+            elif r.warnings:
+                status = "WARN"
+            elif r.infos:
+                status = "PASS"  # info-only is still a pass
+            else:
+                status = "PASS"
             if r.issues:
-                status = "FAIL" if r.errors else "WARN"
                 print(f"\n{status}: {r.driver_id} [{r.driver_type}] ({r.driver_path})")
                 for issue in r.issues:
                     print(str(issue))
@@ -862,6 +885,7 @@ def main():
 
         total_errors += len(r.errors)
         total_warnings += len(r.warnings)
+        total_infos += len(r.infos)
         if r.passed:
             passed += 1
         else:
@@ -872,7 +896,8 @@ def main():
     print(
         f"{len(results)} drivers validated: "
         f"{passed} passed, {failed} failed, "
-        f"{total_errors} errors, {total_warnings} warnings"
+        f"{total_errors} errors, {total_warnings} warnings, "
+        f"{total_infos} infos"
     )
 
     sys.exit(1 if total_errors > 0 else 0)
