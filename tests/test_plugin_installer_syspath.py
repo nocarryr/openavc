@@ -44,7 +44,10 @@ def test_failed_exec_module_does_not_leave_dir_on_sys_path(tmp_path):
     assert str(plugin_dir) not in sys.path
     result = _register_installed_plugin("broken", plugin_dir)
 
-    assert result is False
+    # A60 changed the return type: None on success, error-message str on
+    # failure (so install_plugin can surface the diagnostic in the UI).
+    assert result is not None
+    assert "RuntimeError" in result
     assert str(plugin_dir) not in sys.path, (
         "_register_installed_plugin left the plugin directory on sys.path "
         "after exec_module raised — subsequent plugin installs with "
@@ -64,7 +67,9 @@ def test_no_plugin_info_match_cleans_up_sys_path(tmp_path):
     assert str(plugin_dir) not in sys.path
     result = _register_installed_plugin("nothing", plugin_dir)
 
-    assert result is False
+    # Failure path returns an error message (str), not False.
+    assert result is not None
+    assert "PLUGIN_INFO" in result
     assert str(plugin_dir) not in sys.path
 
 
@@ -86,7 +91,8 @@ class GoodPlugin:
     assert str(plugin_dir) not in sys.path
     try:
         result = _register_installed_plugin("good", plugin_dir)
-        assert result is True
+        # Success returns None (no error message).
+        assert result is None
         assert str(plugin_dir) in sys.path, (
             "Successful registration should leave plugin dir on sys.path "
             "so the plugin's submodule imports continue to work."
