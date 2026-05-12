@@ -1090,6 +1090,18 @@ async def _test_via_configurable_driver(body: TestCommandRequest) -> dict:
                 if send_result is False or send_result is None:
                     error_text = "No response within timeout"
 
+        # Settle period — many devices send a response in multiple frames
+        # (NEC NaviSet per-parameter lines, Christie LX ACK then DATA). Without
+        # this short wait the disconnect tears down the transport before
+        # trailing frames arrive. HTTP already returns the full response
+        # synchronously so we skip the settle there.
+        if (
+            received_chunks
+            and error_text is None
+            and transport_type in ("tcp", "udp", "osc", "serial")
+        ):
+            await asyncio.sleep(min(0.3, body.timeout / 4))
+
     finally:
         try:
             await driver.disconnect()
@@ -1188,10 +1200,13 @@ async def _test_raw(body: TestCommandRequest) -> dict:
     if body.transport == "serial":
         return await _test_serial_raw(body)
 
+    if body.transport == "udp":
+        return await _test_udp_raw(body)
+
     if body.transport not in ("tcp",):
         raise HTTPException(
             status_code=422,
-            detail="Only TCP, serial, HTTP, and OSC test connections are supported",
+            detail="Only TCP, UDP, serial, HTTP, and OSC test connections are supported",
         )
 
     from server.transport.tcp import TCPTransport
@@ -1230,7 +1245,7 @@ async def _test_raw(body: TestCommandRequest) -> dict:
     try:
         cmd_data = body.command_string.encode().decode("unicode_escape").encode()
         response = await transport.send_and_wait(cmd_data, timeout=body.timeout)
-        response_text = response.decode("ascii", errors="replace")
+        response_text = _decode_for_display(response)
     except asyncio.TimeoutError:
         error_text = "Timeout waiting for response"
     except (OSError, ValueError, UnicodeError) as e:
@@ -1290,6 +1305,59 @@ async def _test_serial_raw(body: TestCommandRequest) -> dict:
         error_text = str(e)
     finally:
         await transport.close()
+
+    return {
+        "success": error_text is None,
+        "sent": body.command_string,
+        "received": [response_text] if response_text is not None else [],
+        "state_changes": {},
+        "error": error_text,
+    }
+
+
+async def _test_udp_raw(body: TestCommandRequest) -> dict:
+    """Raw UDP probe — open UDPTransport, send command_string bytes, await reply.
+
+    The configurable driver runtime already supports UDP in definition mode; this
+    surfaces the same shape to the raw probe path so authors can fire one-off
+    bytes without first declaring a command.
+    """
+    import asyncio
+    from server.transport.udp import UDPTransport
+
+    try:
+        port = int(body.port)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid UDP port: {body.port!r}",
+        ) from None
+
+    response_text = None
+    error_text = None
+    udp = UDPTransport(host=body.host, port=port, name="udp_test")
+
+    try:
+        await udp.open()
+    except OSError as e:
+        return {
+            "success": False,
+            "sent": body.command_string,
+            "received": [],
+            "state_changes": {},
+            "error": str(e),
+        }
+
+    try:
+        cmd_data = body.command_string.encode().decode("unicode_escape").encode()
+        response = await udp.send_and_wait(cmd_data, timeout=body.timeout)
+        response_text = _decode_for_display(response)
+    except asyncio.TimeoutError:
+        error_text = "Timeout waiting for response"
+    except (OSError, ValueError, UnicodeError) as e:
+        error_text = str(e)
+    finally:
+        await udp.close()
 
     return {
         "success": error_text is None,
