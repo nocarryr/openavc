@@ -60,7 +60,8 @@ export interface TestCommandResult {
 
 export interface TestCommandRequest {
   host: string;
-  port: number;
+  /** Numeric port for IP transports; serial port path (e.g. "COM3") for serial. */
+  port: number | string;
   transport: string;
   timeout?: number;
   /** Definition mode: full driver definition + which command to invoke. */

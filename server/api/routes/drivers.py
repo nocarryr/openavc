@@ -979,11 +979,26 @@ async def _test_via_configurable_driver(body: TestCommandRequest) -> dict:
     # background poller for a one-shot test.
     definition = dict(body.definition or {})
     default_config = dict(definition.get("default_config") or {})
+    # Serial drivers use `port` as a string path (e.g. "COM3"); IP transports
+    # need an int. Coerce numeric strings for IP, leave serial strings alone.
+    transport_type = definition.get("transport", body.transport)
+    port_value: int | str = body.port
+    if transport_type != "serial":
+        try:
+            port_value = int(body.port)
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "sent": None,
+                "received": [],
+                "state_changes": {},
+                "error": f"Invalid port for {transport_type}: {body.port!r}",
+            }
     config = {
         **default_config,
         **(body.config_overrides or {}),
         "host": body.host,
-        "port": body.port,
+        "port": port_value,
         "poll_interval": 0,
     }
     # Patch the definition so the runtime sees poll-off.
@@ -1170,10 +1185,13 @@ async def _test_raw(body: TestCommandRequest) -> dict:
     if body.transport == "osc":
         return await _test_osc_raw(body)
 
+    if body.transport == "serial":
+        return await _test_serial_raw(body)
+
     if body.transport not in ("tcp",):
         raise HTTPException(
             status_code=422,
-            detail="Only TCP, HTTP, and OSC test connections are supported",
+            detail="Only TCP, serial, HTTP, and OSC test connections are supported",
         )
 
     from server.transport.tcp import TCPTransport
@@ -1182,10 +1200,19 @@ async def _test_raw(body: TestCommandRequest) -> dict:
     response_text = None
     error_text = None
 
+    # Coerce numeric-string port to int for IP transports.
+    try:
+        port = int(body.port)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid TCP port: {body.port!r}",
+        ) from None
+
     try:
         transport = await TCPTransport.create(
             host=body.host,
-            port=body.port,
+            port=port,
             on_data=lambda d: None,
             on_disconnect=lambda: None,
             delimiter=delimiter,
@@ -1204,6 +1231,59 @@ async def _test_raw(body: TestCommandRequest) -> dict:
         cmd_data = body.command_string.encode().decode("unicode_escape").encode()
         response = await transport.send_and_wait(cmd_data, timeout=body.timeout)
         response_text = response.decode("ascii", errors="replace")
+    except asyncio.TimeoutError:
+        error_text = "Timeout waiting for response"
+    except (OSError, ValueError, UnicodeError) as e:
+        error_text = str(e)
+    finally:
+        await transport.close()
+
+    return {
+        "success": error_text is None,
+        "sent": body.command_string,
+        "received": [response_text] if response_text is not None else [],
+        "state_changes": {},
+        "error": error_text,
+    }
+
+
+async def _test_serial_raw(body: TestCommandRequest) -> dict:
+    """Raw serial probe — open SerialTransport with the port path in body.port."""
+    import asyncio
+    from server.transport.serial_transport import SerialTransport
+
+    port_path = str(body.port)
+    if not port_path:
+        raise HTTPException(
+            status_code=422,
+            detail="Serial port path is required (e.g. COM3 or /dev/ttyUSB0).",
+        )
+
+    delimiter = body.delimiter.encode().decode("unicode_escape").encode()
+    response_text = None
+    error_text = None
+
+    try:
+        transport = await SerialTransport.create(
+            port=port_path,
+            on_data=lambda d: None,
+            on_disconnect=lambda: None,
+            delimiter=delimiter,
+            timeout=body.timeout,
+        )
+    except (OSError, ConnectionError) as e:
+        return {
+            "success": False,
+            "sent": body.command_string,
+            "received": [],
+            "state_changes": {},
+            "error": str(e),
+        }
+
+    try:
+        cmd_data = body.command_string.encode().decode("unicode_escape").encode()
+        response = await transport.send_and_wait(cmd_data, timeout=body.timeout)
+        response_text = _decode_for_display(response)
     except asyncio.TimeoutError:
         error_text = "Timeout waiting for response"
     except (OSError, ValueError, UnicodeError) as e:

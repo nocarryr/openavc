@@ -118,9 +118,10 @@ class TestCommandRequest(BaseModel):
        returns whatever comes back. No auth or on_connect.
     """
 
-    # Common
-    host: str
-    port: int = 23
+    # Common — host is unused for serial; port carries the serial-port path
+    # (e.g. "COM3", "/dev/ttyUSB0") for that transport.
+    host: str = ""
+    port: int | str = 23
     transport: str = "tcp"
     timeout: float = 5.0
 

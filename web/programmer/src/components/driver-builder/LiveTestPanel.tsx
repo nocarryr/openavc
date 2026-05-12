@@ -39,8 +39,14 @@ const RAW_COMMAND = "__raw__";
  */
 export function LiveTestPanel({ draft }: LiveTestPanelProps) {
   const transport = draft.transport || "tcp";
-  const defaultPort =
-    typeof draft.default_config?.port === "number"
+  const isSerial = transport === "serial";
+  // Serial transports store a port path (e.g. "COM3", "/dev/ttyUSB0") in
+  // default_config.port. IP transports store a numeric port.
+  const defaultPort: number | string = isSerial
+    ? typeof draft.default_config?.port === "string"
+      ? (draft.default_config.port as string)
+      : ""
+    : typeof draft.default_config?.port === "number"
       ? (draft.default_config.port as number)
       : transport === "http"
         ? 80
@@ -118,10 +124,16 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
     selectedCommand !== RAW_COMMAND ? draft.commands[selectedCommand] ?? null : null;
 
   const canSend =
-    !!host &&
+    (isSerial ? !!port.trim() : !!host) &&
     (selectedCommand !== RAW_COMMAND
       ? command !== null
       : rawString.trim().length > 0);
+
+  // Serial uses the port string as a device path; IP transports need an int.
+  const resolvePortForSend = (): number | string => {
+    if (isSerial) return port;
+    return parseInt(port) || (typeof defaultPort === "number" ? defaultPort : 23);
+  };
 
   const handleSend = async () => {
     if (!canSend) return;
@@ -132,11 +144,13 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
         if (v !== "") overrides[k] = v;
       }
 
+      const portForSend = resolvePortForSend();
+
       const data: Parameters<typeof api.testDriverCommand>[1] =
         selectedCommand === RAW_COMMAND
           ? {
               host,
-              port: parseInt(port) || defaultPort,
+              port: portForSend,
               transport,
               command_string: rawString,
               delimiter: draft.delimiter,
@@ -144,7 +158,7 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
             }
           : {
               host,
-              port: parseInt(port) || defaultPort,
+              port: portForSend,
               transport,
               definition: draft,
               command_name: selectedCommand,
@@ -224,34 +238,50 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
       </p>
 
       {/* Connection */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 110px",
-          gap: "var(--space-md)",
-          marginBottom: "var(--space-md)",
-        }}
-      >
-        <div>
-          <label style={labelStyle}>Host / IP Address</label>
-          <input
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
-            placeholder="192.168.1.100"
-            style={{ width: "100%" }}
-          />
-        </div>
-        <div>
-          <label style={labelStyle}>Port</label>
+      {isSerial ? (
+        <div style={{ marginBottom: "var(--space-md)" }}>
+          <label style={labelStyle}>Serial Port</label>
           <input
             value={port}
             onChange={(e) => setPort(e.target.value)}
-            inputMode="numeric"
-            style={{ width: "100%" }}
+            placeholder="COM3 or /dev/ttyUSB0"
+            style={{ width: "100%", fontFamily: "var(--font-mono)" }}
           />
-          <div style={helpStyle}>{transport.toUpperCase()}</div>
+          <div style={helpStyle}>
+            Path to the serial device on this host. Prefix with <code>SIM:</code> to
+            use the built-in simulator (e.g. <code>SIM:projector</code>).
+          </div>
         </div>
-      </div>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 110px",
+            gap: "var(--space-md)",
+            marginBottom: "var(--space-md)",
+          }}
+        >
+          <div>
+            <label style={labelStyle}>Host / IP Address</label>
+            <input
+              value={host}
+              onChange={(e) => setHost(e.target.value)}
+              placeholder="192.168.1.100"
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Port</label>
+            <input
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+              inputMode="numeric"
+              style={{ width: "100%" }}
+            />
+            <div style={helpStyle}>{transport.toUpperCase()}</div>
+          </div>
+        </div>
+      )}
 
       {/* Driver-declared config (credentials, instance tags, etc.) */}
       {customConfigFields.length > 0 && (
@@ -377,9 +407,19 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
             }}
           />
           <div style={helpStyle}>
-            Bypasses the driver — sent as-is to {host || "the device"} on port{" "}
-            {port || defaultPort}. Useful for one-off probes; for real testing
-            pick a defined command above.
+            {isSerial ? (
+              <>
+                Bypasses the driver — sent as-is to {port || "the serial port"}.
+                Useful for one-off probes; for real testing pick a defined
+                command above.
+              </>
+            ) : (
+              <>
+                Bypasses the driver — sent as-is to {host || "the device"} on
+                port {port || defaultPort}. Useful for one-off probes; for real
+                testing pick a defined command above.
+              </>
+            )}
           </div>
         </div>
       )}
