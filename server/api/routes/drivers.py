@@ -20,6 +20,49 @@ log = get_logger(__name__)
 router = APIRouter()
 
 
+def _parse_semver(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
+
+
+def _enforce_min_platform_version(required: str) -> None:
+    """Raise HTTPException 422 if the running OpenAVC is older than ``required``.
+
+    Used by both the request-field path and the post-download YAML-parsed path
+    so /api/drivers/install and /api/discovery/install-and-match converge on
+    the same gate (A65).
+    """
+    from server.version import __version__
+
+    try:
+        current_tup = _parse_semver(__version__)
+        required_tup = _parse_semver(required)
+    except Exception:
+        log.debug("Version parse failed; allowing install", exc_info=True)
+        return
+    if current_tup < required_tup:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This driver requires OpenAVC {required} or later. "
+                f"You are running {__version__}. Please update OpenAVC first."
+            ),
+        )
+
+
+def _peek_min_platform_version(yaml_text: str) -> str | None:
+    """Best-effort extract ``min_platform_version`` from raw driver YAML."""
+    try:
+        import yaml as _yaml
+        parsed = _yaml.safe_load(yaml_text)
+    except Exception:
+        return None
+    if isinstance(parsed, dict):
+        value = parsed.get("min_platform_version")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 # --- Drivers ---
 
 
@@ -204,28 +247,12 @@ async def install_community_driver(body: CommunityDriverInstallRequest) -> dict[
     )
     from server.drivers.configurable import create_configurable_driver_class
 
-    # Check minimum platform version requirement
+    # min_platform_version supplied by the caller. The YAML body itself is
+    # checked again after download (see _enforce_min_platform_version) so
+    # callers like /api/discovery/install-and-match — which don't carry the
+    # field on the request — can't bypass the gate (A65, cousin to A32).
     if body.min_platform_version:
-        from server.version import __version__
-
-        def _parse_semver(v: str) -> tuple[int, ...]:
-            return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
-
-        try:
-            current = _parse_semver(__version__)
-            required = _parse_semver(body.min_platform_version)
-            if current < required:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"This driver requires OpenAVC {body.min_platform_version} or later. "
-                        f"You are running {__version__}. Please update OpenAVC first."
-                    ),
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            log.debug("Version check skipped (parsing failed), allowing install", exc_info=True)
+        _enforce_min_platform_version(body.min_platform_version)
 
     driver_repo = _get_driver_repo_dir()
     driver_repo.mkdir(parents=True, exist_ok=True)
@@ -264,6 +291,20 @@ async def install_community_driver(body: CommunityDriverInstallRequest) -> dict[
         raise HTTPException(status_code=502, detail=f"GitHub returned {e.response.status_code}")
     except httpx.RequestError as e:
         raise _api_error(502, f"Failed to download driver '{body.driver_id}'", e)
+
+    # For YAML drivers, also enforce min_platform_version parsed from the file
+    # itself. This guards endpoints that call install_community_driver without
+    # passing the request field (Discovery's install-and-match, future callers).
+    if ext == ".avcdriver":
+        yaml_min_version = _peek_min_platform_version(yaml_text)
+        if yaml_min_version:
+            try:
+                _enforce_min_platform_version(yaml_min_version)
+            except HTTPException:
+                # Roll back the download so an incompatible driver isn't left
+                # on disk.
+                filepath.unlink(missing_ok=True)
+                raise
 
     # If this is a YAML driver with a sibling Python companion (e.g.
     # crestron_cip → crestron_cip_discovery.py), fetch the companion
@@ -575,29 +616,11 @@ async def update_driver(driver_id: str, request: Request) -> dict[str, Any]:
     if not file_url:
         raise HTTPException(status_code=422, detail="file_url is required")
 
-    # Check minimum platform version requirement
+    # Check minimum platform version requirement (caller-supplied; YAML-based
+    # check happens after download below)
     min_ver = body.get("min_platform_version")
     if min_ver:
-        from server.version import __version__
-
-        def _parse_semver(v: str) -> tuple[int, ...]:
-            return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
-
-        try:
-            current = _parse_semver(__version__)
-            required = _parse_semver(min_ver)
-            if current < required:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"This driver version requires OpenAVC {min_ver} or later. "
-                        f"You are running {__version__}. Please update OpenAVC first."
-                    ),
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            log.debug("Version check skipped (parsing failed), allowing update", exc_info=True)
+        _enforce_min_platform_version(min_ver)
 
     # Find the existing file
     old_file = None
@@ -678,6 +701,14 @@ async def update_driver(driver_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"GitHub returned {e.response.status_code}")
     except httpx.RequestError as e:
         raise _api_error(502, f"Failed to download driver '{driver_id}'", e)
+
+    # For YAML drivers, also enforce the version pulled from the file itself
+    # so a caller that omits min_platform_version still can't install an
+    # incompatible driver (A65).
+    if ext == ".avcdriver":
+        yaml_min_version = _peek_min_platform_version(new_content)
+        if yaml_min_version:
+            _enforce_min_platform_version(yaml_min_version)
 
     # Unregister old, delete old file, write new
     unregister_driver(driver_id)
