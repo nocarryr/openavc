@@ -1839,6 +1839,17 @@ class PanelApp {
                                 const dropOutput = parseInt(cp.dataset.output);
                                 if (!lockedOutputs.has(dropOutput)) {
                                     this.send({ type: 'ui.route', element_id: element.id, input: dragStartInput, output: dropOutput });
+                                    // Audio follow video: mirror the click handler so the drag
+                                    // gesture and tap gesture behave the same with AFV on.
+                                    if (config.audio_follow_video && element.bindings?.audio_route) {
+                                        this.send({
+                                            type: 'ui.route',
+                                            element_id: element.id,
+                                            input: dragStartInput,
+                                            output: dropOutput,
+                                            audio: true,
+                                        });
+                                    }
                                 }
                             }
                             dragStartInput = null;

@@ -852,6 +852,11 @@ export function BasicProperties({
               Add an Audio Route binding in the Bindings tab to send the audio route command.
             </div>
           )}
+          {element.matrix_config?.audio_follow_video && (
+            <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "0 0 0 76px", fontStyle: "italic" }}>
+              Only enable this if your matrix needs a separate audio route command. Many switchers route audio together with video automatically — leave this off for those.
+            </div>
+          )}
           <FieldRow label="Show Lock">
             <input
               type="checkbox"
