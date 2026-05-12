@@ -313,6 +313,32 @@ async def test_accept_inbound_auth_success(isc_with_auth):
     assert peer_id == "peer-ok"
 
 
+async def test_inbound_auth_fail_dedup_counter_tracks_repeats(isc_with_auth):
+    """A57 — repeated auth failures from the same peer increment the
+    dedupe counter; the first failure logs at WARNING, the rest at DEBUG."""
+    hello = {"type": "isc.hello", "instance_id": "peer-flood", "name": "Bad"}
+    for _ in range(3):
+        ws = FakeWebSocket(auth_key="wrong_key")
+        peer_id = await isc_with_auth.accept_inbound(ws, hello)
+        assert peer_id is None
+    assert isc_with_auth._inbound_auth_fails["peer-flood"] == 3
+
+
+async def test_inbound_auth_fail_counter_clears_on_success(isc_with_auth):
+    """A57 — once the peer auths successfully, the counter resets."""
+    hello = {"type": "isc.hello", "instance_id": "peer-recovers", "name": "Recovers"}
+    # Two failures
+    for _ in range(2):
+        ws = FakeWebSocket(auth_key="wrong_key")
+        await isc_with_auth.accept_inbound(ws, hello)
+    assert isc_with_auth._inbound_auth_fails["peer-recovers"] == 2
+    # Successful auth resets
+    ws = FakeWebSocket(auth_key="secret123")
+    peer_id = await isc_with_auth.accept_inbound(ws, hello)
+    assert peer_id == "peer-recovers"
+    assert "peer-recovers" not in isc_with_auth._inbound_auth_fails
+
+
 # ---------------------------------------------------------------------------
 # Message handling
 # ---------------------------------------------------------------------------

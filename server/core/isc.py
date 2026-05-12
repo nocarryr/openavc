@@ -58,6 +58,15 @@ BEACON_TTL = 15.0                  # consider a peer gone after this many second
 
 # Reconnection back-off (seconds)
 RECONNECT_DELAYS = [5, 10, 20, 40, 60]
+# Auth-rejection back-off (seconds). When a peer rejects us with auth_failed or
+# auth_not_configured, retrying every minute forever is wasteful — auth keys
+# only change on a project reload. Stretch the wait to multi-minute intervals
+# and let reload() reset state when the user fixes the config.
+AUTH_REJECT_DELAY = 300
+
+
+class _ISCAuthRejected(ConnectionRefusedError):
+    """Outbound connect was rejected for an auth reason — backoff is long."""
 
 # Keepalive
 PING_INTERVAL = 30.0
@@ -230,6 +239,12 @@ class ISCManager:
         self._peers: dict[str, PeerInfo] = {}
         self._connections: dict[str, PeerConnection] = {}
 
+        # Auth-reject de-duplication: once we've logged that a peer rejected
+        # the inbound auth, drop subsequent identical rejections to debug to
+        # avoid the log flood A57 calls out. Reset by reload() when the user
+        # changes the auth key.
+        self._inbound_auth_fails: dict[str, int] = {}
+
         # Background tasks
         self._tasks: list[asyncio.Task] = []
         self._connect_tasks: dict[str, asyncio.Task] = {}
@@ -387,6 +402,10 @@ class ISCManager:
         if auth_key_changed:
             for peer_id in list(self._connections.keys()):
                 await self._close_peer(peer_id, emit=True)
+            # Auth key rotated — clear the inbound auth-fail dedupe map so
+            # the next failure (if any) is logged at WARNING instead of
+            # silently re-deduped against an unrelated key.
+            self._inbound_auth_fails.clear()
 
         # Drop peers removed from the manual list. After handshake the peer
         # may be re-keyed from "manual:host:port" to the real instance_id,
@@ -531,6 +550,15 @@ class ISCManager:
     # Inbound connection handling (called by isc_ws.py)
     # ------------------------------------------------------------------
 
+    def _log_inbound_auth_fail(self, peer_id: str, reason: str) -> None:
+        """Log an inbound auth rejection, downgrading repeats to debug (A57)."""
+        n = self._inbound_auth_fails.get(peer_id, 0) + 1
+        self._inbound_auth_fails[peer_id] = n
+        if n == 1:
+            log.warning(f"ISC: Rejected {peer_id[:8]} — {reason}")
+        else:
+            log.debug(f"ISC: Rejected {peer_id[:8]} — {reason} (attempt #{n})")
+
     async def accept_inbound(self, ws: Any, hello: dict[str, Any]) -> str | None:
         """
         Validate an inbound hello message and register the peer.
@@ -548,7 +576,7 @@ class ISCManager:
 
         if not self._auth_key:
             await _ws_send_fastapi(ws, {"type": "isc.reject", "reason": "auth_not_configured"})
-            log.warning(f"ISC: Rejected {peer_id[:8]} — no auth key configured")
+            self._log_inbound_auth_fail(peer_id, "no auth key configured")
             return None
 
         # HMAC challenge-response: send a nonce, peer must prove it has the key
@@ -568,8 +596,12 @@ class ISCManager:
 
         if not _verify_isc_hmac(self._auth_key, nonce, auth_msg.get("response", "")):
             await _ws_send_fastapi(ws, {"type": "isc.reject", "reason": "auth_failed"})
-            log.warning(f"ISC: Rejected {peer_id[:8]} — HMAC verification failed")
+            self._log_inbound_auth_fail(peer_id, "HMAC verification failed")
             return None
+
+        # Auth succeeded — clear any prior fail count so a future failure is
+        # logged at WARNING again (the peer recovered or rotated keys).
+        self._inbound_auth_fails.pop(peer_id, None)
 
         # Atomic duplicate-detect + register under _peer_lock. An in-flight
         # outbound (still in handshake, not yet in _connections) also counts
@@ -823,12 +855,32 @@ class ISCManager:
     async def _outbound_loop(self, peer_id: str, host: str, port: int) -> None:
         """Maintain an outbound connection to a peer with reconnection."""
         attempt = 0
+        auth_fails = 0
+        delay: float | None = None
         while self._running:
             try:
                 await self._outbound_connect(peer_id, host, port)
                 attempt = 0  # Reset on successful connection
+                auth_fails = 0
+                delay = None
             except asyncio.CancelledError:
                 return
+            except _ISCAuthRejected as e:
+                # Auth keys only change on project reload; retrying every
+                # minute floods both logs and the peer. Stretch the backoff
+                # and log only the first failure at WARNING. (A57)
+                auth_fails += 1
+                if auth_fails == 1:
+                    log.warning(
+                        f"ISC: Peer {peer_id[:8]} auth rejected ({e}); "
+                        f"backing off to {AUTH_REJECT_DELAY}s until configuration changes"
+                    )
+                else:
+                    log.debug(
+                        f"ISC: Peer {peer_id[:8]} auth rejected ({e}); "
+                        f"attempt #{auth_fails}"
+                    )
+                delay = AUTH_REJECT_DELAY
             except ConnectionRefusedError as e:
                 if "duplicate" in str(e):
                     log.debug(f"ISC: Peer {peer_id[:8]} already connected (duplicate), stopping outbound")
@@ -840,12 +892,15 @@ class ISCManager:
             if not self._running:
                 return
 
-            # Back off
-            idx = min(attempt, len(RECONNECT_DELAYS) - 1)
-            delay = RECONNECT_DELAYS[idx]
-            attempt += 1
+            # Back off — auth rejections use the longer fixed delay; otherwise
+            # walk the standard escalating schedule.
+            if delay is None:
+                idx = min(attempt, len(RECONNECT_DELAYS) - 1)
+                delay = RECONNECT_DELAYS[idx]
+                attempt += 1
             log.debug(f"ISC: Reconnecting to {peer_id[:8]} in {delay}s")
             await asyncio.sleep(delay)
+            delay = None
 
     async def _outbound_connect(self, peer_id: str, host: str, port: int) -> None:
         """Connect to a peer, authenticate, and run the message loop."""
@@ -870,6 +925,8 @@ class ISCManager:
 
             if resp.get("type") == "isc.reject":
                 reason = resp.get("reason", "unknown")
+                if reason in ("auth_failed", "auth_not_configured"):
+                    raise _ISCAuthRejected(reason)
                 log.warning(f"ISC: Peer {peer_id[:8]} rejected: {reason}")
                 raise ConnectionRefusedError(reason)
 
@@ -890,6 +947,8 @@ class ISCManager:
 
             if resp.get("type") == "isc.reject":
                 reason = resp.get("reason", "unknown")
+                if reason in ("auth_failed", "auth_not_configured"):
+                    raise _ISCAuthRejected(reason)
                 log.warning(f"ISC: Peer {peer_id[:8]} rejected: {reason}")
                 raise ConnectionRefusedError(reason)
 
