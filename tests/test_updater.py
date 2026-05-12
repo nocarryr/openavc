@@ -391,3 +391,80 @@ class TestUpdateManager:
         result = await mgr.apply_update()
         assert result["success"] is False
         assert "does not support self-update" in result["error"]
+
+    async def test_apply_update_clears_marker_on_apply_failure(self, tmp_path):
+        """A58: when the apply step raises, the pending-update marker must NOT
+        survive on disk — otherwise the next manual restart triggers a false
+        rollback against a from_version the user never moved away from.
+        """
+        mock_state = MagicMock()
+        mock_state.set = MagicMock()
+        mgr = UpdateManager(state_store=mock_state, data_dir=tmp_path)
+
+        # Force the manager to think it's a self-updating deployment.
+        mgr._deployment_type = DeploymentType.LINUX_PACKAGE
+
+        mgr._checker._last_check_result = ReleaseInfo(
+            version="1.0.0",
+            tag="v1.0.0",
+            prerelease=False,
+            changelog="",
+            published_at="2026-06-01T00:00:00Z",
+        )
+
+        artifact = tmp_path / "openavc-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake")
+
+        with patch(
+            "server.updater.backup.create_backup",
+            return_value=tmp_path / "backup.zip",
+        ), patch(
+            "server.updater.backup.cleanup_old_backups",
+        ), patch.object(
+            mgr, "_download_update", new_callable=AsyncMock, return_value=artifact
+        ), patch.object(
+            mgr, "_apply_linux", side_effect=OSError("disk full")
+        ):
+            result = await mgr.apply_update()
+
+        assert result["success"] is False
+        assert "disk full" in result["error"]
+        # Marker must be cleared so a manual restart doesn't roll back stale.
+        assert not (tmp_path / "pending-update").exists(), (
+            "pending-update marker leaked after apply failure"
+        )
+
+    async def test_apply_cloud_update_clears_marker_on_apply_failure(self, tmp_path):
+        """A58: same invariant for apply_cloud_update()."""
+        mock_state = MagicMock()
+        mock_state.set = MagicMock()
+        mgr = UpdateManager(state_store=mock_state, data_dir=tmp_path)
+
+        mgr._deployment_type = DeploymentType.LINUX_PACKAGE
+
+        artifact = tmp_path / "openavc-9.9.9.tar.gz"
+        artifact.write_bytes(b"fake")
+
+        with patch(
+            "server.updater.backup.create_backup",
+            return_value=tmp_path / "backup.zip",
+        ), patch(
+            "server.updater.backup.cleanup_old_backups",
+        ), patch.object(
+            mgr,
+            "_download_artifact",
+            new_callable=AsyncMock,
+            return_value=artifact,
+        ), patch.object(
+            mgr, "_apply_linux", side_effect=OSError("read-only filesystem")
+        ):
+            result = await mgr.apply_cloud_update(
+                target_version="9.9.9",
+                update_url="https://example.com/openavc-9.9.9.tar.gz",
+                checksum_sha256=None,
+            )
+
+        assert result["success"] is False
+        assert not (tmp_path / "pending-update").exists(), (
+            "pending-update marker leaked after cloud apply failure"
+        )

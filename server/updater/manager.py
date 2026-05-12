@@ -373,6 +373,15 @@ class UpdateManager:
         except Exception as e:
             error_msg = f"Update failed: {e}"
             log.exception(error_msg)
+            # Clear the pending-update marker so a subsequent manual restart
+            # doesn't trigger a false rollback against a stale from_version
+            # (A58). The marker is meaningful only after the apply step has
+            # successfully scheduled the version transition.
+            from server.updater.rollback import clear_pending_marker
+            try:
+                clear_pending_marker(self._data_dir)
+            except OSError:
+                log.exception("Failed to clear stale pending-update marker")
             self._set_state("system.update_status", "error")
             self._set_state("system.update_error", error_msg)
             self._add_history_entry(__version__, release.version, "failed", error_msg)
@@ -449,6 +458,14 @@ class UpdateManager:
         except Exception as e:
             error_msg = f"Update failed: {e}"
             log.exception(error_msg)
+            # Clear the pending-update marker so a subsequent manual restart
+            # doesn't trigger a false rollback against a stale from_version
+            # (A58). Same rationale as the GitHub-driven apply_update path.
+            from server.updater.rollback import clear_pending_marker
+            try:
+                clear_pending_marker(self._data_dir)
+            except OSError:
+                log.exception("Failed to clear stale pending-update marker")
             self._set_state("system.update_status", "error")
             self._set_state("system.update_error", error_msg)
             self._add_history_entry(__version__, target_version, "failed", error_msg)
