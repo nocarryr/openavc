@@ -900,7 +900,13 @@ class PluginLoader:
         return result
 
     def get_all_extensions(self) -> dict[str, Any]:
-        """Get all extensions from running plugins, organized by extension type."""
+        """Get all extensions from running plugins, organized by extension type.
+
+        Sanitizes each extension's ``state_pattern`` to keep plugins inside their
+        ``plugin.<id>.*`` namespace. A hostile or careless extension that
+        declares ``state_pattern: "*"`` or ``"device.*"`` would otherwise let a
+        plugin's sidebar scrape unrelated state (A71).
+        """
         result: dict[str, list] = {
             "views": [],
             "device_panels": [],
@@ -917,16 +923,53 @@ class PluginLoader:
 
             info = plugin_class.PLUGIN_INFO
             plugin_name = info.get("name", plugin_id)
+            namespace_prefix = f"plugin.{plugin_id}."
 
             for ext_type in result:
                 for ext in extensions.get(ext_type, []):
-                    result[ext_type].append({
+                    safe_ext = {
                         **ext,
                         "plugin_id": plugin_id,
                         "plugin_name": plugin_name,
-                    })
+                    }
+                    pattern = safe_ext.get("state_pattern")
+                    if pattern is not None:
+                        normalized = self._sanitize_state_pattern(
+                            pattern, plugin_id, namespace_prefix
+                        )
+                        safe_ext["state_pattern"] = normalized
+                    result[ext_type].append(safe_ext)
 
         return result
+
+    @staticmethod
+    def _sanitize_state_pattern(
+        pattern: Any, plugin_id: str, namespace_prefix: str
+    ) -> str:
+        """Force a plugin's state_pattern into its own namespace.
+
+        Returns the original pattern if it's safely scoped; otherwise rewrites
+        to the default ``plugin.<id>.*`` and logs a warning. ``{device_id}``
+        and similar placeholders inside the namespace are allowed.
+        """
+        default_pattern = f"{namespace_prefix}*"
+        if not isinstance(pattern, str):
+            log.warning(
+                "Plugin '%s' state_pattern is not a string (%r); using default %r",
+                plugin_id, pattern, default_pattern,
+            )
+            return default_pattern
+        trimmed = pattern.strip()
+        if not trimmed:
+            return default_pattern
+        if not trimmed.startswith(namespace_prefix):
+            log.warning(
+                "Plugin '%s' state_pattern %r escapes its namespace; "
+                "rewriting to %r",
+                plugin_id, trimmed, default_pattern,
+            )
+            return default_pattern
+        return trimmed
 
     # ──── Validation Endpoint Support ────
 

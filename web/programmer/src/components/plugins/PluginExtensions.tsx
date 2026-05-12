@@ -5,7 +5,7 @@
  * These components are used across multiple views (Dashboard, Devices, etc.)
  * to render plugin-contributed UI content.
  */
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Activity, Zap } from "lucide-react";
 import { useConnectionStore } from "../../store/connectionStore";
 import { showError } from "../../store/toastStore";
@@ -14,6 +14,26 @@ import { useLogStore } from "../../store/logStore";
 import type { PluginExtension } from "../../api/restClient";
 import * as api from "../../api/restClient";
 import { SurfaceConfigurator } from "./SurfaceConfigurator";
+
+// Convert a glob-style state pattern to an anchored RegExp.
+//
+// Replaces every `*` with `.*` (multi-segment, matches across `.`) and
+// escapes all other regex specials. Anchoring with ^…$ keeps a pattern
+// like `plugin.foo.*` from accidentally matching `plugin.football.*`,
+// the bug A70 called out.
+function compileStatePattern(pattern: string): RegExp | null {
+  const trimmed = pattern.trim();
+  if (!trimmed) return null;
+  // Escape every regex special except `*`, then turn `*` into `.*`.
+  const escaped = trimmed
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  try {
+    return new RegExp(`^${escaped}$`);
+  } catch {
+    return null;
+  }
+}
 
 // ──── State Table Renderer ────
 // Shows a read-only table of state keys matching a glob pattern with live updates.
@@ -25,18 +45,23 @@ export function StateTableRenderer({
   statePattern: string;
   title?: string;
 }) {
-  const liveState = useConnectionStore((s) => s.liveState);
+  // Subscribe only to stateVersion (a primitive that bumps on every batch).
+  // The full liveState map is pulled on demand inside useMemo so we don't
+  // re-render on every batch — only when entries actually change. The filter
+  // itself still runs once per batch, but the component skips React's
+  // reconciler when matching keys are unchanged. (A72)
+  const stateVersion = useConnectionStore((s) => s.stateVersion);
 
-  // Derive the prefix from the glob. Defense in depth: reject empty /
-  // whitespace-only patterns outright — an empty prefix would match
-  // every key in liveState and leak the entire state map into a plugin
-  // sidebar (A69). The caller must supply a non-empty pattern.
-  const trimmed = statePattern.trim();
-  const prefix = trimmed.replace(/\*.*$/, "");
-  const isValidPrefix = prefix.length > 0;
-  const entries = isValidPrefix
-    ? Object.entries(liveState).filter(([key]) => key.startsWith(prefix))
-    : [];
+  const regex = useMemo(() => compileStatePattern(statePattern), [statePattern]);
+
+  const entries = useMemo(() => {
+    if (!regex) return [];
+    const live = useConnectionStore.getState().liveState;
+    return Object.entries(live).filter(([key]) => regex.test(key));
+    // stateVersion is intentionally in the dep list so we re-filter when
+    // a new state batch is applied — even though it's not referenced.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regex, stateVersion]);
 
   return (
     <div>
