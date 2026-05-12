@@ -69,10 +69,17 @@ _BASH_PATH = _find_bash()
 _BASH_AVAILABLE = _BASH_PATH is not None
 
 
-def _build_fake_install(target_dir: Path, version: str = "1.0.0") -> None:
+def _build_fake_install(
+    target_dir: Path, version: str = "1.0.0", *, with_venv: bool = True
+) -> None:
     """Build a directory that looks like /opt/openavc after installation.
 
     Matches the real structure: server/, web/, requirements.txt, etc.
+
+    Includes a minimal venv/bin/python3 marker file by default so the
+    integrity check in update-helper.sh treats the directory as a
+    complete install (A61). Set ``with_venv=False`` to simulate a
+    partial / corrupt install for rollback-refusal tests.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "server").mkdir(exist_ok=True)
@@ -91,6 +98,11 @@ def _build_fake_install(target_dir: Path, version: str = "1.0.0") -> None:
     (target_dir / "pyproject.toml").write_text(
         f'[project]\nname = "openavc"\nversion = "{version}"\n'
     )
+    if with_venv:
+        (target_dir / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (target_dir / "venv" / "bin" / "python3").write_text(
+            "#!/usr/bin/python3\n# stub for tests\n"
+        )
 
 
 def _build_update_tarball(staging_dir: Path, version: str) -> Path:
@@ -554,16 +566,22 @@ class TestHelperScriptApplyUpdate:
         assert "1.0.0" in prev_version_content
 
     def test_preserves_files_not_in_tarball(self, tmp_path):
-        """Files in the app dir that aren't in the tarball should survive
-        the extraction (tar extracts over existing dir, doesn't delete first)."""
+        """Preserved dirs (venv, driver_repo, plugin_repo) survive the swap
+        even though the tarball never ships them."""
         data_dir = tmp_path / "data"
         app_dir = tmp_path / "app"
         data_dir.mkdir()
         _build_fake_install(app_dir, "1.0.0")
-        # Add a file that won't be in the tarball (like venv/)
-        (app_dir / "venv").mkdir()
-        (app_dir / "venv" / "bin").mkdir(parents=True)
+        # Custom file inside the preserved venv dir, plus a marker in
+        # driver_repo/ and plugin_repo/ to prove user content survives.
         (app_dir / "venv" / "bin" / "python").write_text("#!/usr/bin/python3")
+        (app_dir / "driver_repo").mkdir(exist_ok=True)
+        (app_dir / "driver_repo" / "my_driver.avcdriver").write_text("id: my_driver\n")
+        (app_dir / "plugin_repo").mkdir(exist_ok=True)
+        (app_dir / "plugin_repo" / "my_plugin").mkdir()
+        (app_dir / "plugin_repo" / "my_plugin" / "plugin.json").write_text(
+            '{"id": "my_plugin"}'
+        )
 
         tarball = _build_update_tarball(tmp_path / "staging", "2.0.0")
         instruction = {
@@ -575,8 +593,10 @@ class TestHelperScriptApplyUpdate:
 
         _run_helper(data_dir, app_dir)
 
-        # venv should still exist (tarball didn't include it)
+        # All preserved dirs and their custom content must survive.
         assert (app_dir / "venv" / "bin" / "python").exists()
+        assert (app_dir / "driver_repo" / "my_driver.avcdriver").exists()
+        assert (app_dir / "plugin_repo" / "my_plugin" / "plugin.json").exists()
 
     def test_missing_artifact_skips_and_cleans_up(self, tmp_path):
         """If the tarball doesn't exist, skip the update, remove instruction,
@@ -685,6 +705,102 @@ class TestHelperScriptRollback:
         assert result.returncode == 0
         assert not (data_dir / "apply-rollback").exists()
         assert _read_version(app_dir) == "2.0.0"
+
+    def test_corrupt_previous_refused(self, tmp_path):
+        """A61: a $PREVIOUS that exists but lacks key files (e.g. partial
+        cp -a from a prior crashed update) must NOT be promoted. Promoting
+        it would leave no working install."""
+        data_dir = tmp_path / "data"
+        app_dir = tmp_path / "app"
+        previous = Path(str(app_dir) + ".previous")
+        data_dir.mkdir()
+
+        # Current install (v2.0.0, broken — that's why rollback was requested)
+        _build_fake_install(app_dir, "2.0.0")
+        # Previous install is CORRUPT — missing venv/bin/python3 (partial cp -a)
+        _build_fake_install(previous, "1.0.0", with_venv=False)
+        (data_dir / "apply-rollback").write_text("")
+
+        result = _run_helper(data_dir, app_dir)
+
+        assert result.returncode == 0
+        # Rollback was refused — current install must be untouched
+        assert _read_version(app_dir) == "2.0.0"
+        # Marker cleared so we don't loop on the corrupt rollback
+        assert not (data_dir / "apply-rollback").exists()
+        # Failure mode logged so an operator can investigate
+        assert "corrupt" in result.stdout.lower() or "corrupt" in result.stderr.lower()
+
+
+@pytest.mark.skipif(not _BASH_AVAILABLE, reason="bash not available")
+class TestHelperScriptAtomicSwap:
+    """A62: atomic-swap-extract guarantees that files removed in the new
+    release do not linger in $APP_DIR after an update."""
+
+    def test_removed_files_purged(self, tmp_path):
+        """A file that exists in v1.0.0 but is removed in v2.0.0's tarball
+        must NOT survive the update — the old overlay-extract approach
+        would leave it behind for driver_loader / importlib to pick up."""
+        data_dir = tmp_path / "data"
+        app_dir = tmp_path / "app"
+        data_dir.mkdir()
+        _build_fake_install(app_dir, "1.0.0")
+
+        # File that v1.0.0 had but v2.0.0 removed.
+        (app_dir / "server" / "drivers").mkdir(parents=True, exist_ok=True)
+        (app_dir / "server" / "drivers" / "deprecated_driver.py").write_text(
+            "# removed in v2.0.0\n"
+        )
+
+        # Tarball for v2.0.0 — built fresh from _build_fake_install, so it
+        # never contains deprecated_driver.py.
+        tarball = _build_update_tarball(tmp_path / "staging", "2.0.0")
+
+        instruction = {
+            "artifact": str(tarball),
+            "from_version": "1.0.0",
+            "to_version": "2.0.0",
+        }
+        (data_dir / "apply-update.json").write_text(json.dumps(instruction))
+
+        result = _run_helper(data_dir, app_dir)
+
+        assert result.returncode == 0
+        assert _read_version(app_dir) == "2.0.0"
+        # The deprecated file must NOT be in $APP_DIR after the swap.
+        assert not (app_dir / "server" / "drivers" / "deprecated_driver.py").exists(), (
+            "atomic-swap-extract did not purge file removed in the new release"
+        )
+
+    def test_previous_snapshot_is_complete(self, tmp_path):
+        """After an update, $APP_DIR.previous must be a full snapshot of
+        the old install — including venv, driver_repo, plugin_repo — so a
+        future rollback has everything it needs."""
+        data_dir = tmp_path / "data"
+        app_dir = tmp_path / "app"
+        data_dir.mkdir()
+        _build_fake_install(app_dir, "1.0.0")
+        (app_dir / "driver_repo").mkdir(exist_ok=True)
+        (app_dir / "driver_repo" / "x.avcdriver").write_text("id: x\n")
+
+        tarball = _build_update_tarball(tmp_path / "staging", "2.0.0")
+        instruction = {
+            "artifact": str(tarball),
+            "from_version": "1.0.0",
+            "to_version": "2.0.0",
+        }
+        (data_dir / "apply-update.json").write_text(json.dumps(instruction))
+
+        _run_helper(data_dir, app_dir)
+
+        previous = Path(str(app_dir) + ".previous")
+        assert previous.is_dir()
+        # Full snapshot of the OLD install — code, venv, user repos.
+        assert (previous / "server" / "version.py").exists()
+        assert (previous / "venv" / "bin" / "python3").exists(), (
+            "A61: snapshot is missing venv — rollback would be refused as corrupt"
+        )
+        assert (previous / "driver_repo" / "x.avcdriver").exists()
 
 
 # ===========================================================================
