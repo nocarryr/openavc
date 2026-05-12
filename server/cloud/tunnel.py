@@ -94,7 +94,12 @@ class TunnelHandler:
                 ping_interval=None,
                 ping_timeout=None,
                 close_timeout=10,
-                max_size=2**20,
+                # 16 MB ceiling (A46). The previous 1 MB ceiling broke any
+                # upload past ~750 KB after base64 inflation, killing driver
+                # / plugin / asset / theme uploads through a remote tunnel.
+                # 16 MB matches the typical FastAPI/Starlette default on the
+                # cloud receive side and keeps memory bounded.
+                max_size=2**24,
             )
 
             self._tunnels[tunnel_id] = conn
@@ -282,15 +287,33 @@ class TunnelHandler:
     async def _handle_ws_open(self, conn: TunnelConnection, msg: dict) -> None:
         """Open a local WebSocket connection for proxying."""
         ws_id = msg.get("id", "")
+        # `path` may include a query string (A47): preserve it intact so
+        # endpoints that rely on `?token=…` style auth still authenticate.
         path = msg.get("path", "/")
-
         url = f"ws://localhost:{conn.target_port}{path}"
+
+        # Subprotocols arrive as a structured list; pass them to the
+        # `websockets` client so it can negotiate with the local server.
+        subprotocols = msg.get("subprotocols") or None
+        # Forward only application-level headers; drop hop-by-hop and any
+        # WebSocket-handshake headers the client library generates itself.
+        raw_headers = msg.get("headers") or {}
+        drop = {
+            "host", "connection", "upgrade", "sec-websocket-key",
+            "sec-websocket-version", "sec-websocket-extensions",
+            "sec-websocket-protocol", "content-length", "transfer-encoding",
+        }
+        additional_headers = [
+            (k, v) for k, v in raw_headers.items() if k.lower() not in drop
+        ]
 
         try:
             local_ws = await websockets.connect(
                 url,
                 ping_interval=None,
                 ping_timeout=None,
+                subprotocols=subprotocols,
+                additional_headers=additional_headers or None,
             )
             conn.local_ws_connections[ws_id] = local_ws
 

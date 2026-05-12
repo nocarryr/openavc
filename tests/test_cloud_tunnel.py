@@ -251,3 +251,143 @@ async def test_http_request_proxied(tunnel_handler, mock_agent):
     assert base64.b64decode(sent["body"]) == b"<html>Hello</html>"
 
     await tunnel_handler.stop()
+
+
+# ===========================================================================
+# A45 — HTTP query strings must survive the tunnel hop. The cloud now bakes
+# the query into `path` and the agent passes the path through to httpx, which
+# preserves it when building the local URL.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_http_request_preserves_query_string(tunnel_handler, mock_agent):
+    """Query string baked into `path` should be passed to the local server."""
+    from server.cloud.tunnel import TunnelConnection
+
+    mock_data_ws = AsyncMock()
+    mock_data_ws.send = AsyncMock()
+
+    conn = TunnelConnection(tunnel_id="t-q", target_port=8080, data_ws=mock_data_ws)
+    tunnel_handler._tunnels["t-q"] = conn
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {}
+    mock_response.content = b"ok"
+
+    mock_client = AsyncMock()
+    mock_client.request = AsyncMock(return_value=mock_response)
+    tunnel_handler._http_client = mock_client
+
+    msg = {
+        "type": "http_request",
+        "id": "req-q",
+        "method": "GET",
+        "path": "/api/scripts?enabled=true&owner=aaron",
+        "headers": {},
+        "body": "",
+    }
+    await tunnel_handler._handle_http_request(conn, msg)
+
+    # The httpx call should have included the query string in the URL.
+    call_kwargs = mock_client.request.call_args.kwargs
+    url = call_kwargs["url"]
+    assert "?enabled=true&owner=aaron" in url
+    assert url == "http://localhost:8080/api/scripts?enabled=true&owner=aaron"
+
+    await tunnel_handler.stop()
+
+
+# ===========================================================================
+# A47 — WebSocket subprotocols and filtered headers must flow through ws_open
+# to the agent's localhost connect. Hop-by-hop headers stay stripped.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws_open_passes_subprotocols_and_headers(tunnel_handler, mock_agent):
+    """ws_open with subprotocols + custom headers should reach websockets.connect."""
+    from server.cloud.tunnel import TunnelConnection
+    from unittest.mock import patch, AsyncMock as _AsyncMock
+
+    mock_data_ws = AsyncMock()
+    mock_data_ws.send = AsyncMock()
+
+    conn = TunnelConnection(tunnel_id="t-ws", target_port=8080, data_ws=mock_data_ws)
+    tunnel_handler._tunnels["t-ws"] = conn
+
+    mock_local_ws = AsyncMock()
+    mock_local_ws.recv = AsyncMock(side_effect=asyncio.CancelledError)
+    mock_local_ws.close = AsyncMock()
+    # async iterator over zero frames so _forward_local_ws exits cleanly
+    mock_local_ws.__aiter__ = lambda self: self
+    mock_local_ws.__anext__ = _AsyncMock(side_effect=StopAsyncIteration)
+
+    msg = {
+        "type": "ws_open",
+        "id": "ws-1",
+        "path": "/programmer/ws?session=abc",
+        "headers": {
+            "x-app-key": "value",
+            "host": "tunnel.example.com",
+            "connection": "Upgrade",
+            "upgrade": "websocket",
+            "sec-websocket-key": "abc",
+            "sec-websocket-version": "13",
+            "sec-websocket-protocol": "openavc.v1",
+        },
+        "subprotocols": ["openavc.v1", "openavc.v2"],
+    }
+
+    with patch("server.cloud.tunnel.websockets.connect", new=_AsyncMock(return_value=mock_local_ws)) as p:
+        await tunnel_handler._handle_ws_open(conn, msg)
+        # Brief yield so the forward task touches __aiter__ before we stop()
+        await asyncio.sleep(0)
+
+        call_kwargs = p.call_args.kwargs
+        # Subprotocols flow through as a structured list
+        assert call_kwargs["subprotocols"] == ["openavc.v1", "openavc.v2"]
+        # Query string preserved in the connect URL
+        assert "?session=abc" in p.call_args.args[0]
+        # additional_headers includes app headers, strips hop-by-hop + WS handshake
+        hdr_pairs = call_kwargs["additional_headers"]
+        hdr_keys = {k.lower() for k, _ in hdr_pairs}
+        assert "x-app-key" in hdr_keys
+        for forbidden in (
+            "host", "connection", "upgrade",
+            "sec-websocket-key", "sec-websocket-version",
+            "sec-websocket-protocol",
+        ):
+            assert forbidden not in hdr_keys, f"{forbidden} should have been stripped"
+
+    await tunnel_handler.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_open_no_subprotocols_no_headers(tunnel_handler, mock_agent):
+    """ws_open without subprotocols passes None to websockets.connect (default behavior)."""
+    from server.cloud.tunnel import TunnelConnection
+    from unittest.mock import patch, AsyncMock as _AsyncMock
+
+    mock_data_ws = AsyncMock()
+    conn = TunnelConnection(tunnel_id="t-bare", target_port=8080, data_ws=mock_data_ws)
+    tunnel_handler._tunnels["t-bare"] = conn
+
+    mock_local_ws = AsyncMock()
+    mock_local_ws.__aiter__ = lambda self: self
+    mock_local_ws.__anext__ = _AsyncMock(side_effect=StopAsyncIteration)
+
+    msg = {
+        "type": "ws_open",
+        "id": "ws-bare",
+        "path": "/programmer/ws",
+        "headers": {},
+    }
+    with patch("server.cloud.tunnel.websockets.connect", new=_AsyncMock(return_value=mock_local_ws)) as p:
+        await tunnel_handler._handle_ws_open(conn, msg)
+        call_kwargs = p.call_args.kwargs
+        assert call_kwargs["subprotocols"] is None
+        assert call_kwargs["additional_headers"] is None
+
+    await tunnel_handler.stop()
