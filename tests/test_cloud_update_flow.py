@@ -82,6 +82,7 @@ async def test_apply_cloud_update_full_flow(tmp_path):
     # Build the manager with mocked internals
     mgr = UpdateManager.__new__(UpdateManager)
     mgr._data_dir = data_dir
+    mgr._project_path = data_dir / "project.avc"
     mgr._state = MagicMock()
     mgr._checker = MagicMock()
     mgr._update_in_progress = False
@@ -148,6 +149,7 @@ async def test_apply_cloud_update_bad_checksum(tmp_path):
 
     mgr = UpdateManager.__new__(UpdateManager)
     mgr._data_dir = data_dir
+    mgr._project_path = data_dir / "project.avc"
     mgr._state = MagicMock()
     mgr._checker = MagicMock()
     mgr._update_in_progress = False
@@ -190,6 +192,7 @@ async def test_apply_cloud_update_no_checksum(tmp_path):
 
     mgr = UpdateManager.__new__(UpdateManager)
     mgr._data_dir = data_dir
+    mgr._project_path = data_dir / "project.avc"
     mgr._state = MagicMock()
     mgr._checker = MagicMock()
     mgr._update_in_progress = False
@@ -391,6 +394,9 @@ async def test_command_handler_auto_restart_false():
     events = MockEventBus()
     devices = MockDeviceManager()
     update_manager = AsyncMock()
+    # stage_update is sync (manager.py:495); override the AsyncMock default
+    # so the call doesn't return an un-awaited coroutine.
+    update_manager.stage_update = MagicMock()
 
     handler = CommandHandler(agent, devices, events, update_manager=update_manager)
 
@@ -408,10 +414,14 @@ async def test_command_handler_auto_restart_false():
          patch("server.updater.platform.detect_deployment_type"):
         await handler.handle(msg)
 
-    # Should NOT have called apply at all
+    # Should NOT have called apply at all — the cloud-provided URL is staged
+    # so a later manual apply uses it (A63 wiring).
     update_manager.apply_cloud_update.assert_not_called()
     update_manager.apply_update.assert_not_called()
-    assert "auto_restart=false" in agent.sent[0][1]["result"]
+    update_manager.stage_update.assert_called_once()
+    result_text = agent.sent[0][1]["result"]
+    assert "staged" in result_text
+    assert "Programmer IDE" in result_text
 
 
 # ===========================================================================
