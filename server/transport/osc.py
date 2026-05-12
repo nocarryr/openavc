@@ -95,16 +95,66 @@ class OSCTransport:
         Sends an OSC /info query (no args) and waits for any UDP response.
         Most OSC devices respond to /info with console metadata. Returns
         True if any datagram arrives back, False on timeout.
+
+        When a separate listen socket is configured (``listen_port > 0``),
+        the device may reply to the dedicated feedback port and never to
+        the send socket (e.g. ETC Eos consoles, which emit
+        ``/eos/out/...`` continuously to their configured OSC TX port).
+        In that case the send-socket ``send_and_wait`` is raced against
+        polling the listen socket's last-data timestamp; either path
+        counts as a verified connection.
         """
         if self._udp is None or not self._udp.host or not self._udp.port:
             return False
 
         probe = osc_encode_message("/info")
-        try:
-            await self._udp.send_and_wait(probe, timeout=timeout)
-            return True
-        except (asyncio.TimeoutError, OSError):
+        listen_active = self._listen_port > 0
+        # Snapshot the listen-socket baseline BEFORE sending so earlier
+        # unrelated traffic can't satisfy the race retroactively.
+        baseline = (
+            getattr(self, "_listen_last_data", 0.0) if listen_active else 0.0
+        )
+
+        async def _send_and_wait() -> bool:
+            try:
+                await self._udp.send_and_wait(probe, timeout=timeout)
+                return True
+            except (asyncio.TimeoutError, OSError):
+                return False
+
+        if not listen_active:
+            return await _send_and_wait()
+
+        async def _listen_for_reply() -> bool:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            while loop.time() < deadline:
+                if getattr(self, "_listen_last_data", 0.0) > baseline:
+                    return True
+                await asyncio.sleep(0.02)
             return False
+
+        send_task = asyncio.create_task(_send_and_wait())
+        listen_task = asyncio.create_task(_listen_for_reply())
+        try:
+            done, pending = await asyncio.wait(
+                {send_task, listen_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            return any(task.result() for task in done)
+        finally:
+            # Defensive: make sure neither task leaks if asyncio.wait
+            # raised for any reason.
+            for task in (send_task, listen_task):
+                if not task.done():
+                    task.cancel()
 
     async def close(self) -> None:
         """Close all sockets."""
