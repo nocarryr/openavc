@@ -303,16 +303,42 @@ class CommandHandler:
                 return
 
             if not can_self_update(deployment_type):
+                # A64 — fleet operations need to tell immutable deployments
+                # (Docker, git_dev) apart from a real failure. Return failure
+                # with a structured error tag so the cloud bucket isn't a
+                # green "applied" for systems that haven't moved.
                 await self._send_result(
-                    request_id, True,
-                    result=f"Update to {target_version} available but this deployment type does not support self-update.",
+                    request_id, False,
+                    error="deployment_immutable",
+                    result=(
+                        f"Update to {target_version} cannot be applied: this "
+                        f"deployment ({deployment_type}) is immutable. Update "
+                        "via the deployment's native channel."
+                    ),
                 )
                 return
 
             if not auto_restart:
+                # A63 — persist the cloud-provided URL + checksum so a later
+                # manual apply uses this exact target instead of falling
+                # back to GitHub. Surface system.update_staged_version so the
+                # IDE can show "Update v0.6.0 staged by cloud".
+                if update_url:
+                    self._update_manager.stage_update(
+                        target_version, update_url, checksum_sha256,
+                    )
+                    result_text = (
+                        f"Update to {target_version} staged. Apply from the "
+                        "Programmer IDE when ready."
+                    )
+                else:
+                    result_text = (
+                        f"Update to {target_version} available. "
+                        "auto_restart=false, waiting for manual apply."
+                    )
                 await self._send_result(
                     request_id, True,
-                    result=f"Update to {target_version} available. auto_restart=false, waiting for manual apply.",
+                    result=result_text,
                 )
                 return
 

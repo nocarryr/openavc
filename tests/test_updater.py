@@ -468,3 +468,66 @@ class TestUpdateManager:
         assert not (tmp_path / "pending-update").exists(), (
             "pending-update marker leaked after cloud apply failure"
         )
+
+    # --- A63: cloud staged update -----------------------------------------
+
+    def test_stage_update_persists_to_disk(self, tmp_path):
+        """stage_update writes target_version + update_url to staged-update.json."""
+        mock_state = MagicMock()
+        mgr = UpdateManager(state_store=mock_state, data_dir=tmp_path)
+        mgr.stage_update(
+            "0.6.0", "https://example.com/x.tar.gz", checksum_sha256="abc"
+        )
+        staged = mgr.get_staged_update()
+        assert staged is not None
+        assert staged["target_version"] == "0.6.0"
+        assert staged["update_url"] == "https://example.com/x.tar.gz"
+        assert staged["checksum_sha256"] == "abc"
+        mock_state.set.assert_any_call(
+            "system.update_staged_version", "0.6.0", source="system"
+        )
+
+    def test_get_staged_update_returns_none_when_absent(self, tmp_path):
+        mgr = UpdateManager(state_store=None, data_dir=tmp_path)
+        assert mgr.get_staged_update() is None
+
+    def test_get_staged_update_ignores_malformed_payload(self, tmp_path):
+        mgr = UpdateManager(state_store=None, data_dir=tmp_path)
+        (tmp_path / "staged-update.json").write_text("::: not json :::")
+        assert mgr.get_staged_update() is None
+
+    def test_clear_staged_update_removes_file(self, tmp_path):
+        mock_state = MagicMock()
+        mgr = UpdateManager(state_store=mock_state, data_dir=tmp_path)
+        mgr.stage_update("0.6.0", "https://example.com/x.tar.gz")
+        assert (tmp_path / "staged-update.json").exists()
+        mgr.clear_staged_update()
+        assert not (tmp_path / "staged-update.json").exists()
+        assert mgr.get_staged_update() is None
+
+    async def test_apply_update_consumes_staged_update(self, tmp_path):
+        """apply_update routes to apply_cloud_update with staged params and clears."""
+        mock_state = MagicMock()
+        mock_state.get = MagicMock(return_value="")
+        mgr = UpdateManager(state_store=mock_state, data_dir=tmp_path)
+        mgr.stage_update(
+            "9.9.9", "https://example.com/openavc-9.9.9.tar.gz", "sha256hex"
+        )
+
+        captured: dict = {}
+
+        async def fake_apply_cloud(target_version, update_url, checksum_sha256=None):
+            captured["target_version"] = target_version
+            captured["update_url"] = update_url
+            captured["checksum_sha256"] = checksum_sha256
+            return {"success": True, "message": "ok"}
+
+        with patch.object(mgr, "apply_cloud_update", new=fake_apply_cloud):
+            result = await mgr.apply_update()
+
+        assert result["success"] is True
+        assert captured["target_version"] == "9.9.9"
+        assert captured["update_url"] == "https://example.com/openavc-9.9.9.tar.gz"
+        assert captured["checksum_sha256"] == "sha256hex"
+        # Staged marker is consumed.
+        assert mgr.get_staged_update() is None

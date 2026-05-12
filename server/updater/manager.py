@@ -315,9 +315,23 @@ class UpdateManager:
 
         This is the full update flow: backup -> download -> verify -> apply -> restart.
         For non-self-updating deployments, returns instructions instead.
+        If the cloud has staged an update (auto_restart=False) we route through
+        apply_cloud_update with that staged URL instead of querying GitHub.
         """
         if self._update_in_progress:
             return {"success": False, "error": "Update already in progress"}
+
+        # Prefer a cloud-staged update if one is pending — covers the
+        # auto_restart=False case where the cloud pushed a target_version
+        # without applying it immediately (A63).
+        staged = self.get_staged_update()
+        if staged:
+            self.clear_staged_update()
+            return await self.apply_cloud_update(
+                staged["target_version"],
+                staged["update_url"],
+                staged.get("checksum_sha256"),
+            )
 
         release = self._checker.last_result
         if release is None:
@@ -472,6 +486,64 @@ class UpdateManager:
             return {"success": False, "error": error_msg}
         finally:
             self._update_in_progress = False
+
+    # --- Cloud-staged update (auto_restart=False) -----------------------
+
+    def _staged_path(self) -> Path:
+        return self._data_dir / "staged-update.json"
+
+    def stage_update(
+        self, target_version: str, update_url: str,
+        checksum_sha256: str | None = None,
+    ) -> None:
+        """Persist a cloud-staged update so it can be applied manually later (A63).
+
+        Called when the cloud sends ``software_update`` with
+        ``auto_restart=False``. The next call to ``apply_update`` uses this
+        target instead of polling GitHub.
+        """
+        import json
+        payload = {
+            "target_version": target_version,
+            "update_url": update_url,
+            "checksum_sha256": checksum_sha256,
+        }
+        try:
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+            self._staged_path().write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
+            self._set_state("system.update_staged_version", target_version)
+            log.info("Cloud staged update for v%s", target_version)
+        except OSError:
+            log.exception("Failed to persist cloud-staged update")
+
+    def get_staged_update(self) -> dict[str, Any] | None:
+        """Return the staged-update record, or None if no update is staged."""
+        import json
+        path = self._staged_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log.exception("Failed to read staged-update marker; ignoring")
+            return None
+        if not isinstance(data, dict):
+            return None
+        target = data.get("target_version")
+        url = data.get("update_url")
+        if not target or not url:
+            return None
+        return data
+
+    def clear_staged_update(self) -> None:
+        """Remove the staged-update marker (called after apply)."""
+        try:
+            self._staged_path().unlink(missing_ok=True)
+        except OSError:
+            log.exception("Failed to clear staged-update marker")
+        self._set_state("system.update_staged_version", "")
 
     def _verify_hash(self, artifact_path: Path, expected_hash: str) -> None:
         """Verify a downloaded artifact against a known SHA-256 hash."""
