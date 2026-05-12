@@ -65,6 +65,11 @@ async def isc_websocket_endpoint(ws: WebSocket) -> None:
             pass  # Catch-all: socket may already be closed
         return
 
+    # Capture the exact PeerConnection instance so peer_disconnected can
+    # identity-check it: an orphan socket's late disconnect must not pop
+    # a fresh reconnection that's taken its place (A55).
+    conn = _isc_manager.get_connection(peer_id)
+
     # --- Message loop with rate limiting ---
     msg_timestamps: list[float] = []
     try:
@@ -89,4 +94,4 @@ async def isc_websocket_endpoint(ws: WebSocket) -> None:
         # Catch-all: any unexpected error ends the peer connection gracefully
         log.debug(f"ISC: Peer {peer_id[:8]} connection ended")
     finally:
-        await _isc_manager.peer_disconnected(peer_id)
+        await _isc_manager.peer_disconnected(peer_id, conn=conn)

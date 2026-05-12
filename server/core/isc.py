@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac as hmac_mod
+import itertools
 import json
 import secrets
 import socket
@@ -158,10 +159,16 @@ class PeerInfo:
 class PeerConnection:
     """Normalised wrapper around a peer WebSocket (inbound or outbound)."""
 
+    # Process-wide monotonic counter. Used to identify a specific connection
+    # instance so a stale orphan's late disconnect can't kill the live one
+    # at the same peer_id (see A54 / A55 in the pre-release audit).
+    _id_counter = itertools.count(1)
+
     def __init__(self, ws: Any, direction: str):
         self._ws = ws
         self.direction = direction  # "inbound" | "outbound"
         self._closed = False
+        self.connection_id = next(PeerConnection._id_counter)
 
     async def send(self, msg: dict[str, Any]) -> None:
         text = json.dumps(msg)
@@ -564,32 +571,58 @@ class ISCManager:
             log.warning(f"ISC: Rejected {peer_id[:8]} — HMAC verification failed")
             return None
 
-        # Duplicate check — if we already have an outbound to this peer,
-        # the instance with the smaller ID keeps its outbound.
-        if peer_id in self._connections:
-            if self.instance_id < peer_id:
-                await _ws_send_fastapi(ws, {"type": "isc.reject", "reason": "duplicate"})
-                return None
-            else:
-                await self._close_peer(peer_id, emit=False)
+        # Atomic duplicate-detect + register under _peer_lock. An in-flight
+        # outbound (still in handshake, not yet in _connections) also counts
+        # as a duplicate — otherwise a simultaneous bidirectional connect
+        # leaves both sides with an orphan socket per peer (A54).
+        async with self._peer_lock:
+            existing = self._connections.get(peer_id)
+            has_outbound_task = peer_id in self._connect_tasks
 
-        log.info(f"ISC: Accepted inbound peer «{peer_name}» ({peer_id[:8]})")
+            if existing is not None or has_outbound_task:
+                if self.instance_id < peer_id:
+                    # Our id is smaller — the outbound direction is canonical;
+                    # reject this inbound. Lock released by context manager on
+                    # the return below.
+                    await _ws_send_fastapi(ws, {"type": "isc.reject", "reason": "duplicate"})
+                    log.debug(
+                        f"ISC: Rejected inbound from {peer_id[:8]} "
+                        f"(outbound direction is canonical)"
+                    )
+                    return None
 
-        # Register peer
-        peer = self._peers.get(peer_id)
-        if peer is None:
-            peer = PeerInfo(
-                instance_id=peer_id, name=peer_name, host="", port=0,
-                version=peer_version, source="inbound",
-            )
-            self._peers[peer_id] = peer
-        peer.connected = True
-        peer.name = peer_name
-        peer.version = peer_version
-        peer.last_seen = time()
+                # Their id is smaller — the inbound direction is canonical.
+                # Close any existing connection (identity-safe: we hold the
+                # lock and pop+close in one step).
+                if existing is not None:
+                    self._connections.pop(peer_id, None)
+                    await existing.close()
+                # Cancel any in-flight outbound attempt. Pop first so a fresh
+                # _schedule_connect() can run again if needed; cancel() is
+                # non-blocking so it's safe inside the lock.
+                if has_outbound_task:
+                    task = self._connect_tasks.pop(peer_id, None)
+                    if task is not None and not task.done():
+                        task.cancel()
 
-        # Store connection
-        self._connections[peer_id] = PeerConnection(ws, "inbound")
+            log.info(f"ISC: Accepted inbound peer «{peer_name}» ({peer_id[:8]})")
+
+            # Register peer
+            peer = self._peers.get(peer_id)
+            if peer is None:
+                peer = PeerInfo(
+                    instance_id=peer_id, name=peer_name, host="", port=0,
+                    version=peer_version, source="inbound",
+                )
+                self._peers[peer_id] = peer
+            peer.connected = True
+            peer.name = peer_name
+            peer.version = peer_version
+            peer.last_seen = time()
+
+            # Store connection
+            conn = PeerConnection(ws, "inbound")
+            self._connections[peer_id] = conn
 
         # Send welcome
         await _ws_send_fastapi(ws, {
@@ -645,9 +678,15 @@ class ISCManager:
         else:
             log.debug(f"ISC: Unknown message type from {peer_id[:8]}: {msg_type}")
 
-    async def peer_disconnected(self, peer_id: str) -> None:
-        """Called when a peer connection drops (either direction)."""
-        await self._close_peer(peer_id, emit=True)
+    async def peer_disconnected(self, peer_id: str, conn: PeerConnection | None = None) -> None:
+        """Called when a peer connection drops (either direction).
+
+        ``conn`` should be the exact PeerConnection instance that owned the
+        socket. If the tracked connection at ``peer_id`` no longer matches
+        (e.g. it was replaced by a fresh reconnection while this orphan was
+        still alive), the disconnect is ignored — see A55.
+        """
+        await self._close_peer(peer_id, emit=True, conn=conn)
 
     # ------------------------------------------------------------------
     # UDP broadcast discovery
@@ -862,13 +901,37 @@ class ISCManager:
             real_name = resp.get("name", "")
             real_version = resp.get("version", "")
 
-            # If the peer_id was a temporary key (manual peer), remap
+            # If the peer_id was a temporary key (manual peer), remap.
+            # Then apply the duplicate tie-break against any existing
+            # connection at the real id (A56: close the loser instead of
+            # silently overwriting).
             async with self._peer_lock:
                 if peer_id != real_id:
                     self._peers.pop(peer_id, None)
-                    if peer_id in self._connections:
-                        self._connections.pop(peer_id)
+                    existing_tmp = self._connections.pop(peer_id, None)
+                    if existing_tmp is not None:
+                        # Shouldn't normally happen, but if a connection was
+                        # tracked under the temp key, close it before remap.
+                        await existing_tmp.close()
                     peer_id = real_id
+
+                existing = self._connections.get(peer_id)
+                if existing is not None:
+                    if self.instance_id > peer_id:
+                        # Their id is smaller — inbound direction is canonical;
+                        # this outbound loses the tie-break. Abort cleanly so
+                        # _outbound_loop catches the "duplicate" reason and
+                        # stops retrying.
+                        log.debug(
+                            f"ISC: Outbound to {peer_id[:8]} loses tie-break "
+                            f"(inbound direction is canonical)"
+                        )
+                        raise ConnectionRefusedError("duplicate")
+                    # Our id is smaller — outbound direction is canonical;
+                    # close the existing inbound (or stale outbound) before
+                    # replacing it.
+                    self._connections.pop(peer_id, None)
+                    await existing.close()
 
                 peer = self._peers.get(peer_id)
                 if peer is None:
@@ -904,8 +967,9 @@ class ISCManager:
                 msg = json.loads(raw)
                 await self.handle_message(peer_id, msg)
 
-        # Connection closed normally
-        await self._close_peer(peer_id, emit=True)
+        # Connection closed normally. Pass `conn` so a stale outbound
+        # disconnect can't kill a newer inbound that replaced it (A55).
+        await self._close_peer(peer_id, emit=True, conn=conn)
 
     # ------------------------------------------------------------------
     # Message handlers
@@ -1061,11 +1125,38 @@ class ISCManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _close_peer(self, peer_id: str, emit: bool = True) -> None:
-        """Close a peer connection and update tracking."""
-        conn = self._connections.pop(peer_id, None)
-        if conn:
-            await conn.close()
+    async def _close_peer(
+        self,
+        peer_id: str,
+        emit: bool = True,
+        conn: PeerConnection | None = None,
+    ) -> None:
+        """Close a peer connection and update tracking.
+
+        If ``conn`` is provided, only pop the tracked entry if it is the
+        same PeerConnection instance. This prevents an orphan socket's
+        late disconnect from killing a legitimate fresh reconnection at
+        the same peer_id (A55). The orphan socket itself is still closed.
+        """
+        existing = self._connections.get(peer_id)
+
+        if conn is not None and existing is not conn:
+            # Stale disconnect — the tracked connection has been replaced
+            # by a newer one (or removed entirely). Close the orphan's
+            # socket so its resources free, but don't touch the live entry.
+            log.debug(
+                f"ISC: Ignoring stale disconnect for {peer_id[:8]} "
+                f"(connection replaced)"
+            )
+            try:
+                await conn.close()
+            except Exception:
+                pass
+            return
+
+        self._connections.pop(peer_id, None)
+        if existing is not None:
+            await existing.close()
 
         # Clean up pending command futures for this peer
         stale_ids = [
@@ -1098,6 +1189,14 @@ class ISCManager:
     def _get_ws(self, instance_id: str) -> PeerConnection | None:
         """Get a peer's WebSocket connection."""
         return self._connections.get(instance_id)
+
+    def get_connection(self, peer_id: str) -> PeerConnection | None:
+        """Return the live PeerConnection for ``peer_id`` or None.
+
+        Public so isc_ws.py can hand the exact instance back to
+        ``peer_disconnected`` for identity-checked cleanup (see A55).
+        """
+        return self._connections.get(peer_id)
 
 
 # ---------------------------------------------------------------------------

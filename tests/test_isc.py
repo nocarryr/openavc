@@ -640,3 +640,139 @@ async def test_duplicate_connection_larger_id_accepts_inbound(isc):
     assert result == "0000-0000"  # Accepted
     # New inbound connection replaces old outbound
     assert isc._connections["0000-0000"].direction == "inbound"
+
+
+async def test_duplicate_connection_outbound_in_flight_smaller_id_rejects_inbound(isc):
+    """A54: an in-flight outbound (still in handshake, not yet in _connections)
+    must also count as a duplicate. With smaller local id, reject the inbound
+    so the outbound can win the race."""
+    # isc has id "aaaa-1111", peer "zzzz-9999" — local id is smaller, so the
+    # outbound is the canonical direction.
+    async def never_completes():
+        await asyncio.sleep(60)
+
+    fake_task = asyncio.create_task(never_completes())
+    isc._connect_tasks["zzzz-9999"] = fake_task
+    try:
+        ws_in = FakeWebSocket(auth_key="testkey")
+        result = await isc.accept_inbound(ws_in, {
+            "type": "isc.hello", "instance_id": "zzzz-9999", "name": "Z",
+        })
+        assert result is None  # Rejected
+        msgs = ws_in.get_sent_msgs()
+        assert any(m["type"] == "isc.reject" and m["reason"] == "duplicate" for m in msgs)
+        # Outbound task still scheduled and untouched
+        assert "zzzz-9999" in isc._connect_tasks
+        assert not fake_task.cancelled()
+    finally:
+        fake_task.cancel()
+        try:
+            await fake_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_duplicate_connection_outbound_in_flight_larger_id_cancels_outbound(isc):
+    """A54: an in-flight outbound with larger local id loses to the inbound.
+    accept_inbound must cancel the outbound task and accept the inbound."""
+    # isc has id "aaaa-1111", peer "0000-0000" — local id is larger, so the
+    # inbound is the canonical direction.
+    async def never_completes():
+        await asyncio.sleep(60)
+
+    fake_task = asyncio.create_task(never_completes())
+    isc._connect_tasks["0000-0000"] = fake_task
+
+    ws_in = FakeWebSocket(auth_key="testkey")
+    result = await isc.accept_inbound(ws_in, {
+        "type": "isc.hello", "instance_id": "0000-0000", "name": "Zero",
+    })
+    assert result == "0000-0000"  # Accepted
+    assert isc._connections["0000-0000"].direction == "inbound"
+    # Outbound task cancelled and removed from tracking
+    assert "0000-0000" not in isc._connect_tasks
+    # Give the event loop a tick to process the cancellation
+    await asyncio.sleep(0)
+    assert fake_task.cancelled()
+
+
+async def test_stale_disconnect_ignored_when_connection_replaced(isc, events):
+    """A55: a stale orphan's late peer_disconnected must NOT pop the live
+    replacement connection at the same peer_id."""
+    # Set up: peer "peer-x" has a live connection.
+    ws_live = FakeWebSocket()
+    live_conn = PeerConnection(ws_live, "inbound")
+    isc._connections["peer-x"] = live_conn
+    isc._peers["peer-x"] = PeerInfo(
+        instance_id="peer-x", name="X", host="1.2.3.4", port=8080,
+        connected=True,
+    )
+
+    # A different (older, orphaned) PeerConnection wraps a dead socket.
+    ws_orphan = FakeWebSocket()
+    orphan_conn = PeerConnection(ws_orphan, "outbound")
+    assert orphan_conn.connection_id != live_conn.connection_id
+
+    disconnected = []
+    events.on("isc.peer_disconnected", lambda e, p: disconnected.append(p))
+
+    # The orphan fires peer_disconnected. It must not kill the live conn.
+    await isc.peer_disconnected("peer-x", conn=orphan_conn)
+
+    assert "peer-x" in isc._connections
+    assert isc._connections["peer-x"] is live_conn
+    assert isc._peers["peer-x"].connected is True
+    assert len(disconnected) == 0  # No disconnect event emitted
+
+
+async def test_stale_disconnect_closes_orphan_socket(isc):
+    """A55: even when ignored, the orphan's socket should still be closed
+    so it doesn't leak resources."""
+    ws_live = FakeWebSocket()
+    live_conn = PeerConnection(ws_live, "inbound")
+    isc._connections["peer-y"] = live_conn
+    isc._peers["peer-y"] = PeerInfo(
+        instance_id="peer-y", name="Y", host="1.2.3.4", port=8080,
+        connected=True,
+    )
+
+    ws_orphan = FakeWebSocket()
+    orphan_conn = PeerConnection(ws_orphan, "outbound")
+
+    await isc.peer_disconnected("peer-y", conn=orphan_conn)
+
+    # Live socket untouched, orphan socket closed
+    assert ws_live._closed is False
+    assert ws_orphan._closed is True
+
+
+async def test_disconnect_with_matching_conn_pops_entry(isc, events):
+    """Sanity: when the conn matches the tracked entry, normal disconnect
+    behavior still applies — pop, close, emit."""
+    ws = FakeWebSocket()
+    conn = PeerConnection(ws, "inbound")
+    isc._connections["peer-z"] = conn
+    isc._peers["peer-z"] = PeerInfo(
+        instance_id="peer-z", name="Z", host="1.2.3.4", port=8080,
+        connected=True,
+    )
+
+    disconnected = []
+    events.on("isc.peer_disconnected", lambda e, p: disconnected.append(p))
+
+    await isc.peer_disconnected("peer-z", conn=conn)
+
+    assert "peer-z" not in isc._connections
+    assert isc._peers["peer-z"].connected is False
+    assert ws._closed is True
+    assert len(disconnected) == 1
+
+
+async def test_peer_connection_has_monotonic_id():
+    """Sanity: each PeerConnection gets a unique increasing connection_id."""
+    ws1 = FakeWebSocket()
+    ws2 = FakeWebSocket()
+    c1 = PeerConnection(ws1, "outbound")
+    c2 = PeerConnection(ws2, "inbound")
+    assert c1.connection_id < c2.connection_id
+    assert c1.connection_id != c2.connection_id
