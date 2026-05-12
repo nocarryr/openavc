@@ -125,6 +125,8 @@ Set the cancel group in the macro header, next to the macro ID. Give both macros
 
 You can also cancel a running macro manually by clicking the **Cancel** button in the macro header while it's running.
 
+**Side effects of a cancelled macro.** Cancellation is not transactional. Any steps the cancelled macro already executed stay in effect: a **Set Variable** write is still in the state store, a **Device Command** or **Group Command** is already on the wire to the equipment, and an **Emit Event** payload has already fired on the event bus. None of those are rolled back. The two steps that unwind cleanly are **Delay** and **Wait Until**: if cancellation hits during either, the wait is abandoned with no residual change. Sub-macros invoked with **Run Macro** are cancelled at their current step, so partial effects from inside the sub-macro persist the same way. Plan paired macros (System On / System Off, for example) so that being interrupted partway through is still recoverable by the macro that takes over. A common pattern is to set a "target state" variable as the very first step of each, so whichever one finishes last decides the final system state.
+
 ## Progress in Panel
 
 When a macro is running, the panel provides two forms of feedback:
