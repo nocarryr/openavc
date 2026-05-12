@@ -195,6 +195,7 @@ export interface UIElement {
     input_key_pattern?: string;
     output_key_pattern?: string;
     route_key_pattern?: string;
+    audio_route_key_pattern?: string;
     audio_follow_video?: boolean;
     show_lock?: boolean;
     show_mute?: boolean;

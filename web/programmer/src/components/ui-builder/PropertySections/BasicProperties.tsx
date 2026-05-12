@@ -820,6 +820,17 @@ export function BasicProperties({
           <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "0 0 0 76px" }}>
             Use * for the output number (1-based)
           </div>
+          <FieldRow label="Audio Route Key">
+            <input
+              value={element.matrix_config?.audio_route_key_pattern || ""}
+              onChange={(e) => onChange({ matrix_config: { ...element.matrix_config, audio_route_key_pattern: e.target.value || undefined } })}
+              placeholder="device.sw.output_*_audio_source"
+              style={{ flex: 1, fontSize: 11 }}
+            />
+          </FieldRow>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "0 0 0 76px" }}>
+            Optional. When set, an "A≠V" badge appears on any output whose audio route differs from its video route.
+          </div>
           <FieldRow label="Input Key">
             <input
               value={element.matrix_config?.input_key_pattern || ""}

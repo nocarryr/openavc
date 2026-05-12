@@ -521,6 +521,18 @@
     align-items: center;
     justify-content: center;
 }
+/* Mismatch badge shown when audio route diverges from video route. */
+.matrix-route-mismatch {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--panel-warning, #d4a017);
+    border: 1px solid var(--panel-warning, #d4a017);
+    border-radius: 3px;
+    padding: 0 4px;
+    margin-left: 6px;
+    line-height: 14px;
+    background: color-mix(in srgb, var(--panel-warning, #d4a017) 12%, transparent);
+}
 /* Presets */
 .matrix-presets {
     display: flex;

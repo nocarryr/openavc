@@ -1552,6 +1552,7 @@ class PanelApp {
         const inputLabels = config.input_labels || Array.from({ length: inputCount }, (_, i) => `In ${i + 1}`);
         const outputLabels = config.output_labels || Array.from({ length: outputCount }, (_, i) => `Out ${i + 1}`);
         const routePattern = config.route_key_pattern || '';
+        const audioRoutePattern = config.audio_route_key_pattern || '';
         const inputKeyPattern = config.input_key_pattern || '';
         const outputKeyPattern = config.output_key_pattern || '';
         const matrixStyle = element.matrix_style || 'crosspoint';
@@ -1618,6 +1619,16 @@ class PanelApp {
                 outLabel.textContent = outputLabels[o] || `Out ${o + 1}`;
                 outLabel.dataset.outputIdx = String(o);
                 row.appendChild(outLabel);
+                // Hidden badge shown when audio route diverges from video route
+                if (audioRoutePattern) {
+                    const mismatch = document.createElement('span');
+                    mismatch.className = 'matrix-route-mismatch';
+                    mismatch.dataset.mismatchIdx = String(o);
+                    mismatch.textContent = 'A≠V';
+                    mismatch.title = 'Audio route does not match video route';
+                    mismatch.hidden = true;
+                    row.appendChild(mismatch);
+                }
 
                 const select = document.createElement('select');
                 select.className = 'matrix-list-select';
@@ -1762,11 +1773,27 @@ class PanelApp {
 
             // Output rows with crosspoints
             for (let o = 0; o < outputCount; o++) {
-                // Output label
+                // Output label — wrapped in a labelText span so the mismatch
+                // badge (when shown) doesn't get wiped by the dynamic-label
+                // updater. The data-output-idx attribute stays on the header
+                // so existing query selectors still find it.
                 const outHeader = document.createElement('div');
                 outHeader.className = 'matrix-header matrix-output-header';
-                outHeader.textContent = outputLabels[o] || `Out ${o + 1}`;
                 outHeader.dataset.outputIdx = String(o);
+                const outLabelText = document.createElement('span');
+                outLabelText.dataset.labelText = '';
+                outLabelText.textContent = outputLabels[o] || `Out ${o + 1}`;
+                outHeader.appendChild(outLabelText);
+                // Hidden badge shown when audio route diverges from video route
+                if (audioRoutePattern) {
+                    const mismatch = document.createElement('span');
+                    mismatch.className = 'matrix-route-mismatch';
+                    mismatch.dataset.mismatchIdx = String(o);
+                    mismatch.textContent = 'A≠V';
+                    mismatch.title = 'Audio route does not match video route';
+                    mismatch.hidden = true;
+                    outHeader.appendChild(mismatch);
+                }
                 table.appendChild(outHeader);
 
                 // Crosspoint cells
@@ -1930,7 +1957,8 @@ class PanelApp {
                 elementDef: element,
                 binding: { key: routePattern },
                 _matrix: {
-                    routePattern, inputKeyPattern, outputKeyPattern,
+                    routePattern, audioRoutePattern,
+                    inputKeyPattern, outputKeyPattern,
                     inputCount, outputCount, activeColor, inactiveColor,
                     matrixStyle,
                 },
@@ -1941,10 +1969,10 @@ class PanelApp {
     }
 
     evaluateMatrixRoutes(b) {
-        const { routePattern, inputKeyPattern, outputKeyPattern, inputCount, outputCount, activeColor, inactiveColor, matrixStyle } = b._matrix;
+        const { routePattern, audioRoutePattern, inputKeyPattern, outputKeyPattern, inputCount, outputCount, activeColor, inactiveColor, matrixStyle } = b._matrix;
         const el = b.element;
 
-        // Read current routes from state
+        // Read current video routes from state
         const routes = {};  // output (1-based) -> input (1-based)
         for (let o = 1; o <= outputCount; o++) {
             const key = routePattern.replace('*', String(o));
@@ -1954,14 +1982,42 @@ class PanelApp {
             }
         }
 
-        // Update dynamic labels from state
+        // Read audio routes if a pattern is configured, so we can flag any
+        // output whose audio route diverges from its video route.
+        const audioRoutes = {};
+        if (audioRoutePattern) {
+            for (let o = 1; o <= outputCount; o++) {
+                const key = audioRoutePattern.replace('*', String(o));
+                const val = this.state[key];
+                if (val !== undefined && val !== null) {
+                    audioRoutes[o] = parseInt(String(val));
+                }
+            }
+            // Toggle the per-output mismatch badge.
+            const badges = el.querySelectorAll('.matrix-route-mismatch');
+            badges.forEach(badge => {
+                const idx = parseInt(badge.dataset.mismatchIdx) + 1;
+                const video = routes[idx];
+                const audio = audioRoutes[idx];
+                const mismatch =
+                    video !== undefined && audio !== undefined && video !== audio;
+                badge.hidden = !mismatch;
+            });
+        }
+
+        // Update dynamic labels from state — write to the [data-label-text]
+        // child when present (crosspoint output header has siblings), else to
+        // the header element directly (input headers, list-view labels).
         if (inputKeyPattern) {
             const headers = el.querySelectorAll('[data-input-idx]');
             headers.forEach(h => {
                 const idx = parseInt(h.dataset.inputIdx);
                 const key = inputKeyPattern.replace('*', String(idx + 1));
                 const val = this.state[key];
-                if (val !== undefined && val !== null) h.textContent = String(val);
+                if (val !== undefined && val !== null) {
+                    const target = h.querySelector('[data-label-text]') || h;
+                    target.textContent = String(val);
+                }
             });
         }
         if (outputKeyPattern) {
@@ -1970,7 +2026,10 @@ class PanelApp {
                 const idx = parseInt(h.dataset.outputIdx);
                 const key = outputKeyPattern.replace('*', String(idx + 1));
                 const val = this.state[key];
-                if (val !== undefined && val !== null) h.textContent = String(val);
+                if (val !== undefined && val !== null) {
+                    const target = h.querySelector('[data-label-text]') || h;
+                    target.textContent = String(val);
+                }
             });
         }
 
