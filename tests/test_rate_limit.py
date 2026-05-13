@@ -137,8 +137,11 @@ def test_classify_open():
     assert _classify("GET", "/api/status") == "open"
     assert _classify("GET", "/api/health") == "open"
     assert _classify("GET", "/api/cloud/status") == "open"
-    assert _classify("GET", "/api/library") == "open"
-    assert _classify("GET", "/api/library/abc123") == "open"
+    assert _classify("GET", "/api/startup-status") == "open"
+    assert _classify("GET", "/api/auth/required") == "open"
+    # Library moved to protected (standard tier) by the 1821cba security fix.
+    assert _classify("GET", "/api/library") == "standard"
+    assert _classify("GET", "/api/library/abc123") == "standard"
 
 
 def test_classify_strict():
@@ -315,20 +318,17 @@ def test_tiers_are_independent():
         assert r.status_code == 200
 
 
-def test_library_routes_are_open_tier():
-    """Library routes should use the open tier (higher limit)."""
+def test_library_routes_are_standard_tier():
+    """Library routes share the standard tier with other authenticated /api/ routes
+    (since the 1821cba security fix moved them off the open tier)."""
     app = _make_app()
     client = TestClient(app)
 
-    with patch("server.config.RATE_LIMIT_OPEN_PER_MINUTE", 3), \
-         patch("server.config.RATE_LIMIT_STANDARD_PER_MINUTE", 1):
+    with patch("server.config.RATE_LIMIT_STANDARD_PER_MINUTE", 2):
         _reset_state()
-        # Exhaust standard
-        client.get("/api/devices")
+        # First two library hits succeed (standard limit = 2)
+        assert client.get("/api/library").status_code == 200
+        assert client.get("/api/library/abc").status_code == 200
+        # Third hit on a sibling standard-tier path should be throttled
         r = client.get("/api/devices")
         assert r.status_code == 429
-        # Library should still work (open tier)
-        r = client.get("/api/library")
-        assert r.status_code == 200
-        r = client.get("/api/library/abc")
-        assert r.status_code == 200

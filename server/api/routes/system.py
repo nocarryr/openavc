@@ -48,15 +48,21 @@ async def health_check() -> dict[str, Any]:
     """Health check for monitoring and container orchestration."""
     engine = _get_engine()
     status = engine.get_status()
-    devices = status.get("devices", {})
+    devices_list = engine.devices.list_devices() if engine.devices else []
+    total = len(devices_list)
+    connected = sum(1 for d in devices_list if d.get("connected"))
+    orphaned = sum(1 for d in devices_list if d.get("orphaned"))
+    disabled = sum(1 for d in devices_list if d.get("enabled") is False)
     return {
         "status": "healthy",
         "version": status.get("version", "unknown"),
         "uptime_seconds": status.get("uptime_seconds", 0),
         "devices": {
-            "total": devices.get("total", 0),
-            "connected": devices.get("connected", 0),
-            "error": devices.get("error", 0),
+            "total": total,
+            "connected": connected,
+            "disconnected": total - connected - orphaned - disabled,
+            "orphaned": orphaned,
+            "disabled": disabled,
         },
         "cloud": {
             "connected": status.get("cloud_connected", False),

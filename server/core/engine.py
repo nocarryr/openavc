@@ -131,12 +131,14 @@ class Engine:
         sys_config.ensure_file()
 
         # Set system state keys
+        from server.updater.platform import detect_deployment_type
         self.state.set("system.version", __version__, source="system")
         self.state.set("system.update_available", "", source="system")
         self.state.set("system.update_channel", sys_config.get("updates", "channel", "stable"), source="system")
         self.state.set("system.update_status", "idle", source="system")
         self.state.set("system.update_progress", 0, source="system")
         self.state.set("system.update_error", "", source="system")
+        self.state.set("system.deployment_type", detect_deployment_type().value, source="system")
 
         # Load project — with corruption recovery
         self.project = self._load_project_safe()

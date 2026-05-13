@@ -298,6 +298,10 @@ class TriggerEngine:
             elapsed = time.time() - ts.last_fired
             if elapsed < cooldown:
                 log.debug(f"Trigger {trigger_id} skipped — cooldown ({elapsed:.1f}s < {cooldown}s)")
+                asyncio.create_task(self.events.emit(
+                    "trigger.skipped",
+                    {"trigger_id": trigger_id, "reason": "cooldown"},
+                ))
                 return
 
         # 3. Debounce
