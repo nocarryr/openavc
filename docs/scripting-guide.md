@@ -16,9 +16,10 @@ Every script imports from the `openavc` module, which is injected by the Script 
 
 ```python
 from openavc import (
-    on_event, on_state_change,                        # Decorators
-    devices, state, events, macros, log, isc,         # Proxy objects
+    on_event, on_state_change,                          # Decorators
+    devices, state, events, macros, log, isc, plugins,  # Proxy objects
     delay, after, every, cancel_timer, cancel_all_timers,  # Timer functions
+    Event,                                              # Event class (for type hints)
 )
 ```
 
@@ -335,12 +336,15 @@ log.info(f"Cancelled {count} timers")
 | `ui.hold.<element_id>` | Button held past threshold |
 | `ui.toggle_off.<element_id>` | Toggle button turned off |
 | `ui.change.<element_id>` | Slider or select value changed (payload includes `value`) |
-| `ui.route.<element_id>` | Matrix route changed (payload includes `input`, `output`) |
+| `ui.route.<element_id>` | Video route changed (payload includes `input`, `output`) |
+| `ui.audio_route.<element_id>` | Audio-breakaway route changed (payload includes `input`, `output`) |
+| `ui.mute_route.<element_id>` | Output mute changed via matrix (payload includes `output`, `mute`) |
+| `ui.audio_mute_route.<element_id>` | Audio-breakaway output mute changed (payload includes `output`, `mute`) |
 | `ui.submit.<element_id>` | Text input or keypad submitted (payload includes `value`) |
 | `ui.page.<page_id>` | Page navigation (no payload) |
 | `device.connected.<device_id>` | Device connected |
 | `device.disconnected.<device_id>` | Device disconnected |
-| `device.error.<device_id>` | Device communication error (payload includes `error`) |
+| `device.error.<device_id>` | Device communication error (payload includes `error`). *Reserved — not currently emitted by built-in drivers; safe to subscribe to but won't fire until a driver opts in.* |
 | `macro.started.<macro_id>` | Macro began executing |
 | `macro.completed.<macro_id>` | Macro finished executing |
 | `macro.cancelled.<macro_id>` | Macro was cancelled |

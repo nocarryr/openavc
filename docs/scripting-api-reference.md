@@ -254,12 +254,15 @@ Events fired by the system that scripts can listen for with `@on_event`.
 | `ui.hold.<element_id>` | `element_id` | Button held past threshold |
 | `ui.toggle_off.<element_id>` | `element_id` | Toggle button turned off |
 | `ui.change.<element_id>` | `element_id`, `value` | Slider or select value changed |
-| `ui.route.<element_id>` | `element_id`, `input`, `output` | Matrix route changed |
+| `ui.route.<element_id>` | `element_id`, `input`, `output` | Video route changed |
+| `ui.audio_route.<element_id>` | `element_id`, `input`, `output` | Audio-breakaway route changed |
+| `ui.mute_route.<element_id>` | `element_id`, `output`, `mute` | Output mute changed via matrix |
+| `ui.audio_mute_route.<element_id>` | `element_id`, `output`, `mute` | Audio-breakaway output mute changed |
 | `ui.submit.<element_id>` | `element_id`, `value` | Text input or keypad submitted |
 | `ui.page.<page_id>` | (none) | Page navigation |
 | `device.connected.<device_id>` | (none) | Device connected |
 | `device.disconnected.<device_id>` | (none) | Device disconnected |
-| `device.error.<device_id>` | `device_id`, `error` | Device communication error |
+| `device.error.<device_id>` | `device_id`, `error` | Device communication error. *Reserved — not currently emitted by built-in drivers.* |
 | `macro.started.<macro_id>` | `macro_id`, `name`, `total_steps` | Macro began executing |
 | `macro.completed.<macro_id>` | `macro_id`, `name` | Macro finished executing |
 | `macro.cancelled.<macro_id>` | `macro_id`, `name` | Macro was cancelled |
