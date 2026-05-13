@@ -71,12 +71,19 @@ def _make_hint(driver_id: str, **discovery):
 
 
 def _udp_responder(port: int, query_match: bytes, reply: bytes) -> threading.Thread:
-    """Spawn a one-shot UDP server that replies to ``query_match`` packets."""
+    """Spawn a one-shot UDP server that replies to ``query_match`` packets.
+
+    Binds synchronously so callers can probe the moment this returns; the
+    background thread just does recvfrom on the already-bound socket. Without
+    the sync bind, Linux CI runners are slow enough that the probe goes out
+    before the thread's bind() completes and the test KeyErrors.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", port))
+    s.settimeout(3.0)
+
     def serve():
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            s.bind(("127.0.0.1", port))
-            s.settimeout(3.0)
             data, addr = s.recvfrom(2048)
             if query_match in data:
                 s.sendto(reply, addr)
@@ -90,14 +97,19 @@ def _udp_responder(port: int, query_match: bytes, reply: bytes) -> threading.Thr
 
 
 def _tcp_responder(port: int, reply: bytes) -> threading.Thread:
-    """Spawn a one-shot TCP server that sends ``reply`` after first read."""
+    """Spawn a one-shot TCP server that sends ``reply`` after first read.
+
+    Binds and listens synchronously to avoid the same race that bit the UDP
+    helper on slow Linux CI runners.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(1)
+    s.settimeout(4.0)
+
     def serve():
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            s.bind(("127.0.0.1", port))
-            s.listen(1)
-            s.settimeout(4.0)
             conn, _ = s.accept()
             try:
                 conn.settimeout(2.0)
