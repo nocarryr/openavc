@@ -1,35 +1,41 @@
-Plugins are now full participants in the rest of the platform. They can declare macro actions and script methods that show up alongside the built-ins. The asset library has been extended past images to handle audio, with native panel playback driven by the new Audio Player plugin. The Pi image and Docker discovery both got real fixes, and Windows updates actually finish on reboot now.
+Discovery has been rebuilt around driver-declared probes and evidence, so every vendor identification on the network scan card now traces back to a probe response or a service the driver said it owns. The cloud agent now supports remote restart, diagnostic actions, and tunneled WebSocket and HTTP traffic with query strings and subprotocols intact. Matrix and audio devices respect audio-follow-video correctly. The Driver Builder's Live Test works over serial, surfaces rate-limit feedback, and guards against running against a production project. A pre-release audit ran across the platform and the findings are closed.
 
-## Plugins
+## Discovery
 
-Plugins can register macro actions through a `MACRO_ACTIONS` schema. Their actions appear in the macro builder under a Plugin Actions group, with a form that's generated from the schema. Variable references like `$var.volume` resolve before the handler runs, the same as every other macro step.
+Discovery is now schema-driven. A driver declares its TCP and UDP probes (or an mDNS service, or an SNMP OID, or a small Python companion), and the scan engine runs them against the network. The result for each device records the probe that matched, the literal pattern it found, and which fields the driver extracted. The platform itself no longer carries any vendor knowledge, so adding a new device family is a driver change, not a core change.
 
-Plugins can also register script methods through a `SCRIPT_API` schema. User scripts call them as `openavc.plugins.<plugin_id>.<method>(...)`. The script editor autocompletes the plugin id, lists the methods that plugin exposes, and shows their docs on hover. Sync and async handlers both work.
+The Driver Builder's Discovery editor has been rebuilt to match. You can write a probe inline, see which signal it provides, and validate it against shipped probe fixtures before any device is on the network. Companion `.py` files are hidden from the driver listing but install, update, and uninstall alongside their `.avcdriver` file.
 
-A plugin's select-field options can now point at a state key instead of being hard-coded. The macro builder reads the live list from there, so a plugin like Audio Player can offer a "pick a sound" dropdown that updates when you upload a new sound, without the user typing filenames.
+A few specific hardening changes: common web-app ports are rejected as `port_open` hints because they collide with too many unrelated services. UDP reachability probes require a `poll_interval` so we don't blast the network. mDNS and SSDP scanners now bind to the configured `control_ip` instead of every interface.
 
-The plugin detail page in the IDE now renders an optional `usage` field as Markdown, so plugins can show how to actually use them (from a macro, from a script, from a button) without a user having to dig through a README.
+## Cloud agent
 
-Enabling or disabling a plugin now refreshes the macro builder's action list immediately, instead of after a page reload.
+Remote restart and diagnostic actions (ping a host, traceroute, DNS lookup, port check, tail logs) work end to end. The agent gates each downstream action on the capability set the cloud negotiated for the session, so an agent whose tunnel capability was revoked silently ignores stray tunnel pushes instead of acting on them.
 
-## Audio in the asset library
+The remote-UI tunnel now preserves query strings, custom headers, and WebSocket subprotocols. Frames that arrive before the local WebSocket finishes connecting are queued instead of dropped. The `target_port` field is honored, so the same tunnel can reach the Programmer IDE, the panel, or any other local service.
 
-Asset uploads accept mp3, wav, ogg, and m4a in addition to images. Per-file caps are 50 MB for images and 200 MB for audio, with a per-project total of 5 GB.
+Cloud-pushed updates are now staged: the cloud download lands in a holding location, the apply step swaps atomically, and a failed apply clears the pending-update marker instead of leaving the system stuck on next boot. The Windows installer rollback now matches versions correctly across patch releases.
 
-The asset browser has filter chips that switch between all assets, images only, and audio only. Audio entries render with a native player so you can preview a sound before assigning it.
+## Matrix and audio
 
-The Program tab now has an Assets section that lists every uploaded asset, so you can manage them in one place instead of going through an image property field on a UI element.
+Matrix mute respects audio-follow-video: muting a video route also mutes the linked audio route when the matrix is in AFV mode. Audio routes display their current source in the device test panel. The cloud's mute and route commands flow through the same AFV-aware path.
 
-Panels can play audio directly through the panel runtime, driven by the Audio Player plugin. There's no iframe and no UI element to add. Every connected panel plays in sync.
+## Driver Builder Live Test
 
-## Pi image
+Live Test works against serial drivers in addition to TCP and HTTP. The panel refuses to run against the live project to keep an in-progress driver from clobbering a deployed room. Rate-limit errors from the device surface in the test panel directly instead of failing silently.
 
-The image build was finishing in a state where first boot dropped you on a blank labwc desktop instead of the OpenAVC panel, because Pi OS's first-boot rename wizard was overriding our auto-login user. The image now boots straight into the configured user with the panel running. The build verifies this before producing an image, so a future regression of this class fails the build instead of shipping a broken `.img`.
+## Plugin hardening
 
-## Docker
+A plugin that fails to register surfaces the error during install instead of disappearing. The `min_openavc_version` field is enforced at install time across both first-party and community plugins. State-pattern subscriptions with an empty pattern no longer leak state across plugin reloads.
 
-Discovery scans were failing inside Docker because containers don't get raw socket access by default. The shipped Compose file now uses host networking with `NET_RAW`, and the image grants `cap_net_raw` to ping. The install path is also simpler now: download the Compose file, run `docker compose up -d`.
+## ISC
 
-## Windows updater
+The inter-system connection now drops removed peers and rotates keys when auth changes, so a project reload that swaps an ISC password actually invalidates the old session. Auth failures back off with deduplicated log messages instead of spamming the log every retry interval.
 
-The post-install task that completes a Windows update on next boot was being scheduled but never firing. `schtasks` was silently truncating the start time into the past, so Task Scheduler skipped the trigger. Updates now register the task via XML, and the trigger sticks.
+## Other
+
+* The macro engine serializes register-and-preempt within a cancel group so a fast double-tap of `system_on` / `system_off` doesn't race.
+* The OSC verify path races the send socket against the listen socket for dual-port devices like grandMA3, so a verified probe doesn't depend on which socket the device replies on.
+* The Python driver serial template uses the correct connection field names.
+* The starter project bundled with every installer is now in the v0.4.0 schema.
+* Cancelled macros are not transactional; the docs now say so.
