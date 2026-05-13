@@ -8,7 +8,12 @@
 # Data is stored in /data (mount a volume to persist across restarts).
 
 # --- Stage 1: Build frontends ---
-FROM node:20-alpine AS frontend
+# Pin the frontend build to the build host's native architecture. The output
+# is static JS/CSS that's arch-agnostic, so running Node under QEMU emulation
+# for the linux/arm64 leg of a multi-arch build buys us nothing except
+# intermittent SIGILLs when QEMU mistranslates Node's JIT. Build once on
+# amd64 and COPY the dist/ into both final images.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
 WORKDIR /build
 COPY web/programmer/package*.json ./programmer/
 COPY web/simulator/package*.json ./simulator/
