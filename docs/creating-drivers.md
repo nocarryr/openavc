@@ -130,7 +130,7 @@ Order matters here. Build them in the order they appear:
 
 - **TCP / serial / UDP**: a single **Send** field. `{param_name}` placeholders substitute parameter values; `{config_key}` placeholders substitute device config (e.g., `{set_id}`).
 - **HTTP**: method, path, body, headers, query params. Every field supports `{placeholders}`.
-- **OSC**: address + a typed argument list (`f`/`i`/`s`/`h`/`d`/`T`/`F`/`N`).
+- **OSC**: address + a typed argument list (`f`/`i`/`s`/`h`/`d`/`b`/`T`/`F`/`N`).
 
 **Parameters** for each command let users fill in what to send. Each parameter has a type, optional required flag, label, help, default, and (numeric) min/max bounds or (enum) allowed values.
 
@@ -178,7 +178,7 @@ Each fingerprint has a per-row **Cross-vendor** toggle. Tick it when the same wi
 
 - **OUI** — MAC vendor block (e.g. `00:0e:dd`).
 - **Hostname pattern** — regex against reverse-DNS / NetBIOS name.
-- **Open port** — vendor-specific TCP port the device leaves open. Ports 22, 80, and 443 are rejected as too generic.
+- **Open port** — vendor-specific TCP port the device leaves open. Generic web/SSH ports (22, 80, 443, 8000, 8080, 8443, 8888) are rejected — they would match every web/SSH device.
 - **Manufacturer alias** — case-insensitive exact match against any manufacturer string the scan captured (probe response, AMX DDP `make`, etc.).
 - **SNMP enterprise number** — the device's IANA Private Enterprise Number.
 
@@ -730,7 +730,7 @@ discovery:
 | `python` | Fingerprint | Sibling `<driver_id>_discovery.py` with `async def probe(ctx) -> None`. Use when the wire format needs Python (multi-step handshakes, binary parsers, broadcast-then-per-host TCP follow-ups). Sub-fields: `file` (path relative to the driver) and optional `cross_vendor`. |
 | `oui` | Hint | MAC OUI prefixes (e.g. `["00:05:a6"]`). Drives the *possible* state and the "Unknown device, vendor: …" display. |
 | `hostname` | Hint | Regex patterns matched against reverse-DNS / NetBIOS name. |
-| `port_open` | Hint | TCP ports the device leaves open (e.g. `[1710, 4352]`). Ports 22, 80, 443 are disallowed (too generic). |
+| `port_open` | Hint | TCP ports the device leaves open (e.g. `[1710, 4352]`). Generic web/SSH ports (22, 80, 443, 8000, 8080, 8443, 8888) are disallowed. |
 | `manufacturer_alias` | Hint | Manufacturer / make strings the device returns when a scan captures one (probe response, AMX DDP `make`, ONVIF Manufacturer field, etc.). Case-insensitive exact match after whitespace strip. List every variant. Multiple drivers may share an alias. |
 | `snmp_pen` | Hint | IANA Private Enterprise Number. |
 
@@ -738,7 +738,7 @@ discovery:
 
 Enforced at driver-load time and mirrored at catalog-build time by `openavc-drivers/scripts/build_index.py`:
 
-1. **`port_open` rejects `{22, 80, 443}`** — too generic. Other ports are accepted.
+1. **`port_open` rejects generic web/SSH ports `{22, 80, 443, 8000, 8080, 8443, 8888}`** — they would match every web/SSH device. Other ports are accepted.
 2. **`tcp_probe` and `udp_probe` accept exactly one of `send_ascii` / `send_hex`.** Both is an error; omitting both is allowed for TCP connect-only banner reads.
 3. **Probes declare exactly one of `expect` / `expect_regex` / `expect_hex`.** Required for both `tcp_probe` and `udp_probe`. Regex patterns are compiled at load time — invalid patterns fail validation.
 4. **`timeout_ms` ≤ 10 000.** Hard cap.
@@ -988,7 +988,7 @@ commands:
     # No args — sends address only (query)
 ```
 
-Argument types: `f` (float), `i` (integer), `s` (string), `T` (true), `F` (false).
+Argument types: `f` (float32), `i` (int32), `s` (string), `h` (int64), `d` (float64), `b` (blob/bytes), `T` (true), `F` (false), `N` (nil).
 
 #### OSC Response Format
 
@@ -1448,7 +1448,7 @@ DRIVER_INFO = {
     # --- Required ---
     "id": "unique_driver_id",        # Lowercase, underscores only
     "name": "Human-Readable Name",
-    "transport": "tcp",              # "tcp", "serial", "http", or "udp"
+    "transport": "tcp",              # "tcp", "serial", "http", "udp", or "osc"
 
     # --- Optional metadata ---
     "manufacturer": "Generic",
@@ -1735,4 +1735,4 @@ For the complete simulator guide with all control types, state machines, and Pyt
 
 ## Using AI Assistants
 
-If you use an AI coding assistant (Claude, ChatGPT, Copilot, etc.), you can point it to the `AGENTS.md` file in the [community driver repository](https://github.com/open-avc/openavc-drivers/blob/main/AGENTS.md). It contains the complete YAML schema, Python driver API, naming conventions, and examples in a format optimized for LLM agents. The repository also includes a `validate.py` script that your assistant can use to check its work.
+If you use an AI coding assistant (Claude, ChatGPT, Copilot, etc.), you can point it to the `AGENTS.md` file in the [community driver repository](https://github.com/open-avc/openavc-drivers/blob/main/AGENTS.md). It contains the complete YAML schema, Python driver API, naming conventions, and examples in a format optimized for LLM agents. The repository also includes `scripts/build_index.py` (run with `--check` to validate without writing) that your assistant can use to verify its work — it validates the schema, regex patterns, and catalog consistency.
