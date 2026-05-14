@@ -88,6 +88,59 @@ class TestSystemConfig:
         assert cfg.get("cloud", "enabled") is False
         assert cfg.get("updates", "channel") == "stable"
 
+    def test_tls_defaults(self, tmp_path):
+        """TLS section defaults: disabled, port 8443, auto_generate on, redirect on."""
+        cfg = SystemConfig()
+        cfg._data_dir = tmp_path
+        cfg._file_path = tmp_path / "system.json"
+        cfg.load()
+
+        assert cfg.get("tls", "enabled") is False
+        assert cfg.get("tls", "port") == 8443
+        assert cfg.get("tls", "auto_generate") is True
+        assert cfg.get("tls", "cert_file") == ""
+        assert cfg.get("tls", "key_file") == ""
+        assert cfg.get("tls", "redirect_http") is True
+
+    def test_tls_section_appears_for_legacy_system_json(self, tmp_path):
+        """A system.json written before TLS existed still gets the tls section via DEFAULTS merge."""
+        system_json = tmp_path / "system.json"
+        system_json.write_text(json.dumps({
+            "network": {"http_port": 9090},
+            "cloud": {"enabled": True},
+        }))
+
+        cfg = SystemConfig()
+        cfg._data_dir = tmp_path
+        cfg._file_path = system_json
+        cfg.load()
+
+        assert cfg.get("tls", "enabled") is False
+        assert cfg.get("tls", "port") == 8443
+
+    def test_tls_env_overrides(self, tmp_path):
+        """OPENAVC_TLS_* env vars override defaults."""
+        cfg = SystemConfig()
+        cfg._data_dir = tmp_path
+        cfg._file_path = tmp_path / "system.json"
+
+        with patch.dict(os.environ, {
+            "OPENAVC_TLS_ENABLED": "true",
+            "OPENAVC_TLS_PORT": "9443",
+            "OPENAVC_TLS_AUTO_GENERATE": "false",
+            "OPENAVC_TLS_CERT_FILE": "/etc/ssl/server.crt",
+            "OPENAVC_TLS_KEY_FILE": "/etc/ssl/server.key",
+            "OPENAVC_TLS_REDIRECT_HTTP": "false",
+        }):
+            cfg.load()
+
+        assert cfg.get("tls", "enabled") is True
+        assert cfg.get("tls", "port") == 9443
+        assert cfg.get("tls", "auto_generate") is False
+        assert cfg.get("tls", "cert_file") == "/etc/ssl/server.crt"
+        assert cfg.get("tls", "key_file") == "/etc/ssl/server.key"
+        assert cfg.get("tls", "redirect_http") is False
+
     def test_load_from_file(self, tmp_path):
         """Config merges values from system.json."""
         system_json = tmp_path / "system.json"

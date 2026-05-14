@@ -105,6 +105,14 @@ DEFAULTS: dict[str, Any] = {
     "discovery": {
         "advertise": True,
     },
+    "tls": {
+        "enabled": False,
+        "port": 8443,
+        "auto_generate": True,
+        "cert_file": "",
+        "key_file": "",
+        "redirect_http": True,
+    },
 }
 
 # Mapping: (section, key) -> (env_var, type)
@@ -124,6 +132,12 @@ ENV_OVERRIDES: dict[tuple[str, str], tuple[str, type]] = {
     ("cloud", "system_key"): ("OPENAVC_CLOUD_SYSTEM_KEY", str),
     ("cloud", "system_id"): ("OPENAVC_CLOUD_SYSTEM_ID", str),
     ("discovery", "advertise"): ("OPENAVC_MDNS_ADVERTISE", bool),
+    ("tls", "enabled"): ("OPENAVC_TLS_ENABLED", bool),
+    ("tls", "port"): ("OPENAVC_TLS_PORT", int),
+    ("tls", "auto_generate"): ("OPENAVC_TLS_AUTO_GENERATE", bool),
+    ("tls", "cert_file"): ("OPENAVC_TLS_CERT_FILE", str),
+    ("tls", "key_file"): ("OPENAVC_TLS_KEY_FILE", str),
+    ("tls", "redirect_http"): ("OPENAVC_TLS_REDIRECT_HTTP", bool),
 }
 
 

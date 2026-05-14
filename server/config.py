@@ -46,6 +46,14 @@ _cfg = _load_config_values()
 HTTP_PORT: int = _cfg.get("network", "http_port", 8080)
 BIND_ADDRESS: str = _cfg.get("network", "bind_address", "0.0.0.0")
 
+# HTTPS / TLS (DEFAULTS owns the truth — no fallback args)
+TLS_ENABLED: bool = _cfg.get("tls", "enabled")
+TLS_PORT: int = _cfg.get("tls", "port")
+TLS_AUTO_GENERATE: bool = _cfg.get("tls", "auto_generate")
+TLS_CERT_FILE: str = _cfg.get("tls", "cert_file")
+TLS_KEY_FILE: str = _cfg.get("tls", "key_file")
+TLS_REDIRECT_HTTP: bool = _cfg.get("tls", "redirect_http")
+
 # Logging
 LOG_LEVEL: str = _cfg.get("logging", "level", "info")
 

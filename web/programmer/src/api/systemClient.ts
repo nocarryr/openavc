@@ -224,6 +224,7 @@ export interface SystemConfig {
   updates: { check_enabled: boolean; channel: string; auto_check_interval_hours: number; auto_backup_before_update: boolean; notify_only: boolean };
   cloud: { enabled: boolean; endpoint: string; system_key: string; system_id: string };
   kiosk: { enabled: boolean; target_url: string; cursor_visible: boolean };
+  tls: { enabled: boolean; port: number; auto_generate: boolean; cert_file: string; key_file: string; redirect_http: boolean };
 }
 
 export async function getSystemVersion(): Promise<{
