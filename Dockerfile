@@ -87,7 +87,13 @@ ENV OPENAVC_SERVICE_MANAGED=1
 
 EXPOSE 8080
 
+# Hits the plain HTTP port: when TLS is enabled with redirect_http=true (the
+# default), the redirect listener returns 301 to https://, and urllib follows
+# it. The unverified SSL context lets that redirect succeed for the self-signed
+# cert without affecting the TLS-off path (HTTP ignores the context arg).
+# Caveat: with TLS on AND redirect_http=false, this healthcheck cannot reach
+# the TLS listener at port 8443 — document in deployment.md.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"
+    CMD python -c "import ssl,urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', context=ssl._create_unverified_context())"
 
 ENTRYPOINT ["python", "-m", "server.main"]

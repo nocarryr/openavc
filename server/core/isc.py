@@ -153,7 +153,11 @@ def _parse_peer_address(addr: str) -> tuple[str, int]:
 
 @dataclass
 class PeerInfo:
-    """Information about a discovered or configured peer instance."""
+    """Information about a discovered or configured peer instance.
+
+    ``scheme`` is "http" or "https" — derived from the peer's beacon. Older
+    peers without scheme info default to "http" (backward compatible).
+    """
     instance_id: str
     name: str
     host: str
@@ -163,6 +167,7 @@ class PeerInfo:
     discovered_at: float = field(default_factory=time)
     last_seen: float = field(default_factory=time)
     source: str = "mdns"  # "mdns", "manual", "inbound"
+    scheme: str = "http"  # set to "https" when the peer advertises TLS
 
 
 class PeerConnection:
@@ -775,14 +780,25 @@ class ISCManager:
             log.debug("ISC: Beacon loop error (non-fatal)")
 
     def _build_beacon(self) -> bytes:
-        """Build a discovery beacon packet: magic header + JSON payload."""
-        payload = json.dumps({
+        """Build a discovery beacon packet: magic header + JSON payload.
+
+        ``scheme`` and ``tls_port`` were added in Phase 6 of the HTTPS plan.
+        They are additive — older peers ignore unknown JSON keys, newer peers
+        default to ``scheme="http"`` when the field is missing — so
+        ISC_PROTOCOL_VERSION stays "1".
+        """
+        from server import config
+        body: dict[str, Any] = {
             "instance_id": self.instance_id,
             "name": self.instance_name,
             "port": self.http_port,
             "version": _platform_version,
             "protocol": ISC_PROTOCOL_VERSION,
-        }).encode()
+        }
+        if config.TLS_ENABLED:
+            body["scheme"] = "https"
+            body["tls_port"] = config.TLS_PORT
+        payload = json.dumps(body).encode()
         return DISCOVERY_MAGIC + payload
 
     def _handle_beacon(self, data: bytes, addr: tuple[str, int]) -> None:
@@ -815,7 +831,14 @@ class ISCManager:
             return  # Skip self
 
         peer_name = payload.get("name", "")
-        peer_port = payload.get("port", 8080)
+        # The peer's beacon may advertise scheme="https" + a separate tls_port.
+        # In that case we connect to wss://host:tls_port rather than ws://host:port
+        # — outbound WebSocket clients don't follow HTTP 301 redirects.
+        peer_scheme = payload.get("scheme", "http")
+        if peer_scheme == "https":
+            peer_port = int(payload.get("tls_port") or payload.get("port", 8443))
+        else:
+            peer_port = int(payload.get("port", 8080))
         host = addr[0]  # Sender's IP from the UDP packet
 
         existing = self._peers.get(peer_id)
@@ -829,37 +852,43 @@ class ISCManager:
             existing.last_seen = time()
             return
 
-        log.info(f"ISC: Discovered «{peer_name}» ({peer_id[:8]}) at {host}:{peer_port}")
+        log.info(f"ISC: Discovered «{peer_name}» ({peer_id[:8]}) at {peer_scheme}://{host}:{peer_port}")
 
         self._peers[peer_id] = PeerInfo(
             instance_id=peer_id, name=peer_name, host=host, port=peer_port,
             version=payload.get("version", ""), source="discovered",
+            scheme=peer_scheme,
         )
         self._push_isc_update()
 
         # Connect if not already connected
         if peer_id not in self._connections:
-            self._schedule_connect(peer_id, host, peer_port)
+            self._schedule_connect(peer_id, host, peer_port, peer_scheme)
 
     # ------------------------------------------------------------------
     # Outbound connections
     # ------------------------------------------------------------------
 
-    def _schedule_connect(self, peer_id: str, host: str, port: int) -> None:
-        """Schedule a background task to connect to a peer."""
+    def _schedule_connect(self, peer_id: str, host: str, port: int, scheme: str = "http") -> None:
+        """Schedule a background task to connect to a peer.
+
+        ``scheme`` is "http" (default) or "https" — set by callers that have
+        TLS info from the peer's beacon. Manual-config callers leave it at
+        the default; they're expected to connect over plain ws://.
+        """
         if peer_id in self._connect_tasks:
             return
-        task = asyncio.create_task(self._outbound_loop(peer_id, host, port))
+        task = asyncio.create_task(self._outbound_loop(peer_id, host, port, scheme))
         self._connect_tasks[peer_id] = task
 
-    async def _outbound_loop(self, peer_id: str, host: str, port: int) -> None:
+    async def _outbound_loop(self, peer_id: str, host: str, port: int, scheme: str = "http") -> None:
         """Maintain an outbound connection to a peer with reconnection."""
         attempt = 0
         auth_fails = 0
         delay: float | None = None
         while self._running:
             try:
-                await self._outbound_connect(peer_id, host, port)
+                await self._outbound_connect(peer_id, host, port, scheme)
                 attempt = 0  # Reset on successful connection
                 auth_fails = 0
                 delay = None
@@ -902,14 +931,26 @@ class ISCManager:
             await asyncio.sleep(delay)
             delay = None
 
-    async def _outbound_connect(self, peer_id: str, host: str, port: int) -> None:
-        """Connect to a peer, authenticate, and run the message loop."""
+    async def _outbound_connect(self, peer_id: str, host: str, port: int, scheme: str = "http") -> None:
+        """Connect to a peer, authenticate, and run the message loop.
+
+        When ``scheme`` is "https", connects via wss:// with an unverified
+        SSL context — peers are self-signed by design (loopback / local LAN
+        trust model). See openavc-https-tls-plan.md §"ISC (Inter-System
+        Communication) — TLS-aware peers".
+        """
         import websockets
 
-        url = f"ws://{host}:{port}{ISC_WS_PATH}"
+        ssl_ctx = None
+        if scheme == "https":
+            import ssl as _ssl
+            ssl_ctx = _ssl._create_unverified_context()
+            url = f"wss://{host}:{port}{ISC_WS_PATH}"
+        else:
+            url = f"ws://{host}:{port}{ISC_WS_PATH}"
         log.debug(f"ISC: Connecting to {url}")
 
-        async with websockets.connect(url, close_timeout=5) as ws:
+        async with websockets.connect(url, close_timeout=5, ssl=ssl_ctx) as ws:
             # Send hello (no auth key — challenge-response handles auth)
             await ws.send(json.dumps({
                 "type": "isc.hello",

@@ -49,31 +49,89 @@ DATA_DIR = Path(os.environ.get('PROGRAMDATA', 'C:\\ProgramData')) / 'OpenAVC'
 STARTUP_ERROR_FILE = DATA_DIR / 'startup-error.json'
 
 
-def _get_port() -> int:
-    """Read the configured HTTP port from system.json or fallback to default."""
-    # Check env var first
+def _get_server_config() -> dict:
+    """Read the relevant subset of system.json at tray startup.
+
+    Returns: {"http_port", "tls_enabled", "tls_port"}.
+    Falls back to defaults on any read/parse failure — the tray must keep
+    running even if system.json is malformed.
+    """
+    result = {
+        "http_port": DEFAULT_PORT,
+        "tls_enabled": False,
+        "tls_port": 8443,
+    }
+
+    # Env-var overrides (mirror server/system_config.py ENV_OVERRIDES)
     port_env = os.environ.get('OPENAVC_PORT')
     if port_env:
         try:
-            return int(port_env)
+            result["http_port"] = int(port_env)
+        except ValueError:
+            pass
+    tls_env = os.environ.get('OPENAVC_TLS_ENABLED', '').lower()
+    if tls_env in ('true', '1', 'yes'):
+        result["tls_enabled"] = True
+    elif tls_env in ('false', '0', 'no'):
+        result["tls_enabled"] = False
+    tls_port_env = os.environ.get('OPENAVC_TLS_PORT')
+    if tls_port_env:
+        try:
+            result["tls_port"] = int(tls_port_env)
         except ValueError:
             pass
 
-    # Try reading system.json from ProgramData
     system_json = Path(os.environ.get('PROGRAMDATA', 'C:\\ProgramData')) / 'OpenAVC' / 'system.json'
     if system_json.exists():
         try:
             data = json.loads(system_json.read_text(encoding='utf-8'))
-            return data.get('network', {}).get('http_port', DEFAULT_PORT)
-        except (json.JSONDecodeError, OSError):
+            if 'OPENAVC_PORT' not in os.environ:
+                result["http_port"] = data.get('network', {}).get('http_port', DEFAULT_PORT)
+            tls_section = data.get('tls', {}) if isinstance(data.get('tls'), dict) else {}
+            if 'OPENAVC_TLS_ENABLED' not in os.environ:
+                result["tls_enabled"] = bool(tls_section.get('enabled', False))
+            if 'OPENAVC_TLS_PORT' not in os.environ:
+                result["tls_port"] = int(tls_section.get('port', 8443))
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
             pass
 
-    return DEFAULT_PORT
+    return result
 
 
-def _api_get(path: str, port: int, timeout: float = 3.0) -> dict | None:
-    """Make a GET request to the local OpenAVC API. Returns parsed JSON or None."""
-    url = f'http://127.0.0.1:{port}{path}'
+def _get_port() -> int:
+    """Back-compat shim: HTTP port only."""
+    return _get_server_config()["http_port"]
+
+
+def _base_url(server_cfg: dict) -> str:
+    """Browser-facing base URL (scheme + host + port).
+
+    When TLS is on, points at https://localhost:<tls_port>. The browser will
+    show a one-time security warning until the CA cert is installed.
+    """
+    if server_cfg.get("tls_enabled"):
+        return f"https://localhost:{server_cfg['tls_port']}"
+    return f"http://localhost:{server_cfg['http_port']}"
+
+
+def _api_get(path: str, server_cfg: dict, timeout: float = 3.0) -> dict | None:
+    """Make a GET request to the local OpenAVC API. Returns parsed JSON or None.
+
+    On TLS-enabled installs, hits the TLS port directly with cert verification
+    disabled (loopback self-signed cert — same trust model as the rest of
+    OpenAVC's internal callers).
+    """
+    if server_cfg.get("tls_enabled"):
+        url = f"https://127.0.0.1:{server_cfg['tls_port']}{path}"
+        try:
+            import ssl
+            ctx = ssl._create_unverified_context()
+            req = Request(url, headers={'Accept': 'application/json'})
+            with urlopen(req, timeout=timeout, context=ctx) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except (URLError, OSError, json.JSONDecodeError, TimeoutError):
+            return None
+    url = f"http://127.0.0.1:{server_cfg['http_port']}{path}"
     try:
         req = Request(url, headers={'Accept': 'application/json'})
         with urlopen(req, timeout=timeout) as resp:
@@ -125,7 +183,9 @@ class OpenAVCTray:
     """OpenAVC system tray application."""
 
     def __init__(self):
-        self._port = _get_port()
+        self._server_cfg = _get_server_config()
+        self._port = self._server_cfg["http_port"]  # back-compat
+        self._base_url = _base_url(self._server_cfg)
         self._running = True
         self._server_status: str = 'unknown'  # 'running', 'stopped', 'unknown'
         self._version: str = ''
@@ -160,7 +220,7 @@ class OpenAVCTray:
     def _poll_status(self):
         """Background thread that polls the server health endpoint."""
         while self._running:
-            health = _api_get('/api/health', self._port)
+            health = _api_get('/api/health', self._server_cfg)
             if health and health.get('status') == 'healthy':
                 self._server_status = 'running'
                 self._version = health.get('version', self._version)
@@ -181,17 +241,17 @@ class OpenAVCTray:
             time.sleep(POLL_INTERVAL)
 
     def _open_programmer(self, systray):
-        webbrowser.open(f'http://localhost:{self._port}/programmer')
+        webbrowser.open(f'{self._base_url}/programmer')
 
     def _open_panel(self, systray):
-        webbrowser.open(f'http://localhost:{self._port}/panel')
+        webbrowser.open(f'{self._base_url}/panel')
 
     def _check_updates(self, systray):
         """Trigger an update check, then open the Updates view in the browser."""
         # Fire-and-forget: tell the server to check now
-        _api_get('/api/system/updates/check', self._port, timeout=15)
+        _api_get('/api/system/updates/check', self._server_cfg, timeout=15)
         # Open the Programmer IDE Updates view so the user can see the result
-        webbrowser.open(f'http://localhost:{self._port}/programmer#/updates')
+        webbrowser.open(f'{self._base_url}/programmer#/updates')
 
     def _start_service(self, systray):
         _service_command('start')

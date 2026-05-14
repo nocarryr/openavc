@@ -11,7 +11,6 @@
 # No special drivers needed for HDMI + USB touch displays.
 
 CONFIG_FILE="${OPENAVC_DATA_DIR:-/var/lib/openavc}/system.json"
-DEFAULT_URL="http://localhost:8080/panel"
 INFO_PAGE="/tmp/openavc-info.html"
 
 # --- Read settings from system.json ---
@@ -24,14 +23,23 @@ try:
         config = json.load(f)
     kiosk = config.get('kiosk', {})
     network = config.get('network', {})
+    tls = config.get('tls') or {}
+    tls_enabled = bool(tls.get('enabled', False))
+    proto = 'https' if tls_enabled else 'http'
+    effective_port = int(tls.get('port', 8443)) if tls_enabled else int(network.get('http_port', 8080))
+    default_url = f'{proto}://localhost:{effective_port}/panel'
     print(kiosk.get('enabled', False))
-    print(kiosk.get('target_url', '$DEFAULT_URL'))
+    print(kiosk.get('target_url', default_url))
     print(kiosk.get('cursor_visible', False))
-    print(network.get('http_port', 8080))
+    print(int(network.get('http_port', 8080)))
+    print(proto)
+    print(effective_port)
 except Exception:
     print('False')
-    print('$DEFAULT_URL')
+    print('http://localhost:8080/panel')
     print('False')
+    print('8080')
+    print('http')
     print('8080')
 "
 }
@@ -41,15 +49,21 @@ KIOSK_ENABLED=$(echo "$CONFIG_OUTPUT" | sed -n '1p')
 TARGET_URL=$(echo "$CONFIG_OUTPUT" | sed -n '2p')
 CURSOR_VISIBLE=$(echo "$CONFIG_OUTPUT" | sed -n '3p')
 PORT=$(echo "$CONFIG_OUTPUT" | sed -n '4p')
+PROTO=$(echo "$CONFIG_OUTPUT" | sed -n '5p')
+EFFECTIVE_PORT=$(echo "$CONFIG_OUTPUT" | sed -n '6p')
 
 # --- Wait for the OpenAVC server to be ready ---
+#
+# When TLS is on, the server's cert is self-signed by default — curl's -k skips
+# verification during the boot health-check wait loop. The flag is a no-op for
+# plain http://.
 
 echo "Waiting for OpenAVC server..."
 ATTEMPTS=0
 MAX_ATTEMPTS=60
 
 while [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
-    if curl -sf http://localhost:${PORT}/api/health > /dev/null 2>&1; then
+    if curl -sf -k ${PROTO}://localhost:${EFFECTIVE_PORT}/api/health > /dev/null 2>&1; then
         echo "Server is ready."
         break
     fi
@@ -66,12 +80,13 @@ fi
 IP_ADDR=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+')
 HOSTNAME=$(hostname)
 
-if [ "$PORT" = "80" ]; then
-    BASE_URL="http://${IP_ADDR}"
-    MDNS_URL="http://${HOSTNAME}.local"
+# When TLS is on, info-page URLs advertise the HTTPS port; otherwise the HTTP port.
+if [ "$EFFECTIVE_PORT" = "80" ] || [ "$EFFECTIVE_PORT" = "443" ]; then
+    BASE_URL="${PROTO}://${IP_ADDR}"
+    MDNS_URL="${PROTO}://${HOSTNAME}.local"
 else
-    BASE_URL="http://${IP_ADDR}:${PORT}"
-    MDNS_URL="http://${HOSTNAME}.local:${PORT}"
+    BASE_URL="${PROTO}://${IP_ADDR}:${EFFECTIVE_PORT}"
+    MDNS_URL="${PROTO}://${HOSTNAME}.local:${EFFECTIVE_PORT}"
 fi
 
 # --- Determine what to show ---
@@ -190,7 +205,7 @@ else
     <h2>Network</h2>
     ${NETWORK_INFO}
     <div class="field"><span class="label">Hostname</span><span class="value">${HOSTNAME}.local</span></div>
-    <div class="field"><span class="label">Port</span><span class="value">${PORT}</span></div>
+    <div class="field"><span class="label">Port</span><span class="value">${EFFECTIVE_PORT}</span></div>
   </div>
 
   <div class="card">
@@ -257,4 +272,5 @@ exec chromium \
     --password-store=basic \
     --touch-events=enabled \
     --enable-touch-drag-drop \
+    --allow-insecure-localhost \
     "$CHROMIUM_URL"

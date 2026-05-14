@@ -802,3 +802,94 @@ async def test_peer_connection_has_monotonic_id():
     c2 = PeerConnection(ws2, "inbound")
     assert c1.connection_id < c2.connection_id
     assert c1.connection_id != c2.connection_id
+
+
+# ---------------------------------------------------------------------------
+# TLS-aware discovery (HTTPS plan §6)
+# ---------------------------------------------------------------------------
+
+
+def test_beacon_omits_scheme_when_tls_off(isc, monkeypatch):
+    """A v1-shape beacon — no scheme/tls_port — is emitted when TLS is off."""
+    from server import config
+    monkeypatch.setattr(config, "TLS_ENABLED", False)
+    raw = isc._build_beacon()
+    from server.core.isc import DISCOVERY_MAGIC
+    payload = json.loads(raw[len(DISCOVERY_MAGIC):])
+    assert "scheme" not in payload
+    assert "tls_port" not in payload
+    assert payload["instance_id"] == "aaaa-1111"
+    assert payload["port"] == 8080
+
+
+def test_beacon_emits_scheme_when_tls_on(isc, monkeypatch):
+    """TLS-on beacons advertise scheme=https + tls_port."""
+    from server import config
+    monkeypatch.setattr(config, "TLS_ENABLED", True)
+    monkeypatch.setattr(config, "TLS_PORT", 8443)
+    raw = isc._build_beacon()
+    from server.core.isc import DISCOVERY_MAGIC
+    payload = json.loads(raw[len(DISCOVERY_MAGIC):])
+    assert payload["scheme"] == "https"
+    assert payload["tls_port"] == 8443
+
+
+def test_handle_beacon_v1_defaults_to_http(isc, monkeypatch):
+    """A beacon with no scheme field is treated as http (backward compat)."""
+    captured = []
+    monkeypatch.setattr(isc, "_schedule_connect", lambda *args: captured.append(args))
+    from server.core.isc import DISCOVERY_MAGIC
+    payload = DISCOVERY_MAGIC + json.dumps({
+        "instance_id": "zzzz-9999",
+        "name": "Old Peer",
+        "port": 8080,
+        "version": "0.10.0",
+        "protocol": "1",
+    }).encode()
+    isc._handle_beacon(payload, ("192.168.1.50", 51000))
+
+    assert "zzzz-9999" in isc._peers
+    peer = isc._peers["zzzz-9999"]
+    assert peer.scheme == "http"
+    assert peer.port == 8080
+    assert captured == [("zzzz-9999", "192.168.1.50", 8080, "http")]
+
+
+def test_handle_beacon_v2_with_https_uses_tls_port(isc, monkeypatch):
+    """A beacon with scheme=https + tls_port routes outbound to the TLS port."""
+    captured = []
+    monkeypatch.setattr(isc, "_schedule_connect", lambda *args: captured.append(args))
+    from server.core.isc import DISCOVERY_MAGIC
+    payload = DISCOVERY_MAGIC + json.dumps({
+        "instance_id": "yyyy-8888",
+        "name": "New Peer",
+        "port": 8080,
+        "version": "0.12.0",
+        "protocol": "1",
+        "scheme": "https",
+        "tls_port": 8443,
+    }).encode()
+    isc._handle_beacon(payload, ("192.168.1.51", 51000))
+
+    peer = isc._peers["yyyy-8888"]
+    assert peer.scheme == "https"
+    assert peer.port == 8443  # tls_port wins
+    assert captured == [("yyyy-8888", "192.168.1.51", 8443, "https")]
+
+
+def test_handle_beacon_https_falls_back_to_port_when_tls_port_missing(isc, monkeypatch):
+    """scheme=https but no tls_port: fall back to the regular port field."""
+    captured = []
+    monkeypatch.setattr(isc, "_schedule_connect", lambda *args: captured.append(args))
+    from server.core.isc import DISCOVERY_MAGIC
+    payload = DISCOVERY_MAGIC + json.dumps({
+        "instance_id": "xxxx-7777",
+        "name": "Mid-Migration Peer",
+        "port": 8443,
+        "scheme": "https",
+    }).encode()
+    isc._handle_beacon(payload, ("192.168.1.52", 51000))
+
+    peer = isc._peers["xxxx-7777"]
+    assert peer.scheme == "https"
+    assert peer.port == 8443

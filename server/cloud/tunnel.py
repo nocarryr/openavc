@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import ssl
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
@@ -50,8 +51,40 @@ class TunnelHandler:
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=30.0)
+            # verify=False is the same trust model as ISC peer connections:
+            # the tunnel only ever connects to localhost, and the only TLS
+            # cert in play is the self-signed one we generated ourselves.
+            # The flag is moot for http:// URLs (plain HTTP, no handshake).
+            self._http_client = httpx.AsyncClient(timeout=30.0, verify=False)
         return self._http_client
+
+    @staticmethod
+    def _loopback_origin(target_port: int) -> str:
+        """Return the origin (scheme://host:port) for tunneled HTTP requests.
+
+        When TLS is enabled and the cloud is targeting the main HTTP port,
+        the main app has moved to TLS_PORT — switch to https. Plugin and
+        alt-service ports are untouched (they stay on http).
+        """
+        from server import config
+        if config.TLS_ENABLED and target_port == config.HTTP_PORT:
+            return f"https://localhost:{config.TLS_PORT}"
+        return f"http://localhost:{target_port}"
+
+    @staticmethod
+    def _loopback_ws_url(target_port: int, path: str) -> tuple[str, ssl.SSLContext | None]:
+        """Return (url, ssl_ctx) for tunneled WebSocket requests.
+
+        ssl_ctx is None for ws://; for wss:// it's an unverified context (same
+        trust model as the HTTP path: self-signed loopback).
+        """
+        from server import config
+        if config.TLS_ENABLED and target_port == config.HTTP_PORT:
+            return (
+                f"wss://localhost:{config.TLS_PORT}{path}",
+                ssl._create_unverified_context(),
+            )
+        return f"ws://localhost:{target_port}{path}", None
 
     async def handle_tunnel_open(self, msg: dict[str, Any]) -> None:
         """Handle a tunnel_open message from the cloud."""
@@ -243,7 +276,8 @@ class TunnelHandler:
         headers = msg.get("headers", {})
         body_b64 = msg.get("body", "")
 
-        url = f"http://localhost:{conn.target_port}{path}"
+        local_origin = self._loopback_origin(conn.target_port)
+        url = f"{local_origin}{path}"
 
         try:
             client = await self._get_http_client()
@@ -272,16 +306,27 @@ class TunnelHandler:
                 raise ValueError(f"Response too large: {len(response.content)} bytes")
 
             # Build response message — rewrite Location headers so redirects
-            # stay within the tunnel instead of pointing to localhost
+            # stay within the tunnel instead of pointing to localhost. When TLS
+            # is on, both the redirect listener (http -> https) and the main
+            # TLS app emit Location values that need stripping, so we check
+            # both schemes/host variants.
             resp_headers = dict(response.headers)
-            local_origin = f"http://localhost:{conn.target_port}"
+            from server import config as _cfg
+            local_origins = [
+                f"http://localhost:{conn.target_port}",
+                f"http://127.0.0.1:{conn.target_port}",
+            ]
+            if _cfg.TLS_ENABLED and conn.target_port == _cfg.HTTP_PORT:
+                local_origins.extend([
+                    f"https://localhost:{_cfg.TLS_PORT}",
+                    f"https://127.0.0.1:{_cfg.TLS_PORT}",
+                ])
             if "location" in resp_headers:
                 loc = resp_headers["location"]
-                if loc.startswith(local_origin):
-                    # Strip the local origin, keep just the path
-                    resp_headers["location"] = loc[len(local_origin):]
-                elif loc.startswith("/"):
-                    pass  # Already relative, fine
+                for origin in local_origins:
+                    if loc.startswith(origin):
+                        resp_headers["location"] = loc[len(origin):]
+                        break
             resp_msg = {
                 "type": "http_response",
                 "id": request_id,
@@ -312,7 +357,7 @@ class TunnelHandler:
         # `path` may include a query string (A47): preserve it intact so
         # endpoints that rely on `?token=…` style auth still authenticate.
         path = msg.get("path", "/")
-        url = f"ws://localhost:{conn.target_port}{path}"
+        url, ssl_ctx = self._loopback_ws_url(conn.target_port, path)
 
         # Subprotocols arrive as a structured list; pass them to the
         # `websockets` client so it can negotiate with the local server.
@@ -336,6 +381,7 @@ class TunnelHandler:
                 ping_timeout=None,
                 subprotocols=subprotocols,
                 additional_headers=additional_headers or None,
+                ssl=ssl_ctx,
             )
             conn.local_ws_connections[ws_id] = local_ws
 
