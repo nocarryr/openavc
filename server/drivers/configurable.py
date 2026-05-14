@@ -73,7 +73,9 @@ class ConfigurableDriver(BaseDriver):
         - id, name, manufacturer, category, transport
         - commands: dict of command_name -> {string, params}
         - responses: list of {pattern, mappings} for parsing
-        - polling: optional {interval, queries}
+        - polling: optional {queries}. Poll cadence is sourced from
+          default_config.poll_interval — a top-level polling.interval is
+          ignored.
         - state_variables, config_schema, default_config
     """
 
