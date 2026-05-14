@@ -1,7 +1,9 @@
 """
 REST API endpoints for plugin management.
 
-All endpoints require programmer auth (same as device management).
+Management endpoints require programmer auth (same as device management).
+Static plugin assets served for iframe / audio / image loads are on the open
+router — see the comment above `open_router` below.
 """
 
 from pathlib import Path
@@ -23,6 +25,14 @@ from server.utils.logger import get_logger
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_programmer_auth)])
+# Open router — for static plugin assets (HTML/JS/CSS/images/audio) that the
+# panel runtime fetches as iframe src or media src. Browser resource loads
+# can't attach Authorization headers, so requiring auth here just produces a
+# native HTTP Basic dialog inside the panel iframe. The handler hardens
+# against path traversal, blocks symlinks, and serves unknown extensions as
+# application/octet-stream, so opening these is the same security shape as
+# /api/projects/{id}/assets/* (also open).
+open_router = APIRouter(prefix="/api")
 
 _engine = None
 
@@ -151,13 +161,13 @@ def _serve_plugin_file(plugin_id: str, subdir: str, file_path: str):
     return FileResponse(resolved, media_type=media_type)
 
 
-@router.get("/plugins/{plugin_id}/panel/{file_path:path}")
+@open_router.get("/plugins/{plugin_id}/panel/{file_path:path}")
 async def serve_plugin_panel_file(plugin_id: str, file_path: str):
     """Serve static files from a plugin's panel/ directory for iframe rendering."""
     return _serve_plugin_file(plugin_id, "panel", file_path)
 
 
-@router.get("/plugins/{plugin_id}/files/{file_path:path}")
+@open_router.get("/plugins/{plugin_id}/files/{file_path:path}")
 async def serve_plugin_file(plugin_id: str, file_path: str):
     """Serve any static file from inside a plugin's directory.
 

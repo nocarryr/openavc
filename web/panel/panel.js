@@ -5,6 +5,87 @@
  * from JSON definitions, and sends user interactions back to the server.
  */
 
+// --- Programmer auth bridge -------------------------------------------------
+// When the panel is embedded as an iframe inside the Programmer IDE (UI Builder
+// canvas, Theme Studio preview) and a programmer password is configured, the
+// SPA caches the credentials in sessionStorage. We're same-origin with the SPA
+// so we can read them, and we must — otherwise our /api fetches and the
+// WebSocket handshake return 401, which makes the browser pop its native HTTP
+// Basic dialog inside the iframe. See openavc/web/programmer/src/api/auth.ts
+// for the parent half.
+(function installProgrammerAuthBridge() {
+    const STORAGE_KEY = 'openavc.programmer.auth';
+
+    function getStoredAuth() {
+        try {
+            const raw = sessionStorage.getItem(STORAGE_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.user === 'string' && typeof parsed.pass === 'string') {
+                return parsed;
+            }
+        } catch (_) { /* fall through */ }
+        return null;
+    }
+
+    function getAuthHeader() {
+        const a = getStoredAuth();
+        if (!a) return null;
+        return 'Basic ' + btoa(`${a.user}:${a.pass}`);
+    }
+
+    // Mirrors getAuthSubprotocols() in the Programmer SPA: URI-encode for
+    // unicode safety, base64-encode, then URL-safe / strip padding so the value
+    // is a valid WebSocket subprotocol token (RFC 6455 restricts these to HTTP
+    // token chars). The server decodes it in check_ws_auth().
+    function getAuthSubprotocol() {
+        const a = getStoredAuth();
+        if (!a) return null;
+        const b64 = btoa(unescape(encodeURIComponent(a.pass)))
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/, '');
+        return `auth.b64.${b64}`;
+    }
+
+    // Exposed so the PanelApp WebSocket constructor can pull the subprotocol.
+    window.__openavcGetAuthSubprotocol = getAuthSubprotocol;
+
+    function isApiUrl(url) {
+        // /api, /api/..., or /tunnel/<id>/api/...
+        return /(^|\/)api(\/|$|\?)/.test(url);
+    }
+
+    // Patch fetch unconditionally; the header is only attached when credentials
+    // are actually present. If no Programmer SPA is involved (panel opened
+    // standalone after an interactive Basic login), the browser's own cache
+    // handles auth and this patch is a no-op.
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+        let url;
+        if (typeof input === 'string') {
+            url = input;
+        } else if (input instanceof URL) {
+            url = input.toString();
+        } else {
+            url = input.url;
+        }
+        const auth = getAuthHeader();
+        if (auth && isApiUrl(url)) {
+            const headers = new Headers(
+                init?.headers ??
+                    (input instanceof Request ? input.headers : undefined),
+            );
+            if (!headers.has('Authorization')) {
+                headers.set('Authorization', auth);
+            }
+            init = { ...(init || {}), headers };
+        }
+        return originalFetch(input, init);
+    };
+})();
+// ---------------------------------------------------------------------------
+
 class PanelApp {
     constructor() {
         const params = new URLSearchParams(window.location.search);
@@ -164,7 +245,14 @@ class PanelApp {
         const basePath = pathParts[0] || '';
         const url = `${protocol}//${location.host}${basePath}/ws?client=panel&namespaces=device,var,ui,system,plugin`;
 
-        this.ws = new WebSocket(url);
+        // When embedded in the Programmer IDE, attach the cached programmer
+        // password as a Sec-WebSocket-Protocol so the handshake authenticates
+        // without prompting. Standalone panels with no cached credentials fall
+        // back to the plain ctor (browser cache / open server).
+        const authProto = typeof window.__openavcGetAuthSubprotocol === 'function'
+            ? window.__openavcGetAuthSubprotocol()
+            : null;
+        this.ws = authProto ? new WebSocket(url, [authProto]) : new WebSocket(url);
 
         this.ws.onopen = () => {
             this.reconnectDelay = 1000;
