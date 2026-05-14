@@ -146,10 +146,21 @@ async def _initialize_engine(app: FastAPI) -> None:
         engine.events.on("system.restart_requested", _on_restart_requested)
 
         app.state.engine_ready = True
+        if config.TLS_ENABLED:
+            scheme = "https"
+            port = config.TLS_PORT
+        else:
+            scheme = "http"
+            port = config.HTTP_PORT
         log.info("=" * 60)
-        log.info(f"  Panel UI:    http://localhost:{config.HTTP_PORT}/panel")
-        log.info(f"  Programmer:  http://localhost:{config.HTTP_PORT}/programmer")
-        log.info(f"  REST API:    http://localhost:{config.HTTP_PORT}/api")
+        log.info(f"  Panel UI:    {scheme}://localhost:{port}/panel")
+        log.info(f"  Programmer:  {scheme}://localhost:{port}/programmer")
+        log.info(f"  REST API:    {scheme}://localhost:{port}/api")
+        if config.TLS_ENABLED and config.TLS_REDIRECT_HTTP:
+            log.info(
+                f"  HTTP redirect: http://localhost:{config.HTTP_PORT} "
+                f"-> https://localhost:{config.TLS_PORT}"
+            )
         log.info("=" * 60)
     except Exception as e:
         app.state.engine_error = str(e)
@@ -471,37 +482,160 @@ def _clear_startup_error() -> None:
         pass
 
 
-if __name__ == "__main__":
+def _preflight_port(port: int, *, retries: int) -> "OSError | None":
+    """Try to bind to (BIND_ADDRESS, port). Return None on success, last error otherwise.
+
+    During cloud-driven restart the dying parent's listening socket can take a
+    moment to free after `os._exit(0)`; the retry loop tolerates that brief
+    window. Normal startup uses retries=1 to surface a clean "port in use"
+    error immediately.
+    """
     import socket as _sock
     import time as _time
-
-    # During cloud restart, the dying parent's listening socket can take a
-    # moment to free after `os._exit(0)`. Retry for up to 10s so the new
-    # process doesn't lose the race even when the parent's hard-exit
-    # watchdog (7s) is what finally tears it down. For a normal startup
-    # (no restart marker) we check once, preserving the immediate
-    # "port in use" error.
-    _retries = 20 if os.environ.get("OPENAVC_RESTARTING") == "1" else 1
-    _bound = False
-    _last_err: OSError | None = None
-    for _attempt in range(_retries):
-        _test = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+    last_err: "OSError | None" = None
+    for attempt in range(retries):
+        test = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
         try:
-            _test.bind((config.BIND_ADDRESS, config.HTTP_PORT))
-            _bound = True
-            _test.close()
-            break
-        except OSError as _err:
-            _last_err = _err
-            _test.close()
-            if _attempt < _retries - 1:
+            test.bind((config.BIND_ADDRESS, port))
+            test.close()
+            return None
+        except OSError as err:
+            last_err = err
+            test.close()
+            if attempt < retries - 1:
                 _time.sleep(0.5)
-    if not _bound:
+    return last_err
+
+
+def _build_redirect_app(tls_port: int):
+    """Tiny Starlette app: catch-all that 301/308 redirects to https://...:tls_port.
+
+    GET/HEAD use 301; other methods use 308 to preserve method semantics. The
+    Host header drives the redirect target hostname so external clients (phones,
+    other servers on the LAN) get redirected back to themselves, not to
+    "localhost". Pathological Host values fall back to the request URL hostname.
+    """
+    from starlette.applications import Starlette
+    from starlette.responses import RedirectResponse
+    from starlette.routing import Route
+
+    _BAD_HOST_CHARS = (" ", "/", "\\", "@", "<", ">", "\"", "'")
+
+    async def _handler(request: Request) -> RedirectResponse:
+        host_header = request.headers.get("host", "")
+        host = host_header.split(":", 1)[0] if host_header else ""
+        if not host or any(c in host for c in _BAD_HOST_CHARS):
+            host = request.url.hostname or "localhost"
+        target = f"https://{host}:{tls_port}{request.url.path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        status = 301 if request.method in ("GET", "HEAD") else 308
+        return RedirectResponse(target, status_code=status)
+
+    return Starlette(routes=[
+        Route(
+            "/{path:path}",
+            _handler,
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+        ),
+    ])
+
+
+async def _run_tls() -> None:
+    """Run the TLS listener (and optional HTTP redirect listener) concurrently.
+
+    On TLS-config failure, writes a startup-error file and exits non-zero with
+    the same shape as the existing port-in-use error so the tray app and other
+    monitors can surface the cause.
+    """
+    from server import tls as tls_module
+    from server.system_config import get_system_config
+
+    try:
+        cert_path, key_path = tls_module.load_or_generate(
+            config, get_system_config().data_dir
+        )
+    except tls_module.TLSConfigError as exc:
         msg = (
-            f"Port {config.HTTP_PORT} is already in use.\n"
+            "HTTPS is enabled but the TLS listener cannot start:\n"
+            f"  {exc.reason}\n\n"
+            "Fix the certificate configuration in Settings > Security,\n"
+            "or disable HTTPS (Settings > Security, or OPENAVC_TLS_ENABLED=false)."
+        )
+        print(f"\n*** {msg} ***\n", file=sys.stderr)
+        _write_startup_error("tls_error", msg)
+        raise SystemExit(1) from exc
+
+    main_config = uvicorn.Config(
+        "server.main:app",
+        host=config.BIND_ADDRESS,
+        port=config.TLS_PORT,
+        ssl_certfile=str(cert_path),
+        ssl_keyfile=str(key_path),
+        reload=False,
+        log_level="info",
+    )
+    main_server = uvicorn.Server(main_config)
+    tasks: list[asyncio.Task] = [asyncio.create_task(main_server.serve())]
+
+    if config.TLS_REDIRECT_HTTP:
+        redirect_err = _preflight_port(config.HTTP_PORT, retries=1)
+        if redirect_err is None:
+            redirect_config = uvicorn.Config(
+                _build_redirect_app(config.TLS_PORT),
+                host=config.BIND_ADDRESS,
+                port=config.HTTP_PORT,
+                log_level="warning",  # quiet: every redirect logs an info line otherwise
+            )
+            redirect_server = uvicorn.Server(redirect_config)
+            # Only the main server installs signal handlers; otherwise both
+            # servers race to register signal.signal handlers and the second
+            # one overrides the first. The redirect cancels via the
+            # FIRST_COMPLETED logic below when main shuts down.
+            import contextlib as _contextlib
+
+            @_contextlib.contextmanager
+            def _no_signals():
+                yield
+
+            redirect_server.capture_signals = _no_signals
+            tasks.append(asyncio.create_task(redirect_server.serve()))
+        else:
+            log.warning(
+                "HTTP redirect listener could not bind to port %d (%s); "
+                "old http:// links will not auto-redirect.",
+                config.HTTP_PORT,
+                redirect_err,
+            )
+
+    # When either task finishes (graceful shutdown, error, signal), cancel the
+    # other so we don't hang in asyncio.gather.
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        # Re-raise any exception the completed task ended with.
+        task.result()
+
+
+if __name__ == "__main__":
+    # The pre-flight port is whichever port we'll actually bind primary.
+    # When TLS is on with redirect, the HTTP redirect listener is best-effort
+    # and pre-flighted inside _run_tls (logs a warning, never blocks startup).
+    _primary_port = config.TLS_PORT if config.TLS_ENABLED else config.HTTP_PORT
+    _primary_label = "HTTPS port" if config.TLS_ENABLED else "HTTP port"
+    _env_var_hint = "OPENAVC_TLS_PORT" if config.TLS_ENABLED else "OPENAVC_PORT"
+
+    _retries = 20 if os.environ.get("OPENAVC_RESTARTING") == "1" else 1
+    _err = _preflight_port(_primary_port, retries=_retries)
+    if _err is not None:
+        msg = (
+            f"{_primary_label} {_primary_port} is already in use.\n"
             f"Another application (or another copy of OpenAVC) is using this port.\n\n"
             f"To fix this, change the port in Settings > System,\n"
-            f"or set the OPENAVC_PORT environment variable."
+            f"or set the {_env_var_hint} environment variable."
         )
         print(f"\n*** {msg} ***\n")
         _write_startup_error("port_in_use", msg)
@@ -512,10 +646,13 @@ if __name__ == "__main__":
 
     _clear_startup_error()
 
-    uvicorn.run(
-        "server.main:app",
-        host=config.BIND_ADDRESS,
-        port=config.HTTP_PORT,
-        reload=False,
-        log_level="info",
-    )
+    if config.TLS_ENABLED:
+        asyncio.run(_run_tls())
+    else:
+        uvicorn.run(
+            "server.main:app",
+            host=config.BIND_ADDRESS,
+            port=config.HTTP_PORT,
+            reload=False,
+            log_level="info",
+        )
