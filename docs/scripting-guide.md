@@ -343,8 +343,8 @@ log.info(f"Cancelled {count} timers")
 | `ui.submit.<element_id>` | Text input or keypad submitted (payload includes `value`) |
 | `ui.page.<page_id>` | Page navigation (no payload) |
 | `device.connected.<device_id>` | Device connected |
-| `device.disconnected.<device_id>` | Device disconnected |
-| `device.error.<device_id>` | Device communication error (payload includes `error`). *Reserved — not currently emitted by built-in drivers; safe to subscribe to but won't fire until a driver opts in.* |
+| `device.disconnected.<device_id>` | Device disconnected — transport-level loss (socket dropped, serial port gone, poll watchdog tripped) |
+| `device.error.<device_id>` | Protocol/parse/command failure on an otherwise-live connection (payload includes `device_id`, `error`). Distinct from `device.disconnected.<device_id>` — see note below |
 | `macro.started.<macro_id>` | Macro began executing |
 | `macro.completed.<macro_id>` | Macro finished executing |
 | `macro.cancelled.<macro_id>` | Macro was cancelled |
@@ -355,6 +355,8 @@ log.info(f"Cancelled {count} timers")
 | `isc.*.<event>` | Event from a remote OpenAVC instance |
 | `custom.<anything>` | User-defined events |
 
+> **`device.disconnected` vs `device.error`.** These two are complementary, not interchangeable. `device.disconnected` fires when the transport itself fails — the TCP socket drops, the serial port unplugs, the poll watchdog trips on a connectionless transport. The device's `connected` state flips to `False` at the same moment. `device.error` fires when a command or poll completes against a live transport but the protocol layer fails: a bad parameter, a decode error, an HTTP 5xx, a malformed response. The connection is presumed alive; only that operation went wrong. If the same exception is both (e.g. a TCP write fails because the socket just died), only `device.disconnected` fires — the transport callback owns that path.
+>
 > **Note on schedules:** Scheduled actions are handled via triggers, not events. A schedule trigger directly executes its macro when the cron expression matches. To run a script on a schedule, create a macro with an Emit Event step that fires a custom event, handle that event in your script with `@on_event`, and attach a schedule trigger to the macro.
 
 ## Complete Examples

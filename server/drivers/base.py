@@ -433,9 +433,22 @@ class BaseDriver(ABC):
                 try:
                     await self.poll()
                 except (ConnectionError, TimeoutError, OSError):
+                    # Transport-level loss — the disconnect watchdog / transport
+                    # callback will publish device.disconnected.<id>. Don't fire
+                    # device.error.<id> here; that event is reserved for
+                    # protocol/parse failures on an otherwise-live connection.
                     log.warning(f"[{self.device_id}] Poll failed (connection issue)")
-                except Exception:
+                except Exception as exc:
                     log.exception(f"[{self.device_id}] Unexpected error during poll")
+                    try:
+                        await self.events.emit(
+                            f"device.error.{self.device_id}",
+                            {"device_id": self.device_id, "error": str(exc)},
+                        )
+                    except Exception:
+                        log.exception(
+                            f"[{self.device_id}] Failed to emit device.error"
+                        )
 
                 await asyncio.sleep(interval)
 

@@ -924,10 +924,19 @@ class ConfigurableDriver(BaseDriver):
                     data = _safe_encode_escapes(formatted)
                     await self.transport.send(data)
             except ConnectionError:
+                # Transport gone — device.disconnected.<id> fires from the
+                # transport callback. No device.error here.
                 log.warning(f"[{self.device_id}] Poll query failed — not connected")
                 return
-            except Exception:  # Catch-all: template substitution, encoding, or HTTP errors
+            except Exception as exc:  # Template substitution, encoding, or HTTP errors
                 log.exception(f"[{self.device_id}] Poll query error")
+                try:
+                    await self.events.emit(
+                        f"device.error.{self.device_id}",
+                        {"device_id": self.device_id, "error": str(exc)},
+                    )
+                except Exception:
+                    log.exception(f"[{self.device_id}] Failed to emit device.error")
 
     def _create_frame_parser(self) -> FrameParser | None:
         """Check definition for frame parser config."""

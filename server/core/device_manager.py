@@ -229,13 +229,27 @@ class DeviceManager:
     async def send_command(
         self, device_id: str, command: str, params: dict[str, Any] | None = None
     ) -> Any:
-        """Send a command to a device by ID."""
+        """Send a command to a device by ID.
+
+        Any exception raised by the driver's ``send_command`` is published as
+        ``device.error.<device_id>`` (payload: ``{"device_id", "error"}``) and
+        then re-raised. Transport-level loss is reported separately as
+        ``device.disconnected.<device_id>`` from the transport callback; the
+        two events are complementary — see ``event_bus.py`` for the policy.
+        """
         driver = self._devices.get(device_id)
         if driver is None:
             raise ValueError(f"Device '{device_id}' not found")
         if not driver.get_state("connected"):
             raise ConnectionError(f"Device '{device_id}' is not connected")
-        return await driver.send_command(command, params)
+        try:
+            return await driver.send_command(command, params)
+        except Exception as exc:
+            await self.events.emit(
+                f"device.error.{device_id}",
+                {"device_id": device_id, "error": str(exc)},
+            )
+            raise
 
     def get_device_info(self, device_id: str) -> dict[str, Any]:
         """Return device metadata, status, and capabilities."""

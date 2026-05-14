@@ -328,3 +328,144 @@ async def test_on_device_disconnected_triggers_reconnect(dm, core):
     assert "test_dev" in dm._reconnect_tasks
 
     await dm._cancel_reconnect("test_dev")
+
+
+# ---------------------------------------------------------------------------
+# device.error.<id> emission (backlog §31)
+# ---------------------------------------------------------------------------
+
+class ErroringDriver(BaseDriver):
+    """Mock driver whose send_command / poll can be forced to raise.
+
+    Set ``raise_on_command`` to an exception instance to make ``send_command``
+    raise that exception. Set ``raise_on_poll`` for the same on ``poll``.
+    """
+
+    DRIVER_INFO = {
+        "id": "erroring_driver",
+        "name": "Erroring Driver",
+        "manufacturer": "Test",
+        "category": "utility",
+        "transport": "tcp",
+        "default_config": {"host": "127.0.0.1", "port": 9999},
+        "commands": {"power_on": {"label": "Power On", "params": {}}},
+        "state_variables": {},
+        "config_schema": {},
+    }
+
+    def __init__(self, device_id, config, state, events):
+        super().__init__(device_id, config, state, events)
+        self.raise_on_command: Exception | None = None
+        self.raise_on_poll: Exception | None = None
+
+    async def connect(self):
+        self._connected = True
+        self.state.set(f"device.{self.device_id}.connected", True, source="driver")
+
+    async def disconnect(self):
+        self._connected = False
+        self.state.set(f"device.{self.device_id}.connected", False, source="driver")
+
+    async def send_command(self, command: str, params: dict | None = None):
+        if self.raise_on_command is not None:
+            raise self.raise_on_command
+        return None
+
+    async def poll(self):
+        if self.raise_on_poll is not None:
+            raise self.raise_on_poll
+
+    async def stop_polling(self):
+        pass
+
+
+_DRIVER_REGISTRY["erroring_driver"] = ErroringDriver
+
+
+async def test_send_command_emits_device_error(dm, core):
+    """Exception from driver.send_command emits device.error.<id> and re-raises."""
+    state, events = core
+    driver = ErroringDriver("dev_err", {}, state, events)
+    await driver.connect()
+    dm._devices["dev_err"] = driver
+
+    received: list[tuple[str, dict]] = []
+
+    def capture(event_name: str, payload):
+        received.append((event_name, payload))
+
+    events.on("device.error.dev_err", capture)
+
+    driver.raise_on_command = RuntimeError("bad parameter")
+    with pytest.raises(RuntimeError, match="bad parameter"):
+        await dm.send_command("dev_err", "power_on")
+
+    assert received == [
+        ("device.error.dev_err", {"device_id": "dev_err", "error": "bad parameter"}),
+    ]
+
+
+async def test_send_command_not_connected_skips_device_error(dm, core):
+    """Pre-flight not-connected guard raises ConnectionError but does NOT emit
+    device.error — that path is the device.disconnected territory; the
+    disconnect event has already fired separately."""
+    state, events = core
+    driver = ErroringDriver("dev_off", {}, state, events)
+    # Not calling connect — driver stays connected=False
+    dm._devices["dev_off"] = driver
+
+    received: list[tuple[str, dict]] = []
+    events.on("device.error.dev_off", lambda name, payload: received.append((name, payload)))
+
+    with pytest.raises(ConnectionError, match="not connected"):
+        await dm.send_command("dev_off", "power_on")
+
+    assert received == []
+
+
+async def test_poll_loop_emits_device_error_on_protocol_failure(core):
+    """A non-connection exception raised by poll() emits device.error.<id>."""
+    state, events = core
+    driver = ErroringDriver("dev_poll_err", {}, state, events)
+    await driver.connect()
+
+    received: list[tuple[str, dict]] = []
+    events.on(
+        "device.error.dev_poll_err",
+        lambda name, payload: received.append((name, payload)),
+    )
+
+    driver.raise_on_poll = ValueError("bad response frame")
+
+    # Run the poll loop briefly. start_polling kicks off the background task;
+    # one cycle is enough to trigger the exception path.
+    await driver.start_polling(0.01)
+    await asyncio.sleep(0.05)
+    await driver.stop_polling()
+
+    assert len(received) >= 1
+    name, payload = received[0]
+    assert name == "device.error.dev_poll_err"
+    assert payload == {"device_id": "dev_poll_err", "error": "bad response frame"}
+
+
+async def test_poll_loop_connection_error_skips_device_error(core):
+    """ConnectionError / TimeoutError / OSError in poll() are transport-level
+    signals — device.disconnected handles them. device.error must not fire."""
+    state, events = core
+    driver = ErroringDriver("dev_poll_conn", {}, state, events)
+    await driver.connect()
+
+    received: list[tuple[str, dict]] = []
+    events.on(
+        "device.error.dev_poll_conn",
+        lambda name, payload: received.append((name, payload)),
+    )
+
+    driver.raise_on_poll = ConnectionError("socket reset")
+
+    await driver.start_polling(0.01)
+    await asyncio.sleep(0.05)
+    await driver.stop_polling()
+
+    assert received == []

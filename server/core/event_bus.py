@@ -8,8 +8,11 @@ Event types follow a dotted namespace convention:
     state.changed              — any state change
     state.changed.<key>        — specific key changed
     device.connected.<id>      — device came online
-    device.disconnected.<id>   — device went offline
-    device.error.<id>          — device error
+    device.disconnected.<id>   — transport-level loss (TCP socket closed,
+                                 serial port gone, watchdog dry-poll trip)
+    device.error.<id>          — protocol/parse/command failure on an
+                                 otherwise-live connection (payload:
+                                 {device_id, error})
     ui.press.<element_id>      — button pressed
     ui.release.<element_id>    — button released
     ui.change.<element_id>     — slider/select changed
@@ -20,6 +23,27 @@ Event types follow a dotted namespace convention:
     macro.completed.<macro_id> — macro finished
     schedule.<schedule_id>     — scheduled event fired
     custom.<anything>          — user-defined events
+
+device.disconnected vs device.error
+-----------------------------------
+These two are complementary, not interchangeable:
+
+* ``device.disconnected.<id>`` fires when the transport itself fails —
+  the TCP socket drops, the serial port unplugs, the poll watchdog
+  trips on a UDP/HTTP/OSC device. The driver's ``connected`` state
+  flips to False at the same time. Use this to drive "device offline"
+  UI and recovery logic.
+
+* ``device.error.<id>`` fires when a command or poll completes against
+  a live transport but the protocol layer fails — a bad parameter, a
+  decode error, a malformed response, an HTTP 5xx, a timeout waiting
+  for a reply on a still-open socket. The connection is presumed
+  alive; only this command went wrong. Use this for protocol-level
+  alerting that's distinct from "the device is gone."
+
+If the same exception is both (e.g. a TCP write fails because the
+socket just died), only ``device.disconnected`` fires — the transport
+callback owns that path.
 """
 
 from __future__ import annotations
