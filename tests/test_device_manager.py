@@ -469,3 +469,115 @@ async def test_poll_loop_connection_error_skips_device_error(core):
     await driver.stop_polling()
 
     assert received == []
+
+
+# ---------------------------------------------------------------------------
+# Missing-driver discovery + bulk orphan retry
+# ---------------------------------------------------------------------------
+# These cover the fix for the silent-orphan bug: when drivers are added to
+# driver_repo/ mid-session (community install, file-system drop), every
+# project device that was waiting on those drivers should activate without a
+# server restart.
+
+async def test_get_missing_drivers_returns_unique_driver_ids(dm):
+    """get_missing_drivers() dedupes — two devices with the same missing
+    driver should produce one entry, not two."""
+    await dm.add_device({
+        "id": "display_a",
+        "driver": "missing_display_driver",
+        "name": "Display A",
+        "config": {},
+    })
+    await dm.add_device({
+        "id": "display_b",
+        "driver": "missing_display_driver",
+        "name": "Display B",
+        "config": {},
+    })
+    await dm.add_device({
+        "id": "switcher_1",
+        "driver": "missing_switcher_driver",
+        "name": "Matrix Switcher",
+        "config": {},
+    })
+
+    missing = dm.get_missing_drivers()
+    assert sorted(missing) == ["missing_display_driver", "missing_switcher_driver"]
+
+
+async def test_get_missing_drivers_empty_when_no_orphans(dm):
+    """No orphans means no missing drivers, regardless of registered drivers."""
+    assert dm.get_missing_drivers() == []
+
+
+async def test_retry_all_orphans_activates_when_driver_appears(dm, core):
+    """The core orphan-activation flow: orphan exists, driver gets registered,
+    retry sweep activates the device. Mirrors what happens after a community
+    driver install completes mid-session."""
+    state, _ = core
+    # Add an orphan whose driver doesn't exist yet
+    await dm.add_device({
+        "id": "future_device",
+        "driver": "newly_arriving_driver",
+        "name": "Future Device",
+        "config": {"host": "127.0.0.1", "port": 9999},
+    })
+    assert state.get("device.future_device.orphaned") is True
+
+    # Driver shows up (e.g. install_community_driver just registered it)
+    _DRIVER_REGISTRY["newly_arriving_driver"] = MockDriver
+    try:
+        activated = await dm.retry_all_orphans()
+        assert activated == ["future_device"]
+        # Orphan flag cleared, device now connected via MockDriver
+        assert state.get("device.future_device.orphaned") in (False, None)
+        assert state.get("device.future_device.connected") is True
+    finally:
+        _DRIVER_REGISTRY.pop("newly_arriving_driver", None)
+        await dm.disconnect_all()
+
+
+async def test_retry_all_orphans_skips_when_driver_still_missing(dm, core):
+    """Orphans whose driver is still not in the registry must stay orphaned.
+    The sweep should report them as not-activated and leave their state alone."""
+    state, _ = core
+    await dm.add_device({
+        "id": "still_orphaned",
+        "driver": "still_missing_driver",
+        "name": "Still Orphaned",
+        "config": {},
+    })
+    assert state.get("device.still_orphaned.orphaned") is True
+
+    activated = await dm.retry_all_orphans()
+    assert activated == []
+    # Orphan state unchanged
+    assert state.get("device.still_orphaned.orphaned") is True
+
+
+async def test_retry_all_orphans_partial_activation(dm, core):
+    """Mixed batch: one orphan's driver is now registered, the other's isn't.
+    Only the activatable one comes online; the missing-driver one stays put."""
+    state, _ = core
+    await dm.add_device({
+        "id": "ready_to_go",
+        "driver": "another_arriving_driver",
+        "name": "Ready",
+        "config": {},
+    })
+    await dm.add_device({
+        "id": "still_waiting",
+        "driver": "totally_missing",
+        "name": "Waiting",
+        "config": {},
+    })
+
+    _DRIVER_REGISTRY["another_arriving_driver"] = MockDriver
+    try:
+        activated = await dm.retry_all_orphans()
+        assert activated == ["ready_to_go"]
+        assert state.get("device.ready_to_go.connected") is True
+        assert state.get("device.still_waiting.orphaned") is True
+    finally:
+        _DRIVER_REGISTRY.pop("another_arriving_driver", None)
+        await dm.disconnect_all()

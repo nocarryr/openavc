@@ -144,6 +144,24 @@ To remove a driver you no longer need:
 
 You cannot uninstall a driver while a device in the project is using it. The Uninstall button is disabled in that case, and the detail panel lists the devices that reference the driver. Remove or reassign those devices first, then uninstall. You can always reinstall from Browse Community.
 
+### Drivers a Project Needs
+
+When you open a project, OpenAVC checks every device's driver against the registered drivers on this system. Devices whose driver isn't installed are marked **orphaned** — they appear in the device list grayed out, with a yellow status dot and "(not installed)" next to the driver name.
+
+If any orphaned devices are found and their drivers are available in the community catalog, a **Missing Drivers** prompt appears. It lists each missing driver with the device count it affects, separated into two groups:
+
+- **Available from community** — checked by default. Click **Install N drivers** to download them all from the community library in one step. As soon as each driver is registered, every device waiting on it activates and starts connecting.
+- **Not in community catalog** — drivers the project references that aren't in the public library (private drivers, typos, drivers from another source). These need to be reassigned to a different driver, or the driver file uploaded manually from the Drivers tab.
+
+Click **Skip** to dismiss without installing — the orphaned devices stay marked, and you can install their drivers later from Browse Community or the per-device banner.
+
+Each orphaned device also shows a **Driver Not Installed** banner in its detail panel with two actions:
+
+- **Install from Community** — installs that single driver directly. The device activates as soon as the install completes.
+- **Reassign Driver** — opens the device editor so you can switch to a driver that is installed.
+
+If the driver isn't in the community catalog, the banner says so and offers **Browse Drivers** (to upload manually) plus **Reassign Driver** instead of the install button.
+
 ## Device Discovery
 
 The Discovery panel is inside the **Devices** view. Click **Devices** in the sidebar, then select the **Discovery** tab. It scans your network for AV devices and helps you add them to your project without manually entering IP addresses and driver settings.
