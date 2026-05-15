@@ -258,17 +258,31 @@ class MDNSAdvertiser:
         instance_id: str,
         http_port: int,
         version: str,
+        *,
+        tls_enabled: bool = False,
+        tls_port: int = 0,
     ):
         self._instance_name = _sanitize_instance_name(instance_name)
         self._instance_id = instance_id
         self._http_port = http_port
         self._version = version
+        self._tls_enabled = tls_enabled
+        self._tls_port = tls_port
 
         self._sock: socket.socket | None = None
         self._running = False
         self._responder_task: asyncio.Task | None = None
         self._local_ip: str = ""
         self._hostname: str = ""
+
+    @property
+    def _service_port(self) -> int:
+        """Port to advertise in the SRV record.
+
+        When TLS is on, panel apps must reach the HTTPS listener directly —
+        hitting the HTTP redirect listener over TLS would fail the handshake.
+        """
+        return self._tls_port if self._tls_enabled else self._http_port
 
     async def start(self) -> None:
         """Start advertising the service via mDNS."""
@@ -288,11 +302,12 @@ class MDNSAdvertiser:
         self._responder_task.add_done_callback(self._on_task_done)
 
         log.info(
-            "mDNS: Advertising %s.%s on %s:%d",
+            "mDNS: Advertising %s.%s on %s:%d (%s)",
             self._instance_name,
             SERVICE_TYPE,
             self._local_ip,
-            self._http_port,
+            self._service_port,
+            "https" if self._tls_enabled else "http",
         )
 
     async def stop(self) -> None:
@@ -387,7 +402,7 @@ class MDNSAdvertiser:
             service_type=SERVICE_TYPE,
             hostname=self._hostname,
             ip=self._local_ip,
-            port=self._http_port,
+            port=self._service_port,
             txt_pairs=self._build_txt_pairs(),
         )
         packet = build_dns_response(records)
@@ -406,7 +421,7 @@ class MDNSAdvertiser:
             service_type=SERVICE_TYPE,
             hostname=self._hostname,
             ip=self._local_ip,
-            port=self._http_port,
+            port=self._service_port,
             txt_pairs=self._build_txt_pairs(),
             ttl=0,
         )
@@ -418,13 +433,21 @@ class MDNSAdvertiser:
             log.debug("mDNS: Failed to send goodbye: %s", e)
 
     def _build_txt_pairs(self) -> dict[str, str]:
-        """Build TXT record key=value pairs."""
-        return {
+        """Build TXT record key=value pairs.
+
+        ``scheme`` is included only when TLS is enabled. Readers that don't
+        see the key should default to ``"http"`` — keeps older panel apps
+        working through the HTTP-to-HTTPS redirect listener.
+        """
+        pairs = {
             "name": self._instance_name,
             "id": self._instance_id,
             "version": self._version,
             "path": "/panel",
         }
+        if self._tls_enabled:
+            pairs["scheme"] = "https"
+        return pairs
 
     @staticmethod
     def _on_task_done(task: asyncio.Task) -> None:

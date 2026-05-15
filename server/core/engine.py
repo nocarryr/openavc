@@ -1282,6 +1282,8 @@ class Engine:
                 instance_id=instance_id,
                 http_port=config.HTTP_PORT,
                 version=__version__,
+                tls_enabled=config.TLS_ENABLED,
+                tls_port=config.TLS_PORT,
             )
             await self.mdns_advertiser.start()
         except Exception:
