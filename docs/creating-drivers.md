@@ -1362,6 +1362,44 @@ These methods can be overridden in your driver subclass:
 | `_resolve_delimiter()` | No | Checks DRIVER_INFO, then config, then defaults to `b"\r"`. |
 | `_handle_transport_disconnect()` | No | Sets connected=False, emits disconnect event. |
 
+### The `poll()` contract
+
+Python drivers that override `poll()` **must propagate transport-level errors**. The polling loop catches `ConnectionError`, `TimeoutError`, `OSError`, and any `httpx.HTTPError` and counts them toward the missed-poll watchdog. After 3 consecutive dry polls, the platform flips `device.<id>.connected` to `False` and emits `device.disconnected.<id>`.
+
+Swallowing transport errors here causes `device.<id>.connected` to lie when the device is unreachable. **Do this:**
+
+```python
+async def poll(self) -> None:
+    try:
+        await self._refresh_state()
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        raise ConnectionError(f"Device not responding: {exc}") from exc
+```
+
+**Not this:**
+
+```python
+async def poll(self) -> None:
+    try:
+        await self._refresh_state()
+    except (httpx.ConnectError, httpx.TimeoutException):
+        log.warning("Poll failed — device not responding")
+        # WRONG: device.<id>.connected will stay True forever
+```
+
+Protocol-level errors (unexpected response shape, expected device states like "in standby") may be handled inside `poll()` — those indicate the device is reachable but not in a queryable state, so they should not penalize the watchdog. If you raise `ValueError` or any non-transport exception, the platform logs it via `device.error.<id>` and continues polling.
+
+If your driver doesn't use one of the platform transport classes (`TCPTransport`, `HTTPClientTransport`, `UDPTransport`, `OSCTransport`), use `_verify_reachable(host, port, timeout)` in `connect()` to confirm the device is alive before setting `connected=True`:
+
+```python
+async def connect(self) -> None:
+    host = self.config.get("host", "")
+    port = self.config.get("port", 1400)
+    if not await self._verify_reachable(host, port, timeout=3.0):
+        raise ConnectionError(f"Device at {host}:{port} not responding")
+    # ...rest of setup, then set_state("connected", True)
+```
+
 ### Convenience Methods
 
 These are available on every driver via the `BaseDriver` base class:
@@ -1372,6 +1410,7 @@ These are available on every driver via the `BaseDriver` base class:
 | `self.get_state("power")` | Gets the current value of `device.<device_id>.power` |
 | `await self.start_polling(15)` | Starts calling `self.poll()` every 15 seconds |
 | `await self.stop_polling()` | Stops the polling loop |
+| `await self._verify_reachable(host, port)` | Returns True if a TCP connection opens within the timeout |
 | `await self.transport.send(data)` | Send raw bytes to the device |
 | `await self.transport.send_and_wait(data, timeout=5)` | Send and wait for the next response |
 | `self.device_id` | The device's ID (e.g., `"projector1"`) |

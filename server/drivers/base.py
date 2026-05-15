@@ -49,6 +49,7 @@ class BaseDriver(ABC):
         self.transport: Any = None
         self._poll_task: asyncio.Task | None = None
         self._connected = False
+        self._last_poll_success: float = 0.0
 
         # Initialize state variables from DRIVER_INFO
         self._init_state_variables()
@@ -328,6 +329,17 @@ class BaseDriver(ABC):
         Called periodically to request device status.
 
         Override to send status query commands. Default: no-op.
+
+        Contract: implementations MUST propagate transport-level errors
+        (ConnectionError, TimeoutError, OSError, httpx.ConnectError,
+        httpx.TimeoutException). The polling loop catches these and counts
+        them toward the missed-poll watchdog. Swallowing transport errors
+        here causes `device.<id>.connected` to lie when the device is
+        unreachable.
+
+        Protocol-level errors (unexpected response shape, expected device
+        states like "in standby") may be handled inside poll() — those
+        indicate the device is reachable but not in a queryable state.
         """
 
     def _create_frame_parser(self) -> FrameParser | None:
@@ -364,6 +376,35 @@ class BaseDriver(ABC):
 
         # Default
         return b"\r"
+
+    async def _verify_reachable(
+        self, host: str, port: int, timeout: float = 3.0
+    ) -> bool:
+        """
+        Verify that a TCP host:port is reachable.
+
+        Drivers that don't use a platform transport (raw httpx clients,
+        websocket clients, etc.) should call this in connect() before
+        setting connected=True, so that loading the project against an
+        unreachable host fails fast instead of declaring a phantom
+        connection that has to time out via the watchdog.
+
+        Returns True if a TCP connection can be opened within the timeout,
+        False otherwise.
+        """
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=timeout,
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+        except (OSError, asyncio.TimeoutError):
+            return False
 
     def _handle_transport_disconnect(self) -> None:
         """
@@ -411,35 +452,49 @@ class BaseDriver(ABC):
     async def _poll_loop(self, interval: float) -> None:
         """Background loop that calls self.poll() periodically.
 
-        For connectionless transports (UDP, OSC, HTTP), includes a watchdog
-        that triggers disconnect if no data is received for several poll
-        cycles. TCP and serial detect disconnect at the transport level.
+        Tracks whether each poll() returned cleanly. When N consecutive polls
+        raise a transport-level error (ConnectionError, TimeoutError, OSError,
+        or any httpx HTTP error), marks the device disconnected and exits.
+        Protocol-level errors (e.g., ValueError on unexpected response shape)
+        are logged via device.error.<id> but do not penalize the watchdog —
+        the device is reachable, just misbehaving.
+
+        Drivers MUST propagate transport errors from poll(). Swallowing
+        httpx.ConnectError and friends in a driver's poll() causes connected
+        state to lie.
         """
-        has_watchdog = (
-            self.transport is not None
-            and hasattr(self.transport, "last_data_received")
-        )
+        import time
+        try:
+            import httpx
+            httpx_errors: tuple = (httpx.HTTPError,)
+        except ImportError:
+            httpx_errors = ()
+
         max_dry_polls = self.config.get("max_missed_polls", 3)
         dry_polls = 0
+        # Seed at loop start so we don't false-positive before the first poll.
+        self._last_poll_success = time.monotonic()
 
         try:
             while True:
-                last_rx = (
-                    self.transport.last_data_received
-                    if has_watchdog and self.transport
-                    else 0
-                )
-
                 try:
                     await self.poll()
-                except (ConnectionError, TimeoutError, OSError):
-                    # Transport-level loss — the disconnect watchdog / transport
-                    # callback will publish device.disconnected.<id>. Don't fire
-                    # device.error.<id> here; that event is reserved for
-                    # protocol/parse failures on an otherwise-live connection.
-                    log.warning(f"[{self.device_id}] Poll failed (connection issue)")
+                    self._last_poll_success = time.monotonic()
+                    dry_polls = 0
+                except (ConnectionError, TimeoutError, OSError) as exc:
+                    log.warning(
+                        f"[{self.device_id}] Poll failed (connection): {exc}"
+                    )
+                    dry_polls += 1
+                except httpx_errors as exc:
+                    log.warning(
+                        f"[{self.device_id}] Poll failed (HTTP): {exc}"
+                    )
+                    dry_polls += 1
                 except Exception as exc:
-                    log.exception(f"[{self.device_id}] Unexpected error during poll")
+                    log.exception(
+                        f"[{self.device_id}] Unexpected error during poll"
+                    )
                     try:
                         await self.events.emit(
                             f"device.error.{self.device_id}",
@@ -450,21 +505,15 @@ class BaseDriver(ABC):
                             f"[{self.device_id}] Failed to emit device.error"
                         )
 
-                await asyncio.sleep(interval)
+                if dry_polls >= max_dry_polls:
+                    log.warning(
+                        f"[{self.device_id}] No response for "
+                        f"{dry_polls} poll cycles — marking disconnected"
+                    )
+                    self._handle_transport_disconnect()
+                    return
 
-                if has_watchdog and self.transport:
-                    new_rx = self.transport.last_data_received
-                    if new_rx <= last_rx:
-                        dry_polls += 1
-                        if dry_polls >= max_dry_polls:
-                            log.warning(
-                                f"[{self.device_id}] No response for "
-                                f"{dry_polls} poll cycles — marking disconnected"
-                            )
-                            self._handle_transport_disconnect()
-                            return
-                    else:
-                        dry_polls = 0
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             return
 
