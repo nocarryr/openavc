@@ -310,6 +310,46 @@ export async function downloadCertificate(): Promise<Blob> {
   return res.blob();
 }
 
+export interface TlsUploadResult {
+  cert_path: string;
+  key_path: string;
+  fingerprint: string;
+  subject: string;
+  issuer: string;
+  expires_at: string;
+  days_until_expiry: number;
+  sans: string[];
+  warnings: string[];
+}
+
+/** Upload a user-provided cert + matching private key as PEM files.
+ *  On success the server writes them to data_dir/tls/user-{cert,key}.pem and
+ *  returns the absolute paths plus parsed metadata. The caller is responsible
+ *  for following this with a config patch that points tls.cert_file /
+ *  tls.key_file at the returned paths.
+ *  Throws Error with the server's user-friendly message on 400 (cert/key
+ *  mismatch, passphrase-protected key, garbage input, ...). */
+export async function uploadTlsCert(cert: File, key: File): Promise<TlsUploadResult> {
+  const form = new FormData();
+  form.append("cert", cert);
+  form.append("key", key);
+  const res = await fetch(`${BASE}/system/tls/upload-cert`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = `Upload failed (HTTP ${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = body.detail;
+    } catch {
+      /* fall through with generic message */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 // --- Network Adapters ---
 
 export interface NetworkAdapter {

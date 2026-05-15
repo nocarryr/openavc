@@ -8,6 +8,7 @@ tmp_path-backed cert store.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -201,3 +202,183 @@ def test_tls_status_flags_expired_cert(client, monkeypatch, tmp_path):
     resp = client.get("/api/system/tls-status")
     assert resp.status_code == 200
     assert "expired" in resp.json()["cert"]["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# /api/system/tls/upload-cert
+# ---------------------------------------------------------------------------
+
+
+def _make_cert_key_pair(
+    *, ca: bool = False, with_passphrase: bytes | None = None
+) -> tuple[bytes, bytes]:
+    """Generate a one-shot self-signed cert + matching key as PEM bytes."""
+    import datetime as dt
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test")])
+    now = dt.datetime.now(dt.timezone.utc)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + dt.timedelta(days=365))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+            critical=False,
+        )
+    )
+    if ca:
+        builder = builder.add_extension(
+            x509.BasicConstraints(ca=True, path_length=0), critical=True
+        )
+    cert = builder.sign(key, hashes.SHA256())
+
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    encryption: Any = serialization.NoEncryption()
+    if with_passphrase is not None:
+        encryption = serialization.BestAvailableEncryption(with_passphrase)
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=encryption,
+    )
+    return cert_pem, key_pem
+
+
+def _upload(client, cert_pem: bytes, key_pem: bytes):
+    return client.post(
+        "/api/system/tls/upload-cert",
+        files={
+            "cert": ("cert.pem", cert_pem, "application/x-pem-file"),
+            "key": ("key.pem", key_pem, "application/x-pem-file"),
+        },
+    )
+
+
+def test_upload_cert_happy_path_writes_files_and_returns_metadata(
+    client, tls_dir, tmp_path
+):
+    cert_pem, key_pem = _make_cert_key_pair()
+    resp = _upload(client, cert_pem, key_pem)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["cert_path"].endswith("user-cert.pem")
+    assert body["key_path"].endswith("user-key.pem")
+    assert len(body["fingerprint"]) == 64
+    assert "localhost" in body["sans"]
+    # Files exist on disk where the endpoint said they would.
+    assert Path(body["cert_path"]).read_bytes() == cert_pem
+    assert Path(body["key_path"]).read_bytes() == key_pem
+
+
+def test_upload_cert_rejects_empty_cert(client, tls_dir):
+    _cert_pem, key_pem = _make_cert_key_pair()
+    resp = _upload(client, b"", key_pem)
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"].lower()
+
+
+def test_upload_cert_rejects_empty_key(client, tls_dir):
+    cert_pem, _key_pem = _make_cert_key_pair()
+    resp = _upload(client, cert_pem, b"")
+    assert resp.status_code == 400
+
+
+def test_upload_cert_rejects_oversize_payload(client, tls_dir):
+    big = b"-----BEGIN CERTIFICATE-----\n" + (b"A" * 60_000) + b"\n-----END CERTIFICATE-----\n"
+    resp = _upload(client, big, big)
+    assert resp.status_code == 400
+    assert "too large" in resp.json()["detail"].lower()
+
+
+def test_upload_cert_rejects_garbage_cert(client, tls_dir):
+    _cert_pem, key_pem = _make_cert_key_pair()
+    resp = _upload(client, b"not a certificate", key_pem)
+    assert resp.status_code == 400
+    assert "x.509" in resp.json()["detail"].lower()
+
+
+def test_upload_cert_rejects_garbage_key(client, tls_dir):
+    cert_pem, _key_pem = _make_cert_key_pair()
+    resp = _upload(client, cert_pem, b"not a key")
+    assert resp.status_code == 400
+    assert "key" in resp.json()["detail"].lower()
+
+
+def test_upload_cert_rejects_passphrase_key(client, tls_dir):
+    cert_pem, _key_pem = _make_cert_key_pair()
+    # Build a passphrase-protected key that does NOT match cert_pem; the
+    # passphrase check must fire before the match check.
+    _, encrypted_key = _make_cert_key_pair(with_passphrase=b"secret")
+    resp = _upload(client, cert_pem, encrypted_key)
+    assert resp.status_code == 400
+    assert "passphrase" in resp.json()["detail"].lower()
+
+
+def test_upload_cert_rejects_mismatched_pair(client, tls_dir):
+    cert_pem, _ = _make_cert_key_pair()
+    _, key_pem = _make_cert_key_pair()  # different key
+    resp = _upload(client, cert_pem, key_pem)
+    assert resp.status_code == 400
+    assert "do not match" in resp.json()["detail"].lower()
+
+
+def test_upload_cert_flags_ca_cert_as_warning(client, tls_dir):
+    cert_pem, key_pem = _make_cert_key_pair(ca=True)
+    resp = _upload(client, cert_pem, key_pem)
+    assert resp.status_code == 200
+    assert "is-ca-cert" in resp.json()["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/system/config TLS invariant guard
+# ---------------------------------------------------------------------------
+
+
+def test_patch_system_config_rejects_provided_mode_without_cert(client):
+    resp = client.patch(
+        "/api/system/config",
+        json={"tls": {"enabled": True, "auto_generate": False, "cert_file": "", "key_file": ""}},
+    )
+    assert resp.status_code == 400
+    assert "provided" in resp.json()["detail"].lower()
+
+
+def test_patch_system_config_allows_provided_mode_with_cert(client, monkeypatch):
+    # Don't actually write to the real system.json — monkeypatch the save.
+    from server.system_config import get_system_config
+
+    cfg = get_system_config()
+    monkeypatch.setattr(cfg, "save", lambda: None)
+    resp = client.patch(
+        "/api/system/config",
+        json={
+            "tls": {
+                "enabled": True,
+                "auto_generate": False,
+                "cert_file": "/tmp/cert.pem",
+                "key_file": "/tmp/key.pem",
+            },
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_patch_system_config_allows_auto_mode(client, monkeypatch):
+    from server.system_config import get_system_config
+
+    cfg = get_system_config()
+    monkeypatch.setattr(cfg, "save", lambda: None)
+    resp = client.patch(
+        "/api/system/config",
+        json={"tls": {"enabled": True, "auto_generate": True}},
+    )
+    assert resp.status_code == 200

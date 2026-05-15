@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
-import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power, Upload, FileCheck2, ChevronDown, ChevronRight } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { RestartProgressDialog } from "../components/shared/RestartProgressDialog";
 import { showError, showSuccess } from "../store/toastStore";
 import * as api from "../api/restClient";
-import type { SystemConfig, NetworkAdapter, TlsStatus } from "../api/restClient";
+import type { SystemConfig, NetworkAdapter, TlsStatus, TlsUploadResult } from "../api/restClient";
 
 const REDACTED = "***";
 
@@ -248,6 +248,16 @@ export function SystemSettingsView() {
   const [restartNeeded, setRestartNeeded] = useState(false);
   const [showRebootDialog, setShowRebootDialog] = useState(false);
   const [showRestartDialog, setShowRestartDialog] = useState(false);
+  // TLS provided-mode cert upload state.
+  const [pickedCert, setPickedCert] = useState<File | null>(null);
+  const [pickedKey, setPickedKey] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState<TlsUploadResult | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteCert, setPasteCert] = useState("");
+  const [pasteKey, setPasteKey] = useState("");
+  const certInputRef = useRef<HTMLInputElement>(null);
+  const keyInputRef = useRef<HTMLInputElement>(null);
   const [kioskAvailable, setKioskAvailable] = useState(false);
   const [adapters, setAdapters] = useState<NetworkAdapter[]>([]);
   const [adaptersLoading, setAdaptersLoading] = useState(false);
@@ -345,6 +355,51 @@ export function SystemSettingsView() {
     } catch (e) {
       showError("Could not download CA certificate: " + String(e));
     }
+  };
+
+  // Upload either the picked files (file-picker path) or the pasted PEM text
+  // (paste-expander path). Server writes them to data_dir/tls/, returns the
+  // paths, and we wire those into the unsaved config so the next Save points
+  // tls.cert_file / tls.key_file at the new files.
+  const handleUploadCert = async (cert: File, key: File) => {
+    setUploading(true);
+    try {
+      const result = await api.uploadTlsCert(cert, key);
+      setUploadResult(result);
+      // Auto-fill the path fields. Marks dirty so the save button enables.
+      update("tls", "cert_file", result.cert_path);
+      update("tls", "key_file", result.key_path);
+      // Reset picker state.
+      setPickedCert(null);
+      setPickedKey(null);
+      setPasteCert("");
+      setPasteKey("");
+      setPasteOpen(false);
+      if (certInputRef.current) certInputRef.current.value = "";
+      if (keyInputRef.current) keyInputRef.current.value = "";
+      showSuccess(
+        "Certificate uploaded. Save and restart to apply." +
+          (result.warnings.includes("is-ca-cert")
+            ? " Warning: this looks like a CA cert, not a server cert — browsers may not trust it."
+            : ""),
+      );
+    } catch (e) {
+      showError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleUploadFromPickers = () => {
+    if (!pickedCert || !pickedKey) return;
+    void handleUploadCert(pickedCert, pickedKey);
+  };
+
+  const handleUploadFromPaste = () => {
+    if (!pasteCert.trim() || !pasteKey.trim()) return;
+    const certFile = new File([pasteCert], "cert.pem", { type: "application/x-pem-file" });
+    const keyFile = new File([pasteKey], "key.pem", { type: "application/x-pem-file" });
+    void handleUploadCert(certFile, keyFile);
   };
 
   const hasDirty = Object.keys(dirty).length > 0;
@@ -653,33 +708,181 @@ export function SystemSettingsView() {
 
               {tlsCertMode === "provided" && (
                 <>
-                  <div style={fieldRow}>
-                    <label style={labelStyle}>Certificate file</label>
-                    <input
-                      style={inputStyle}
-                      value={tls.cert_file}
-                      placeholder="/etc/openavc/tls/cert.pem"
-                      onChange={(e) => update("tls", "cert_file", e.target.value)}
-                    />
-                    <span style={helpText}>
-                      Absolute path on this server's filesystem. The server reads this file on each restart.
-                    </span>
-                  </div>
-                  <div style={fieldRow}>
-                    <label style={labelStyle}>Key file</label>
-                    <input
-                      style={inputStyle}
-                      value={tls.key_file}
-                      placeholder="/etc/openavc/tls/key.pem"
-                      onChange={(e) => update("tls", "key_file", e.target.value)}
-                    />
-                    <span style={helpText}>
-                      The private key matching the certificate above. Keep this file readable only by the OpenAVC service user.
-                    </span>
-                  </div>
-                  {tlsProvidedBlank && (
-                    <div style={{ ...helpText, color: "rgb(244, 67, 54)" }}>
-                      Both certificate and key paths are required.
+                  {/* Active-cert card: shows either the just-uploaded result or
+                      the previously-saved provided cert (from tls-status). */}
+                  {(uploadResult || (tlsStatus?.enabled && tlsStatus.mode === "provided" && tlsStatus.cert)) && (
+                    <div style={{
+                      padding: "var(--space-md)",
+                      background: "var(--bg-elevated)",
+                      borderRadius: "var(--border-radius)",
+                      marginBottom: "var(--space-md)",
+                      border: "1px solid var(--border-color)",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", marginBottom: "var(--space-xs)" }}>
+                        <FileCheck2 size={16} style={{ color: "rgb(76, 175, 80)" }} />
+                        <strong style={{ fontSize: "var(--font-size-sm)" }}>
+                          {uploadResult ? "Certificate uploaded" : "Active certificate"}
+                        </strong>
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                        <div>
+                          Valid until <strong>
+                            {new Date((uploadResult?.expires_at) ?? (tlsStatus?.cert?.expires_at ?? "")).toLocaleDateString()}
+                          </strong>
+                          {" "}
+                          <ExpiryBadge days={(uploadResult?.days_until_expiry) ?? (tlsStatus?.cert?.days_until_expiry ?? 0)} />
+                        </div>
+                        <div><strong>Subject:</strong> <code>{uploadResult?.subject ?? tlsStatus?.cert?.subject}</code></div>
+                        <div style={{ wordBreak: "break-all" }}>
+                          <strong>SHA-256:</strong> <code>{uploadResult?.fingerprint ?? tlsStatus?.cert?.fingerprint}</code>
+                        </div>
+                        <div><strong>Valid for:</strong> {(uploadResult?.sans ?? tlsStatus?.cert?.sans ?? []).join(", ") || "—"}</div>
+                        {uploadResult?.warnings.includes("is-ca-cert") && (
+                          <div style={{ marginTop: "var(--space-xs)", color: "rgb(255, 152, 0)" }}>
+                            <AlertTriangle size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
+                            This looks like a CA certificate, not a server certificate. Most browsers won't trust it.
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUploadResult(null);
+                          update("tls", "cert_file", "");
+                          update("tls", "key_file", "");
+                          setPickedCert(null);
+                          setPickedKey(null);
+                        }}
+                        style={{
+                          ...btnStyle,
+                          background: "transparent",
+                          border: "1px solid var(--border-color)",
+                          color: "var(--text-primary)",
+                          marginTop: "var(--space-sm)",
+                        }}
+                      >
+                        Replace certificate
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Picker UI: hidden when an upload result is showing.
+                      "Replace certificate" above puts us back here. */}
+                  {!uploadResult && !(tls.cert_file && tls.key_file) && (
+                    <>
+                      <div style={fieldRow}>
+                        <label style={labelStyle}>Certificate</label>
+                        <div>
+                          <input
+                            ref={certInputRef}
+                            type="file"
+                            accept=".pem,.crt,.cer,application/x-pem-file,application/x-x509-ca-cert"
+                            onChange={(e) => setPickedCert(e.target.files?.[0] ?? null)}
+                            style={{ fontSize: "var(--font-size-sm)" }}
+                          />
+                          {pickedCert && (
+                            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+                              Selected: <code>{pickedCert.name}</code> ({Math.ceil(pickedCert.size / 100) / 10} KB)
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div style={fieldRow}>
+                        <label style={labelStyle}>Private key</label>
+                        <div>
+                          <input
+                            ref={keyInputRef}
+                            type="file"
+                            accept=".pem,.key,application/x-pem-file"
+                            onChange={(e) => setPickedKey(e.target.files?.[0] ?? null)}
+                            style={{ fontSize: "var(--font-size-sm)" }}
+                          />
+                          {pickedKey && (
+                            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+                              Selected: <code>{pickedKey.name}</code> ({Math.ceil(pickedKey.size / 100) / 10} KB)
+                            </div>
+                          )}
+                        </div>
+                        <span style={helpText}>
+                          The private key matching the certificate above. PEM format, no passphrase.
+                          Files are written to the server's data directory; you don't need filesystem access.
+                        </span>
+                      </div>
+                      <div style={fieldRow}>
+                        <div />
+                        <button
+                          type="button"
+                          onClick={handleUploadFromPickers}
+                          disabled={!pickedCert || !pickedKey || uploading}
+                          style={{
+                            ...btnStyle,
+                            opacity: !pickedCert || !pickedKey || uploading ? 0.5 : 1,
+                            alignSelf: "flex-start",
+                          }}
+                        >
+                          <Upload size={14} />
+                          <span>{uploading ? "Uploading..." : "Upload certificate"}</span>
+                        </button>
+                      </div>
+
+                      {/* Paste-PEM expander for users whose cert arrived in an email. */}
+                      <div style={{ marginTop: "var(--space-md)" }}>
+                        <button
+                          type="button"
+                          onClick={() => setPasteOpen((v) => !v)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--text-secondary)",
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: 0,
+                            fontSize: "var(--font-size-sm)",
+                          }}
+                        >
+                          {pasteOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                          <span>Or paste PEM contents</span>
+                        </button>
+                        {pasteOpen && (
+                          <div style={{ marginTop: "var(--space-sm)", display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+                            <textarea
+                              placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+                              value={pasteCert}
+                              onChange={(e) => setPasteCert(e.target.value)}
+                              rows={6}
+                              style={{ ...inputStyle, fontFamily: "monospace", fontSize: 12, resize: "vertical" }}
+                            />
+                            <textarea
+                              placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
+                              value={pasteKey}
+                              onChange={(e) => setPasteKey(e.target.value)}
+                              rows={6}
+                              style={{ ...inputStyle, fontFamily: "monospace", fontSize: 12, resize: "vertical" }}
+                            />
+                            <button
+                              type="button"
+                              onClick={handleUploadFromPaste}
+                              disabled={!pasteCert.trim() || !pasteKey.trim() || uploading}
+                              style={{
+                                ...btnStyle,
+                                opacity: !pasteCert.trim() || !pasteKey.trim() || uploading ? 0.5 : 1,
+                                alignSelf: "flex-start",
+                              }}
+                            >
+                              <Upload size={14} />
+                              <span>{uploading ? "Uploading..." : "Use pasted certificate"}</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  {tlsProvidedBlank && !uploadResult && (
+                    <div style={{ ...helpText, color: "rgb(244, 67, 54)", marginTop: "var(--space-sm)" }}>
+                      Upload a certificate before saving.
                     </div>
                   )}
                 </>

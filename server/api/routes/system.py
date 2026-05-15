@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from server.api._engine import _get_engine
 from server.api.errors import api_error as _api_error
@@ -298,13 +298,39 @@ async def get_system_config_endpoint() -> dict[str, Any]:
 
 @router.patch("/system/config")
 async def update_system_config(request: Request) -> dict[str, Any]:
-    """Update system configuration sections. Body is a partial system.json structure."""
+    """Update system configuration sections. Body is a partial system.json structure.
+
+    Validates TLS invariants up-front so a partial save can't lock the user
+    out (e.g., saving ``enabled=true`` + ``auto_generate=false`` + empty cert
+    paths would refuse to start the server on next launch, with no UI path
+    back to fix it).
+    """
     from server.system_config import get_system_config
     cfg = get_system_config()
     body = await request.json()
 
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    # Validate TLS section against the proposed post-patch state.
+    if "tls" in body and isinstance(body["tls"], dict):
+        current_tls = dict(cfg.section("tls") or {})
+        proposed_tls = {**current_tls, **body["tls"]}
+        if (
+            proposed_tls.get("enabled")
+            and not proposed_tls.get("auto_generate")
+            and (
+                not str(proposed_tls.get("cert_file") or "").strip()
+                or not str(proposed_tls.get("key_file") or "").strip()
+            )
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Provided-cert mode needs both a certificate and a key. "
+                    "Upload a certificate, or switch back to auto-generate."
+                ),
+            )
 
     updated_sections = []
     for section_name, section_data in body.items():
@@ -457,6 +483,158 @@ async def get_tls_status() -> dict[str, Any]:
         "warnings": warnings,
     }
     return status
+
+
+_UPLOAD_MAX_BYTES = 100_000  # 100 KB — real cert+key combos are 5-20 KB even with chains
+
+
+@router.post("/system/tls/upload-cert")
+async def upload_tls_cert(
+    cert: UploadFile = File(...),
+    key: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Accept a user-provided cert + matching private key, write to data_dir/tls/.
+
+    Lets a non-technical admin install a third-party certificate without
+    touching the server's filesystem. The frontend follows this with a
+    PATCH /api/system/config that points ``tls.cert_file`` / ``tls.key_file``
+    at the returned paths and sets ``auto_generate=false``.
+
+    Validation (rejects with 400 on any failure):
+      * Both files non-empty.
+      * Total payload <= 100 KB.
+      * Cert parses as PEM-encoded X.509.
+      * Key parses as a passphrase-free PEM private key.
+      * Cert and key public-key DER bytes match.
+
+    Files are written atomically (``.tmp`` + ``os.replace``) so a torn write
+    can never leave half-rotated artifacts on disk. POSIX hosts get
+    ``0600`` on the key file.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    cert_bytes = await cert.read()
+    key_bytes = await key.read()
+
+    if not cert_bytes:
+        raise HTTPException(status_code=400, detail="Certificate file is empty.")
+    if not key_bytes:
+        raise HTTPException(status_code=400, detail="Key file is empty.")
+    if len(cert_bytes) + len(key_bytes) > _UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Files too large (max {_UPLOAD_MAX_BYTES // 1000} KB combined).",
+        )
+
+    try:
+        parsed_cert = x509.load_pem_x509_certificate(cert_bytes)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Certificate is not valid PEM-encoded X.509: {exc}",
+        ) from exc
+
+    try:
+        parsed_key = serialization.load_pem_private_key(key_bytes, password=None)
+    except TypeError as exc:
+        # cryptography raises TypeError when a password is required but None was supplied.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Private key is passphrase-protected. Re-export it without a "
+                "passphrase, or put a reverse proxy in front of OpenAVC."
+            ),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Key is not a valid PEM-encoded private key: {exc}",
+        ) from exc
+
+    # Match check via SubjectPublicKeyInfo DER bytes — works uniformly for RSA, EC, Ed25519, etc.
+    try:
+        cert_pub_der = parsed_cert.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        key_pub_der = parsed_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not compare cert and key public keys: {exc}",
+        ) from exc
+
+    if cert_pub_der != key_pub_der:
+        raise HTTPException(status_code=400, detail="Certificate and key do not match.")
+
+    # Atomic write to data_dir/tls/
+    import os
+    from server.system_config import get_system_config
+
+    data_dir = get_system_config().data_dir
+    tls_dir = data_dir / "tls"
+    try:
+        tls_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"TLS data directory is not writable: {tls_dir} ({exc})",
+        ) from exc
+
+    cert_path = tls_dir / "user-cert.pem"
+    key_path = tls_dir / "user-key.pem"
+    cert_tmp = cert_path.with_name(cert_path.name + ".tmp")
+    key_tmp = key_path.with_name(key_path.name + ".tmp")
+
+    try:
+        cert_tmp.write_bytes(cert_bytes)
+        key_tmp.write_bytes(key_bytes)
+        os.replace(cert_tmp, cert_path)
+        os.replace(key_tmp, key_path)
+    except OSError as exc:
+        # Best-effort cleanup of any partial temps.
+        cert_tmp.unlink(missing_ok=True)
+        key_tmp.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write certificate files: {exc}",
+        ) from exc
+
+    if os.name == "posix":
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass  # non-fatal — fall through; tls.read_cert_info still works
+
+    # Surface metadata so the UI can render the success card without a refetch.
+    from server import tls as tls_module
+
+    info = tls_module.read_cert_info(cert_path)
+
+    # Heuristic warning when the user uploaded a CA cert instead of a server cert.
+    warnings = list(info.warnings)
+    try:
+        bc = parsed_cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+        if bc.ca:
+            warnings.append("is-ca-cert")
+    except x509.ExtensionNotFound:
+        pass
+
+    return {
+        "cert_path": str(cert_path),
+        "key_path": str(key_path),
+        "fingerprint": info.fingerprint_sha256,
+        "subject": info.subject,
+        "issuer": info.issuer,
+        "expires_at": info.expires_at.isoformat(),
+        "days_until_expiry": info.days_until_expiry,
+        "sans": info.sans,
+        "warnings": warnings,
+    }
 
 
 # --- Network Adapters ---
