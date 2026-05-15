@@ -374,6 +374,43 @@ class DeviceManager:
         await self.add_device(config)
         return device_id not in self._orphaned_devices
 
+    async def retry_all_orphans(self) -> list[str]:
+        """Promote every orphan whose driver is now in the registry.
+
+        Called after the driver loader runs (project reload, community
+        install) so devices that were stuck in orphan state because their
+        driver wasn't loaded yet come online without a server restart.
+        Returns the list of device IDs that successfully activated.
+        """
+        activated: list[str] = []
+        # Snapshot before iterating — retry_orphaned_device mutates the dict
+        for device_id, config in list(self._orphaned_devices.items()):
+            driver_id = config.get("driver", "")
+            if driver_id not in _DRIVER_REGISTRY:
+                continue
+            try:
+                ok = await self.retry_orphaned_device(device_id)
+                if ok:
+                    activated.append(device_id)
+                    log.info(
+                        f"Activated orphaned device '{device_id}' "
+                        f"(driver '{driver_id}' now installed)"
+                    )
+            except Exception:
+                log.exception(f"Failed to activate orphaned device '{device_id}'")
+        return activated
+
+    def get_missing_drivers(self) -> list[str]:
+        """Return the unique driver IDs that orphaned devices are waiting for."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for cfg in self._orphaned_devices.values():
+            driver_id = cfg.get("driver", "")
+            if driver_id and driver_id not in seen:
+                seen.add(driver_id)
+                result.append(driver_id)
+        return result
+
     async def set_device_setting(
         self, device_id: str, key: str, value: Any
     ) -> Any:

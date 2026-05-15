@@ -354,7 +354,22 @@ async def install_community_driver(body: CommunityDriverInstallRequest) -> dict[
     from server.api.discovery import refresh_all_device_matches
     await refresh_all_device_matches()
 
-    return {"status": "installed", "driver_id": body.driver_id, "file": filename}
+    # Promote any project devices that were orphaned because this driver
+    # wasn't installed yet. Without this the user would have to reload the
+    # project (or restart) to see the device come online.
+    activated: list[str] = []
+    try:
+        engine = _get_engine()
+        activated = await engine.devices.retry_all_orphans()
+    except Exception:
+        log.exception("Failed to retry orphans after install")
+
+    return {
+        "status": "installed",
+        "driver_id": body.driver_id,
+        "file": filename,
+        "activated_devices": activated,
+    }
 
 
 @router.post("/drivers/upload")
@@ -443,7 +458,21 @@ async def upload_driver(request: Request) -> dict[str, Any]:
         filepath.unlink(missing_ok=True)
         raise _api_error(500, f"Failed to load uploaded driver '{filename}'", e)
 
-    return {"status": "uploaded", "driver_id": driver_id, "file": filename}
+    # Promote any project devices waiting on this driver — same flow as
+    # /drivers/install so manual uploads behave identically.
+    activated: list[str] = []
+    try:
+        engine = _get_engine()
+        activated = await engine.devices.retry_all_orphans()
+    except Exception:
+        log.exception("Failed to retry orphans after upload")
+
+    return {
+        "status": "uploaded",
+        "driver_id": driver_id,
+        "file": filename,
+        "activated_devices": activated,
+    }
 
 
 @router.get("/drivers/installed")

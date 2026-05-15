@@ -433,6 +433,13 @@ class Engine:
             self._project_revision += 1
             self._dirty_since_backup = True
 
+            # Pick up any community drivers that were dropped into
+            # driver_repo/ since startup (file-system installs, manual
+            # copies during development, etc.). Without this, _sync_devices
+            # below would mark every device using a freshly-installed driver
+            # as orphaned even though the file is on disk.
+            self._load_project_drivers()
+
             # Stop triggers and cancel macros first — prevents triggers from
             # firing on state keys that are about to be cleaned up
             await self.triggers.stop()
@@ -461,6 +468,12 @@ class Engine:
 
             # Sync devices: remove deleted, add new, update changed
             await self._sync_devices()
+
+            # Promote any orphans whose driver is now in the registry
+            # (e.g. driver_repo/ files added between reloads). _sync_devices
+            # only re-adds devices whose config changed, so an orphan stuck
+            # waiting for its driver wouldn't otherwise come online here.
+            await self.devices.retry_all_orphans()
 
             # If simulation is active, sync simulated devices with the new project state
             if self.simulation.active:

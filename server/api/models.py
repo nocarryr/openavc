@@ -148,6 +148,10 @@ class CommunityDriverInstallRequest(BaseModel):
     min_platform_version: str | None = None
 
 
+class InstallMissingDriversRequest(BaseModel):
+    driver_ids: list[str]
+
+
 # --- Project Library ---
 
 

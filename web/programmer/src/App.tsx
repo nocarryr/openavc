@@ -4,6 +4,7 @@ import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { ViewErrorBoundary } from "./components/shared/ViewErrorBoundary";
 import ToastContainer from "./components/shared/ToastContainer";
 import { ShortcutsPanel } from "./components/shared/ShortcutsPanel";
+import { MissingDriversWatcher } from "./components/shared/MissingDriversWatcher";
 import { Login } from "./components/Login";
 import { DashboardView } from "./views/DashboardView";
 import { useProjectStore } from "./store/projectStore";
@@ -238,6 +239,7 @@ function AuthedApp() {
       </div>
       <ToastContainer />
       {showShortcuts && <ShortcutsPanel onClose={() => setShowShortcuts(false)} />}
+      <MissingDriversWatcher />
     </div>
   );
 }

@@ -142,3 +142,38 @@ export async function retryOrphanedDevice(
 ): Promise<{ status: string; device_id: string; detail?: string }> {
   return request(`/devices/${deviceId}/retry`, { method: "POST" });
 }
+
+// --- Missing Drivers (orphaned devices waiting for a driver install) ---
+
+export interface CommunityMatch {
+  id: string;
+  name: string;
+  manufacturer: string;
+  category: string;
+  file_url: string;
+  min_platform_version: string | null;
+}
+
+export interface MissingDriver {
+  driver_id: string;
+  device_ids: string[];
+  community_match: CommunityMatch | null;
+}
+
+export async function listMissingDrivers(): Promise<MissingDriver[]> {
+  const data = await request<{ missing: MissingDriver[] }>("/devices/missing-drivers");
+  return data.missing;
+}
+
+export async function installMissingDrivers(
+  driverIds: string[]
+): Promise<{
+  installed: string[];
+  failed: { driver_id: string; error: string }[];
+  activated_devices: string[];
+}> {
+  return request("/devices/install-missing", {
+    method: "POST",
+    body: JSON.stringify({ driver_ids: driverIds }),
+  });
+}

@@ -323,49 +323,12 @@ export function DeviceDetail({
 
       {/* Orphaned device banner */}
       {Boolean(liveState[`device.${deviceId}.orphaned`]) && (
-        <div
-          style={{
-            padding: "var(--space-md)",
-            borderRadius: "var(--border-radius)",
-            marginBottom: "var(--space-md)",
-            background: "rgba(239, 68, 68, 0.1)",
-            border: "2px solid rgba(239, 68, 68, 0.4)",
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: "var(--space-sm)", color: "#ef4444", fontSize: "var(--font-size-md)" }}>
-            Driver Not Installed
-          </div>
-          <div style={{ fontSize: "var(--font-size-sm)", marginBottom: "var(--space-md)" }}>
-            This device needs the driver "{deviceConfig?.driver}" which is not installed.
-            Install the driver from the community repository or reassign to a different driver.
-          </div>
-          <div style={{ display: "flex", gap: "var(--space-sm)" }}>
-            <button
-              onClick={() => onBrowseDrivers?.()}
-              style={{
-                padding: "var(--space-xs) var(--space-md)",
-                borderRadius: "var(--border-radius)",
-                background: "var(--color-warning, #f59e0b)",
-                color: "#000",
-                fontSize: "var(--font-size-sm)",
-                fontWeight: 500,
-              }}
-            >
-              Install from Community
-            </button>
-            <button
-              onClick={() => deviceConfig && onEdit(deviceConfig)}
-              style={{
-                padding: "var(--space-xs) var(--space-md)",
-                borderRadius: "var(--border-radius)",
-                background: "var(--bg-hover)",
-                fontSize: "var(--font-size-sm)",
-              }}
-            >
-              Reassign Driver
-            </button>
-          </div>
-        </div>
+        <OrphanBanner
+          driverId={deviceConfig?.driver ?? ""}
+          onReassign={() => deviceConfig && onEdit(deviceConfig)}
+          onBrowseDrivers={onBrowseDrivers}
+          onActivated={() => api.getDevice(deviceId).then(setDeviceInfo).catch(console.error)}
+        />
       )}
 
       {/* Test connection result */}
@@ -1122,3 +1085,136 @@ const devLogTdStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   maxWidth: 150,
 };
+
+function OrphanBanner({
+  driverId,
+  onReassign,
+  onBrowseDrivers,
+  onActivated,
+}: {
+  driverId: string;
+  onReassign: () => void;
+  onBrowseDrivers?: () => void;
+  onActivated: () => void;
+}) {
+  // Look up the missing driver in the catalog so the button can install it
+  // directly (the previous behavior of switching tabs left the user stranded
+  // — they had to find it manually). When the driver isn't in the catalog,
+  // surface that fact inline rather than silently failing.
+  const [match, setMatch] = useState<{ file_url: string; min_platform_version: string | null } | null>(null);
+  const [lookupDone, setLookupDone] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!driverId) return;
+    let cancelled = false;
+    api
+      .listMissingDrivers()
+      .then((items) => {
+        if (cancelled) return;
+        const entry = items.find((m) => m.driver_id === driverId);
+        if (entry?.community_match) {
+          setMatch({
+            file_url: entry.community_match.file_url,
+            min_platform_version: entry.community_match.min_platform_version,
+          });
+        }
+        setLookupDone(true);
+      })
+      .catch(() => setLookupDone(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [driverId]);
+
+  const handleInstall = async () => {
+    if (!match) return;
+    setInstalling(true);
+    setError(null);
+    try {
+      await api.installCommunityDriver(driverId, match.file_url, match.min_platform_version || undefined);
+      // Server retries orphans automatically; refresh device info to pick
+      // up the now-active state.
+      onActivated();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        padding: "var(--space-md)",
+        borderRadius: "var(--border-radius)",
+        marginBottom: "var(--space-md)",
+        background: "rgba(239, 68, 68, 0.1)",
+        border: "2px solid rgba(239, 68, 68, 0.4)",
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: "var(--space-sm)", color: "#ef4444", fontSize: "var(--font-size-md)" }}>
+        Driver Not Installed
+      </div>
+      <div style={{ fontSize: "var(--font-size-sm)", marginBottom: "var(--space-md)" }}>
+        This device needs the driver "{driverId}" which is not installed.
+        {lookupDone && !match && (
+          <div style={{ marginTop: "var(--space-xs)", color: "var(--text-muted)", fontSize: "var(--font-size-sm)" }}>
+            This driver isn't in the community catalog. Reassign the device to a different
+            driver, or upload the driver file from the Drivers tab.
+          </div>
+        )}
+        {error && (
+          <div style={{ marginTop: "var(--space-xs)", color: "#ef4444", fontSize: "var(--font-size-sm)" }}>
+            Install failed: {error}
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: "var(--space-sm)" }}>
+        {match && (
+          <button
+            onClick={handleInstall}
+            disabled={installing}
+            style={{
+              padding: "var(--space-xs) var(--space-md)",
+              borderRadius: "var(--border-radius)",
+              background: "var(--color-warning, #f59e0b)",
+              color: "#000",
+              fontSize: "var(--font-size-sm)",
+              fontWeight: 500,
+              cursor: installing ? "not-allowed" : "pointer",
+              opacity: installing ? 0.7 : 1,
+            }}
+          >
+            {installing ? "Installing..." : "Install from Community"}
+          </button>
+        )}
+        {lookupDone && !match && onBrowseDrivers && (
+          <button
+            onClick={onBrowseDrivers}
+            style={{
+              padding: "var(--space-xs) var(--space-md)",
+              borderRadius: "var(--border-radius)",
+              background: "var(--bg-hover)",
+              fontSize: "var(--font-size-sm)",
+            }}
+          >
+            Browse Drivers
+          </button>
+        )}
+        <button
+          onClick={onReassign}
+          style={{
+            padding: "var(--space-xs) var(--space-md)",
+            borderRadius: "var(--border-radius)",
+            background: "var(--bg-hover)",
+            fontSize: "var(--font-size-sm)",
+          }}
+        >
+          Reassign Driver
+        </button>
+      </div>
+    </div>
+  );
+}

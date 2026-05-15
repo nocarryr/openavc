@@ -11,6 +11,7 @@ from server.api.models import (
     CommandRequest,
     DeviceSettingRequest,
     DeviceUpdateRequest,
+    InstallMissingDriversRequest,
     PendingSettingsRequest,
 )
 from server.core.project_loader import DeviceConfig, save_project
@@ -35,6 +36,112 @@ def _sanitize_device_name(name: str) -> str:
 async def list_devices() -> list[dict[str, Any]]:
     """List all devices with status."""
     return _get_engine().devices.list_devices()
+
+
+@router.get("/devices/missing-drivers")
+async def list_missing_drivers() -> dict[str, Any]:
+    """Drivers that orphaned project devices need, annotated with community matches.
+
+    The IDE polls this on project open / reload. Each entry's
+    ``community_match`` is populated when the driver exists in the public
+    catalog (``raw.githubusercontent.com/open-avc/openavc-drivers``); when
+    null, the user must reassign the device or upload a driver manually.
+
+    Declared before /devices/{device_id} so the literal path wins routing.
+    """
+    from server.discovery.community_index import CommunityIndexCache
+    from server.api.routes.drivers import COMMUNITY_REPO_URL
+
+    engine = _get_engine()
+    missing_ids = engine.devices.get_missing_drivers()
+    if not missing_ids:
+        return {"missing": []}
+
+    devices_per_driver: dict[str, list[str]] = {did: [] for did in missing_ids}
+    for dev in engine.devices.list_devices():
+        if dev.get("orphaned") and dev.get("driver") in devices_per_driver:
+            devices_per_driver[dev["driver"]].append(dev["id"])
+
+    if not hasattr(list_missing_drivers, "_cache"):
+        list_missing_drivers._cache = CommunityIndexCache()
+    catalog = await list_missing_drivers._cache.get_drivers()
+    catalog_by_id: dict[str, dict[str, Any]] = {
+        entry.get("id", ""): entry for entry in catalog if entry.get("id")
+    }
+
+    result: list[dict[str, Any]] = []
+    for driver_id in missing_ids:
+        match = catalog_by_id.get(driver_id)
+        community_match: dict[str, Any] | None = None
+        if match and match.get("file"):
+            community_match = {
+                "id": match["id"],
+                "name": match.get("name", match["id"]),
+                "manufacturer": match.get("manufacturer", ""),
+                "category": match.get("category", ""),
+                "file_url": f"{COMMUNITY_REPO_URL}/{match['file']}",
+                "min_platform_version": match.get("min_platform_version"),
+            }
+        result.append({
+            "driver_id": driver_id,
+            "device_ids": devices_per_driver.get(driver_id, []),
+            "community_match": community_match,
+        })
+    return {"missing": result}
+
+
+@router.post("/devices/install-missing")
+async def install_missing_drivers(body: InstallMissingDriversRequest) -> dict[str, Any]:
+    """Bulk-install community drivers requested by IDs, then activate orphans.
+
+    Each ID is looked up in the community catalog. Failures don't abort the
+    batch; per-driver outcomes are returned so the UI can show which
+    succeeded vs. failed.
+    """
+    from server.api.models import CommunityDriverInstallRequest
+    from server.api.routes.drivers import COMMUNITY_REPO_URL, install_community_driver
+    from server.discovery.community_index import CommunityIndexCache
+
+    if not body.driver_ids:
+        return {"installed": [], "failed": [], "activated_devices": []}
+
+    cache = CommunityIndexCache()
+    catalog = await cache.get_drivers()
+    catalog_by_id: dict[str, dict[str, Any]] = {
+        entry.get("id", ""): entry for entry in catalog if entry.get("id")
+    }
+
+    installed: list[str] = []
+    failed: list[dict[str, Any]] = []
+
+    for driver_id in body.driver_ids:
+        match = catalog_by_id.get(driver_id)
+        if not match or not match.get("file"):
+            failed.append({"driver_id": driver_id, "error": "Not in community catalog"})
+            continue
+        try:
+            await install_community_driver(CommunityDriverInstallRequest(
+                driver_id=driver_id,
+                file_url=f"{COMMUNITY_REPO_URL}/{match['file']}",
+                min_platform_version=match.get("min_platform_version"),
+            ))
+            installed.append(driver_id)
+        except HTTPException as e:
+            failed.append({"driver_id": driver_id, "error": str(e.detail)})
+        except Exception as e:
+            failed.append({"driver_id": driver_id, "error": str(e)})
+
+    # install_community_driver already retries orphans on each call; one
+    # final sweep catches any orphan whose driver was registered out of
+    # order during the batch.
+    engine = _get_engine()
+    activated = await engine.devices.retry_all_orphans()
+
+    return {
+        "installed": installed,
+        "failed": failed,
+        "activated_devices": activated,
+    }
 
 
 @router.get("/devices/{device_id}")
