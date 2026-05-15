@@ -323,6 +323,7 @@ export function SystemSettingsView() {
   const [restartNeeded, setRestartNeeded] = useState(false);
   const [showRebootDialog, setShowRebootDialog] = useState(false);
   const [showRestartDialog, setShowRestartDialog] = useState(false);
+  const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   // TLS provided-mode cert upload state.
   const [pickedCert, setPickedCert] = useState<File | null>(null);
   const [pickedKey, setPickedKey] = useState<File | null>(null);
@@ -401,16 +402,25 @@ export function SystemSettingsView() {
 
     const hasKioskChanges = "kiosk" in payload;
 
+    // Capture the restart flag before the post-save reset, so we can decide
+    // whether to pop the confirm prompt after the request returns.
+    const needsRestart = restartNeeded;
+
     setSaving(true);
     try {
       await api.updateSystemConfig(payload as Partial<SystemConfig>);
-      showSuccess("Settings saved" + (restartNeeded ? ". Restart required for network/security changes." : "."));
+      showSuccess("Settings saved" + (needsRestart ? "." : "."));
       // Reload config + tls status to get fresh state
       const fresh = await api.getSystemConfig();
       setConfig(fresh);
       setDirty({});
       loadTlsStatus();
-      if (hasKioskChanges && kioskAvailable) setShowRebootDialog(true);
+      if (hasKioskChanges && kioskAvailable) {
+        // Kiosk-reboot dialog handles its own flow; don't stack a second prompt.
+        setShowRebootDialog(true);
+      } else if (needsRestart) {
+        setShowRestartPrompt(true);
+      }
     } catch (e) {
       showError("Failed to save: " + String(e));
     } finally {
@@ -1375,6 +1385,28 @@ export function SystemSettingsView() {
           setShowRebootDialog(false);
           showSuccess("Settings saved. Reboot the device for changes to take effect.");
         }}
+      />
+    )}
+
+    {showRestartPrompt && (
+      <ConfirmDialog
+        title="Restart to apply changes?"
+        message={
+          <>
+            Your network or security changes need a server restart to take effect.
+            The Programmer will reconnect automatically once the server is back —
+            usually about ten seconds.
+            <br /><br />
+            You can also keep working and restart later from the banner at the top of this page.
+          </>
+        }
+        confirmLabel="Restart now"
+        cancelLabel="Later"
+        onConfirm={() => {
+          setShowRestartPrompt(false);
+          setShowRestartDialog(true);
+        }}
+        onCancel={() => setShowRestartPrompt(false)}
       />
     )}
 
