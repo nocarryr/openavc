@@ -2,7 +2,7 @@
   <img src="https://openavc.com/logo-wide.png" alt="OpenAVC" width="400">
 </p>
 
-<h3 align="center">AV Control for Every Space</h3>
+<h3 align="center">Replace your AV processor with software.</h3>
 
 <p align="center">
   Open-source platform that replaces Crestron, Extron, and AMX.<br>
