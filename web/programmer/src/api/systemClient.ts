@@ -253,6 +253,27 @@ export async function rebootSystem(): Promise<{ status: string }> {
   return request("/system/reboot", { method: "POST" });
 }
 
+export interface RestartResult {
+  status: string;
+  mode: "graceful" | "hard";
+  delay_seconds: number;
+}
+
+/** Trigger an OpenAVC process restart.
+ *
+ *  The server emits `system.restart_requested` and exits ~2s later (graceful)
+ *  or immediately (hard). Service managers (NSSM / systemd / Docker) bring
+ *  the process back; dev mode spawns a detached replacement. The browser
+ *  should poll `/api/health` on the post-restart URL until it returns 2xx. */
+export async function restartSystem(
+  mode: "graceful" | "hard" = "graceful"
+): Promise<RestartResult> {
+  return request<RestartResult>("/system/restart", {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
 // --- HTTPS / TLS ---
 
 export interface TlsCertInfo {

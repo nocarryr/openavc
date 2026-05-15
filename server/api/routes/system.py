@@ -323,6 +323,36 @@ async def update_system_config(request: Request) -> dict[str, Any]:
     return {"success": True, "updated_sections": updated_sections}
 
 
+@router.post("/system/restart")
+async def restart_system(request: Request) -> dict[str, Any]:
+    """Trigger an OpenAVC process restart.
+
+    Emits ``system.restart_requested`` on the engine event bus. The handler
+    registered at startup (server/main.py) flushes logs, runs a graceful
+    shutdown, and exits — service managers (NSSM / systemd / Docker) bring
+    the process back. In dev mode, ``_spawn_replacement`` handles relaunch.
+
+    Body (optional): ``{"mode": "graceful" | "hard"}``. Default is graceful,
+    which delays exit ~2s to flush logs. "hard" exits immediately.
+    """
+    mode = "graceful"
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and body.get("mode") in ("graceful", "hard"):
+            mode = body["mode"]
+    except Exception:  # noqa: BLE001 — no body / invalid JSON → default mode
+        pass
+
+    engine = _get_engine()
+    await engine.events.emit("system.restart_requested", {"mode": mode})
+
+    return {
+        "status": "restarting",
+        "mode": mode,
+        "delay_seconds": 2 if mode == "graceful" else 0,
+    }
+
+
 # --- HTTPS / TLS ---
 
 

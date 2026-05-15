@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock } from "lucide-react";
+import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
+import { RestartProgressDialog } from "../components/shared/RestartProgressDialog";
 import { showError, showSuccess } from "../store/toastStore";
 import * as api from "../api/restClient";
 import type { SystemConfig, NetworkAdapter, TlsStatus } from "../api/restClient";
@@ -246,6 +247,7 @@ export function SystemSettingsView() {
   const [saving, setSaving] = useState(false);
   const [restartNeeded, setRestartNeeded] = useState(false);
   const [showRebootDialog, setShowRebootDialog] = useState(false);
+  const [showRestartDialog, setShowRestartDialog] = useState(false);
   const [kioskAvailable, setKioskAvailable] = useState(false);
   const [adapters, setAdapters] = useState<NetworkAdapter[]>([]);
   const [adaptersLoading, setAdaptersLoading] = useState(false);
@@ -404,11 +406,33 @@ export function SystemSettingsView() {
       }
     >
       <div style={{ maxWidth: 700 }}>
-        {/* Restart warning */}
-        {restartNeeded && hasDirty && (
+        {/* Restart warning + action.
+            - hasDirty: settings unsaved; user has to save first.
+            - !hasDirty: settings saved; offer to restart in-app. */}
+        {restartNeeded && (
           <div style={warningBox}>
             <AlertTriangle size={16} style={{ color: "rgb(255, 152, 0)", flexShrink: 0, marginTop: 2 }} />
-            <span>Network changes require a server restart to take effect.</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)", flexWrap: "wrap", flex: 1 }}>
+              <span style={{ flex: 1 }}>
+                {hasDirty
+                  ? "Network or security changes need a restart. Save first, then restart from here."
+                  : "Saved. Restart the server to apply network or security changes."}
+              </span>
+              {!hasDirty && (
+                <button
+                  onClick={() => setShowRestartDialog(true)}
+                  style={{
+                    ...btnStyle,
+                    background: "rgb(255, 152, 0)",
+                    color: "#fff",
+                    border: "none",
+                  }}
+                >
+                  <Power size={14} />
+                  <span>Restart now</span>
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -947,6 +971,34 @@ export function SystemSettingsView() {
         }}
       />
     )}
+
+    {showRestartDialog && (() => {
+      // Target URL is derived from the SAVED config (not the unsaved `dirty`
+      // state). The Restart button is only enabled when !hasDirty, so config
+      // reflects what the post-restart server will actually serve.
+      const targetScheme = config?.tls?.enabled ? "https" : "http";
+      const targetPort = config?.tls?.enabled
+        ? (config.tls.port ?? 8443)
+        : (config?.network?.http_port ?? 8080);
+      const targetUrl = `${targetScheme}://${window.location.hostname}:${targetPort}/programmer`;
+      const currentScheme = window.location.protocol === "https:" ? "https" : "http";
+      const isProtocolSwitch = currentScheme !== targetScheme;
+      const expectsNewCert = currentScheme === "http" && targetScheme === "https";
+      return (
+        <RestartProgressDialog
+          targetUrl={targetUrl}
+          isProtocolSwitch={isProtocolSwitch}
+          expectsNewCert={expectsNewCert}
+          onClose={() => {
+            setShowRestartDialog(false);
+            // Clear restartNeeded only if the dialog reported success — but
+            // since the success path navigates away before the user can close,
+            // a manual close means the user is bailing out. Leave the banner
+            // up so they can try again.
+          }}
+        />
+      );
+    })()}
     </>
   );
 }

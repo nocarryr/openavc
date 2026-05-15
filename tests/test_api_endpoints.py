@@ -276,6 +276,54 @@ def test_system_config(client):
     assert isinstance(data, dict)
 
 
+# ── System restart ──
+
+
+def test_system_restart_default_graceful(client):
+    """POST /api/system/restart with no body defaults to graceful mode."""
+    c, engine = client
+
+    received: list[dict] = []
+
+    async def _capture(_event: str, data: dict) -> None:
+        received.append(data)
+
+    engine.events.on("system.restart_requested", _capture)
+    resp = c.post("/api/system/restart")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "restarting"
+    assert body["mode"] == "graceful"
+    assert body["delay_seconds"] == 2
+    assert received == [{"mode": "graceful"}]
+
+
+def test_system_restart_hard_mode(client):
+    """Explicit hard mode is honored."""
+    c, engine = client
+
+    received: list[dict] = []
+
+    async def _capture(_event: str, data: dict) -> None:
+        received.append(data)
+
+    engine.events.on("system.restart_requested", _capture)
+    resp = c.post("/api/system/restart", json={"mode": "hard"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "hard"
+    assert body["delay_seconds"] == 0
+    assert received == [{"mode": "hard"}]
+
+
+def test_system_restart_unknown_mode_falls_back_to_graceful(client):
+    """Garbage mode value is ignored, defaults to graceful."""
+    c, engine = client
+    resp = c.post("/api/system/restart", json={"mode": "wild-west"})
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "graceful"
+
+
 # ── ISC endpoints (no ISC configured) ──
 
 
