@@ -1,41 +1,34 @@
-Discovery has been rebuilt around driver-declared probes and evidence, so every vendor identification on the network scan card now traces back to a probe response or a service the driver said it owns. The cloud agent now supports remote restart, diagnostic actions, and tunneled WebSocket and HTTP traffic with query strings and subprotocols intact. Matrix and audio devices respect audio-follow-video correctly. The Driver Builder's Live Test works over serial, surfaces rate-limit feedback, and guards against running against a production project. A pre-release audit ran across the platform and the findings are closed.
+OpenAVC now has built-in HTTPS that you can turn on from Settings > Security in the Programmer. Most installs stay on HTTP because they live on an isolated AV VLAN, but when you need TLS it is a one-click toggle: the server generates its own internal CA and server certificate, runs the HTTPS listener on port 8443, and keeps port 8080 alive as an HTTP-to-HTTPS redirect so existing bookmarks and panel devices keep working. You can also point it at your own internal-CA cert and key. The Programmer can now prompt you to install any community drivers a project needs but does not have, restart the server in-app after a settings change, and ships a handful of reliability fixes for busy projects.
 
-## Discovery
+## HTTPS
 
-Discovery is now schema-driven. A driver declares its TCP and UDP probes (or an mDNS service, or an SNMP OID, or a small Python companion), and the scan engine runs them against the network. The result for each device records the probe that matched, the literal pattern it found, and which fields the driver extracted. The platform itself no longer carries any vendor knowledge, so adding a new device family is a driver change, not a core change.
+Off by default. When enabled from Settings > Security, the server runs two listeners side by side. A TLS listener on port 8443 serves the full app. A tiny HTTP listener on 8080 returns a 301 or 308 redirect to the matching HTTPS URL, preserving the path and query string, so existing bookmarks, panel apps, and mDNS clients keep working without any reconfiguration.
 
-The Driver Builder's Discovery editor has been rebuilt to match. You can write a probe inline, see which signal it provides, and validate it against shipped probe fixtures before any device is on the network. Companion `.py` files are hidden from the driver listing but install, update, and uninstall alongside their `.avcdriver` file.
+The auto-generated certificate has a 10-year validity. Its subject alternative names cover `localhost`, `127.0.0.1`, the OS hostname, and every local IPv4 the server can see, plus `::1` when IPv6 is up. If the host's primary IP changes between restarts the server cert is re-issued automatically against the same internal CA, so any device that already trusts the CA survives the re-issue without re-pairing. The Security card displays the certificate fingerprint and per-OS instructions for installing the CA on Windows, macOS, iOS, and Android.
 
-A few specific hardening changes: common web-app ports are rejected as `port_open` hints because they collide with too many unrelated services. UDP reachability probes require a `poll_interval` so we don't blast the network. mDNS and SSDP scanners now bind to the configured `control_ip` instead of every interface.
+If you have an internal CA, switch the mode to **Provided** in Settings > Security and point at your PEM cert and key. There is no silent fallback to HTTP on a bad cert: the server writes a precise error to startup-error.json and refuses to start the TLS listener.
 
-## Cloud agent
+mDNS advertises `scheme=https` and the TLS port when HTTPS is on, so panel apps that read the field build the right URL straight away. ISC peers, the cloud tunnel, the Windows tray, and the Pi kiosk launcher all pick up HTTPS automatically with no config changes.
 
-Remote restart and diagnostic actions (ping a host, traceroute, DNS lookup, port check, tail logs) work end to end. The agent gates each downstream action on the capability set the cloud negotiated for the session, so an agent whose tunnel capability was revoked silently ignores stray tunnel pushes instead of acting on them.
+## In-app server restart
 
-The remote-UI tunnel now preserves query strings, custom headers, and WebSocket subprotocols. Frames that arrive before the local WebSocket finishes connecting are queued instead of dropped. The `target_port` field is honored, so the same tunnel can reach the Programmer IDE, the panel, or any other local service.
+The Network and Security cards now prompt you to restart the server when you save a setting that needs a process restart, and the dialog hands the restart back to the service manager. NSSM on Windows, systemd on Linux, Docker, and dev installs all work. The progress dialog tracks the new process coming up and reloads the page automatically when it is reachable again.
 
-Cloud-pushed updates are now staged: the cloud download lands in a holding location, the apply step swaps atomically, and a failed apply clears the pending-update marker instead of leaving the system stuck on next boot. The Windows installer rollback now matches versions correctly across patch releases.
+## Missing drivers prompt
 
-## Matrix and audio
+Open a project that references a driver you do not have installed and the Programmer surfaces a modal listing every missing driver, annotated with community-catalog matches. One click installs them and re-activates the orphaned devices so you do not have to add them back to the project by hand.
 
-Matrix mute respects audio-follow-video: muting a video route also mutes the linked audio route when the matrix is in AFV mode. Audio routes display their current source in the device test panel. The cloud's mute and route commands flow through the same AFV-aware path.
+## Reliability fixes
 
-## Driver Builder Live Test
+A handful of fixes that hit busy projects.
 
-Live Test works against serial drivers in addition to TCP and HTTP. The panel refuses to run against the live project to keep an in-progress driver from clobbering a deployed room. Rate-limit errors from the device surface in the test panel directly instead of failing silently.
+* Save conflicts and slow startup when a project has many devices.
+* Device connected state lying for drivers that do not use the platform transports.
+* Cloud restart hanging when the service manager could not see the process exit.
+* `device.error.<id>` is now emitted from poll errors and send_command errors, not just connect errors, so error-driven triggers fire reliably.
 
-## Plugin hardening
+## Polish
 
-A plugin that fails to register surfaces the error during install instead of disappearing. The `min_openavc_version` field is enforced at install time across both first-party and community plugins. State-pattern subscriptions with an empty pattern no longer leak state across plugin reloads.
-
-## ISC
-
-The inter-system connection now drops removed peers and rotates keys when auth changes, so a project reload that swaps an ISC password actually invalidates the old session. Auth failures back off with deduplicated log messages instead of spamming the log every retry interval.
-
-## Other
-
-* The macro engine serializes register-and-preempt within a cancel group so a fast double-tap of `system_on` / `system_off` doesn't race.
-* The OSC verify path races the send socket against the listen socket for dual-port devices like grandMA3, so a verified probe doesn't depend on which socket the device replies on.
-* The Python driver serial template uses the correct connection field names.
-* The starter project bundled with every installer is now in the v0.4.0 schema.
-* Cancelled macros are not transactional; the docs now say so.
+* The script editor's Monaco bundle is now served locally so it works offline.
+* Embedded panels inside the UI Builder no longer prompt for the panel password.
+* The Docker build now compiles the frontend on the native build arch, avoiding QEMU SIGILL crashes during multi-arch CI builds.
