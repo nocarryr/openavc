@@ -182,14 +182,21 @@ class Engine:
         groups_data = [g.model_dump() for g in self.project.device_groups]
         self.macros.load_groups(groups_data)
 
-        # Add and connect devices (merge connection table into device config)
+        # Add and connect devices in parallel (merge connection table into
+        # device config). Sequential await of driver.connect() would serialize
+        # TCP timeouts (5 s each) — with N offline devices, startup blocks for
+        # N x 5 s. Each add_device is independent (writes to its own device_id
+        # keys in state/config dicts), so gather is safe.
         startup_errors: list[str] = []
-        for device in self.project.devices:
-            try:
-                await self.devices.add_device(self.resolved_device_config(device))
-            except Exception as e:  # Catch-all: isolates individual device startup failures
-                startup_errors.append(f"Device '{device.id}': {e}")
-                log.error(f"Failed to add device '{device.id}': {e}")
+        results = await asyncio.gather(
+            *(self.devices.add_device(self.resolved_device_config(device))
+              for device in self.project.devices),
+            return_exceptions=True,
+        )
+        for device, result in zip(self.project.devices, results):
+            if isinstance(result, Exception):
+                startup_errors.append(f"Device '{device.id}': {result}")
+                log.error(f"Failed to add device '{device.id}': {result}")
 
         # Register UI event bindings
         self._register_ui_bindings()
@@ -594,12 +601,22 @@ class Engine:
             if orphaned:
                 log.info(f"Cleaned up {len(orphaned)} orphaned state key(s) for removed device '{device_id}'")
 
-        # Add new devices
-        for device_id in project_ids - running_ids:
-            await self.devices.add_device(project_devices[device_id])
+        # Add new devices in parallel — sequential awaits would serialize
+        # connect timeouts. Match the parallelization in start().
+        new_device_ids = list(project_ids - running_ids)
+        if new_device_ids:
+            add_results = await asyncio.gather(
+                *(self.devices.add_device(project_devices[did])
+                  for did in new_device_ids),
+                return_exceptions=True,
+            )
+            for did, result in zip(new_device_ids, add_results):
+                if isinstance(result, Exception):
+                    log.error(f"Failed to add device '{did}' during sync: {result}")
 
-        # Update changed devices — compare raw project config AND connection
-        # table entries separately to detect IP/port changes
+        # Update changed devices in parallel — compare raw project config AND
+        # connection table entries separately to detect IP/port changes
+        changed_ids: list[str] = []
         for device_id in running_ids & project_ids:
             old_config = self.devices.get_device_config(device_id) or {}
             new_config = project_devices[device_id]
@@ -608,7 +625,16 @@ class Engine:
             if (old_config.get("name") != new_config.get("name") or
                     old_config.get("driver") != new_config.get("driver") or
                     old_conn != new_conn):
-                await self.devices.update_device(device_id, new_config)
+                changed_ids.append(device_id)
+        if changed_ids:
+            update_results = await asyncio.gather(
+                *(self.devices.update_device(did, project_devices[did])
+                  for did in changed_ids),
+                return_exceptions=True,
+            )
+            for did, result in zip(changed_ids, update_results):
+                if isinstance(result, Exception):
+                    log.error(f"Failed to update device '{did}' during sync: {result}")
 
     async def _sync_plugins(self) -> None:
         """Sync running plugins with project config on hot-reload."""

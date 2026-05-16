@@ -12,6 +12,15 @@ const MAX_UNDO = 50;
 // Module-level debounce timer for debouncedSave
 let _saveTimer: ReturnType<typeof setTimeout> | undefined;
 
+// Serializes saves so a second save() call while one is in flight doesn't
+// fire a concurrent PUT with a stale ETag (which would 409). When _saveInFlight
+// is set, the current save's tail will fire one more save after it completes.
+// _saveChain tracks the in-flight save (and any chained re-save) so callers
+// that `await save()` see completion of the actual underlying write.
+let _saveInFlight = false;
+let _resaveQueued = false;
+let _saveChain: Promise<void> = Promise.resolve();
+
 interface ProjectStore {
   project: ProjectConfig | null;
   loading: boolean;
@@ -76,29 +85,66 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
   },
 
-  save: async (retryCount = 0) => {
-    const { project, etag } = get();
-    if (!project) return;
-    set({ saving: true, savePending: false, error: null });
-    try {
-      const result = await api.saveProject(project, etag ?? undefined);
-      const newEtag = result.etag ?? null;
-      const newRevision = newEtag ? parseInt(newEtag.replace(/"/g, ""), 10) || null : null;
-      set({ saving: false, dirty: false, etag: newEtag, revision: newRevision, conflictDetected: false });
-    } catch (e) {
-      if (e instanceof api.ConflictError) {
-        set({ saving: false, conflictDetected: true, error: e.message });
-        return;
-      }
-      const maxRetries = 2;
-      if (retryCount < maxRetries) {
-        const delay = (retryCount + 1) * 1000;
-        setTimeout(() => get().save(retryCount + 1), delay);
-        set({ error: `Save failed, retrying in ${delay / 1000}s...`, saving: false });
-      } else {
+  save: async (retryCount = 0): Promise<void> => {
+    // Don't stack concurrent saves — they'd send the same stale ETag and 409.
+    // Mark that another save is wanted and return the chain promise so callers
+    // that `await save()` (e.g. the import flow) wait for the actual write.
+    if (_saveInFlight) {
+      _resaveQueued = true;
+      await _saveChain;
+      return;
+    }
+    if (!get().project) return;
+
+    const performSave = async (): Promise<void> => {
+      const { project, etag } = get();
+      if (!project) return;
+      _saveInFlight = true;
+      set({ saving: true, savePending: false, error: null });
+      try {
+        const projectAtSendTime = project;
+        const result = await api.saveProject(projectAtSendTime, etag ?? undefined);
+        const newEtag = result.etag ?? null;
+        const newRevision = newEtag ? parseInt(newEtag.replace(/"/g, ""), 10) || null : null;
+        // If the project ref changed during the save, the user kept editing —
+        // keep dirty=true so the tail logic below schedules another save.
+        const editedDuringSave = get().project !== projectAtSendTime;
+        set({
+          saving: false,
+          dirty: editedDuringSave,
+          etag: newEtag,
+          revision: newRevision,
+          conflictDetected: false,
+        });
+      } catch (e) {
+        if (e instanceof api.ConflictError) {
+          set({ saving: false, conflictDetected: true, error: e.message });
+          _saveInFlight = false;
+          _resaveQueued = false;  // user must reload to clear the conflict
+          return;
+        }
+        const maxRetries = 2;
+        if (retryCount < maxRetries) {
+          const delay = (retryCount + 1) * 1000;
+          set({ error: `Save failed, retrying in ${delay / 1000}s...`, saving: false });
+          _saveInFlight = false;
+          setTimeout(() => { void get().save(retryCount + 1); }, delay);
+          return;
+        }
         set({ error: String(e), saving: false });
       }
-    }
+      _saveInFlight = false;
+      // If user kept editing OR another save was requested while we were
+      // busy, chain another save into the same promise so awaiters see the
+      // final write complete.
+      if (_resaveQueued || get().dirty) {
+        _resaveQueued = false;
+        await get().save();
+      }
+    };
+
+    _saveChain = performSave();
+    return _saveChain;
   },
 
   debouncedSave: (delay = 500) => {
