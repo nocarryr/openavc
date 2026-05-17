@@ -14,6 +14,20 @@ Keys follow a namespace convention:
 
 All values are Python primitives: str, int, float, bool, None.
 No nested objects — flat key-value only.
+
+Subscription dispatch uses a prefix-index so wildcard listeners (cloud
+relay, ISC, alert monitor) do not pay an fnmatch cost per key. Patterns
+are bucketed at subscribe time:
+
+    "*"                  -> universal bucket
+    "device.proj1.*"     -> prefix bucket keyed by "device.proj1."
+    "var.room_active"    -> exact bucket
+    "device.*.power"     -> glob fallback (fnmatch)
+
+High-volume listeners that only need the aggregate delta can register
+via ``subscribe_bulk(pattern, callback)``; the callback receives a list
+of (key, old_value, new_value, source) tuples once per set/set_batch/
+delete transaction, instead of one call per key.
 """
 
 from __future__ import annotations
@@ -21,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from time import time
@@ -45,13 +60,32 @@ class HistoryEntry:
     timestamp: float = field(default_factory=time)
 
 
+@dataclass
+class _Sub:
+    """Internal subscription record."""
+
+    sub_id: str
+    pattern: str
+    callback: Callable
+    bulk: bool
+
+
+_GLOB_CHARS = "*?["
+
+
 class StateStore:
     """Centralized reactive key-value state store with change notification."""
 
+    _VALID_PREFIXES = ("device.", "var.", "ui.", "system.", "isc.", "plugin.")
+
     def __init__(self):
         self._store: dict[str, Any] = {}
-        # pattern -> list of (subscription_id, callback)
-        self._listeners: dict[str, list[tuple[str, Callable]]] = {}
+        # Subscription indices — populated at subscribe() time.
+        self._universal_subs: list[_Sub] = []                 # pattern == "*"
+        self._exact_subs: dict[str, list[_Sub]] = {}          # no glob chars
+        self._prefix_subs: dict[str, list[_Sub]] = {}         # "<prefix>." -> subs (pattern ends in ".*")
+        self._glob_subs: list[_Sub] = []                      # other glob patterns
+        self._all_subs: dict[str, _Sub] = {}                  # sub_id -> sub (for unsubscribe)
         self._history: deque[HistoryEntry] = deque(maxlen=1000)
         self._event_bus: EventBus | None = None
         self._pending_event_tasks: set[asyncio.Task] = set()
@@ -60,11 +94,54 @@ class StateStore:
         """Wire up the EventBus after construction (avoids circular dependency)."""
         self._event_bus = event_bus
 
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get a state value."""
         return self._store.get(key, default)
 
-    _VALID_PREFIXES = ("device.", "var.", "ui.", "system.", "isc.", "plugin.")
+    def get_namespace(self, prefix: str) -> dict[str, Any]:
+        """
+        Get all key-value pairs under a namespace prefix.
+
+        Example: get_namespace("device.projector1") returns
+                 {"power": "on", "input": "hdmi1", "connected": True}
+        """
+        prefix_dot = prefix if prefix.endswith(".") else prefix + "."
+        result = {}
+        for key, value in self._store.items():
+            if key.startswith(prefix_dot):
+                short_key = key[len(prefix_dot):]
+                result[short_key] = value
+        return result
+
+    def get_matching(self, pattern: str) -> dict[str, Any]:
+        """Get all key-value pairs where the key matches a glob pattern."""
+        return {k: v for k, v in self._store.items() if fnmatch(k, pattern)}
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a complete copy of the state store."""
+        return dict(self._store)
+
+    def get_history(self, count: int = 50) -> list[dict]:
+        """Return recent state change history."""
+        entries = list(self._history)[-count:]
+        return [
+            {
+                "key": e.key,
+                "old_value": e.old_value,
+                "new_value": e.new_value,
+                "source": e.source,
+                "timestamp": e.timestamp,
+            }
+            for e in entries
+        ]
+
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
 
     def set(self, key: str, value: Any, source: str = "system") -> None:
         """
@@ -87,27 +164,9 @@ class StateStore:
         if log.isEnabledFor(10):  # DEBUG = 10
             log.debug(f"State: {key} = {value!r} (was {old_value!r}, source={source})")
 
-        # Notify listeners
-        self._notify_listeners(key, old_value, value, source)
-
-        # Emit events on the EventBus
-        if self._event_bus is not None:
-            payload = {
-                "key": key,
-                "old_value": old_value,
-                "new_value": value,
-                "source": source,
-            }
-            # Schedule event emission as a task (non-blocking)
-            try:
-                loop = asyncio.get_running_loop()
-                for event_name in ("state.changed", f"state.changed.{key}"):
-                    task = loop.create_task(self._event_bus.emit(event_name, payload))
-                    self._pending_event_tasks.add(task)
-                    task.add_done_callback(self._pending_event_tasks.discard)
-            except RuntimeError:
-                # No running event loop — skip async events (happens in sync tests)
-                pass
+        change = (key, old_value, value, source)
+        self._notify([change])
+        self._emit_events([change])
 
     def set_batch(self, updates: dict[str, Any], source: str = "system") -> None:
         """
@@ -115,42 +174,58 @@ class StateStore:
         notifications fire. Listeners and triggers see the complete batch,
         not partial intermediate states.
         """
-        # Phase 1: apply all changes, collect what actually changed
-        changes: list[tuple[str, Any, Any]] = []  # (key, old_value, new_value)
+        # Phase 1: apply all changes, collect what actually changed.
+        changes: list[tuple[str, Any, Any, str]] = []
+        store = self._store
+        history = self._history
         for key, value in updates.items():
-            old_value = self._store.get(key)
+            old_value = store.get(key)
             if old_value == value and type(old_value) is type(value):
                 continue
-            self._store[key] = value
-            self._history.append(HistoryEntry(key, old_value, value, source))
-            changes.append((key, old_value, value))
+            store[key] = value
+            history.append(HistoryEntry(key, old_value, value, source))
+            changes.append((key, old_value, value, source))
 
         if not changes:
             return
 
-        # Phase 2: notify listeners (state is fully updated at this point)
-        for key, old_value, new_value in changes:
-            if log.isEnabledFor(10):
+        if log.isEnabledFor(10):
+            for key, old_value, new_value, _ in changes:
                 log.debug(f"State: {key} = {new_value!r} (was {old_value!r}, source={source})")
-            self._notify_listeners(key, old_value, new_value, source)
 
-        # Phase 3: emit events
-        if self._event_bus is not None:
-            try:
-                loop = asyncio.get_running_loop()
-                for key, old_value, new_value in changes:
-                    payload = {
-                        "key": key,
-                        "old_value": old_value,
-                        "new_value": new_value,
-                        "source": source,
-                    }
-                    for event_name in ("state.changed", f"state.changed.{key}"):
-                        task = loop.create_task(self._event_bus.emit(event_name, payload))
-                        self._pending_event_tasks.add(task)
-                        task.add_done_callback(self._pending_event_tasks.discard)
-            except RuntimeError:
-                pass
+        # Phase 2: notify listeners (state is fully updated at this point).
+        self._notify(changes)
+
+        # Phase 3: emit events.
+        self._emit_events(changes)
+
+    def delete(self, key: str, source: str = "system") -> None:
+        """Remove a key from the store entirely (not just set to None).
+
+        Unlike set(key, None), this removes the key from the store so
+        get(key) returns the default.  Fires the same listener and EventBus
+        notifications as set() so that downstream consumers (state relay,
+        triggers, WebSocket broadcast) learn about the removal.
+        """
+        if key not in self._store:
+            return  # Key doesn't exist — nothing to notify
+
+        old_value = self._store.pop(key)
+        self._history.append(HistoryEntry(key, old_value, None, source))
+
+        if log.isEnabledFor(10):
+            log.debug(f"State: {key} deleted (was {old_value!r}, source={source})")
+
+        # Notify listeners. The key is already removed from _store at this
+        # point, which lets consumers distinguish delete from set-to-None
+        # by probing whether the key still exists in the store.
+        change = (key, old_value, None, source)
+        self._notify([change])
+        self._emit_events([change])
+
+    # ------------------------------------------------------------------
+    # Subscriptions
+    # ------------------------------------------------------------------
 
     def subscribe(self, pattern: str, callback: Callable) -> str:
         """
@@ -171,80 +246,55 @@ class StateStore:
             Subscription ID (use to unsubscribe).
         """
         sub_id = str(uuid.uuid4())
-        if pattern not in self._listeners:
-            self._listeners[pattern] = []
-        self._listeners[pattern].append((sub_id, callback))
+        self._add_sub(_Sub(sub_id=sub_id, pattern=pattern, callback=callback, bulk=False))
         log.debug(f"State subscription {sub_id[:8]}... on pattern '{pattern}'")
         return sub_id
 
-    def delete(self, key: str, source: str = "system") -> None:
-        """Remove a key from the store entirely (not just set to None).
-
-        Unlike set(key, None), this removes the key from the store so
-        get(key) returns the default.  Fires the same listener and EventBus
-        notifications as set() so that downstream consumers (state relay,
-        triggers, WebSocket broadcast) learn about the removal.
+    def subscribe_bulk(self, pattern: str, callback: Callable) -> str:
         """
-        if key not in self._store:
-            return  # Key doesn't exist — nothing to notify
+        Subscribe for delta-batched notifications.
 
-        old_value = self._store.pop(key)
+        The callback is invoked at most once per ``set`` / ``set_batch`` /
+        ``delete`` transaction with a ``list[tuple[key, old, new, source]]``
+        of every change in that transaction that matched the pattern.
 
-        self._history.append(HistoryEntry(key, old_value, None, source))
+        Prefer this over ``subscribe`` for high-volume wildcard listeners
+        (cloud relay, ISC bridge, alert monitor) that only need the
+        aggregate delta rather than N individual callbacks. For a 40k-key
+        ``set_batch`` with a ``"*"`` bulk subscriber, the callback fires
+        once with a 40k-item list instead of 40k times.
 
-        if log.isEnabledFor(10):  # DEBUG = 10
-            log.debug(f"State: {key} deleted (was {old_value!r}, source={source})")
-
-        # Notify listeners (key is already removed from _store at this point,
-        # which lets consumers distinguish delete from set-to-None by checking
-        # whether the key still exists in the store)
-        self._notify_listeners(key, old_value, None, source)
-
-        # Emit events on the EventBus
-        if self._event_bus is not None:
-            payload = {
-                "key": key,
-                "old_value": old_value,
-                "new_value": None,
-                "source": source,
-            }
-            try:
-                loop = asyncio.get_running_loop()
-                for event_name in ("state.changed", f"state.changed.{key}"):
-                    task = loop.create_task(self._event_bus.emit(event_name, payload))
-                    self._pending_event_tasks.add(task)
-                    task.add_done_callback(self._pending_event_tasks.discard)
-            except RuntimeError:
-                pass
+        The pattern grammar is identical to ``subscribe``.
+        """
+        sub_id = str(uuid.uuid4())
+        self._add_sub(_Sub(sub_id=sub_id, pattern=pattern, callback=callback, bulk=True))
+        log.debug(f"State bulk subscription {sub_id[:8]}... on pattern '{pattern}'")
+        return sub_id
 
     def unsubscribe(self, sub_id: str) -> None:
-        """Remove a subscription by ID. Cleans up empty pattern entries."""
-        empty_patterns: list[str] = []
-        for pattern, subs in self._listeners.items():
-            self._listeners[pattern] = [(sid, cb) for sid, cb in subs if sid != sub_id]
-            if not self._listeners[pattern]:
-                empty_patterns.append(pattern)
-        for pattern in empty_patterns:
-            del self._listeners[pattern]
+        """Remove a subscription by ID."""
+        sub = self._all_subs.pop(sub_id, None)
+        if sub is None:
+            return
+        self._remove_sub_from_index(sub)
 
-    def get_namespace(self, prefix: str) -> dict[str, Any]:
+    @property
+    def _listeners(self) -> dict[str, list[tuple[str, Callable]]]:
+        """Read-only view of subscriptions grouped by pattern.
+
+        Reconstructed from the internal indices for backward-compatible
+        inspection (used by tests that assert a pattern is no longer
+        subscribed after cleanup). Don't mutate this; use subscribe /
+        unsubscribe.
         """
-        Get all key-value pairs under a namespace prefix.
+        out: dict[str, list[tuple[str, Callable]]] = {}
+        for sub in self._all_subs.values():
+            out.setdefault(sub.pattern, []).append((sub.sub_id, sub.callback))
+        return out
 
-        Example: get_namespace("device.projector1") returns
-                 {"power": "on", "input": "hdmi1", "connected": True}
-        """
-        prefix_dot = prefix if prefix.endswith(".") else prefix + "."
-        result = {}
-        for key, value in self._store.items():
-            if key.startswith(prefix_dot):
-                short_key = key[len(prefix_dot):]
-                result[short_key] = value
-        return result
-
-    def get_matching(self, pattern: str) -> dict[str, Any]:
-        """Get all key-value pairs where the key matches a glob pattern."""
-        return {k: v for k, v in self._store.items() if fnmatch(k, pattern)}
+    # ------------------------------------------------------------------
+    # Async housekeeping
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _log_task_exception(task: asyncio.Task) -> None:
@@ -258,40 +308,198 @@ class StateStore:
             await asyncio.gather(*self._pending_event_tasks, return_exceptions=True)
             self._pending_event_tasks.clear()
 
-    def snapshot(self) -> dict[str, Any]:
-        """Return a complete copy of the state store."""
-        return dict(self._store)
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
-    def get_history(self, count: int = 50) -> list[dict]:
-        """Return recent state change history."""
-        entries = list(self._history)[-count:]
-        return [
-            {
-                "key": e.key,
-                "old_value": e.old_value,
-                "new_value": e.new_value,
-                "source": e.source,
-                "timestamp": e.timestamp,
-            }
-            for e in entries
-        ]
+    @staticmethod
+    def _classify_pattern(pattern: str) -> tuple[str, str]:
+        """Bucket a subscription pattern.
 
-    def _notify_listeners(
-        self, key: str, old_value: Any, new_value: Any, source: str
+        Returns ``(bucket, key)`` where ``bucket`` is one of:
+
+        - ``"universal"`` — pattern is literally ``"*"``; key is ``""``.
+        - ``"exact"``     — pattern has no glob chars; key is the pattern.
+        - ``"prefix"``    — pattern is ``"<literal>.*"`` with no other glob
+                            chars; key is ``"<literal>."`` (trailing dot
+                            retained so candidate-prefix lookup matches it
+                            exactly).
+        - ``"glob"``      — anything else; falls back to fnmatch.
+        """
+        if pattern == "*":
+            return ("universal", "")
+        has_glob = any(c in pattern for c in _GLOB_CHARS)
+        if not has_glob:
+            return ("exact", pattern)
+        if pattern.endswith(".*") and not any(c in pattern[:-2] for c in _GLOB_CHARS):
+            return ("prefix", pattern[:-1])  # keep the trailing dot
+        return ("glob", pattern)
+
+    def _add_sub(self, sub: _Sub) -> None:
+        bucket, key = self._classify_pattern(sub.pattern)
+        if bucket == "universal":
+            self._universal_subs.append(sub)
+        elif bucket == "exact":
+            self._exact_subs.setdefault(key, []).append(sub)
+        elif bucket == "prefix":
+            self._prefix_subs.setdefault(key, []).append(sub)
+        else:
+            self._glob_subs.append(sub)
+        self._all_subs[sub.sub_id] = sub
+
+    def _remove_sub_from_index(self, sub: _Sub) -> None:
+        bucket, key = self._classify_pattern(sub.pattern)
+        if bucket == "universal":
+            self._universal_subs = [s for s in self._universal_subs if s.sub_id != sub.sub_id]
+        elif bucket == "exact":
+            lst = self._exact_subs.get(key)
+            if lst is not None:
+                remaining = [s for s in lst if s.sub_id != sub.sub_id]
+                if remaining:
+                    self._exact_subs[key] = remaining
+                else:
+                    del self._exact_subs[key]
+        elif bucket == "prefix":
+            lst = self._prefix_subs.get(key)
+            if lst is not None:
+                remaining = [s for s in lst if s.sub_id != sub.sub_id]
+                if remaining:
+                    self._prefix_subs[key] = remaining
+                else:
+                    del self._prefix_subs[key]
+        else:
+            self._glob_subs = [s for s in self._glob_subs if s.sub_id != sub.sub_id]
+
+    def _matching_non_universal_subs(self, key: str) -> Iterator[_Sub]:
+        """Yield subs whose pattern matches ``key``, excluding universal subs.
+
+        Universal subs ('*') are dispatched once per transaction outside the
+        per-key loop, so they're omitted here.
+        """
+        # Exact subs are an O(1) dict lookup.
+        exact = self._exact_subs.get(key)
+        if exact:
+            yield from exact
+
+        # Prefix subs: walk every "."-bounded prefix of the key. A pattern
+        # "p.*" was registered under "p." so we look up each "p." substring
+        # of the key. Cost is O(D) where D is the number of dots in the
+        # key (≤ ~6 for OpenAVC keys), not O(P) where P is the number of
+        # prefix subscriptions.
+        if self._prefix_subs:
+            prefix_subs = self._prefix_subs
+            for i, ch in enumerate(key):
+                if ch == ".":
+                    bucket = prefix_subs.get(key[: i + 1])
+                    if bucket:
+                        yield from bucket
+
+        # Glob fallback: arbitrary-position wildcards still pay fnmatch.
+        # Expected to be rare in practice.
+        if self._glob_subs:
+            for sub in self._glob_subs:
+                if fnmatch(key, sub.pattern):
+                    yield sub
+
+    def _notify(self, changes: list[tuple[str, Any, Any, str]]) -> None:
+        """Deliver a transaction's worth of changes to subscribers.
+
+        Per-key subscribers fire once per matching change. Bulk subscribers
+        fire once with a list of every change in this transaction that
+        matched their pattern. Universal subs ('*') are handled outside the
+        per-change loop so wildcard listeners don't pay an O(N) index walk
+        per change.
+        """
+        if not changes:
+            return
+
+        # 1) Universal subs match every change unconditionally. Fire them in
+        #    their natural mode and skip them in the per-change loop below.
+        for sub in self._universal_subs:
+            if sub.bulk:
+                self._invoke_bulk(sub, changes)
+            else:
+                for key, old, new, source in changes:
+                    self._invoke_per_key(sub, key, old, new, source)
+
+        # 2) Patterned subs (exact / prefix / glob). Per-key subs fire
+        #    immediately; bulk subs accumulate into per-sub buckets, then
+        #    fire once with the full list at the end of the transaction.
+        bulk_buckets: dict[str, list[tuple[str, Any, Any, str]]] | None = None
+        bulk_subs_by_id: dict[str, _Sub] | None = None
+
+        for change in changes:
+            key, old, new, source = change
+            for sub in self._matching_non_universal_subs(key):
+                if sub.bulk:
+                    if bulk_buckets is None:
+                        bulk_buckets = {}
+                        bulk_subs_by_id = {}
+                    existing = bulk_buckets.get(sub.sub_id)
+                    if existing is None:
+                        bulk_buckets[sub.sub_id] = [change]
+                        bulk_subs_by_id[sub.sub_id] = sub  # type: ignore[index]
+                    else:
+                        existing.append(change)
+                else:
+                    self._invoke_per_key(sub, key, old, new, source)
+
+        if bulk_buckets:
+            assert bulk_subs_by_id is not None
+            for sub_id, bucket_changes in bulk_buckets.items():
+                self._invoke_bulk(bulk_subs_by_id[sub_id], bucket_changes)
+
+    def _invoke_per_key(
+        self, sub: _Sub, key: str, old: Any, new: Any, source: str
     ) -> None:
-        """Call all listeners whose pattern matches the changed key."""
-        for pattern, subs in self._listeners.items():
-            if fnmatch(key, pattern):
-                for _sub_id, callback in subs:
-                    try:
-                        result = callback(key, old_value, new_value, source)
-                        # If the callback is async, schedule it with error logging
-                        if asyncio.iscoroutine(result):
-                            try:
-                                loop = asyncio.get_running_loop()
-                                task = loop.create_task(result)
-                                task.add_done_callback(self._log_task_exception)
-                            except RuntimeError:
-                                pass  # No event loop — skip
-                    except Exception:  # Catch-all: isolates listener callback errors
-                        log.exception(f"Error in state listener for pattern '{pattern}'")
+        try:
+            result = sub.callback(key, old, new, source)
+            if asyncio.iscoroutine(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                    task = loop.create_task(result)
+                    task.add_done_callback(self._log_task_exception)
+                except RuntimeError:
+                    pass  # No event loop — skip
+        except Exception:  # Catch-all: isolates listener callback errors
+            log.exception(f"Error in state listener for pattern '{sub.pattern}'")
+
+    def _invoke_bulk(
+        self, sub: _Sub, changes: list[tuple[str, Any, Any, str]]
+    ) -> None:
+        try:
+            result = sub.callback(changes)
+            if asyncio.iscoroutine(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                    task = loop.create_task(result)
+                    task.add_done_callback(self._log_task_exception)
+                except RuntimeError:
+                    pass
+        except Exception:
+            log.exception(f"Error in state bulk listener for pattern '{sub.pattern}'")
+
+    def _emit_events(self, changes: list[tuple[str, Any, Any, str]]) -> None:
+        """Emit ``state.changed`` events for each change.
+
+        Schedules emission as asyncio tasks; if there's no running loop
+        (sync tests), the events are silently skipped.
+        """
+        if self._event_bus is None or not changes:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # No event loop — skip async events (sync tests)
+
+        for key, old_value, new_value, source in changes:
+            payload = {
+                "key": key,
+                "old_value": old_value,
+                "new_value": new_value,
+                "source": source,
+            }
+            for event_name in ("state.changed", f"state.changed.{key}"):
+                task = loop.create_task(self._event_bus.emit(event_name, payload))
+                self._pending_event_tasks.add(task)
+                task.add_done_callback(self._pending_event_tasks.discard)
