@@ -220,3 +220,70 @@ def test_required_port_invalid_value_raises():
     d = _make_driver({"port": "not-a-number"})
     with pytest.raises(ConnectionError, match="invalid port"):
         d._required_port()
+
+
+# ---------------------------------------------------------------------------
+# Discovery /add-device REST endpoint — first-add behavior
+# ---------------------------------------------------------------------------
+
+
+async def test_discovery_add_device_pulls_in_driver_defaults_on_first_add(
+    tmp_path, fake_tcp_driver, monkeypatch
+):
+    """Regression: clicking Add/Install in Discovery must save the driver's
+    declared port (and other defaults) into the project file AND apply
+    them to the runtime device on first add — without requiring a server
+    restart.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from server.api import discovery as discovery_api
+    from server.api.discovery import AddDeviceRequest, add_device
+
+    # Stub the discovery engine — add_device only reads .results for
+    # display-name enrichment.
+    fake_discovery = MagicMock()
+    fake_discovery.results = {}
+    discovery_api.set_discovery_engine(fake_discovery)
+
+    # Real engine with empty project, plus mocked devices manager so we
+    # can assert what runtime_config the route handed off.
+    engine = Engine(str(tmp_path / "test.avc"))
+    engine.project = ProjectConfig(
+        project=ProjectMeta(id="t", name="Test"),
+        devices=[],
+        connections={},
+    )
+    engine.devices = MagicMock()
+    engine.devices.add_device = AsyncMock()
+    engine._project_revision = 0
+
+    discovery_api.set_app_engine(engine)
+
+    # Don't actually write to disk
+    monkeypatch.setattr(
+        "server.core.project_loader.save_project", lambda *a, **k: None
+    )
+
+    req = AddDeviceRequest(ip="192.0.2.50", driver_id="fake_kramer_test")
+    result = await add_device(req)
+
+    assert result["status"] == "ok"
+
+    # 1. Runtime hand-off includes driver defaults (port etc.)
+    runtime_arg = engine.devices.add_device.await_args.args[0]
+    assert runtime_arg["config"]["host"] == "192.0.2.50"
+    assert runtime_arg["config"]["port"] == 5000, (
+        "first-add must include driver default_config.port at runtime"
+    )
+    assert runtime_arg["config"]["machine_number"] == "01"
+    assert runtime_arg["config"]["poll_interval"] == 10
+
+    # 2. Saved project also has the defaults — user opening the device
+    #    sees port populated, not a blank field.
+    saved_device = engine.project.devices[-1]
+    saved_conn = engine.project.connections[saved_device.id]
+    assert saved_conn["host"] == "192.0.2.50"
+    assert saved_conn["port"] == 5000
+    assert saved_device.config["machine_number"] == "01"
+    assert saved_device.config["poll_interval"] == 10

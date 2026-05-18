@@ -356,14 +356,24 @@ async def add_device(req: AddDeviceRequest) -> dict[str, Any]:
     name = re.sub(r"<[^>]+>", "", name)
     name = " ".join(name.split())[:128]
 
-    # Merge suggested config with any overrides from the request.
-    # The deterministic matcher does not produce per-driver suggested
-    # configs; defaults come from the driver's own default_config.
-    config = {"host": req.ip}
+    # Layer the device's config so it lands in the project pre-filled,
+    # not just at runtime:
+    #   driver defaults  <  request overrides  <  discovery-provided host
+    # Empty-string / None defaults are dropped so we don't write blanks
+    # over fields the user can fill later (mirrors the manual Add Device
+    # dialog's prefill behavior).
+    from server.core.device_manager import get_driver_default_config
+    from server.core.project_migration import CONNECTION_FIELDS
+
+    driver_defaults = {
+        k: v for k, v in get_driver_default_config(req.driver_id).items()
+        if v is not None and v != ""
+    }
+
+    config = {**driver_defaults, "host": req.ip}
     config.update(req.config)
 
     # Split config into connection fields and protocol fields
-    from server.core.project_migration import CONNECTION_FIELDS
     protocol_config = {}
     conn_overrides = {}
     for key, value in config.items():
