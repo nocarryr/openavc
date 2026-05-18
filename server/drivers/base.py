@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from server.core.event_bus import EventBus
@@ -112,7 +113,7 @@ class BaseDriver(ABC):
             from server.transport.tcp import TCPTransport
 
             host = self.config.get("host", "")
-            port = self.config.get("port", 23)
+            port = self._required_port()
             delay = self.config.get("inter_command_delay", 0.0)
 
             self.transport = await TCPTransport.create(
@@ -153,7 +154,7 @@ class BaseDriver(ABC):
             from server.transport.udp import UDPTransport
 
             host = self.config.get("host", "")
-            port = self.config.get("port", 6000)
+            port = self._required_port()
             delay = self.config.get("inter_command_delay", 0.0)
 
             self.transport = UDPTransport(
@@ -171,7 +172,7 @@ class BaseDriver(ABC):
             from server.transport.osc import OSCTransport
 
             host = self.config.get("host", "")
-            port = self.config.get("port", 8000)
+            port = self._required_port()
             listen_port = self.config.get("listen_port", 0)
             delay = self.config.get("inter_command_delay", 0.0)
 
@@ -341,6 +342,32 @@ class BaseDriver(ABC):
         states like "in standby") may be handled inside poll() — those
         indicate the device is reachable but not in a queryable state.
         """
+
+    def _required_port(self) -> int:
+        """Return ``config['port']`` for TCP/UDP/OSC, or raise a clear error.
+
+        Driver ``default_config.port`` is layered in by
+        ``Engine.resolved_device_config`` before instantiation, so a
+        properly-declared driver always has a port here. A missing port
+        means the driver definition skipped declaring one — surface that
+        as a config error instead of silently dialing port 23.
+        """
+        port = self.config.get("port")
+        if port is None or port == "":
+            driver_id = self.DRIVER_INFO.get("id", "?")
+            raise ConnectionError(
+                f"Device '{self.device_id}': missing 'port' in config "
+                f"(driver '{driver_id}' must declare default_config.port "
+                f"or the device must override it)"
+            )
+        try:
+            return int(port)
+        except (TypeError, ValueError) as e:
+            driver_id = self.DRIVER_INFO.get("id", "?")
+            raise ConnectionError(
+                f"Device '{self.device_id}': invalid port {port!r} "
+                f"(driver '{driver_id}')"
+            ) from e
 
     def _create_frame_parser(self) -> FrameParser | None:
         """

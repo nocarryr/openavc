@@ -57,6 +57,21 @@ def is_driver_registered(driver_id: str) -> bool:
     return driver_id in _DRIVER_REGISTRY
 
 
+def get_driver_default_config(driver_id: str) -> dict[str, Any]:
+    """Return the registered driver's ``default_config``, or ``{}`` if unknown.
+
+    Used by ``Engine.resolved_device_config`` to layer driver-declared
+    defaults under saved device config. Unknown / orphaned drivers return
+    an empty dict so a missing driver behaves the same as today (the
+    device will fail to instantiate, but resolution stays well-defined).
+    """
+    cls = _DRIVER_REGISTRY.get(driver_id)
+    if cls is None:
+        return {}
+    defaults = cls.DRIVER_INFO.get("default_config", {}) or {}
+    return dict(defaults)
+
+
 def get_driver_registry() -> list[dict[str, Any]]:
     """Return metadata for all registered drivers."""
     return [

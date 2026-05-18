@@ -570,11 +570,23 @@ class Engine:
         log.info("Project reloaded")
 
     def resolved_device_config(self, device) -> dict:
-        """Get device config dict with connection table entries merged in."""
+        """Get device config dict with driver defaults and connection table merged in.
+
+        Layering (later wins):
+          1. ``driver.DRIVER_INFO["default_config"]`` — driver-declared
+             defaults (e.g. control-protocol port). Ensures discovery /
+             AI-tool add paths inherit the right defaults even when the
+             caller only supplied ``host``.
+          2. ``device.config`` — protocol fields saved in the project.
+          3. ``project.connections[id]`` — connection-table overrides
+             (host, port, baudrate, etc.) saved separately.
+        """
+        from server.core.device_manager import get_driver_default_config
+
         cfg = device.model_dump() if hasattr(device, "model_dump") else dict(device)
+        defaults = get_driver_default_config(cfg.get("driver", ""))
         conn = self.project.connections.get(cfg["id"], {})
-        if conn:
-            cfg["config"] = {**cfg.get("config", {}), **conn}
+        cfg["config"] = {**defaults, **cfg.get("config", {}), **conn}
         return cfg
 
     async def _sync_devices(self) -> None:
