@@ -42,6 +42,19 @@ class ProjectMeta(_ForwardCompatModel):
     modified: str = ""
 
 
+class ChildEntityConfig(_ForwardCompatModel):
+    """Project-side metadata for one child entity owned by a device.
+
+    The runtime state for child entities lives in the state store under
+    ``device.<parent>.<child_type>.<local_id_padded>.<property>``; this
+    model only persists the bits that the project author controls (user
+    label, freeform config). Driver-controlled state (online flag, signal
+    presence, etc.) is never persisted in the project file.
+    """
+    label: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
 class DeviceConfig(_ForwardCompatModel):
     id: str
     driver: str
@@ -49,6 +62,14 @@ class DeviceConfig(_ForwardCompatModel):
     config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     pending_settings: dict[str, Any] = Field(default_factory=dict)
+    # child_entities keyed by child_type -> local_id_padded -> ChildEntityConfig.
+    # Empty for devices whose drivers don't declare child_entity_types. The
+    # key is the padded string form (matching the state-store convention)
+    # so a controller with encoder 5 looks like
+    #   {"encoder": {"005": {"label": "Lobby TX"}}}
+    child_entities: dict[str, dict[str, ChildEntityConfig]] = Field(
+        default_factory=dict
+    )
 
     @field_validator("id")
     @classmethod
@@ -106,7 +127,7 @@ class StepCondition(_ForwardCompatModel):
 
 
 class MacroStep(_ForwardCompatModel):
-    action: str  # "device.command", "group.command", "delay", "state.set", "macro", "event.emit", "conditional", "wait_until"
+    action: str  # "device.command", "group.command", "delay", "state.set", "macro", "event.emit", "conditional", "wait_until", "ui.navigate"
     # Fields used by different action types (all optional, validated at runtime)
     device: str | None = None
     group: str | None = None  # group.command: target device group ID
@@ -118,6 +139,7 @@ class MacroStep(_ForwardCompatModel):
     macro: str | None = None
     event: str | None = None
     payload: dict[str, Any] | None = None
+    page: str | None = None  # ui.navigate: target page id, or "$back" / "$dismiss" to pop overlay
     description: str | None = None  # human-readable step description (for progress display)
 
     # Conditional step fields (action == "conditional")
@@ -365,7 +387,7 @@ class PluginConfig(_ForwardCompatModel):
 
 
 class ProjectConfig(_ForwardCompatModel):
-    openavc_version: str = "0.4.0"
+    openavc_version: str = "0.5.0"
     project: ProjectMeta
     devices: list[DeviceConfig] = Field(default_factory=list)
     device_groups: list[DeviceGroup] = Field(default_factory=list)

@@ -8,6 +8,7 @@ from server.core.project_migration import (
     migrate_0_1_to_0_2,
     migrate_0_2_to_0_3,
     migrate_0_3_to_0_4,
+    migrate_0_4_to_0_5,
     migrate_project,
 )
 
@@ -68,6 +69,14 @@ def make_v03_project(**overrides) -> dict:
     """Minimal v0.3.0 project."""
     data = make_v02_project()
     data = migrate_0_2_to_0_3(data)
+    data.update(overrides)
+    return data
+
+
+def make_v04_project(**overrides) -> dict:
+    """Minimal v0.4.0 project."""
+    data = make_v03_project()
+    data = migrate_0_3_to_0_4(data)
     data.update(overrides)
     return data
 
@@ -210,7 +219,47 @@ class TestMigrate03To04:
 
 
 # ---------------------------------------------------------------------------
-# Full chain: 0.1.0 → 0.4.0
+# 0.4.0 → 0.5.0
+# ---------------------------------------------------------------------------
+
+class TestMigrate04To05:
+    def test_version_bumped(self):
+        data = make_v04_project()
+        result = migrate_0_4_to_0_5(copy.deepcopy(data))
+        assert result["openavc_version"] == "0.5.0"
+
+    def test_child_entities_added_to_every_device(self):
+        """Migration injects an empty child_entities dict on each device
+        so the on-disk schema has the new key, even before any controller
+        driver populates it."""
+        data = make_v04_project()
+        result = migrate_0_4_to_0_5(copy.deepcopy(data))
+        for device in result["devices"]:
+            assert device["child_entities"] == {}
+
+    def test_existing_child_entities_preserved(self):
+        """A v0.4.0 file that already happens to carry child_entities
+        (hand-edited or imported from a future version) keeps its
+        contents through migration."""
+        data = make_v04_project()
+        data["devices"][0]["child_entities"] = {
+            "encoder": {"005": {"label": "Lobby TX"}},
+        }
+        result = migrate_0_4_to_0_5(copy.deepcopy(data))
+        assert result["devices"][0]["child_entities"] == {
+            "encoder": {"005": {"label": "Lobby TX"}},
+        }
+
+    def test_no_devices(self):
+        """A project with no devices migrates cleanly (just version bump)."""
+        data = {"project": {"id": "x", "name": "X"}, "devices": []}
+        result = migrate_0_4_to_0_5(copy.deepcopy(data))
+        assert result["openavc_version"] == "0.5.0"
+        assert result["devices"] == []
+
+
+# ---------------------------------------------------------------------------
+# Full chain: 0.1.0 → CURRENT_VERSION
 # ---------------------------------------------------------------------------
 
 class TestFullMigrationChain:
@@ -249,12 +298,22 @@ class TestFullMigrationChain:
         assert "device_groups" in result
 
     def test_current_version_not_migrated(self):
-        data = make_v03_project()
-        data = migrate_0_3_to_0_4(data)  # Now at 0.4.0
+        data = make_v04_project()
+        data = migrate_0_4_to_0_5(data)  # Now at CURRENT_VERSION (0.5.0)
         result, migrated = migrate_project(copy.deepcopy(data))
 
         assert migrated is False
         assert result["openavc_version"] == CURRENT_VERSION
+
+    def test_0_4_to_current(self):
+        data = make_v04_project()
+        result, migrated = migrate_project(copy.deepcopy(data))
+
+        assert migrated is True
+        assert result["openavc_version"] == CURRENT_VERSION
+        # Every device gained an empty child_entities entry.
+        for device in result["devices"]:
+            assert device["child_entities"] == {}
 
     def test_missing_version_treated_as_0_1(self):
         data = {"project": {"id": "old", "name": "Old"}, "devices": []}

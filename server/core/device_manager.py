@@ -176,8 +176,13 @@ class DeviceManager:
             await self.events.emit("device.orphaned", {"device_id": device_id, "driver": driver_id})
             return
 
-        # Create driver instance
+        # Create driver instance, then hand it the project-side
+        # child_entities map (user labels, per-child config) which
+        # register_child consults to seed the platform-managed `label`
+        # state key. Done post-construction so existing driver subclasses
+        # with a fixed __init__ signature don't need to change.
         driver = driver_class(device_id, config, self.state, self.events)
+        driver.set_project_child_entities(device_config.get("child_entities") or {})
         self._devices[device_id] = driver
         self._device_configs[device_id] = device_config
 

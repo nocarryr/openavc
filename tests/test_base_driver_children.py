@@ -82,14 +82,20 @@ class _FakeControllerDriver(BaseDriver):
         return None
 
 
-def _make_driver(device_id: str = "ctrl1") -> _FakeControllerDriver:
+def _make_driver(
+    device_id: str = "ctrl1",
+    child_entities: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> _FakeControllerDriver:
     """Fresh driver + state/event store. Each test gets an isolated set."""
-    return _FakeControllerDriver(
+    drv = _FakeControllerDriver(
         device_id=device_id,
         config={},
         state=StateStore(),
         events=EventBus(),
     )
+    if child_entities is not None:
+        drv.set_project_child_entities(child_entities)
+    return drv
 
 
 # ---------------------------------------------------------------------------
@@ -479,3 +485,73 @@ async def test_poll_children_empty_when_nothing_registered():
 
     await drv.poll_children("encoder", fetch)
     assert fetched == []
+
+
+# ---------------------------------------------------------------------------
+# Project-side child_entities -> register_child label injection (P4)
+# ---------------------------------------------------------------------------
+
+
+def test_register_child_injects_project_label():
+    """When DeviceManager passes child_entities (from the project file),
+    register_child seeds the synthetic `label` state key from the project's
+    ChildEntityConfig.label so listeners see the user's name without a
+    second update round-trip."""
+    drv = _make_driver(child_entities={
+        "encoder": {
+            "005": {"label": "Lobby TX", "config": {}},
+        },
+    })
+    drv.register_child("encoder", 5)
+    assert drv.state.get("device.ctrl1.encoder.005.label") == "Lobby TX"
+
+
+def test_register_child_label_defaults_empty_without_project_entry():
+    """A child with no project-side label gets `label = ""`, not None."""
+    drv = _make_driver(child_entities={})
+    drv.register_child("encoder", 5)
+    assert drv.state.get("device.ctrl1.encoder.005.label") == ""
+
+
+def test_register_child_initial_state_label_wins_over_project_label():
+    """An explicit initial_state[label] takes precedence over the project's
+    stored label. This matters for drivers that compute a label from
+    discovered metadata (e.g. the device's hostname) when no user label
+    has been authored yet."""
+    drv = _make_driver(child_entities={
+        "encoder": {"005": {"label": "Project Label"}},
+    })
+    drv.register_child("encoder", 5, initial_state={"label": "Driver Label"})
+    assert drv.state.get("device.ctrl1.encoder.005.label") == "Driver Label"
+
+
+def test_register_child_label_writable_via_set_child_state():
+    """set_child_state accepts the synthetic `label` key without raising
+    — the IDE writes user-edited labels back through this path."""
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    drv.set_child_state("encoder", 5, "label", "Updated")
+    assert drv.state.get("device.ctrl1.encoder.005.label") == "Updated"
+
+
+def test_register_child_padded_id_lookup():
+    """Project entries are keyed by the padded id string, matching the
+    state-store convention. Encoder 5 with pad_width=3 must look up "005",
+    not "5"."""
+    drv = _make_driver(child_entities={
+        "encoder": {
+            "5": {"label": "WRONG — unpadded key"},
+            "005": {"label": "Correct"},
+        },
+    })
+    drv.register_child("encoder", 5)
+    assert drv.state.get("device.ctrl1.encoder.005.label") == "Correct"
+
+
+def test_register_child_project_entries_for_other_types_ignored():
+    """Project entries for child_type X don't bleed into child_type Y."""
+    drv = _make_driver(child_entities={
+        "decoder": {"5": {"label": "Decoder label"}},
+    })
+    drv.register_child("encoder", 5)
+    assert drv.state.get("device.ctrl1.encoder.005.label") == ""

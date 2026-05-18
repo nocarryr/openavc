@@ -48,7 +48,7 @@ TEST_PROJECT_OLD = {
 }
 
 TEST_PROJECT_NEW = {
-    "openavc_version": "0.4.0",
+    "openavc_version": CURRENT_VERSION,
     "project": {"id": "test_lifecycle", "name": "Lifecycle Test"},
     "devices": [
         {
@@ -162,7 +162,7 @@ class TestMigration:
         migrated, was_migrated = migrate_project(data)
 
         assert was_migrated is False
-        assert migrated["openavc_version"] == "0.4.0"
+        assert migrated["openavc_version"] == CURRENT_VERSION
         assert migrated["connections"] == TEST_PROJECT_NEW["connections"]
         assert migrated["devices"][0]["config"] == TEST_PROJECT_NEW["devices"][0]["config"]
 

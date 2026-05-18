@@ -55,9 +55,27 @@ class BaseDriver(ABC):
         # mapping is a dict (not a set) so it preserves insertion order, which
         # makes list_children() output stable for tests and IDE displays.
         self._children: dict[str, dict[int, bool]] = {}
+        # Project-side child metadata: {child_type: {local_id_padded: {label, config}}}.
+        # Populated by DeviceManager.add_device after construction (via
+        # set_project_child_entities) so existing driver subclasses with a
+        # fixed __init__ signature don't need to change. register_child
+        # consults this to seed the per-child `label` state key without
+        # the driver having to plumb the project schema itself.
+        self._project_child_entities: dict[str, dict[str, dict[str, Any]]] = {}
 
         # Initialize state variables from DRIVER_INFO
         self._init_state_variables()
+
+    def set_project_child_entities(
+        self, child_entities: dict[str, dict[str, dict[str, Any]]] | None,
+    ) -> None:
+        """Set the project-side child metadata for this driver instance.
+
+        Called by DeviceManager from the project's DeviceConfig.child_entities
+        after construction. Keeps the BaseDriver __init__ signature stable
+        for existing driver subclasses that define their own __init__.
+        """
+        self._project_child_entities = dict(child_entities or {})
 
     @property
     def connected(self) -> bool:
@@ -614,7 +632,13 @@ class BaseDriver(ABC):
     # listeners can distinguish "configured but offline" from "not configured".
     # See openavc-device-children-plan.md design §1-§3 for the full design.
 
-    _CHILD_RESERVED_PROPS: tuple[str, ...] = ("online",)
+    # State keys the platform always provides for every registered child,
+    # in addition to whatever the driver declares in
+    # child_entity_types[<type>].state_variables. `online` is driver-managed
+    # (the driver sets it as it observes connectivity). `label` is the
+    # user-set friendly name, sourced from the project file on registration
+    # and writable through the IDE / REST.
+    _CHILD_RESERVED_PROPS: tuple[str, ...] = ("online", "label")
 
     def _child_type_def(self, child_type: str) -> dict[str, Any]:
         """Return the DRIVER_INFO child_entity_types[<type>] definition.
@@ -631,11 +655,12 @@ class BaseDriver(ABC):
 
     def _effective_child_schema(self, child_type: str) -> dict[str, dict[str, Any]]:
         """Schema for one child instance's state variables, with the
-        platform-managed `online` key injected if the driver didn't
-        already declare it.
+        platform-managed `online` and `label` keys injected if the driver
+        didn't already declare them.
         """
         declared = dict(self._child_type_def(child_type).get("state_variables", {}))
         declared.setdefault("online", {"type": "boolean"})
+        declared.setdefault("label", {"type": "string"})
         return declared
 
     def _format_child_id(self, child_type: str, local_id: int) -> str:
@@ -749,10 +774,20 @@ class BaseDriver(ABC):
                     f".state_variables"
                 )
 
+        # Project-side label: if the project file has a ChildEntityConfig
+        # entry for this (type, padded_id), use its `label` as the default
+        # so listeners see the user's name immediately, not "" then a
+        # delayed update once the IDE re-pushes it.
+        padded = self._format_child_id(child_type, local_id)
+        project_entry = self._project_child_entities.get(child_type, {}).get(padded)
+        project_label = project_entry.get("label", "") if project_entry else ""
+
         updates: dict[str, Any] = {}
         for prop, var_def in schema.items():
             if prop == "online":
                 value = overrides.get("online", True)
+            elif prop == "label":
+                value = overrides.get("label", project_label)
             elif prop in overrides:
                 value = overrides[prop]
             else:

@@ -29,7 +29,7 @@ from server.core.project_loader import (
     build_default_plugin_config,
     get_plugin_setup_fields,
 )
-from server.core.project_migration import migrate_project
+from server.core.project_migration import CURRENT_VERSION, migrate_project
 from server.core.state_store import StateStore
 
 
@@ -830,12 +830,12 @@ class TestProjectMigration:
         }
         result, migrated = migrate_project(data)
         assert migrated
-        assert result["openavc_version"] == "0.4.0"
+        assert result["openavc_version"] == CURRENT_VERSION
         assert result["plugins"] == {}
         assert result["plugin_dependencies"] == []
 
     def test_migrate_0_1_to_0_3(self):
-        """Full migration chain: 0.1.0 → 0.2.0 → 0.3.0."""
+        """Full migration chain runs all the way to CURRENT_VERSION."""
         data = {
             "openavc_version": "0.1.0",
             "project": {"id": "test", "name": "Test"},
@@ -845,7 +845,7 @@ class TestProjectMigration:
         }
         result, migrated = migrate_project(data)
         assert migrated
-        assert result["openavc_version"] == "0.4.0"
+        assert result["openavc_version"] == CURRENT_VERSION
         # 0.1 → 0.2: host moved to connections
         assert "host" not in result["devices"][0]["config"]
         assert result["connections"]["proj1"]["host"] == "1.2.3.4"
@@ -855,7 +855,7 @@ class TestProjectMigration:
 
     def test_no_migration_needed(self):
         data = {
-            "openavc_version": "0.4.0",
+            "openavc_version": CURRENT_VERSION,
             "project": {"id": "test", "name": "Test"},
             "plugins": {"mqtt": {"enabled": True, "config": {}}},
             "plugin_dependencies": [],

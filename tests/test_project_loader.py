@@ -140,6 +140,105 @@ def test_round_trip(test_project_path):
     Path(tmp_path).unlink()
 
 
+def test_round_trip_child_entities_preserved():
+    """A device's child_entities (user labels + per-child config) survives
+    load -> save -> load exactly.
+
+    P4 acceptance: the project layer is the source of truth for user labels
+    and freeform per-child config, so the round-trip must be lossless.
+    """
+    data = {
+        "openavc_version": "0.5.0",
+        "project": {"id": "ce_rt", "name": "Child Entity Round Trip"},
+        "devices": [
+            {
+                "id": "ctrl1",
+                "driver": "fake_controller",
+                "name": "Matrix",
+                "child_entities": {
+                    "encoder": {
+                        "005": {
+                            "label": "Lobby TX",
+                            "config": {"room": "Lobby", "rack_u": 12},
+                        },
+                        "017": {"label": "Stage Left"},
+                    },
+                    "decoder": {
+                        "01": {"label": "Lobby RX"},
+                    },
+                },
+            },
+        ],
+    }
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as f:
+        json.dump(data, f)
+        tmp_path = f.name
+
+    project = load_project(tmp_path)
+    # Loaded model matches what we put in.
+    dev = project.devices[0]
+    assert "encoder" in dev.child_entities
+    assert dev.child_entities["encoder"]["005"].label == "Lobby TX"
+    assert dev.child_entities["encoder"]["005"].config == {
+        "room": "Lobby", "rack_u": 12,
+    }
+    assert dev.child_entities["encoder"]["017"].label == "Stage Left"
+    assert dev.child_entities["decoder"]["01"].label == "Lobby RX"
+
+    # Round trip: save then reload, confirm bit-for-bit identity.
+    save_project(tmp_path, project)
+    reloaded = load_project(tmp_path)
+    rdev = reloaded.devices[0]
+    assert rdev.child_entities["encoder"]["005"].label == "Lobby TX"
+    assert rdev.child_entities["encoder"]["005"].config == {
+        "room": "Lobby", "rack_u": 12,
+    }
+    assert rdev.child_entities["encoder"]["017"].label == "Stage Left"
+    assert rdev.child_entities["decoder"]["01"].label == "Lobby RX"
+
+    # And the on-disk JSON keeps the same shape (no flattening, no nesting
+    # gymnastics) so external tools and a future agent can read it back.
+    on_disk = json.loads(Path(tmp_path).read_text())
+    assert on_disk["devices"][0]["child_entities"] == {
+        "encoder": {
+            "005": {
+                "label": "Lobby TX",
+                "config": {"room": "Lobby", "rack_u": 12},
+            },
+            "017": {"label": "Stage Left", "config": {}},
+        },
+        "decoder": {
+            "01": {"label": "Lobby RX", "config": {}},
+        },
+    }
+
+    Path(tmp_path).unlink()
+
+
+def test_child_entities_defaults_to_empty_on_existing_device():
+    """A device that doesn't supply child_entities loads with the field
+    defaulted to an empty dict — preserves backward compatibility with
+    pre-v0.5 project files that haven't yet migrated."""
+    data = {
+        "openavc_version": "0.5.0",
+        "project": {"id": "p", "name": "P"},
+        "devices": [
+            {"id": "proj1", "driver": "pjlink", "name": "Projector"},
+        ],
+    }
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as f:
+        json.dump(data, f)
+        tmp_path = f.name
+
+    project = load_project(tmp_path)
+    assert project.devices[0].child_entities == {}
+    Path(tmp_path).unlink()
+
+
 def test_minimal_project():
     """A project with just a name and no devices should load fine."""
     minimal = {
