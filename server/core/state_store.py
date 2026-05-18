@@ -271,6 +271,19 @@ class StateStore:
         log.debug(f"State bulk subscription {sub_id[:8]}... on pattern '{pattern}'")
         return sub_id
 
+    def subscribe_children(
+        self, parent_id: str, child_type: str, callback: Callable
+    ) -> str:
+        """Subscribe to every state change on any child of ``parent_id`` of
+        type ``child_type``.
+
+        Equivalent to ``subscribe(f"device.{parent_id}.{child_type}.*", cb)``
+        but encodes the platform's child-entity key shape so callers don't
+        assemble it themselves. Callback signature is the standard
+        per-key form: ``(key, old_value, new_value, source)``.
+        """
+        return self.subscribe(f"device.{parent_id}.{child_type}.*", callback)
+
     def unsubscribe(self, sub_id: str) -> None:
         """Remove a subscription by ID."""
         sub = self._all_subs.pop(sub_id, None)

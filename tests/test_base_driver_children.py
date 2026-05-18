@@ -1,0 +1,481 @@
+"""Tests for BaseDriver child-entity APIs (P3 of the device-with-children plan).
+
+A "child entity" is a sub-unit owned by a parent device — encoders on a
+matrix controller, decoders on a presentation switcher, zones on a DSP.
+Drivers declare them in DRIVER_INFO["child_entity_types"] and manage live
+instances via register_child / deregister_child / set_child_state /
+set_child_state_batch / set_children_state_batch / poll_children.
+
+The platform owns the state-key format:
+
+    device.<parent_id>.<child_type>.<local_id_padded>.<property>
+
+These tests cover the seven acceptance items called out in the plan plus
+the edge cases that drove the design (idempotency, padded IDs, atomicity,
+synthetic `online`, range validation, schema rejection).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from server.core.event_bus import EventBus
+from server.core.state_store import StateStore
+from server.drivers.base import BaseDriver
+
+
+# ---------------------------------------------------------------------------
+# Fixture driver — declares two child types with realistic shapes.
+# ---------------------------------------------------------------------------
+
+
+class _FakeControllerDriver(BaseDriver):
+    """Test fixture: a controller-style driver with two child types.
+
+    `encoder` uses 3-digit padded IDs (mirroring real AV-over-IP gear).
+    `decoder` uses no padding so we can prove the platform respects the
+    declared pad_width per type, not globally.
+    """
+
+    DRIVER_INFO: dict[str, Any] = {
+        "id": "fake_controller",
+        "name": "Fake Controller",
+        "transport": "tcp",
+        "state_variables": {},
+        "commands": {},
+        "child_entity_types": {
+            "encoder": {
+                "label": "Encoder",
+                "label_plural": "Encoders",
+                "id_format": {
+                    "type": "integer", "min": 1, "max": 762, "pad_width": 3,
+                },
+                "state_variables": {
+                    "name": {"type": "string"},
+                    "ip": {"type": "string"},
+                    "signal_present": {"type": "boolean"},
+                    "audio_source": {
+                        "type": "enum", "values": ["HDMI", "ANALOG"],
+                    },
+                    "lan_mode": {"type": "integer", "min": 1, "max": 2},
+                },
+                "summary_fields": ["name", "ip", "signal_present"],
+                "label_field": "name",
+            },
+            "decoder": {
+                "label": "Decoder",
+                "id_format": {
+                    "type": "integer", "min": 1, "max": 32,
+                    # no pad_width — IDs render bare ("5", not "005").
+                },
+                "state_variables": {
+                    "name": {"type": "string"},
+                    "source": {"type": "integer", "min": 0, "max": 762},
+                },
+            },
+        },
+    }
+
+    async def send_command(self, command: str, params: dict | None = None) -> Any:
+        return None
+
+
+def _make_driver(device_id: str = "ctrl1") -> _FakeControllerDriver:
+    """Fresh driver + state/event store. Each test gets an isolated set."""
+    return _FakeControllerDriver(
+        device_id=device_id,
+        config={},
+        state=StateStore(),
+        events=EventBus(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# register_child
+# ---------------------------------------------------------------------------
+
+
+def test_child_entity_register_creates_state_keys():
+    drv = _make_driver()
+    drv.register_child("encoder", 5, initial_state={"name": "Lobby TX"})
+
+    # Every declared prop got a key, with caller overrides applied and
+    # type-correct defaults filled in for the rest.
+    assert drv.state.get("device.ctrl1.encoder.005.name") == "Lobby TX"
+    assert drv.state.get("device.ctrl1.encoder.005.ip") == ""
+    assert drv.state.get("device.ctrl1.encoder.005.signal_present") is False
+    assert drv.state.get("device.ctrl1.encoder.005.audio_source") == "HDMI"
+    assert drv.state.get("device.ctrl1.encoder.005.lan_mode") == 1
+
+    # Platform-managed `online` defaults to True (registered → assumed online).
+    assert drv.state.get("device.ctrl1.encoder.005.online") is True
+
+
+def test_child_entity_register_idempotent():
+    """Calling register_child twice with the same (type, id) is a no-op the
+    second time — it does not stomp existing state with fresh defaults."""
+    drv = _make_driver()
+    drv.register_child("encoder", 5, initial_state={"name": "First"})
+    drv.set_child_state("encoder", 5, "signal_present", True)
+    # Drift the synthetic `online` flag too — second register must not reset it.
+    drv.set_child_state("encoder", 5, "online", False)
+
+    drv.register_child("encoder", 5, initial_state={"name": "Second"})
+
+    assert drv.state.get("device.ctrl1.encoder.005.name") == "First"
+    assert drv.state.get("device.ctrl1.encoder.005.signal_present") is True
+    assert drv.state.get("device.ctrl1.encoder.005.online") is False
+    # Still only registered once.
+    assert drv.list_children("encoder") == [5]
+
+
+def test_register_online_default_true_when_initial_state_omitted():
+    drv = _make_driver()
+    drv.register_child("encoder", 1)
+    assert drv.state.get("device.ctrl1.encoder.001.online") is True
+
+
+def test_register_online_can_be_set_false_via_initial_state():
+    drv = _make_driver()
+    drv.register_child("encoder", 1, initial_state={"online": False})
+    assert drv.state.get("device.ctrl1.encoder.001.online") is False
+
+
+def test_register_unknown_initial_state_prop_raises_and_rolls_back():
+    drv = _make_driver()
+    with pytest.raises(ValueError, match="not declared"):
+        drv.register_child("encoder", 7, initial_state={"bogus": "x"})
+    # No partial state should remain.
+    assert drv.list_children("encoder") == []
+    assert drv.state.get("device.ctrl1.encoder.007.name") is None
+
+
+def test_register_unknown_child_type_raises():
+    drv = _make_driver()
+    with pytest.raises(ValueError, match="did not declare"):
+        drv.register_child("video_wall", 1)
+
+
+def test_register_id_out_of_range_raises():
+    drv = _make_driver()
+    with pytest.raises(ValueError, match="max"):
+        drv.register_child("encoder", 1000)  # max is 762
+    with pytest.raises(ValueError, match="min"):
+        drv.register_child("encoder", 0)
+
+
+def test_register_rejects_non_integer_id():
+    drv = _make_driver()
+    with pytest.raises(TypeError):
+        drv.register_child("encoder", "5")  # str, not int
+    with pytest.raises(TypeError):
+        # bool is a subclass of int but should still be rejected — otherwise
+        # register_child("encoder", True) silently lands at ID 1.
+        drv.register_child("encoder", True)
+
+
+# ---------------------------------------------------------------------------
+# Padded local IDs
+# ---------------------------------------------------------------------------
+
+
+def test_state_keys_use_padded_local_id():
+    """Encoder pad_width=3 → IDs render as 001/005/762, not 1/5/762."""
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    drv.register_child("encoder", 762)
+    snapshot = drv.state.snapshot()
+    assert "device.ctrl1.encoder.005.name" in snapshot
+    assert "device.ctrl1.encoder.762.name" in snapshot
+    assert "device.ctrl1.encoder.5.name" not in snapshot
+
+
+def test_state_keys_respect_per_type_padding():
+    """Decoder declares no pad_width → IDs render bare."""
+    drv = _make_driver()
+    drv.register_child("decoder", 5)
+    snapshot = drv.state.snapshot()
+    assert "device.ctrl1.decoder.5.name" in snapshot
+    assert "device.ctrl1.decoder.005.name" not in snapshot
+
+
+# ---------------------------------------------------------------------------
+# deregister_child
+# ---------------------------------------------------------------------------
+
+
+def test_child_entity_deregister_removes_state_keys():
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    drv.register_child("encoder", 6)
+    drv.register_child("decoder", 1)
+
+    drv.deregister_child("encoder", 5)
+
+    snap = drv.state.snapshot()
+    assert not any(k.startswith("device.ctrl1.encoder.005.") for k in snap)
+    # Sibling and other-type children are untouched.
+    assert "device.ctrl1.encoder.006.name" in snap
+    assert "device.ctrl1.decoder.1.name" in snap
+    assert drv.list_children("encoder") == [6]
+
+
+def test_deregister_fires_delete_notifications():
+    """A subscriber on the child prefix sees one delete per state key."""
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+
+    captured: list[tuple[str, Any, Any]] = []
+    drv.state.subscribe_children(
+        "ctrl1", "encoder",
+        lambda k, o, n, s: captured.append((k, o, n)),
+    )
+
+    drv.deregister_child("encoder", 5)
+
+    deleted_keys = {k for k, _o, n in captured if n is None}
+    assert "device.ctrl1.encoder.005.name" in deleted_keys
+    assert "device.ctrl1.encoder.005.online" in deleted_keys
+
+
+def test_deregister_unknown_child_is_noop():
+    drv = _make_driver()
+    # No prior register; should not raise and should not fire anything.
+    captured: list = []
+    drv.state.subscribe("*", lambda k, o, n, s: captured.append(k))
+    drv.deregister_child("encoder", 5)
+    assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# list_children
+# ---------------------------------------------------------------------------
+
+
+def test_list_children_empty_when_none_registered():
+    drv = _make_driver()
+    assert drv.list_children("encoder") == []
+    # Unknown types also return [] (not a raise) — they're just queries.
+    assert drv.list_children("anything") == []
+
+
+def test_list_children_returns_insertion_order():
+    drv = _make_driver()
+    drv.register_child("encoder", 7)
+    drv.register_child("encoder", 2)
+    drv.register_child("encoder", 10)
+    assert drv.list_children("encoder") == [7, 2, 10]
+
+
+# ---------------------------------------------------------------------------
+# set_child_state / set_child_state_batch
+# ---------------------------------------------------------------------------
+
+
+def test_set_child_state_unknown_prop_raises():
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    with pytest.raises(ValueError, match="not declared"):
+        drv.set_child_state("encoder", 5, "bogus", 1)
+
+
+def test_set_child_state_writes_to_correct_key():
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    drv.set_child_state("encoder", 5, "name", "Stage TX")
+    assert drv.state.get("device.ctrl1.encoder.005.name") == "Stage TX"
+
+
+def test_set_child_state_allows_synthetic_online_prop():
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    drv.set_child_state("encoder", 5, "online", False)
+    assert drv.state.get("device.ctrl1.encoder.005.online") is False
+
+
+def test_set_child_state_batch_unknown_prop_aborts_entire_batch():
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    with pytest.raises(ValueError):
+        drv.set_child_state_batch("encoder", 5, {"name": "OK", "bogus": 1})
+    # The valid "name" update must NOT have landed — validation is up-front.
+    assert drv.state.get("device.ctrl1.encoder.005.name") == ""
+
+
+def test_set_child_state_batch_writes_all_props():
+    drv = _make_driver()
+    drv.register_child("encoder", 5)
+    drv.set_child_state_batch("encoder", 5, {
+        "name": "Stage", "ip": "10.0.0.5", "signal_present": True,
+    })
+    assert drv.state.get("device.ctrl1.encoder.005.name") == "Stage"
+    assert drv.state.get("device.ctrl1.encoder.005.ip") == "10.0.0.5"
+    assert drv.state.get("device.ctrl1.encoder.005.signal_present") is True
+
+
+# ---------------------------------------------------------------------------
+# set_children_state_batch — atomicity
+# ---------------------------------------------------------------------------
+
+
+def test_set_children_state_batch_atomic():
+    """All children's state is in place before any per-key listener fires.
+
+    A bulk subscriber is the cleanest way to assert atomicity: it receives
+    one delta list containing every change in the transaction, after the
+    store has fully been updated. If the writes were per-key, the bulk
+    callback would receive multiple smaller deltas instead.
+    """
+    drv = _make_driver()
+    drv.register_child("encoder", 1)
+    drv.register_child("encoder", 2)
+    drv.register_child("encoder", 3)
+
+    # Snapshot state for atomicity check: when the bulk callback fires, the
+    # store must already reflect *every* write in the batch.
+    callbacks: list[list[tuple]] = []
+    snapshots: list[dict] = []
+
+    def _bulk(changes: list[tuple]) -> None:
+        callbacks.append(list(changes))
+        snapshots.append(drv.state.snapshot())
+
+    drv.state.subscribe_bulk("device.ctrl1.encoder.*", _bulk)
+
+    drv.set_children_state_batch([
+        ("encoder", 1, {"name": "A", "signal_present": True}),
+        ("encoder", 2, {"name": "B", "signal_present": True}),
+        ("encoder", 3, {"name": "C", "ip": "10.0.0.3"}),
+    ])
+
+    # Exactly one bulk callback, with all 6 changes (3 children × 2 props).
+    # Every value we wrote differs from the seeded default, so the store's
+    # no-op short-circuit doesn't drop any of them.
+    assert len(callbacks) == 1
+    assert len(callbacks[0]) == 6
+
+    # And at callback time, all per-child state is already visible.
+    snap = snapshots[0]
+    assert snap["device.ctrl1.encoder.001.name"] == "A"
+    assert snap["device.ctrl1.encoder.001.signal_present"] is True
+    assert snap["device.ctrl1.encoder.002.name"] == "B"
+    assert snap["device.ctrl1.encoder.003.name"] == "C"
+    assert snap["device.ctrl1.encoder.003.ip"] == "10.0.0.3"
+
+
+def test_set_children_state_batch_rejects_unknown_prop_before_any_write():
+    drv = _make_driver()
+    drv.register_child("encoder", 1)
+    drv.register_child("encoder", 2)
+    with pytest.raises(ValueError):
+        drv.set_children_state_batch([
+            ("encoder", 1, {"name": "Updated"}),
+            ("encoder", 2, {"bogus": "x"}),
+        ])
+    # Neither update lands — validation is up-front.
+    assert drv.state.get("device.ctrl1.encoder.001.name") == ""
+
+
+def test_set_children_state_batch_empty_is_noop():
+    drv = _make_driver()
+    drv.register_child("encoder", 1)
+    captured: list = []
+    drv.state.subscribe("*", lambda k, o, n, s: captured.append(k))
+    drv.set_children_state_batch([])
+    drv.set_children_state_batch([("encoder", 1, {})])
+    assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# StateStore.subscribe_children helper
+# ---------------------------------------------------------------------------
+
+
+def test_subscribe_children_helper():
+    """state.subscribe_children resolves to the right glob pattern, fires
+    on matching keys, and does NOT fire on unrelated devices/types."""
+    drv = _make_driver()
+    drv.register_child("encoder", 1)
+    drv.register_child("decoder", 1)
+
+    seen: list[str] = []
+    drv.state.subscribe_children(
+        "ctrl1", "encoder", lambda k, o, n, s: seen.append(k),
+    )
+
+    drv.set_child_state("encoder", 1, "name", "X")
+    drv.set_child_state("decoder", 1, "name", "Y")  # different type
+    drv.set_child_state("encoder", 1, "signal_present", True)
+
+    assert "device.ctrl1.encoder.001.name" in seen
+    assert "device.ctrl1.encoder.001.signal_present" in seen
+    assert "device.ctrl1.decoder.1.name" not in seen
+
+
+# ---------------------------------------------------------------------------
+# poll_children
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_poll_children_batches_and_applies():
+    drv = _make_driver()
+    for eid in range(1, 11):
+        drv.register_child("encoder", eid)
+
+    seen_batches: list[list[int]] = []
+
+    async def fetch(batch_ids: list[int]) -> dict[int, dict[str, Any]]:
+        seen_batches.append(list(batch_ids))
+        # Echo back a state update for every id we were asked about.
+        return {eid: {"name": f"E{eid:03d}"} for eid in batch_ids}
+
+    await drv.poll_children(
+        "encoder", fetch, batch_size=3, inter_batch_delay=0,
+    )
+
+    # 10 IDs / batch_size 3 → batches of 3, 3, 3, 1.
+    assert [len(b) for b in seen_batches] == [3, 3, 3, 1]
+    assert seen_batches[0] == [1, 2, 3]
+    assert seen_batches[-1] == [10]
+
+    # State was applied for every encoder.
+    for eid in range(1, 11):
+        assert drv.state.get(f"device.ctrl1.encoder.{eid:03d}.name") == f"E{eid:03d}"
+
+
+@pytest.mark.asyncio
+async def test_poll_children_skips_results_for_unregistered_ids():
+    """The fetch hook is free to return extra IDs that aren't registered
+    (e.g. a child was removed concurrently); the helper drops them rather
+    than blowing up validation when computing a state key for an unknown
+    child."""
+    drv = _make_driver()
+    drv.register_child("encoder", 1)
+    drv.register_child("encoder", 2)
+
+    async def fetch(batch_ids: list[int]) -> dict[int, dict[str, Any]]:
+        return {
+            1: {"name": "Real"},
+            999: {"name": "Ghost"},  # not registered — must be ignored
+        }
+
+    await drv.poll_children("encoder", fetch, batch_size=10, inter_batch_delay=0)
+    assert drv.state.get("device.ctrl1.encoder.001.name") == "Real"
+    # No 999-flavored state should exist.
+    assert "device.ctrl1.encoder.999.name" not in drv.state.snapshot()
+
+
+@pytest.mark.asyncio
+async def test_poll_children_empty_when_nothing_registered():
+    drv = _make_driver()
+    fetched: list[list[int]] = []
+
+    async def fetch(batch_ids: list[int]) -> dict[int, dict[str, Any]]:
+        fetched.append(batch_ids)
+        return {}
+
+    await drv.poll_children("encoder", fetch)
+    assert fetched == []
