@@ -59,7 +59,7 @@ class Engine:
         self.state = StateStore()
         self.events = EventBus()
         self.devices = DeviceManager(self.state, self.events)
-        self.macros = MacroEngine(self.state, self.events, self.devices)
+        self.macros = MacroEngine(self.state, self.events, self.devices, broadcast_ws=self.broadcast_ws)
         self.triggers = TriggerEngine(self.state, self.events, self.macros)
         self.scripts: ScriptEngine | None = None
         self.plugin_loader = PluginLoader(self.state, self.events, self.macros, self.devices)

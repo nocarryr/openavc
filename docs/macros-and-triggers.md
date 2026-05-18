@@ -25,6 +25,7 @@ Use the search box at the top of the macro list to filter by name.
 | **Emit Event** | Fire a custom event on the event bus | `room.shutdown_complete` |
 | **Run Macro** | Execute another macro as a sub-routine | Run `select_hdmi1` |
 | **Conditional** | If/else branching based on state | If projector is already on, skip power-on |
+| **Navigate Panel** | Send every panel to a specific page or overlay | Return all panels to `home` at end of meeting |
 
 The **Device Command** step uses smart dropdowns: after selecting a device, the command dropdown only shows commands defined by that device's driver, with parameter fields that match the driver's command definition. No guessing at command syntax.
 
@@ -98,6 +99,23 @@ Example: a projector warmup that no longer guesses a delay.
 | 3 | Device Command | `projector_main` -> `set_input`, input: `hdmi1` |
 
 Other common uses: wait for a display to confirm an input change before routing audio (short timeout, continue anyway so audio always follows), wait for a device to come back online after a power cycle, or wait for a user to press a confirm button on the panel. For the last case, set a user variable from the button binding and use **Never time out** so the macro waits as long as the user needs. A waiting macro still respects cancel groups and explicit cancellation, so "Never time out" is always breakable from outside.
+
+## Navigate Panel
+
+A **Navigate Panel** step tells every connected panel to switch to a specific page. The target can be:
+
+- A regular page ID, like `home` or `meeting_controls`
+- An overlay or sidebar page ID — the panel pushes it onto the overlay stack
+- `$back` — phone-style back: closes the topmost overlay if one is open, otherwise returns to the previously-visited page. No-op if there's nothing to go back to. Page history resets on idle timeout.
+- `$dismiss` — closes the topmost overlay only. No fallback to page history.
+
+Every panel showing this project follows. Common uses:
+
+- A "End meeting" macro that resets the system and sends panels back to `home`
+- A recovery macro triggered by a fault that opens an `error_overlay`
+- A schedule-driven macro that opens a `welcome` page in the morning
+
+For switching **modes** within a single page (lecture vs. presentation, video conferencing vs. local source), this is usually the wrong tool. Prefer setting a variable with **Set Variable** and binding element visibility to that variable using `visible_when`. That pattern doesn't push every panel to a new page, survives panel reconnects, and keeps the mode state in one place that scripts and other macros can read.
 
 ## Skip If Guards
 

@@ -417,6 +417,13 @@ function NavigateConfig({
   project: ProjectConfig;
   onChange: (v: Record<string, unknown>) => void;
 }) {
+  const pages = project.ui.pages;
+  const regularPages = pages.filter((p) => (p.page_type ?? "page") === "page");
+  const overlayPages = pages.filter((p) => {
+    const t = p.page_type ?? "page";
+    return t === "overlay" || t === "sidebar";
+  });
+
   return (
     <div>
       <label style={labelStyle}>Page</label>
@@ -428,11 +435,24 @@ function NavigateConfig({
         style={{ width: "100%", padding: "4px 6px", fontSize: "var(--font-size-sm)" }}
       >
         <option value="">Select page...</option>
-        {project.ui.pages.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-          </option>
-        ))}
+        {regularPages.length > 0 && (
+          <optgroup label="Pages">
+            {regularPages.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </optgroup>
+        )}
+        {overlayPages.length > 0 && (
+          <optgroup label="Overlays / Sidebars">
+            {overlayPages.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </optgroup>
+        )}
+        <optgroup label="Special">
+          <option value="$back">$back — previous page (or close overlay if one is open)</option>
+          <option value="$dismiss">$dismiss — close topmost overlay only</option>
+        </optgroup>
       </select>
     </div>
   );

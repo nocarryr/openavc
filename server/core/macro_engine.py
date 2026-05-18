@@ -24,17 +24,26 @@ log = get_logger(__name__)
 
 
 PluginActionHandler = Callable[[dict[str, Any], dict[str, Any]], Awaitable[None]]
+BroadcastWS = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class MacroEngine:
     """Executes named macros — ordered sequences of actions with optional delays."""
 
     def __init__(
-        self, state: StateStore, events: EventBus, devices: DeviceManager
+        self,
+        state: StateStore,
+        events: EventBus,
+        devices: DeviceManager,
+        broadcast_ws: BroadcastWS | None = None,
     ):
         self.state = state
         self.events = events
         self.devices = devices
+        # Optional WebSocket broadcaster — used by the ui.navigate step.
+        # None in test/plugin-harness contexts; the step logs and no-ops
+        # rather than failing when not wired.
+        self._broadcast_ws = broadcast_ws
         self._macros: dict[str, dict[str, Any]] = {}  # id -> macro config
         self._groups: dict[str, list[str]] = {}  # group_id -> [device_ids]
         # macro_id -> set of currently-running tasks. A set (not a single
@@ -419,6 +428,13 @@ class MacroEngine:
             timeout = step.get("timeout")
             tmo = "no timeout" if timeout is None else f"{timeout}s"
             return f"Waiting for {key} ({tmo})"
+        if action == "ui.navigate":
+            page = step.get("page", "?")
+            if page == "$back":
+                return "Going back"
+            if page == "$dismiss":
+                return "Dismissing overlay"
+            return f"Navigating panel to {page}"
         plugin_action = self._plugin_actions.get(action)
         if plugin_action is not None:
             _handler, _plugin_id, label = plugin_action
@@ -584,6 +600,21 @@ class MacroEngine:
 
         elif action == "wait_until":
             await self._execute_wait_until(step, macro_id)
+
+        elif action == "ui.navigate":
+            page = step.get("page", "")
+            if not page:
+                raise ValueError("ui.navigate step requires a 'page' value (page id, '$back', or '$dismiss')")
+            log.debug(f"  Macro step: ui.navigate -> {page}")
+            # Emit ui.page.<page_id> for symmetry with element press-side
+            # navigation, but only for real page IDs — $back/$dismiss are
+            # overlay-stack controls, not page targets.
+            if page not in ("$back", "$dismiss"):
+                await self.events.emit(f"ui.page.{page}")
+            if self._broadcast_ws is not None:
+                await self._broadcast_ws({"type": "ui.navigate", "page_id": page})
+            else:
+                log.warning("ui.navigate step fired but no broadcast_ws is wired — no panels notified")
 
         else:
             plugin_action = self._plugin_actions.get(action)

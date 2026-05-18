@@ -60,6 +60,7 @@ export interface MacroStep {
   macro?: string;
   event?: string;
   payload?: Record<string, unknown>;
+  page?: string; // ui.navigate: target page id, or "$back" / "$dismiss"
   description?: string;
 
   // Conditional step fields (action == "conditional")

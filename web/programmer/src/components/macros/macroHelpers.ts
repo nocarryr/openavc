@@ -84,6 +84,19 @@ export const STEP_TYPES: StepTypeInfo[] = [
     }),
   },
   {
+    action: "ui.navigate",
+    label: "Navigate Panel",
+    description: "Send every panel to a specific page or overlay",
+    color: "#0d9488",
+    summary: (step) => {
+      const page = step.page ?? "?";
+      if (page === "$back") return "Back";
+      if (page === "$dismiss") return "Dismiss overlay";
+      return `Go to ${page}`;
+    },
+    defaults: () => ({ action: "ui.navigate", page: "" }),
+  },
+  {
     action: "wait_until",
     label: "Wait Until",
     description: "Pause until a state value matches a condition (with optional timeout)",
@@ -362,6 +375,14 @@ function _generateStepLines(
       }
       case "macro":
         lines.push(`${indent}await macros.execute("${_pyEscape(step.macro ?? "")}")`);
+        break;
+      case "ui.navigate":
+        lines.push(
+          `${indent}# Navigate panels to '${_pyEscape(step.page ?? "")}'`
+        );
+        lines.push(
+          `${indent}# (no script API for ui.navigate yet — call from a macro step instead)`
+        );
         break;
       case "conditional": {
         const cond = step.condition;

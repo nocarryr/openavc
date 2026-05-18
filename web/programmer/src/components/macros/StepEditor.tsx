@@ -122,6 +122,9 @@ export function StepEditor({ step, macros, currentMacroId, onChange, activeStepP
     case "wait_until":
       editor = <WaitUntilEditor step={step} onChange={update} />;
       break;
+    case "ui.navigate":
+      editor = <UINavigateEditor step={step} onChange={update} />;
+      break;
     default:
       if (pluginAction) {
         editor = (
@@ -852,6 +855,68 @@ function WaitUntilEditor({
           With no timeout, the macro waits forever. It can still be stopped by cancelling the
           macro or by another macro in the same cancel group.
         </div>
+      )}
+    </div>
+  );
+}
+
+// --- UI Navigate Editor ---
+
+function UINavigateEditor({
+  step,
+  onChange,
+}: {
+  step: MacroStep;
+  onChange: (patch: Partial<MacroStep>) => void;
+}) {
+  const pages = useProjectStore((s) => s.project?.ui?.pages) ?? [];
+  const regularPages = pages.filter((p) => (p.page_type ?? "page") === "page");
+  const overlayPages = pages.filter((p) => {
+    const t = p.page_type ?? "page";
+    return t === "overlay" || t === "sidebar";
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+      <HelpText>
+        Send every connected panel to a specific page or overlay. For switching modes within the
+        same page, prefer <strong>Set Variable</strong> plus <code style={{ background: "var(--bg-hover)", padding: "0 4px", borderRadius: 2 }}>visible_when</code>{" "}
+        element bindings — that pattern survives panel reconnects and doesn't push every panel to a new page.
+      </HelpText>
+      <div style={rowStyle}>
+        <label style={labelStyle}>Page</label>
+        <select
+          value={step.page ?? ""}
+          onChange={(e) => onChange({ page: e.target.value })}
+          style={inputStyle}
+        >
+          <option value="">Select page...</option>
+          {regularPages.length > 0 && (
+            <optgroup label="Pages">
+              {regularPages.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name || p.id}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {overlayPages.length > 0 && (
+            <optgroup label="Overlays / Sidebars">
+              {overlayPages.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name || p.id}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          <optgroup label="Special">
+            <option value="$back">$back — previous page (or close overlay if one is open)</option>
+            <option value="$dismiss">$dismiss — close topmost overlay only</option>
+          </optgroup>
+        </select>
+      </div>
+      {pages.length === 0 && (
+        <div style={hintStyle}>This project has no pages yet. Add pages in the UI Builder first.</div>
       )}
     </div>
   );

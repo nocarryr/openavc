@@ -245,3 +245,100 @@ async def test_group_command_unknown_group(macro_engine, core):
 
     await macro_engine.execute("test")
     assert macro_engine.devices.send_command.call_count == 0
+
+
+# --- ui.navigate step tests ---
+
+
+async def test_ui_navigate_broadcasts_message(core):
+    """ui.navigate broadcasts the same payload the element press-side action uses."""
+    state, events = core
+    devices = DeviceManager(state, events)
+    devices.send_command = AsyncMock()
+    broadcast = AsyncMock()
+    engine = MacroEngine(state, events, devices, broadcast_ws=broadcast)
+
+    engine.load_macros([{
+        "id": "go_home",
+        "name": "Go home",
+        "steps": [
+            {"action": "ui.navigate", "page": "home"}
+        ],
+    }])
+    await engine.execute("go_home")
+
+    broadcast.assert_awaited_once_with({"type": "ui.navigate", "page_id": "home"})
+
+
+async def test_ui_navigate_emits_page_event(core):
+    """ui.navigate emits ui.page.<page_id> like the element press-side action does."""
+    state, events = core
+    devices = DeviceManager(state, events)
+    devices.send_command = AsyncMock()
+    engine = MacroEngine(state, events, devices, broadcast_ws=AsyncMock())
+
+    received = []
+    events.on("ui.page.welcome", lambda e, p: received.append(e))
+
+    engine.load_macros([{
+        "id": "welcome",
+        "name": "Welcome",
+        "steps": [{"action": "ui.navigate", "page": "welcome"}],
+    }])
+    await engine.execute("welcome")
+
+    assert received == ["ui.page.welcome"]
+
+
+async def test_ui_navigate_back_does_not_emit_page_event(core):
+    """$back / $dismiss are overlay-stack controls, not page targets — no ui.page.* emit."""
+    state, events = core
+    devices = DeviceManager(state, events)
+    devices.send_command = AsyncMock()
+    broadcast = AsyncMock()
+    engine = MacroEngine(state, events, devices, broadcast_ws=broadcast)
+
+    received_events = []
+
+    def _capture(event_name, _payload):
+        if event_name.startswith("ui.page."):
+            received_events.append(event_name)
+
+    events.on("ui.page.*", _capture)
+
+    engine.load_macros([{
+        "id": "dismiss",
+        "name": "Dismiss",
+        "steps": [{"action": "ui.navigate", "page": "$back"}],
+    }])
+    await engine.execute("dismiss")
+
+    broadcast.assert_awaited_once_with({"type": "ui.navigate", "page_id": "$back"})
+    assert received_events == []
+
+
+async def test_ui_navigate_missing_page_raises(macro_engine):
+    """Missing 'page' field raises during step execution (caught and logged, not crash)."""
+    # macro_engine fixture has no broadcast_ws wired; that's a separate path.
+    macro_engine._broadcast_ws = AsyncMock()
+    macro_engine.load_macros([{
+        "id": "broken",
+        "name": "Broken",
+        "steps": [{"action": "ui.navigate"}],  # no page
+    }])
+    # Errors are logged but execution continues (no stop_on_error)
+    await macro_engine.execute("broken")
+    # broadcast must NOT have fired since the step raised before broadcasting
+    macro_engine._broadcast_ws.assert_not_awaited()
+
+
+async def test_ui_navigate_without_broadcast_does_not_crash(macro_engine):
+    """If broadcast_ws is None (test/plugin contexts), the step warns but doesn't crash."""
+    assert macro_engine._broadcast_ws is None
+    macro_engine.load_macros([{
+        "id": "go",
+        "name": "Go",
+        "steps": [{"action": "ui.navigate", "page": "home"}],
+    }])
+    # Should complete without raising
+    await macro_engine.execute("go")

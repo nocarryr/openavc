@@ -117,6 +117,8 @@ class PanelApp {
         this._pendingBindingKeys = null; // Batched binding keys for rAF
         this._bindingRafId = null;       // requestAnimationFrame ID
         this.overlayStack = [];      // Stack of overlay page IDs (newest on top)
+        this.pageHistory = [];       // Stack of previously-visited regular pages (newest on top) for $back
+        this._navigatingBack = false; // Skip history push when navigateToPage is recursing for $back
         this._runningMacros = {};    // macro_id -> { description, step_index, total_steps }
         this.reconnectDelay = 1000;
         this.maxReconnectDelay = 10000;
@@ -435,9 +437,23 @@ class PanelApp {
     // --- Navigation ---
 
     navigateToPage(pageId) {
-        // Handle $back / $dismiss — pop overlay stack
-        if (pageId === '$back' || pageId === '$dismiss') {
+        // $dismiss — overlay only, no page-history fallback
+        if (pageId === '$dismiss') {
             this.dismissOverlay();
+            return;
+        }
+        // $back — phone-style: if an overlay is open, dismiss it;
+        // otherwise pop the page-history stack and go there.
+        if (pageId === '$back') {
+            if (this.overlayStack.length > 0) {
+                this.dismissOverlay();
+                return;
+            }
+            const prev = this.pageHistory.pop();
+            if (!prev) return; // No history → no-op
+            this._navigatingBack = true;
+            try { this.navigateToPage(prev); }
+            finally { this._navigatingBack = false; }
             return;
         }
 
@@ -452,7 +468,13 @@ class PanelApp {
             this.overlayStack.push(pageId);
             this.renderOverlay(targetPage);
         } else {
-            // Regular page — close all overlays and switch
+            // Regular page — push current onto history (so $back can return to
+            // it), close all overlays, and switch. Skip the push when we're
+            // recursing for $back, and when the target is the same page.
+            if (!this._navigatingBack && this.currentPage && this.currentPage !== pageId) {
+                this.pageHistory.push(this.currentPage);
+                if (this.pageHistory.length > 50) this.pageHistory.shift();
+            }
             this.dismissAllOverlays();
             this.currentPage = pageId;
             this.renderCurrentPage();
@@ -3754,6 +3776,7 @@ class PanelApp {
             if (this.currentPage !== idlePage || this.overlayStack.length > 0) {
                 this.dismissAllOverlays();
                 this.currentPage = idlePage;
+                this.pageHistory = []; // Idle reset starts a fresh session — no $back into prior user's navigation
                 this.renderCurrentPage();
             }
             // Re-show lock screen if lock code is set
