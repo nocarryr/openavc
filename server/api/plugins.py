@@ -132,6 +132,13 @@ _PLUGIN_FILE_CONTENT_TYPES = {
     ".wav": "audio/wav",
     ".ogg": "audio/ogg",
     ".m4a": "audio/mp4",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".ts": "video/mp2t",
+    ".m4s": "video/iso.segment",
+    ".mpd": "application/dash+xml",
+    ".vtt": "text/vtt",
 }
 
 
