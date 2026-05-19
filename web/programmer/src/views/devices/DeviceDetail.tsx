@@ -9,6 +9,7 @@ import * as api from "../../api/restClient";
 import type { DeviceConfig, DeviceInfo, DeviceSettingValue } from "../../api/types";
 import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins/PluginExtensions";
 import { findDeviceReferences } from "./deviceUtils";
+import { ChildEntities } from "./ChildEntities";
 
 export function DeviceDetail({
   deviceId,
@@ -350,6 +351,9 @@ export function DeviceDetail({
             : `Connection failed: ${testResult.error}`}
         </div>
       )}
+
+      {/* Child Entities (only renders when the driver declares any) */}
+      <ChildEntities deviceId={deviceId} />
 
       {/* Live State */}
       <div style={sectionStyle}>

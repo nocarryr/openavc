@@ -1,4 +1,11 @@
-import type { DeviceInfo, DeviceSettingValue } from "./types";
+import type {
+  ChildEntitiesByTypeResponse,
+  ChildEntitiesListResponse,
+  ChildEntityDetailResponse,
+  ChildEntityRefreshResponse,
+  DeviceInfo,
+  DeviceSettingValue,
+} from "./types";
 import { request } from "./base";
 
 // --- Devices ---
@@ -134,6 +141,48 @@ export async function importConnections(
     body: JSON.stringify(table),
   });
 }
+
+// --- Child Entities ---
+
+export async function listChildEntities(
+  deviceId: string,
+): Promise<ChildEntitiesListResponse> {
+  return request(`/devices/${deviceId}/children`);
+}
+
+export async function listChildEntitiesByType(
+  deviceId: string,
+  childType: string,
+): Promise<ChildEntitiesByTypeResponse> {
+  return request(`/devices/${deviceId}/children/${childType}`);
+}
+
+export async function getChildEntity(
+  deviceId: string,
+  childType: string,
+  localId: number,
+): Promise<ChildEntityDetailResponse> {
+  return request(`/devices/${deviceId}/children/${childType}/${localId}`);
+}
+
+export async function patchChildEntity(
+  deviceId: string,
+  childType: string,
+  localId: number,
+  patch: { label?: string; config?: Record<string, unknown> },
+): Promise<ChildEntityDetailResponse> {
+  return request(`/devices/${deviceId}/children/${childType}/${localId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function refreshChildEntities(
+  deviceId: string,
+): Promise<ChildEntityRefreshResponse> {
+  return request(`/devices/${deviceId}/children/refresh`, { method: "POST" });
+}
+
 
 // --- Orphaned Device Retry ---
 

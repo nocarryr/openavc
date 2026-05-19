@@ -15,6 +15,15 @@ export interface DeviceConfig {
   config: Record<string, unknown>;
   enabled?: boolean;
   pending_settings?: Record<string, unknown>;
+  // Project-side metadata for child entities owned by this device. Keyed
+  // by child_type -> padded local_id -> ChildEntityConfig. Empty for
+  // devices whose drivers don't declare child_entity_types.
+  child_entities?: Record<string, Record<string, ChildEntityConfig>>;
+}
+
+export interface ChildEntityConfig {
+  label: string;
+  config: Record<string, unknown>;
 }
 
 export interface DeviceGroup {
@@ -680,6 +689,71 @@ export interface DeviceInfo {
   commands: Record<string, unknown>;
   driver_info: Record<string, unknown>;
   config?: Record<string, unknown>;
+}
+
+// --- Child Entities ---
+//
+// Mirrors the runtime shape returned by /api/devices/{id}/children. The
+// per-type schema is the effective schema (platform `online` + `label`
+// injected) so the IDE can render columns + the expanded state view
+// without hardcoding which keys exist.
+
+export interface ChildEntityStateVarDef {
+  type: string;
+  values?: string[];
+  min?: number;
+  max?: number;
+  step?: number;
+  cloud_priority?: string;
+}
+
+export interface ChildEntityIdFormat {
+  type: string;
+  min?: number;
+  max?: number;
+  pad_width?: number;
+}
+
+export interface ChildEntityTypeSchema {
+  label?: string;
+  label_plural?: string;
+  id_format: ChildEntityIdFormat;
+  state_variables: Record<string, ChildEntityStateVarDef>;
+  summary_fields?: string[];
+  label_field?: string;
+}
+
+export interface ChildEntityEntry {
+  local_id: number;
+  local_id_padded: string;
+  label: string;
+  config: Record<string, unknown>;
+  registered: boolean;
+  state: Record<string, unknown>;
+}
+
+export interface ChildEntitiesListResponse {
+  device_id: string;
+  child_entity_types: Record<string, ChildEntityTypeSchema>;
+  children: Record<string, ChildEntityEntry[]>;
+}
+
+export interface ChildEntitiesByTypeResponse {
+  device_id: string;
+  child_type: string;
+  schema: ChildEntityTypeSchema;
+  children: ChildEntityEntry[];
+}
+
+export interface ChildEntityDetailResponse extends ChildEntityEntry {
+  device_id: string;
+  child_type: string;
+}
+
+export interface ChildEntityRefreshResponse {
+  status: string;
+  device_id: string;
+  result: unknown;
 }
 
 export interface StateHistoryEntry {
