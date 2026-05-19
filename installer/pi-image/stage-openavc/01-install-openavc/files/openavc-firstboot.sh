@@ -27,14 +27,12 @@ if [ "$CURRENT_HOSTNAME" != "openavc" ]; then
     echo "Hostname set to openavc"
 fi
 
-# Ensure data directories exist with correct ownership
+# Ensure data directories exist with correct ownership. plugin_repo and
+# driver_repo are created under $DATA_DIR by the runtime on first start
+# (see server/system_config.py) — no need to chown an /opt/openavc/ copy.
 mkdir -p "$DATA_DIR/projects/default" "$DATA_DIR/logs"
 chown -R openavc:openavc "$DATA_DIR"
 chown -R openavc:openavc /var/log/openavc
-
-# Ensure driver_repo and plugin_repo have correct ownership
-chown -R openavc:openavc /opt/openavc/driver_repo 2>/dev/null || true
-chown -R openavc:openavc /opt/openavc/plugin_repo 2>/dev/null || true
 
 # Expand filesystem to fill the SD card (if not already done)
 if command -v raspi-config &> /dev/null; then

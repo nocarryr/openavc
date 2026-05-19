@@ -111,8 +111,6 @@ tar czf "$OPENAVC_ARCHIVE" \
     web/panel/ \
     web/programmer/dist/ \
     web/simulator/dist/ \
-    driver_repo/ \
-    plugin_repo/ \
     themes/ \
     requirements.txt \
     pyproject.toml
