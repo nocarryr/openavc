@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "pytest==8.3.5",             # MIT - Testing framework
     "pytest-asyncio==0.26.0",    # Apache-2.0 - Async test support
+    "pytest-playwright==0.7.0",  # Apache-2.0 - Playwright pytest integration (E2E IDE tests). Bundles `playwright`; install browsers with `python -m playwright install chromium` after `pip install -e .[dev]`.
     "ruff>=0.6.0",               # MIT - Fast Python linter/formatter (unpinned, linter updates are safe)
 ]
 pi = [
