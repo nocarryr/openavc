@@ -1,8 +1,9 @@
 """
 Pre-update backup system.
 
-Creates a zip archive of user data (projects, drivers, system.json)
-before applying an update, so it can be restored if the update fails.
+Creates a zip archive of user data (projects, drivers, plugins,
+system.json) before applying an update, so it can be restored if
+the update fails.
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ def create_backup(
 ) -> Path:
     """Create a pre-update backup of user data.
 
-    Archives: projects/, drivers/, system.json, and any plugin configs.
-    Stores in: {data_dir}/backups/pre-update-v{version}-{timestamp}.zip
+    Archives: projects/, driver_repo/, plugin_repo/, themes/, system.json,
+    cloud.json. Stores in: {data_dir}/backups/pre-update-v{version}-{timestamp}.zip
 
     When ``project_path`` points outside ``data_dir`` (set via
     ``OPENAVC_PROJECT`` to keep project files on a different volume,
@@ -52,10 +53,10 @@ def create_backup(
                     arcname = file_path.relative_to(data_dir).as_posix()
                     zf.write(file_path, arcname)
 
-        # Back up drivers directory
-        drivers_dir = data_dir / "drivers"
-        if drivers_dir.exists():
-            for file_path in drivers_dir.rglob("*"):
+        # Back up driver_repo directory (community-installed drivers)
+        driver_repo_dir = data_dir / "driver_repo"
+        if driver_repo_dir.exists():
+            for file_path in driver_repo_dir.rglob("*"):
                 if file_path.is_file():
                     arcname = file_path.relative_to(data_dir).as_posix()
                     zf.write(file_path, arcname)

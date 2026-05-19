@@ -339,7 +339,7 @@ create_venv() {
 setup_data_dir() {
     info "Setting up data directory at ${DATA_DIR}/..."
 
-    mkdir -p "$DATA_DIR"/{projects/default,drivers,backups,logs}
+    mkdir -p "$DATA_DIR"/{projects/default,backups,logs}
     mkdir -p "$LOG_DIR"
 
     # Seed default project if not present

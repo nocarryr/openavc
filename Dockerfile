@@ -72,7 +72,7 @@ COPY installer/openavc.service ./installer/openavc.service
 # the container image guarantees user-installed content survives an image
 # pull (the old /app/{driver,plugin}_repo layout was wiped by every
 # `docker compose up -d` with a new image).
-RUN mkdir -p /data/projects/default /data/drivers /data/backups /data/logs \
+RUN mkdir -p /data/projects/default /data/backups /data/logs \
     && cp seed/default/project.avc /data/projects/default/project.avc \
     && chown -R openavc:openavc /data /app
 

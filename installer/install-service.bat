@@ -49,7 +49,6 @@ REM Create data and log directories
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if not exist "%DATA_DIR%\logs" mkdir "%DATA_DIR%\logs"
 if not exist "%DATA_DIR%\projects\default" mkdir "%DATA_DIR%\projects\default"
-if not exist "%DATA_DIR%\drivers" mkdir "%DATA_DIR%\drivers"
 if not exist "%DATA_DIR%\backups" mkdir "%DATA_DIR%\backups"
 
 REM Seed default project if not present
