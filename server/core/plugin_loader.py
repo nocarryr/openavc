@@ -66,6 +66,29 @@ _SCRIPT_API_RESERVED_NAMES = frozenset({
     # Anything starting with underscore is rejected by the regex above.
 })
 
+# Whitelisted iframe `sandbox` tokens a panel_elements extension can opt into.
+# `allow-scripts` is always present and not listed here. Tokens that would
+# escape the sandbox (`allow-popups-to-escape-sandbox`,
+# `allow-top-navigation`, `allow-pointer-lock`) are deliberately excluded.
+_ALLOWED_SANDBOX_PERMISSIONS = frozenset({
+    "allow-same-origin",
+    "allow-forms",
+    "allow-modals",
+    "allow-popups",
+})
+
+# Whitelisted Permissions-Policy tokens a panel_elements extension can opt
+# into via the iframe `allow` attribute. `camera`, `microphone`,
+# `geolocation`, and similar sensor-access tokens are deliberately
+# excluded — no v1 use case needs them and they have non-obvious
+# privacy implications.
+_ALLOWED_ALLOW_FEATURES = frozenset({
+    "autoplay",
+    "encrypted-media",
+    "fullscreen",
+    "picture-in-picture",
+})
+
 
 def get_platform_id() -> str:
     """Detect the current platform identifier."""
@@ -906,6 +929,12 @@ class PluginLoader:
         ``plugin.<id>.*`` namespace. A hostile or careless extension that
         declares ``state_pattern: "*"`` or ``"device.*"`` would otherwise let a
         plugin's sidebar scrape unrelated state (A71).
+
+        For panel_elements, also sanitizes ``sandbox_permissions`` and
+        ``allow_features`` against whitelists. The panel runtime trusts
+        these values to set the iframe's sandbox tokens and Permissions-
+        Policy allow attribute; a plugin that tries to declare an
+        unrecognized or dangerous token gets it silently stripped here.
         """
         result: dict[str, list] = {
             "views": [],
@@ -938,8 +967,56 @@ class PluginLoader:
                             pattern, plugin_id, namespace_prefix
                         )
                         safe_ext["state_pattern"] = normalized
+                    if ext_type == "panel_elements":
+                        safe_ext["sandbox_permissions"] = self._sanitize_token_list(
+                            safe_ext.get("sandbox_permissions"),
+                            _ALLOWED_SANDBOX_PERMISSIONS,
+                            plugin_id, "sandbox_permissions",
+                        )
+                        safe_ext["allow_features"] = self._sanitize_token_list(
+                            safe_ext.get("allow_features"),
+                            _ALLOWED_ALLOW_FEATURES,
+                            plugin_id, "allow_features",
+                        )
                     result[ext_type].append(safe_ext)
 
+        return result
+
+    @staticmethod
+    def _sanitize_token_list(
+        raw: Any, allowed: frozenset[str], plugin_id: str, field_name: str
+    ) -> list[str]:
+        """Filter a string list against a whitelist, dropping anything not on it.
+
+        Returns an empty list for missing, non-list, or non-string-element input.
+        Unknown tokens are dropped with a log warning so plugin authors can
+        diagnose typos and so policy escapes are visible in the system log.
+        """
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            log.warning(
+                "Plugin '%s' %s is not a list (%r); ignoring",
+                plugin_id, field_name, raw,
+            )
+            return []
+        result: list[str] = []
+        for token in raw:
+            if not isinstance(token, str):
+                log.warning(
+                    "Plugin '%s' %s contains non-string token %r; ignoring",
+                    plugin_id, field_name, token,
+                )
+                continue
+            if token not in allowed:
+                log.warning(
+                    "Plugin '%s' %s requests unsupported token %r; ignoring "
+                    "(allowed: %s)",
+                    plugin_id, field_name, token, sorted(allowed),
+                )
+                continue
+            if token not in result:
+                result.append(token)
         return result
 
     @staticmethod

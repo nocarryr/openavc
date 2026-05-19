@@ -87,6 +87,43 @@ EXTENSIONS = {
 | `renderer_url` | Yes | Path to the HTML file (relative to the plugin's `panel/` directory) |
 | `default_size` | Yes | Default grid size when dragged onto the canvas: `{"col_span": N, "row_span": N}` |
 | `config_schema` | No | Array of configuration fields for the IDE Properties panel (same field types as plugin config: `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `macro_ref`, `device_ref`) |
+| `sandbox_permissions` | No | Extra `iframe.sandbox` tokens beyond the default `allow-scripts`. See "Iframe Permissions" below for the whitelist. |
+| `allow_features` | No | Permissions-Policy tokens applied via the iframe's `allow` attribute. See "Iframe Permissions" below for the whitelist. |
+
+### Iframe Permissions
+
+By default, plugin iframes get only `sandbox="allow-scripts"` and no `allow` attribute. That's enough for most widgets — they can run JavaScript and call `postMessage` back to the panel — but it blocks anything that needs a same-origin context, autoplay-eligible media, or other delegated features. Two optional fields opt into extra permissions; the server filters both against whitelists, so anything outside these tables is silently dropped.
+
+**`sandbox_permissions`** — extra iframe sandbox tokens:
+
+| Token | What it enables |
+|-------|-----------------|
+| `allow-same-origin` | Iframe shares your origin; required for `fetch` against the OpenAVC server with session cookies, or for `localStorage` |
+| `allow-forms` | Form submission |
+| `allow-modals` | `alert()`, `confirm()`, `prompt()` |
+| `allow-popups` | `window.open` |
+
+Tokens that would let an iframe escape the sandbox (`allow-popups-to-escape-sandbox`, `allow-top-navigation`, `allow-pointer-lock`) are deliberately excluded.
+
+**`allow_features`** — Permissions-Policy tokens:
+
+| Token | What it enables |
+|-------|-----------------|
+| `autoplay` | `<video autoplay muted>` works without a user gesture |
+| `encrypted-media` | EME (DRM playback) |
+| `fullscreen` | `element.requestFullscreen()` |
+| `picture-in-picture` | PiP API |
+
+`camera`, `microphone`, `geolocation`, and similar sensor-access tokens are deliberately excluded — no v1 use case needs them, and they have non-obvious privacy implications.
+
+Example: a video-streaming plugin needing same-origin fetches (to a WHEP signaling endpoint hosted on the same OpenAVC server) plus autoplay would declare:
+
+```python
+"sandbox_permissions": ["allow-same-origin"],
+"allow_features": ["autoplay"]
+```
+
+Stay minimal — only request what you need. Unknown tokens log a warning in the system log so plugin authors can diagnose typos.
 
 ### File Structure
 

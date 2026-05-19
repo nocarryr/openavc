@@ -130,9 +130,33 @@ class PanelApp {
         this._audioUnlocked = false;
         this._lastAudioRequestId = null;
         this._activeAudio = new Set();
+        // Plugin panel_elements lookup: pluginId -> {[type]: extension}.
+        // Populated once at startup via /api/plugins/extensions so per-element
+        // iframe sandbox / allow attributes can apply the plugin's declared
+        // permissions instead of always defaulting to allow-scripts only.
+        this._pluginExtensions = {};
     }
 
-    start() {
+    async _loadPluginExtensions() {
+        const pathParts = location.pathname.split('/panel');
+        const basePath = pathParts[0] || '';
+        try {
+            const res = await fetch(`${basePath}/api/plugins/extensions`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const elements = data.panel_elements || [];
+            for (const ext of elements) {
+                if (!ext.plugin_id || !ext.type) continue;
+                const byType = this._pluginExtensions[ext.plugin_id] || {};
+                byType[ext.type] = ext;
+                this._pluginExtensions[ext.plugin_id] = byType;
+            }
+        } catch (err) {
+            console.warn('[panel] failed to load plugin extensions:', err);
+        }
+    }
+
+    async start() {
         // Any embedded iframe accepts project updates from the parent programmer
         // window. Preview mode embeds the iframe but still opens WS for live state;
         // edit mode embeds it and skips WS entirely.
@@ -153,6 +177,10 @@ class PanelApp {
             this._postToParent({ type: 'openavc:editor-ready' });
             return;
         }
+        // Load plugin extensions before the first render so per-element
+        // iframe sandbox / allow attributes can be applied correctly.
+        // Best-effort: if the fetch fails or hangs, we proceed with defaults.
+        await this._loadPluginExtensions();
         this.setupIdleListeners();
         this._setupAudioUnlock();
         this.connect();
@@ -3081,7 +3109,23 @@ class PanelApp {
 
         const iframe = document.createElement('iframe');
         iframe.src = rendererUrl;
-        iframe.sandbox = 'allow-scripts';
+
+        // Sandbox + allow attributes are 'allow-scripts' / none by default.
+        // A plugin's panel_elements entry can opt into extra tokens via
+        // `sandbox_permissions` and `allow_features`; the server has already
+        // filtered both lists against per-field whitelists, so we trust
+        // whatever comes back from /api/plugins/extensions.
+        const extDef = this._pluginExtensions[pluginId]?.[pluginType];
+        const sandboxTokens = ['allow-scripts'];
+        for (const t of (extDef?.sandbox_permissions || [])) {
+            if (!sandboxTokens.includes(t)) sandboxTokens.push(t);
+        }
+        iframe.sandbox = sandboxTokens.join(' ');
+        const allowFeatures = extDef?.allow_features || [];
+        if (allowFeatures.length) {
+            iframe.setAttribute('allow', allowFeatures.join('; '));
+        }
+
         iframe.style.cssText = 'width:100%; height:100%; border:none; border-radius:inherit;';
         iframe.setAttribute('loading', 'lazy');
         el.style.overflow = 'hidden';

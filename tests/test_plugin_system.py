@@ -584,6 +584,127 @@ class TestPluginAPI:
 
 
 # ═══════════════════════════════════════════════════════════
+#  panel_elements sandbox / allow whitelist tests
+# ═══════════════════════════════════════════════════════════
+
+
+class TestPanelElementSandboxSanitization:
+    """get_all_extensions() filters sandbox_permissions and allow_features
+    against per-field whitelists. Panel.js trusts the filtered output."""
+
+    @pytest.fixture
+    def loader_with_plugin(self, loader, wired, mock_macros, mock_devices):
+        """A loader carrying one running plugin with one panel_element."""
+        def _build(panel_element_ext):
+            class P:
+                PLUGIN_INFO = {
+                    "id": "ext_plug",
+                    "name": "Ext Plug",
+                    "version": "1.0.0",
+                }
+                EXTENSIONS = {"panel_elements": [panel_element_ext]}
+                async def start(self, api): pass
+                async def stop(self): pass
+            loader._instances["ext_plug"] = P()
+            return loader
+        return _build
+
+    def test_unknown_sandbox_token_dropped(self, loader_with_plugin):
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+            "sandbox_permissions": ["allow-same-origin", "allow-top-navigation"],
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        assert ext["sandbox_permissions"] == ["allow-same-origin"]
+
+    def test_known_allow_feature_passes(self, loader_with_plugin):
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+            "allow_features": ["autoplay", "encrypted-media"],
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        assert ext["allow_features"] == ["autoplay", "encrypted-media"]
+
+    def test_unknown_allow_feature_dropped(self, loader_with_plugin):
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+            "allow_features": ["autoplay", "camera", "geolocation"],
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        # camera and geolocation are not in the whitelist
+        assert ext["allow_features"] == ["autoplay"]
+
+    def test_non_list_input_becomes_empty(self, loader_with_plugin):
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+            "sandbox_permissions": "allow-same-origin",  # string, not list
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        assert ext["sandbox_permissions"] == []
+
+    def test_non_string_tokens_dropped(self, loader_with_plugin):
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+            "sandbox_permissions": ["allow-forms", 42, None, "allow-modals"],
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        assert ext["sandbox_permissions"] == ["allow-forms", "allow-modals"]
+
+    def test_duplicates_collapsed(self, loader_with_plugin):
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+            "allow_features": ["autoplay", "autoplay", "autoplay"],
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        assert ext["allow_features"] == ["autoplay"]
+
+    def test_missing_fields_default_to_empty_lists(self, loader_with_plugin):
+        """A plugin that doesn't declare sandbox_permissions / allow_features
+        gets empty lists, not None — panel.js treats both as 'use defaults'."""
+        loader = loader_with_plugin({
+            "type": "viewer", "label": "V", "renderer": "iframe",
+            "renderer_url": "v.html",
+        })
+        result = loader.get_all_extensions()
+        ext = result["panel_elements"][0]
+        assert ext["sandbox_permissions"] == []
+        assert ext["allow_features"] == []
+
+    def test_only_panel_elements_get_sanitized(self, loader, wired, mock_macros, mock_devices):
+        """sandbox_permissions / allow_features only apply to panel_elements.
+        Other extension types (views, device_panels, ...) keep their data as-is."""
+        class P:
+            PLUGIN_INFO = {"id": "other_plug", "name": "Other", "version": "1.0.0"}
+            EXTENSIONS = {
+                "status_cards": [{
+                    "type": "card", "label": "Card",
+                    # An entry that would be filtered for panel_elements should
+                    # pass through untouched for other extension types.
+                    "sandbox_permissions": ["allow-top-navigation"],
+                }],
+            }
+            async def start(self, api): pass
+            async def stop(self): pass
+        loader._instances["other_plug"] = P()
+        result = loader.get_all_extensions()
+        card = result["status_cards"][0]
+        # Untouched on a non-panel_element extension
+        assert card.get("sandbox_permissions") == ["allow-top-navigation"]
+
+
+# ═══════════════════════════════════════════════════════════
 #  PluginLoader Tests
 # ═══════════════════════════════════════════════════════════
 
