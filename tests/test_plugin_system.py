@@ -538,6 +538,50 @@ class TestPluginAPI:
         plugin_api.cancel_task(task_id)
         assert call_count >= 2
 
+    def test_data_dir_creates_per_plugin_subdir(self, plugin_api, tmp_path, monkeypatch):
+        """api.data_dir resolves to PLUGIN_DATA_DIR / <plugin_id>, mkdir-ed on first access."""
+        data_root = tmp_path / "plugin_data"
+        monkeypatch.setattr("server.system_config.PLUGIN_DATA_DIR", data_root)
+        # The data dir for this plugin should not exist yet
+        assert not (data_root / "sample").exists()
+
+        d = plugin_api.data_dir
+
+        assert d == data_root / "sample"
+        assert d.is_dir()
+
+    def test_data_dir_is_cached_after_first_access(self, plugin_api, tmp_path, monkeypatch):
+        """Subsequent accesses return the same Path without re-mkdir-ing."""
+        data_root = tmp_path / "plugin_data"
+        monkeypatch.setattr("server.system_config.PLUGIN_DATA_DIR", data_root)
+        first = plugin_api.data_dir
+        # Even if the dir is removed externally, the cached path is returned.
+        # (Real plugins won't see this — exercises the cache semantics.)
+        import shutil as _shutil
+        _shutil.rmtree(first)
+        second = plugin_api.data_dir
+        assert second == first
+
+    def test_data_dir_does_not_require_capability(self, wired, mock_macros, mock_devices):
+        """data_dir is unconditional — file I/O is the plugin's responsibility."""
+        from server.core.plugin_registry import PluginRegistry
+        state, events = wired
+        reg = PluginRegistry("no_caps")
+        api_no_caps = PluginAPI(
+            plugin_id="no_caps",
+            capabilities=[],  # no capabilities at all
+            config={},
+            registry=reg,
+            state_store=state,
+            event_bus=events,
+            macro_engine=mock_macros,
+            device_manager=mock_devices,
+            platform_id="test",
+        )
+        # Should not raise PluginPermissionError
+        d = api_no_caps.data_dir
+        assert d.name == "no_caps"
+
 
 # ═══════════════════════════════════════════════════════════
 #  PluginLoader Tests

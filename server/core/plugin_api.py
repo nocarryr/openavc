@@ -10,6 +10,7 @@ Each plugin instance receives its own PluginAPI with:
 
 import asyncio
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 from server.utils.logger import get_logger
@@ -60,6 +61,7 @@ class PluginAPI:
         self._failure_reporter = failure_reporter
         self._success_reporter = success_reporter
         self._periodic_tasks: dict[str, asyncio.Task] = {}
+        self._data_dir: Path | None = None
 
     def _require(self, capability: str) -> None:
         if capability not in self._capabilities:
@@ -310,6 +312,27 @@ class PluginAPI:
     def platform(self) -> str:
         """Current platform identifier (win_x64, linux_x64, linux_arm64, etc.)."""
         return self._platform_id
+
+    @property
+    def data_dir(self) -> Path:
+        """Per-plugin persistent data directory. Created on first access.
+
+        Use for sidecar binaries, downloaded models, cached state, certs,
+        recorded segments — anything that should outlive plugin updates and
+        (by default) plugin uninstall. The user can opt to discard this
+        directory at uninstall time; otherwise it persists across
+        install/update/reinstall cycles so the plugin doesn't need to
+        re-download large assets.
+
+        Distinct from the plugin's code directory (managed by the installer)
+        and from `config` (per-project, lives in the .avc project file).
+        """
+        if self._data_dir is None:
+            from server.system_config import PLUGIN_DATA_DIR
+            path = PLUGIN_DATA_DIR / self._plugin_id
+            path.mkdir(parents=True, exist_ok=True)
+            self._data_dir = path
+        return self._data_dir
 
     _VALID_LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
 

@@ -137,6 +137,13 @@ def get_log_dir() -> Path:
 DRIVER_REPO_DIR = get_data_dir() / "driver_repo"
 PLUGIN_REPO_DIR = get_data_dir() / "plugin_repo"
 
+# Per-plugin persistent data directory. Sibling of PLUGIN_REPO_DIR (which
+# holds plugin *code*). PLUGIN_DATA_DIR / <plugin_id> is the plugin's
+# private space for sidecar binaries, downloaded models, cached state,
+# certs, and anything else that should survive plugin updates and
+# (optionally) plugin uninstall. Created on first access by PluginAPI.
+PLUGIN_DATA_DIR = get_data_dir() / "plugin_data"
+
 # Legacy locations from before the data_dir move — referenced by the
 # migration shim only. Not used at runtime once migration has run.
 _LEGACY_DRIVER_REPO_DIR = APP_DIR / "driver_repo"

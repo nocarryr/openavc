@@ -447,9 +447,32 @@ async def update_plugin_endpoint(plugin_id: str, request: Request) -> dict[str, 
         raise _api_error(500, f"Failed to update plugin '{plugin_id}'", e)
 
 
+@router.get("/plugins/{plugin_id}/data-info")
+async def get_plugin_data_info_endpoint(plugin_id: str) -> dict[str, Any]:
+    """Return whether the plugin has a persistent data directory and its size.
+
+    Used by the IDE uninstall dialog to show a "discard X MB of plugin data?"
+    prompt with an accurate size.
+    """
+    from server.core.plugin_installer import get_plugin_data_info
+
+    try:
+        return get_plugin_data_info(plugin_id)
+    except ValueError as e:
+        raise _api_error(422, f"Invalid plugin id '{plugin_id}'", e)
+
+
 @router.delete("/plugins/{plugin_id}")
-async def uninstall_plugin_endpoint(plugin_id: str) -> dict[str, Any]:
-    """Uninstall a plugin and remove it from the project."""
+async def uninstall_plugin_endpoint(
+    plugin_id: str,
+    remove_data: bool = False,
+) -> dict[str, Any]:
+    """Uninstall a plugin and remove it from the project.
+
+    Query parameter `remove_data=true` also deletes the plugin's persistent
+    data directory (sidecar binaries, cached state, etc.). Default is to
+    keep it so a future reinstall doesn't need to re-download large assets.
+    """
     from server.core.plugin_installer import uninstall_plugin
 
     engine = _get_engine()
@@ -460,7 +483,9 @@ async def uninstall_plugin_endpoint(plugin_id: str) -> dict[str, Any]:
         if engine.plugin_loader.is_running(plugin_id):
             await engine.plugin_loader.stop_plugin(plugin_id)
 
-        result = await uninstall_plugin(plugin_id, project_plugins)
+        result = await uninstall_plugin(
+            plugin_id, project_plugins, remove_data=remove_data
+        )
 
         # Remove from project file so it doesn't show as "missing" on restart
         if engine.project and plugin_id in engine.project.plugins:

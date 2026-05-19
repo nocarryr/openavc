@@ -208,8 +208,22 @@ export async function updatePlugin(
   });
 }
 
-export async function uninstallPlugin(pluginId: string): Promise<{ status: string }> {
-  return request(`/plugins/${pluginId}`, { method: "DELETE" });
+export async function uninstallPlugin(
+  pluginId: string,
+  options?: { removeData?: boolean },
+): Promise<{ status: string; data_removed?: boolean }> {
+  const query = options?.removeData ? "?remove_data=true" : "";
+  return request(`/plugins/${pluginId}${query}`, { method: "DELETE" });
+}
+
+export interface PluginDataInfo {
+  plugin_id: string;
+  exists: boolean;
+  size_bytes: number;
+}
+
+export async function getPluginDataInfo(pluginId: string): Promise<PluginDataInfo> {
+  return request(`/plugins/${pluginId}/data-info`);
 }
 
 export type { PluginInfo, SchemaField } from "./types";

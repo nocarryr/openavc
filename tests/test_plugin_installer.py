@@ -22,6 +22,7 @@ from server.core.plugin_installer import (
     _register_installed_plugin,
     _resolve_version,
     _version_tuple,
+    get_plugin_data_info,
     install_plugin,
     list_installed_plugins,
     uninstall_plugin,
@@ -79,10 +80,20 @@ PLUGIN_INFO = {
 
 
 @pytest.fixture(autouse=True)
-def _patch_plugin_repo(tmp_path, monkeypatch):
-    """Redirect PLUGIN_REPO_DIR to a temp directory for every test."""
+def _patch_plugin_dirs(tmp_path, monkeypatch):
+    """Redirect PLUGIN_REPO_DIR and PLUGIN_DATA_DIR to temp directories.
+
+    PLUGIN_REPO_DIR points at tmp_path itself so existing tests can place
+    plugin code at `tmp_path / <plugin_id>`. PLUGIN_DATA_DIR points at a
+    sibling under tmp_path so the two surfaces are isolated.
+    """
+    data_dir = tmp_path / "_plugin_data"
+    data_dir.mkdir()
     monkeypatch.setattr(
         "server.core.plugin_installer.PLUGIN_REPO_DIR", tmp_path
+    )
+    monkeypatch.setattr(
+        "server.core.plugin_installer.PLUGIN_DATA_DIR", data_dir
     )
 
 
@@ -90,6 +101,12 @@ def _patch_plugin_repo(tmp_path, monkeypatch):
 def plugin_repo(tmp_path):
     """Return the tmp_path used as PLUGIN_REPO_DIR."""
     return tmp_path
+
+
+@pytest.fixture
+def plugin_data(tmp_path):
+    """Return the directory used as PLUGIN_DATA_DIR."""
+    return tmp_path / "_plugin_data"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -551,6 +568,77 @@ class TestUninstallPlugin:
 
         with pytest.raises(ValueError, match="currently enabled"):
             await uninstall_plugin("model_plugin", project_plugins=project_plugins)
+
+    async def test_uninstall_keeps_data_by_default(self, plugin_repo, plugin_data):
+        """Plugin data dir survives uninstall unless remove_data is set."""
+        plugin_dir = plugin_repo / "keep_data"
+        plugin_dir.mkdir()
+        data_dir = plugin_data / "keep_data"
+        data_dir.mkdir()
+        (data_dir / "cached_binary").write_bytes(b"sidecar")
+
+        result = await uninstall_plugin("keep_data")
+
+        assert result["status"] == "uninstalled"
+        assert result["data_removed"] is False
+        assert not plugin_dir.exists()
+        assert (data_dir / "cached_binary").read_bytes() == b"sidecar"
+
+    async def test_uninstall_with_remove_data_deletes_data(self, plugin_repo, plugin_data):
+        """remove_data=True wipes the plugin's persistent data dir."""
+        plugin_dir = plugin_repo / "discard_data"
+        plugin_dir.mkdir()
+        data_dir = plugin_data / "discard_data"
+        data_dir.mkdir()
+        (data_dir / "cached_binary").write_bytes(b"sidecar")
+
+        result = await uninstall_plugin("discard_data", remove_data=True)
+
+        assert result["status"] == "uninstalled"
+        assert result["data_removed"] is True
+        assert not plugin_dir.exists()
+        assert not data_dir.exists()
+
+    async def test_uninstall_remove_data_no_data_dir(self, plugin_repo, plugin_data):
+        """remove_data=True is a no-op for the data side when no data dir exists."""
+        plugin_dir = plugin_repo / "no_data"
+        plugin_dir.mkdir()
+
+        result = await uninstall_plugin("no_data", remove_data=True)
+
+        assert result["status"] == "uninstalled"
+        # No data dir existed, so we report data_removed=False truthfully
+        assert result["data_removed"] is False
+
+
+# ═══════════════════════════════════════════════════════════
+#  get_plugin_data_info Tests
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGetPluginDataInfo:
+
+    def test_reports_missing_data_dir(self, plugin_data):
+        """No data dir → exists False, size 0."""
+        info = get_plugin_data_info("never_used")
+        assert info == {"plugin_id": "never_used", "exists": False, "size_bytes": 0}
+
+    def test_reports_size_of_existing_data(self, plugin_data):
+        """Sums size of every file under the data dir, recursively."""
+        data_dir = plugin_data / "with_data"
+        (data_dir / "sub").mkdir(parents=True)
+        (data_dir / "a.bin").write_bytes(b"x" * 100)
+        (data_dir / "sub" / "b.bin").write_bytes(b"y" * 250)
+
+        info = get_plugin_data_info("with_data")
+        assert info["plugin_id"] == "with_data"
+        assert info["exists"] is True
+        assert info["size_bytes"] == 350
+
+    def test_invalid_plugin_id_raises(self, plugin_data):
+        """Plugin-id validation runs before any disk access."""
+        with pytest.raises(ValueError):
+            get_plugin_data_info("../escape")
 
 
 # ═══════════════════════════════════════════════════════════

@@ -45,7 +45,7 @@ interface PluginStore {
   loadCommunity: () => Promise<void>;
   loadInstalled: () => Promise<void>;
   installCommunityPlugin: (pluginId: string, fileUrl: string) => Promise<void>;
-  uninstallPlugin: (pluginId: string) => Promise<void>;
+  uninstallPlugin: (pluginId: string, options?: { removeData?: boolean }) => Promise<void>;
   updateCommunityPlugin: (pluginId: string, fileUrl: string) => Promise<void>;
 }
 
@@ -186,9 +186,9 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     }
   },
 
-  uninstallPlugin: async (pluginId) => {
+  uninstallPlugin: async (pluginId, options) => {
     try {
-      await api.uninstallPlugin(pluginId);
+      await api.uninstallPlugin(pluginId, options);
       await Promise.all([get().load(), get().loadInstalled()]);
     } catch (e) {
       set({ error: String(e) });

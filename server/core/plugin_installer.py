@@ -26,7 +26,7 @@ from server.core.plugin_loader import (
     register_plugin_class,
     unregister_plugin_class,
 )
-from server.system_config import PLUGIN_REPO_DIR
+from server.system_config import PLUGIN_DATA_DIR, PLUGIN_REPO_DIR
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -1051,13 +1051,24 @@ def _register_installed_plugin(plugin_id: str, plugin_dir: Path) -> str | None:
 # ──── Uninstall ────
 
 
-async def uninstall_plugin(plugin_id: str, project_plugins: dict | None = None) -> dict[str, Any]:
+async def uninstall_plugin(
+    plugin_id: str,
+    project_plugins: dict | None = None,
+    *,
+    remove_data: bool = False,
+) -> dict[str, Any]:
     """
     Uninstall a plugin. Checks that it's not in use by the current project.
 
     Args:
         plugin_id: Plugin to uninstall.
         project_plugins: Current project's plugins dict (for safety check).
+        remove_data: If True, also delete the plugin's persistent data
+            directory (PLUGIN_DATA_DIR/<plugin_id>). Default False — the
+            data dir is kept so a future reinstall of the same plugin can
+            pick up cached binaries, downloaded models, etc., without
+            re-downloading. Users opt in via the IDE uninstall dialog or
+            the REST endpoint's `?remove_data=true` query parameter.
     """
     _validate_plugin_id(plugin_id)
     plugin_dir = PLUGIN_REPO_DIR / plugin_id
@@ -1075,12 +1086,48 @@ async def uninstall_plugin(plugin_id: str, project_plugins: dict | None = None) 
                 f"Disable it before uninstalling."
             )
 
-    # Remove files
+    # Remove code
     shutil.rmtree(plugin_dir, ignore_errors=True)
     unregister_plugin_class(plugin_id)
-    log.info(f"Uninstalled plugin '{plugin_id}'")
 
-    return {"status": "uninstalled", "plugin_id": plugin_id}
+    # Optionally remove data
+    data_removed = False
+    if remove_data:
+        data_dir = PLUGIN_DATA_DIR / plugin_id
+        if data_dir.exists():
+            shutil.rmtree(data_dir, ignore_errors=True)
+            data_removed = True
+
+    log.info(
+        "Uninstalled plugin '%s'%s",
+        plugin_id,
+        " (data discarded)" if data_removed else "",
+    )
+
+    return {"status": "uninstalled", "plugin_id": plugin_id, "data_removed": data_removed}
+
+
+def get_plugin_data_info(plugin_id: str) -> dict[str, Any]:
+    """Report whether a plugin has a persistent data directory and its size.
+
+    Used by the IDE to show a "discard X MB of plugin data?" prompt when
+    the user uninstalls a plugin. Returns size 0 with exists=False when
+    the plugin has never written to its data dir.
+    """
+    _validate_plugin_id(plugin_id)
+    data_dir = PLUGIN_DATA_DIR / plugin_id
+
+    if not data_dir.exists():
+        return {"plugin_id": plugin_id, "exists": False, "size_bytes": 0}
+
+    size = 0
+    for entry in data_dir.rglob("*"):
+        if entry.is_file():
+            try:
+                size += entry.stat().st_size
+            except OSError:
+                pass
+    return {"plugin_id": plugin_id, "exists": True, "size_bytes": size}
 
 
 # ──── Update ────

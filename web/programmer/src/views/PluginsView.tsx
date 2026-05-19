@@ -5,6 +5,7 @@ import { ViewContainer } from "../components/layout/ViewContainer";
 import { usePluginStore } from "../store/pluginStore";
 import { useNavigationStore } from "../store/navigationStore";
 import * as api from "../api/restClient";
+import type { PluginDataInfo } from "../api/pluginClient";
 import { parseApiError } from "../api/errors";
 import { InlineError } from "../components/shared/InlineError";
 import type { PluginInfo, SchemaField } from "../api/types";
@@ -13,6 +14,15 @@ import { BrowsePlugins } from "../components/plugins/BrowsePlugins";
 import { VariableKeyPicker } from "../components/shared/VariableKeyPicker";
 import { MarkdownContent } from "../components/ai/MarkdownContent";
 import { useProjectStore } from "../store/projectStore";
+
+// ──── Helpers ────
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
 
 // ──── Status Dot ────
 
@@ -815,7 +825,32 @@ function PluginDetail({ plugin }: { plugin: PluginInfo }) {
   const [saving, setSaving] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
+  const [dataInfo, setDataInfo] = useState<PluginDataInfo | null>(null);
+  const [discardData, setDiscardData] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // When the uninstall confirm opens, fetch plugin-data size so we can
+  // show "Also discard X MB" — only if there's actually data to discard.
+  useEffect(() => {
+    if (!confirmUninstall) {
+      setDataInfo(null);
+      setDiscardData(false);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getPluginDataInfo(plugin.plugin_id)
+      .then((info) => {
+        if (!cancelled) setDataInfo(info);
+      })
+      .catch(() => {
+        // Best-effort: if the size lookup fails we just hide the checkbox.
+        if (!cancelled) setDataInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [confirmUninstall, plugin.plugin_id]);
 
   // Fetch full detail (including config_schema) on mount
   useEffect(() => {
@@ -934,44 +969,74 @@ function PluginDetail({ plugin }: { plugin: PluginInfo }) {
               </button>
             )}
             {confirmUninstall ? (
-              <>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "var(--space-xs)",
+                  alignItems: "flex-end",
+                }}
+              >
                 <span style={{ fontSize: "var(--font-size-sm)", color: "var(--color-error)" }}>
                   Uninstall this plugin?
                 </span>
-                <button
-                  onClick={async () => {
-                    try {
-                      await api.uninstallPlugin(plugin.plugin_id);
-                      setConfirmUninstall(false);
-                      setSelectedId(null);
-                      load();
-                    } catch (e) {
-                      setUninstallError(parseApiError(e));
-                      setConfirmUninstall(false);
-                    }
-                  }}
-                  style={{
-                    padding: "var(--space-xs) var(--space-md)",
-                    borderRadius: "var(--border-radius)",
-                    background: "var(--color-error, #dc2626)",
-                    color: "#fff",
-                    fontSize: "var(--font-size-sm)",
-                  }}
-                >
-                  Yes, Uninstall
-                </button>
-                <button
-                  onClick={() => setConfirmUninstall(false)}
-                  style={{
-                    padding: "var(--space-xs) var(--space-md)",
-                    borderRadius: "var(--border-radius)",
-                    background: "var(--bg-hover)",
-                    fontSize: "var(--font-size-sm)",
-                  }}
-                >
-                  Cancel
-                </button>
-              </>
+                {dataInfo?.exists && dataInfo.size_bytes > 0 && (
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "var(--space-xs)",
+                      fontSize: "var(--font-size-sm)",
+                      color: "var(--text-muted)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={discardData}
+                      onChange={(e) => setDiscardData(e.target.checked)}
+                    />
+                    Also discard {formatBytes(dataInfo.size_bytes)} of plugin data
+                  </label>
+                )}
+                <div style={{ display: "flex", gap: "var(--space-sm)" }}>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await api.uninstallPlugin(plugin.plugin_id, {
+                          removeData: discardData,
+                        });
+                        setConfirmUninstall(false);
+                        setSelectedId(null);
+                        load();
+                      } catch (e) {
+                        setUninstallError(parseApiError(e));
+                        setConfirmUninstall(false);
+                      }
+                    }}
+                    style={{
+                      padding: "var(--space-xs) var(--space-md)",
+                      borderRadius: "var(--border-radius)",
+                      background: "var(--color-error, #dc2626)",
+                      color: "#fff",
+                      fontSize: "var(--font-size-sm)",
+                    }}
+                  >
+                    Yes, Uninstall
+                  </button>
+                  <button
+                    onClick={() => setConfirmUninstall(false)}
+                    style={{
+                      padding: "var(--space-xs) var(--space-md)",
+                      borderRadius: "var(--border-radius)",
+                      background: "var(--bg-hover)",
+                      fontSize: "var(--font-size-sm)",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
             ) : (
               <button
                 onClick={() => {
