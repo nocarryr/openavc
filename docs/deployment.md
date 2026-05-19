@@ -64,12 +64,18 @@ Override with the `OPENAVC_DATA_DIR` environment variable.
 ```
 {data_dir}/
 ├── projects/          # .avc project files + scripts
-├── drivers/           # Community and custom drivers
+├── driver_repo/       # Community and custom drivers (installed from the IDE)
+├── plugin_repo/       # Community and custom plugins (installed from the IDE)
 ├── backups/           # Automatic pre-update backups
 ├── logs/              # Log files (rotated)
 ├── system.json        # System configuration
 └── update-cache/      # Downloaded update packages (temp)
 ```
+
+`driver_repo/` and `plugin_repo/` live under the data directory so the content
+you install from the Programmer IDE survives application upgrades. On Docker
+this is essential — `/app` is rewritten by every image pull, but `/data` is on
+a mounted volume.
 
 ## System Configuration
 
@@ -206,7 +212,7 @@ Environment=OPENAVC_PROJECT=/var/lib/openavc/projects/default/project.avc
 Environment=OPENAVC_BIND=0.0.0.0
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/openavc /var/log/openavc /opt/openavc/driver_repo /opt/openavc/plugin_repo
+ReadWritePaths=/var/lib/openavc /var/log/openavc -/opt/openavc/driver_repo -/opt/openavc/plugin_repo
 ProtectHome=true
 PrivateTmp=true
 
