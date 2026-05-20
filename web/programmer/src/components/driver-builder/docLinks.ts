@@ -30,6 +30,7 @@ export const DOCS = {
   responses: `${DOCS_BASE}/creating-drivers/#responses-entry`,
   polling: `${DOCS_BASE}/creating-drivers/#polling-section`,
   deviceSettings: `${DOCS_BASE}/creating-drivers/#device_settings-entry`,
+  childEntityTypes: `${DOCS_BASE}/creating-drivers/#child_entity_types-entry`,
 
   // Single-section tabs
   discovery: `${DOCS_BASE}/creating-drivers/#discovery`,

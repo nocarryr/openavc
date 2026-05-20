@@ -9,6 +9,7 @@ import { CommandBuilder } from "./CommandBuilder";
 import { ResponseBuilder } from "./ResponseBuilder";
 import { PollingConfig } from "./PollingConfig";
 import { StateVariableEditor } from "./StateVariableEditor";
+import { ChildEntityTypesEditor } from "./ChildEntityTypesEditor";
 import { DiscoveryHintsEditor } from "./DiscoveryHintsEditor";
 import { DeviceSettingsEditor } from "./DeviceSettingsEditor";
 import { SimulatorEditor } from "./SimulatorEditor";
@@ -139,6 +140,7 @@ export function DriverEditor({
   // Counts surfaced in collapsible headers so users can scan a tab and see
   // which sections are populated without expanding every panel.
   const stateCount = Object.keys(draft.state_variables ?? {}).length;
+  const childTypeCount = Object.keys(draft.child_entity_types ?? {}).length;
   const commandCount = Object.keys(draft.commands ?? {}).length;
   const responseCount = (draft.responses ?? []).length;
   const pollingQueryCount = (draft.polling?.queries ?? []).length;
@@ -640,6 +642,16 @@ export function DriverEditor({
               helpHref={DOCS.stateVariables}
             >
               <StateVariableEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Child Entity Types"
+              subtitle="Sub-units this device manages — encoders, decoders, zones, presets. Each declared type gets a per-instance row in the device's Child Entities tab."
+              meta={countMeta(childTypeCount, "type")}
+              defaultOpen={childTypeCount > 0}
+              helpHref={DOCS.childEntityTypes}
+            >
+              <ChildEntityTypesEditor draft={draft} onUpdate={onUpdate} />
             </CollapsibleSection>
 
             <CollapsibleSection

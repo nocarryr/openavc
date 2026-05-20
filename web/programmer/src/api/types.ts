@@ -443,6 +443,12 @@ export interface DriverParamDef {
   default?: unknown;
   // Allowed values for type='enum' — required for that type.
   values?: string[];
+  // Only meaningful for type='child_id' — names one of the driver's
+  // declared child_entity_types. The runtime command picker renders a
+  // dropdown of currently-registered children of that type; the value
+  // passed at command time is the integer local id (the runtime handles
+  // padding when assembling the wire string).
+  child_type?: string;
 }
 
 export interface DriverResponseMapping {
@@ -581,6 +587,52 @@ export interface DriverSimulatorDef {
   error_modes?: Record<string, { behavior: string; description?: string; state?: Record<string, unknown> }>;
 }
 
+/**
+ * Driver-authored child entity type. Mirrors the runtime
+ * ``DRIVER_INFO["child_entity_types"]`` block consumed by
+ * ``server/drivers/base.py`` (register_child / set_child_state) and
+ * ``server/cloud/state_relay.py`` (per-property ``cloud_priority`` tiering).
+ *
+ * The editor surface adds the same metadata as device state_variables
+ * (label, help, min/max/step, values) so authors don't see a new mental
+ * model; only ``cloud_priority`` is child-specific. The runtime is
+ * permissive about extra keys — only ``type``, ``min``, ``values``, and
+ * ``cloud_priority`` are read.
+ */
+export interface DriverChildStateVarDef {
+  type: string;
+  label?: string;
+  help?: string;
+  values?: string[];
+  min?: number;
+  max?: number;
+  step?: number;
+  /** "low" relays at the verbose-state cadence (30s default); "high"
+   *  rides the snappy top-tier cadence (2s default). Unspecified =
+   *  default child cadence (5s). */
+  cloud_priority?: "low" | "high";
+}
+
+export interface DriverChildIdFormat {
+  /** v1 only supports "integer". The platform validates at register_child
+   *  time; the editor surfaces a fixed dropdown. */
+  type: "integer";
+  min?: number;
+  max?: number;
+  pad_width?: number;
+}
+
+export interface DriverChildEntityType {
+  label?: string;
+  label_plural?: string;
+  id_format: DriverChildIdFormat;
+  state_variables: Record<string, DriverChildStateVarDef>;
+  summary_fields?: string[];
+  /** Which declared state variable carries the controller-owned name
+   *  (distinct from the user-set ``label`` injected by the platform). */
+  label_field?: string;
+}
+
 export interface DriverDefinition {
   id: string;
   name: string;
@@ -594,6 +646,10 @@ export interface DriverDefinition {
   default_config: Record<string, unknown>;
   config_schema: Record<string, unknown>;
   state_variables: Record<string, { type: string; label: string; values?: string[]; help?: string; min?: number; max?: number; step?: number }>;
+  /** Sub-units the driver manages (encoders, decoders, zones, presets, ...).
+   *  Optional — drivers that don't declare children stay one flat device.
+   *  See ``server/drivers/base.py`` ``BaseDriver`` child API. */
+  child_entity_types?: Record<string, DriverChildEntityType>;
   commands: Record<string, DriverCommandDef>;
   responses: DriverResponseDef[];
   polling: { interval?: number; queries?: string[] };

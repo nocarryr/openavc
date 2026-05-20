@@ -38,6 +38,9 @@ const BASELINE_CONFIG_KEYS = new Set([
 const ID_RE = /^[a-z][a-z0-9_]*$/;
 const PARAM_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const PLACEHOLDER_RE = /\{(\w+)\}/g;
+// Child type ids and per-child field ids share the device state-key
+// namespace, so they follow the same lowercase-identifier rule.
+const CHILD_ID_RE = /^[a-z][a-z0-9_]*$/;
 
 /**
  * Validate a driver draft against the runtime contract.
@@ -133,6 +136,104 @@ export function validateDriver(
     });
   }
 
+  // ── Child entity types ───────────────────────────────────────────────
+  const childTypes = draft.child_entity_types ?? {};
+  const childTypeNames = new Set(Object.keys(childTypes));
+  for (const [typeName, typeDef] of Object.entries(childTypes)) {
+    if (!CHILD_ID_RE.test(typeName)) {
+      issues.push({
+        severity: "error",
+        section: "behavior",
+        field: `child_entity_types.${typeName}`,
+        message: `Child type "${typeName}" must start with a lowercase letter and use only lowercase letters, digits, and underscores.`,
+      });
+    }
+    if (!typeDef.label?.trim()) {
+      issues.push({
+        severity: "warning",
+        section: "behavior",
+        field: `child_entity_types.${typeName}`,
+        message: `Child type "${typeName}" has no label. Integrators see this in the Child Entities tab.`,
+      });
+    }
+
+    // id_format sanity. v1 only supports integer IDs; the runtime raises
+    // on anything else, so flag a non-integer type as an error.
+    const idf = typeDef.id_format ?? { type: "integer" };
+    if (idf.type !== "integer") {
+      issues.push({
+        severity: "error",
+        section: "behavior",
+        field: `child_entity_types.${typeName}.id_format`,
+        message: `Child type "${typeName}" id_format.type must be "integer" (only integer IDs are supported).`,
+      });
+    }
+    if (
+      typeof idf.min === "number" &&
+      typeof idf.max === "number" &&
+      idf.max < idf.min
+    ) {
+      issues.push({
+        severity: "error",
+        section: "behavior",
+        field: `child_entity_types.${typeName}.id_format`,
+        message: `Child type "${typeName}" id_format.max (${idf.max}) is less than min (${idf.min}).`,
+      });
+    }
+    if (typeof idf.pad_width === "number" && idf.pad_width < 0) {
+      issues.push({
+        severity: "error",
+        section: "behavior",
+        field: `child_entity_types.${typeName}.id_format`,
+        message: `Child type "${typeName}" id_format.pad_width can't be negative.`,
+      });
+    }
+
+    // State fields.
+    const stateVars = typeDef.state_variables ?? {};
+    const fieldNames = Object.keys(stateVars);
+    if (fieldNames.length === 0) {
+      issues.push({
+        severity: "warning",
+        section: "behavior",
+        field: `child_entity_types.${typeName}`,
+        message: `Child type "${typeName}" declares no state fields. Each child would only carry the platform's online/label keys.`,
+      });
+    }
+    for (const fieldName of fieldNames) {
+      if (!CHILD_ID_RE.test(fieldName)) {
+        issues.push({
+          severity: "error",
+          section: "behavior",
+          field: `child_entity_types.${typeName}.${fieldName}`,
+          message: `Field "${fieldName}" in child type "${typeName}" must use lowercase letters, digits, and underscores only.`,
+        });
+      }
+    }
+
+    // summary_fields / label_field must reference declared fields. `online`
+    // and `label` are platform-injected, so they're always valid targets.
+    const fieldSet = new Set([...fieldNames, "online", "label"]);
+    for (const sf of typeDef.summary_fields ?? []) {
+      if (!fieldSet.has(sf)) {
+        issues.push({
+          severity: "warning",
+          section: "behavior",
+          field: `child_entity_types.${typeName}.summary_fields`,
+          message: `Child type "${typeName}" summary field "${sf}" isn't a declared state field.`,
+        });
+      }
+    }
+    if (typeDef.label_field && !fieldSet.has(typeDef.label_field)) {
+      issues.push({
+        severity: "warning",
+        section: "behavior",
+        field: `child_entity_types.${typeName}.label_field`,
+        message: `Child type "${typeName}" name field "${typeDef.label_field}" isn't a declared state field.`,
+      });
+    }
+  }
+
   // ── Commands: param-name legality + placeholder coverage ─────────────
   const configKeys = new Set([
     ...Object.keys(draft.config_schema ?? {}),
@@ -141,6 +242,29 @@ export function validateDriver(
 
   for (const [cmdName, cmd] of Object.entries(draft.commands ?? {})) {
     const declaredParams = new Set(Object.keys(cmd.params ?? {}));
+
+    // child_id params must name a declared child type, else the runtime
+    // command picker has nothing to populate the dropdown from.
+    for (const [paramName, paramDef] of Object.entries(cmd.params ?? {})) {
+      if (paramDef.type !== "child_id") continue;
+      if (!paramDef.child_type) {
+        issues.push({
+          severity: "error",
+          section: "behavior",
+          command: cmdName,
+          param: paramName,
+          message: `Parameter "${paramName}" in command "${cmdName}" is a Child ID but no child type is selected.`,
+        });
+      } else if (!childTypeNames.has(paramDef.child_type)) {
+        issues.push({
+          severity: "error",
+          section: "behavior",
+          command: cmdName,
+          param: paramName,
+          message: `Parameter "${paramName}" in command "${cmdName}" references child type "${paramDef.child_type}", which isn't declared in Child Entity Types.`,
+        });
+      }
+    }
 
     // Param-name legality. The renamer used to silently strip illegal
     // characters; flag the residue so the user understands what got

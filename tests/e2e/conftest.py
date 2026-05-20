@@ -36,7 +36,6 @@ from urllib.request import urlopen
 import pytest
 
 OPENAVC_ROOT = Path(__file__).resolve().parents[2]
-DRIVER_REPO = OPENAVC_ROOT / "driver_repo"
 DRIVER_SRC = Path(__file__).with_name("_controller_driver_src.py")
 INSTALLED_DRIVER_NAME = "e2e_test_controller.py"
 
@@ -47,20 +46,22 @@ INSTALLED_DRIVER_NAME = "e2e_test_controller.py"
 
 @pytest.fixture(scope="session", autouse=True)
 def _install_test_driver():
-    """Copy the synthetic controller driver into ``driver_repo/`` so the
-    server subprocess can discover it. Removed at session end so the
-    workspace driver_repo is left exactly as we found it.
+    """No-op session marker kept for backward compatibility.
+
+    The synthetic controller driver is installed *per server* into each
+    subprocess's own ``{data_dir}/driver_repo/`` (see ``_start_server``),
+    not into the shared workspace ``driver_repo``. The data_dir is where
+    ``DRIVER_REPO_DIR`` resolves after the repo relocation, so the loader
+    discovers it directly with no migration step.
+
+    Earlier this fixture copied the driver into the workspace
+    ``APP_DIR/driver_repo``. That broke once ``migrate_legacy_repos()``
+    began *moving* legacy-location content into the first server's
+    data_dir on startup: the first server drained the workspace copy and
+    every later server in the session saw a "Missing drivers" project.
+    Installing per-server sidesteps the legacy-move path entirely.
     """
-    DRIVER_REPO.mkdir(exist_ok=True)
-    target = DRIVER_REPO / INSTALLED_DRIVER_NAME
-    shutil.copyfile(DRIVER_SRC, target)
-    try:
-        yield target
-    finally:
-        try:
-            target.unlink()
-        except FileNotFoundError:
-            pass
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +210,15 @@ def _start_server(tmp_root: Path, *, initial_children: int):
     tmp_root.mkdir(parents=True, exist_ok=True)
     data_dir = tmp_root / "data"
     data_dir.mkdir(exist_ok=True)
+
+    # Install the synthetic controller driver into THIS server's own
+    # driver_repo (which is where DRIVER_REPO_DIR resolves under the temp
+    # data_dir). Pre-populating the target means migrate_legacy_repos()
+    # skips it, so the driver is never moved out from under a sibling
+    # server — each subprocess in the session is self-contained.
+    driver_repo = data_dir / "driver_repo"
+    driver_repo.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(DRIVER_SRC, driver_repo / INSTALLED_DRIVER_NAME)
 
     project_path = tmp_root / "project.avc"
     project_path.write_text(

@@ -295,3 +295,115 @@ def test_canonical_keys_emit_no_deprecation_warning(caplog):
         create_configurable_driver_class(definition)
     matches = [r for r in caplog.records if "deprecated YAML key" in r.getMessage()]
     assert matches == []
+
+
+# --- child_entity_types passthrough (P8) ---
+#
+# Locks in that a YAML driver declaring child_entity_types ends up with
+# those types on DRIVER_INFO, and that the resulting class drives the
+# existing BaseDriver register_child / set_child_state path the same way
+# a hand-coded Python driver would. The plan calls this out as the gate
+# that unblocks YAML-authored controller drivers.
+
+CHILD_TYPES_DEFINITION: dict = {
+    "id": "test_controller",
+    "name": "Test Controller",
+    "transport": "tcp",
+    "default_config": {"host": "", "port": 23},
+    "config_schema": {},
+    "state_variables": {},
+    "commands": {},
+    "responses": [],
+    "child_entity_types": {
+        "encoder": {
+            "label": "Encoder",
+            "label_plural": "Encoders",
+            "id_format": {
+                "type": "integer", "min": 1, "max": 762, "pad_width": 3,
+            },
+            "state_variables": {
+                "name": {"type": "string"},
+                "ip": {"type": "string"},
+                "signal_present": {
+                    "type": "boolean", "cloud_priority": "high",
+                },
+                "edid_block": {
+                    "type": "string", "cloud_priority": "low",
+                },
+            },
+            "summary_fields": ["name", "ip", "signal_present"],
+            "label_field": "name",
+        },
+    },
+}
+
+
+def test_yaml_child_entity_types_land_in_driver_info():
+    """The factory copies child_entity_types straight onto DRIVER_INFO
+    so BaseDriver's child APIs activate for YAML drivers."""
+    cls = create_configurable_driver_class(CHILD_TYPES_DEFINITION)
+    types = cls.DRIVER_INFO.get("child_entity_types")
+    assert types is not None, "child_entity_types missing from DRIVER_INFO"
+    assert "encoder" in types
+    encoder = types["encoder"]
+    assert encoder["label"] == "Encoder"
+    assert encoder["id_format"]["pad_width"] == 3
+    # cloud_priority survives the round-trip — the cloud relay reads it
+    # off DRIVER_INFO to decide tier (high/low) per child property.
+    encoder_vars = encoder["state_variables"]
+    assert encoder_vars["signal_present"]["cloud_priority"] == "high"
+    assert encoder_vars["edid_block"]["cloud_priority"] == "low"
+
+
+def test_yaml_driver_without_child_types_has_no_key():
+    """Drivers that don't declare child types don't get an empty key
+    written — keeps DRIVER_INFO clean for the existing fleet."""
+    cls = create_configurable_driver_class(SAMPLE_DEFINITION)
+    assert "child_entity_types" not in cls.DRIVER_INFO
+
+
+def test_yaml_driver_register_child_through_base_path(state, events):
+    """End-to-end: YAML-defined child schema -> register_child -> child
+    state keys live at device.<id>.<type>.<padded>.<prop>, defaults from
+    the schema, and the platform-injected `online` / `label` keys ride
+    along."""
+    state.set_event_bus(events)
+    cls = create_configurable_driver_class(CHILD_TYPES_DEFINITION)
+    drv = cls("ctrl_a", {"host": "127.0.0.1", "port": 23}, state, events)
+
+    drv.register_child("encoder", 5, initial_state={
+        "name": "Lobby TX", "signal_present": True,
+    })
+
+    assert state.get("device.ctrl_a.encoder.005.name") == "Lobby TX"
+    assert state.get("device.ctrl_a.encoder.005.signal_present") is True
+    # ip defaulted from the declared "string" type.
+    assert state.get("device.ctrl_a.encoder.005.ip") == ""
+    # Platform-managed keys present without the YAML having to declare them.
+    assert state.get("device.ctrl_a.encoder.005.online") is True
+    assert state.get("device.ctrl_a.encoder.005.label") == ""
+
+
+def test_yaml_driver_set_child_state_validates_against_schema(state, events):
+    """set_child_state honours the YAML-declared schema — unknown props
+    raise, declared props write through to state."""
+    state.set_event_bus(events)
+    cls = create_configurable_driver_class(CHILD_TYPES_DEFINITION)
+    drv = cls("ctrl_b", {"host": "127.0.0.1", "port": 23}, state, events)
+    drv.register_child("encoder", 1)
+
+    drv.set_child_state("encoder", 1, "signal_present", False)
+    assert state.get("device.ctrl_b.encoder.001.signal_present") is False
+
+    with pytest.raises(ValueError, match="not declared"):
+        drv.set_child_state("encoder", 1, "no_such_prop", "x")
+
+
+def test_yaml_driver_register_child_unknown_type_raises(state, events):
+    """A YAML driver that didn't declare a given type can't register one."""
+    state.set_event_bus(events)
+    cls = create_configurable_driver_class(CHILD_TYPES_DEFINITION)
+    drv = cls("ctrl_c", {"host": "127.0.0.1", "port": 23}, state, events)
+
+    with pytest.raises(ValueError, match="did not declare"):
+        drv.register_child("decoder", 1)

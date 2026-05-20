@@ -1028,6 +1028,14 @@ def create_configurable_driver_class(
     if "device_settings" in driver_def:
         driver_info["device_settings"] = driver_def["device_settings"]
 
+    # Copy child_entity_types from the YAML definition. BaseDriver reads
+    # this on register_child / set_child_state to validate properties and
+    # platform-inject the synthetic `online` / `label` keys. The cloud
+    # state-relay also reads it to honour per-property `cloud_priority`
+    # tags (high/low) for tier selection.
+    if "child_entity_types" in driver_def:
+        driver_info["child_entity_types"] = driver_def["child_entity_types"]
+
     # Copy help from each state variable
     state_vars = driver_info.get("state_variables", {})
     for var_name, var_def in state_vars.items():

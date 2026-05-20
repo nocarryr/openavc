@@ -279,6 +279,7 @@ export function CommandBuilder({ draft, onUpdate }: CommandBuilderProps) {
 
                 <ParamEditor
                   params={cmd.params}
+                  childTypes={Object.keys(draft.child_entity_types ?? {})}
                   onChange={(params) => updateCommand(name, { params })}
                 />
               </div>
@@ -533,9 +534,14 @@ function KeyValueList({
 
 function ParamEditor({
   params,
+  childTypes,
   onChange,
 }: {
   params: Record<string, DriverParamDef>;
+  /** Driver-declared child types — passed to ParamRow so the
+   *  ``child_id`` type can render a dropdown of valid child types. Empty
+   *  when the driver hasn't declared any. */
+  childTypes: string[];
   onChange: (params: Record<string, DriverParamDef>) => void;
 }) {
   const paramNames = Object.keys(params);
@@ -600,6 +606,7 @@ function ParamEditor({
           key={name}
           name={name}
           def={params[name]}
+          childTypes={childTypes}
           tryRename={(next) => renameParam(name, next)}
           onUpdate={(partial) => updateParam(name, partial)}
           onRemove={() => removeParam(name)}
@@ -622,12 +629,14 @@ function ParamEditor({
 function ParamRow({
   name,
   def,
+  childTypes,
   tryRename,
   onUpdate,
   onRemove,
 }: {
   name: string;
   def: DriverParamDef;
+  childTypes: string[];
   tryRename: (next: string) => { ok: boolean; reason?: string };
   onUpdate: (partial: Partial<DriverParamDef>) => void;
   onRemove: () => void;
@@ -669,6 +678,7 @@ function ParamRow({
   const isNumeric = def.type === "integer" || def.type === "number";
   const isEnum = def.type === "enum";
   const isBool = def.type === "boolean";
+  const isChildId = def.type === "child_id";
 
   return (
     <div
@@ -747,6 +757,13 @@ function ParamRow({
               if (t !== "enum") {
                 partial.values = undefined;
               }
+              if (t !== "child_id") {
+                partial.child_type = undefined;
+              } else {
+                // Default the child_type to the first declared type so the
+                // param is valid the moment it's switched (if any exist).
+                partial.child_type = def.child_type ?? childTypes[0];
+              }
               onUpdate(partial);
             }}
             style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
@@ -756,6 +773,7 @@ function ParamRow({
             <option value="number">Number</option>
             <option value="boolean">Boolean</option>
             <option value="enum">Enum</option>
+            <option value="child_id">Child ID</option>
           </select>
         </div>
         <label
@@ -915,6 +933,57 @@ function ParamRow({
           >
             Comma-separated. The Add Device dialog and macro editor render
             these as a dropdown.
+          </div>
+        </div>
+      )}
+
+      {isChildId && (
+        <div style={{ marginTop: "var(--space-sm)" }}>
+          <span style={labelStyle}>Child Type</span>
+          {childTypes.length === 0 ? (
+            <div
+              style={{
+                fontSize: "11px",
+                color: "var(--color-warning, #d97706)",
+                padding: "var(--space-xs) var(--space-sm)",
+                borderRadius: "var(--border-radius)",
+                background: "rgba(255, 152, 0, 0.12)",
+                border: "1px solid rgba(255, 152, 0, 0.35)",
+              }}
+            >
+              No child entity types declared yet. Add one in the Child Entity
+              Types section above, then pick it here.
+            </div>
+          ) : (
+            <select
+              value={def.child_type ?? ""}
+              onChange={(e) =>
+                onUpdate({ child_type: e.target.value || undefined })
+              }
+              style={{
+                width: "100%",
+                fontSize: "var(--font-size-sm)",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              <option value="">(select a child type)</option>
+              {childTypes.map((ct) => (
+                <option key={ct} value={ct}>
+                  {ct}
+                </option>
+              ))}
+            </select>
+          )}
+          <div
+            style={{
+              fontSize: "11px",
+              color: "var(--text-muted)",
+              marginTop: 2,
+            }}
+          >
+            The runtime command picker shows a dropdown of registered{" "}
+            {def.child_type ? <code>{def.child_type}</code> : "children"} for
+            this parameter. The value sent is the integer local ID.
           </div>
         </div>
       )}

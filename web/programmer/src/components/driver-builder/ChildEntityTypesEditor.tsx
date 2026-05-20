@@ -1,0 +1,826 @@
+import { useState } from "react";
+import { Plus, Trash2, ChevronDown, ChevronRight } from "lucide-react";
+import type {
+  DriverChildEntityType,
+  DriverChildStateVarDef,
+  DriverDefinition,
+} from "../../api/types";
+
+interface ChildEntityTypesEditorProps {
+  draft: DriverDefinition;
+  onUpdate: (partial: Partial<DriverDefinition>) => void;
+}
+
+const TYPE_ID_RE = /^[a-z][a-z0-9_]*$/;
+
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: "var(--font-size-sm)",
+  color: "var(--text-secondary)",
+  marginBottom: "var(--space-xs)",
+};
+
+const helpStyle: React.CSSProperties = {
+  fontSize: "11px",
+  color: "var(--text-muted)",
+  marginTop: "var(--space-xs)",
+};
+
+export function ChildEntityTypesEditor({
+  draft,
+  onUpdate,
+}: ChildEntityTypesEditorProps) {
+  const types = draft.child_entity_types ?? {};
+  const typeNames = Object.keys(types);
+  const [expanded, setExpanded] = useState<string | null>(typeNames[0] ?? null);
+
+  const writeTypes = (next: Record<string, DriverChildEntityType>) => {
+    onUpdate({
+      child_entity_types: Object.keys(next).length ? next : undefined,
+    });
+  };
+
+  const addType = () => {
+    let counter = typeNames.length + 1;
+    let name = `child_type_${counter}`;
+    while (name in types) {
+      counter++;
+      name = `child_type_${counter}`;
+    }
+    const initial: DriverChildEntityType = {
+      label: "New Child Type",
+      label_plural: "",
+      id_format: { type: "integer", min: 1, max: undefined, pad_width: 0 },
+      state_variables: {},
+      summary_fields: [],
+      label_field: "",
+    };
+    writeTypes({ ...types, [name]: initial });
+    setExpanded(name);
+  };
+
+  const removeType = (name: string) => {
+    const next = { ...types };
+    delete next[name];
+    writeTypes(next);
+    if (expanded === name) setExpanded(null);
+  };
+
+  const renameType = (oldName: string, newName: string) => {
+    const cleaned = newName.replace(/[^a-z0-9_]/gi, "").toLowerCase();
+    if (!cleaned || cleaned === oldName || cleaned in types) return;
+    const next: typeof types = {};
+    for (const [k, v] of Object.entries(types)) {
+      next[k === oldName ? cleaned : k] = v;
+    }
+    writeTypes(next);
+    if (expanded === oldName) setExpanded(cleaned);
+  };
+
+  const updateType = (
+    name: string,
+    partial: Partial<DriverChildEntityType>,
+  ) => {
+    const merged = { ...types[name], ...partial } as DriverChildEntityType;
+    writeTypes({ ...types, [name]: merged });
+  };
+
+  return (
+    <div data-testid="child-entity-types-editor">
+      <p
+        style={{
+          fontSize: "var(--font-size-sm)",
+          color: "var(--text-muted)",
+          marginBottom: "var(--space-md)",
+        }}
+      >
+        Sub-units this driver manages — encoders, decoders, zones, presets,
+        anything the device addresses by ID. Each child type gets its own row
+        in the Child Entities tab on a device and its own per-instance state
+        keys ({"device.<id>.<type>.<local_id>.<prop>"}). Leave this empty for
+        ordinary single-unit devices.
+      </p>
+
+      {typeNames.length === 0 && (
+        <p
+          style={{
+            fontSize: "var(--font-size-sm)",
+            color: "var(--text-muted)",
+            marginBottom: "var(--space-md)",
+            fontStyle: "italic",
+          }}
+        >
+          No child types declared.
+        </p>
+      )}
+
+      {typeNames.map((name) => {
+        const t = types[name];
+        const isOpen = expanded === name;
+        const varCount = Object.keys(t.state_variables ?? {}).length;
+        return (
+          <div
+            key={name}
+            data-testid={`child-type-card-${name}`}
+            style={{
+              border: "1px solid var(--border-color)",
+              borderRadius: "var(--border-radius)",
+              marginBottom: "var(--space-sm)",
+              background: "var(--bg-surface)",
+            }}
+          >
+            <button
+              data-testid={`child-type-header-${name}`}
+              onClick={() => setExpanded(isOpen ? null : name)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                width: "100%",
+                padding: "var(--space-sm) var(--space-md)",
+                gap: "var(--space-sm)",
+                textAlign: "left",
+              }}
+            >
+              {isOpen ? (
+                <ChevronDown size={14} />
+              ) : (
+                <ChevronRight size={14} />
+              )}
+              <span
+                style={{
+                  flex: 1,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--font-size-sm)",
+                }}
+              >
+                {name}
+              </span>
+              <span
+                style={{
+                  color: "var(--text-muted)",
+                  fontSize: "11px",
+                }}
+              >
+                {t.label || "—"} · {varCount}{" "}
+                {varCount === 1 ? "field" : "fields"}
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeType(name);
+                }}
+                title="Remove this child type"
+                style={{ padding: "2px", color: "var(--text-muted)" }}
+              >
+                <Trash2 size={14} />
+              </button>
+            </button>
+
+            {isOpen && (
+              <div
+                style={{
+                  padding: "var(--space-md)",
+                  borderTop: "1px solid var(--border-color)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "var(--space-md)",
+                }}
+              >
+                <IdentitySection
+                  name={name}
+                  type={t}
+                  onRename={(next) => renameType(name, next)}
+                  onUpdate={(partial) => updateType(name, partial)}
+                />
+                <IdFormatSection
+                  type={t}
+                  onUpdate={(partial) => updateType(name, partial)}
+                />
+                <StateVarsSection
+                  type={t}
+                  onUpdate={(partial) => updateType(name, partial)}
+                />
+                <PresentationSection
+                  type={t}
+                  onUpdate={(partial) => updateType(name, partial)}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <button
+        data-testid="add-child-type"
+        onClick={addType}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-xs)",
+          padding: "var(--space-sm) var(--space-md)",
+          borderRadius: "var(--border-radius)",
+          background: "var(--bg-hover)",
+          fontSize: "var(--font-size-sm)",
+          marginTop: "var(--space-sm)",
+        }}
+      >
+        <Plus size={14} /> Add Child Type
+      </button>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Identity (type id, label, label_plural)
+// ──────────────────────────────────────────────────────────────────────────
+function IdentitySection({
+  name,
+  type,
+  onRename,
+  onUpdate,
+}: {
+  name: string;
+  type: DriverChildEntityType;
+  onRename: (next: string) => void;
+  onUpdate: (partial: Partial<DriverChildEntityType>) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr 1fr",
+        gap: "var(--space-md)",
+      }}
+    >
+      <div>
+        <label style={labelStyle}>Type ID</label>
+        <input
+          data-testid={`child-type-id-${name}`}
+          value={name}
+          onChange={(e) => onRename(e.target.value)}
+          placeholder="e.g. encoder"
+          style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+        />
+        <div style={helpStyle}>
+          Lowercase, underscores. Becomes the third segment in state keys
+          (e.g. <code>device.matrix1.encoder.005.signal</code>).
+        </div>
+      </div>
+      <div>
+        <label style={labelStyle}>Label (singular)</label>
+        <input
+          data-testid={`child-type-label-${name}`}
+          value={type.label ?? ""}
+          onChange={(e) => onUpdate({ label: e.target.value })}
+          placeholder="Encoder"
+          style={{ width: "100%" }}
+        />
+        <div style={helpStyle}>Shown in the IDE.</div>
+      </div>
+      <div>
+        <label style={labelStyle}>Label (plural)</label>
+        <input
+          value={type.label_plural ?? ""}
+          onChange={(e) => onUpdate({ label_plural: e.target.value })}
+          placeholder="Encoders"
+          style={{ width: "100%" }}
+        />
+        <div style={helpStyle}>Tab title for the list view.</div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// ID format (integer min/max/pad_width)
+// ──────────────────────────────────────────────────────────────────────────
+function IdFormatSection({
+  type,
+  onUpdate,
+}: {
+  type: DriverChildEntityType;
+  onUpdate: (partial: Partial<DriverChildEntityType>) => void;
+}) {
+  const idf = type.id_format ?? { type: "integer" as const };
+
+  const writeIdFormat = (partial: Partial<typeof idf>) => {
+    const merged = { ...idf, ...partial } as typeof idf;
+    onUpdate({ id_format: merged });
+  };
+
+  const parseInteger = (raw: string): number | undefined => {
+    if (raw === "") return undefined;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border-color)",
+        borderRadius: "var(--border-radius)",
+        padding: "var(--space-sm) var(--space-md)",
+      }}
+    >
+      <div
+        style={{
+          fontSize: "var(--font-size-sm)",
+          fontWeight: 600,
+          marginBottom: "var(--space-xs)",
+        }}
+      >
+        ID format
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr 1fr",
+          gap: "var(--space-sm)",
+          alignItems: "end",
+        }}
+      >
+        <div>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Type</span>
+          <select
+            value="integer"
+            disabled
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          >
+            <option value="integer">Integer</option>
+          </select>
+        </div>
+        <div>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Min</span>
+          <input
+            type="number"
+            value={idf.min ?? ""}
+            onChange={(e) =>
+              writeIdFormat({ min: parseInteger(e.target.value) })
+            }
+            placeholder="1"
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          />
+        </div>
+        <div>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Max</span>
+          <input
+            type="number"
+            value={idf.max ?? ""}
+            onChange={(e) =>
+              writeIdFormat({ max: parseInteger(e.target.value) })
+            }
+            placeholder="unbounded"
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          />
+        </div>
+        <div>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Pad width</span>
+          <input
+            type="number"
+            value={idf.pad_width ?? ""}
+            onChange={(e) =>
+              writeIdFormat({ pad_width: parseInteger(e.target.value) })
+            }
+            placeholder="0"
+            style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+          />
+        </div>
+      </div>
+      <div style={helpStyle}>
+        IDs are integers in <code>[min, max]</code>. Pad width zero-pads the
+        local id when rendered in state keys — e.g. pad_width 3 renders
+        encoder 5 as <code>005</code>. v1 only supports integer IDs.
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Per-child state variables — mirrors StateVariableEditor's grid with
+// `cloud_priority` added in the second row.
+// ──────────────────────────────────────────────────────────────────────────
+function StateVarsSection({
+  type,
+  onUpdate,
+}: {
+  type: DriverChildEntityType;
+  onUpdate: (partial: Partial<DriverChildEntityType>) => void;
+}) {
+  const vars = type.state_variables ?? {};
+  const varNames = Object.keys(vars);
+
+  const writeVars = (next: Record<string, DriverChildStateVarDef>) => {
+    onUpdate({ state_variables: next });
+  };
+
+  const addVar = () => {
+    const name = `field_${varNames.length + 1}`;
+    writeVars({
+      ...vars,
+      [name]: { type: "string", label: "New Field" },
+    });
+  };
+
+  const removeVar = (name: string) => {
+    const next = { ...vars };
+    delete next[name];
+    writeVars(next);
+  };
+
+  const renameVar = (oldName: string, newName: string) => {
+    const cleaned = newName.replace(/[^a-zA-Z0-9_]/g, "").toLowerCase();
+    if (!cleaned || cleaned === oldName || cleaned in vars) return;
+    const next: typeof vars = {};
+    for (const [k, v] of Object.entries(vars)) {
+      next[k === oldName ? cleaned : k] = v;
+    }
+    writeVars(next);
+  };
+
+  const updateVar = (
+    name: string,
+    field: string,
+    value: unknown,
+  ) => {
+    const merged = { ...vars[name], [field]: value } as Record<string, unknown>;
+    if (value === undefined) delete merged[field];
+    writeVars({
+      ...vars,
+      [name]: merged as unknown as DriverChildStateVarDef,
+    });
+  };
+
+  return (
+    <div>
+      <div
+        style={{
+          fontSize: "var(--font-size-sm)",
+          fontWeight: 600,
+          marginBottom: "var(--space-xs)",
+        }}
+      >
+        State fields per {type.label || "child"}
+      </div>
+      <div
+        style={{
+          ...helpStyle,
+          marginTop: 0,
+          marginBottom: "var(--space-sm)",
+        }}
+      >
+        Each registered child gets one state key per field. The platform also
+        injects a boolean <code>online</code> and a string <code>label</code>
+        — you don't need to declare those.
+      </div>
+
+      {varNames.length > 0 && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr 1fr auto auto",
+            gap: "var(--space-sm)",
+            marginBottom: "var(--space-xs)",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Field ID</span>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Label</span>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Help</span>
+          <span style={{ ...labelStyle, fontSize: "11px" }}>Type</span>
+          <span />
+        </div>
+      )}
+
+      {varNames.map((name) => {
+        const v = vars[name];
+        const isNumeric = v.type === "integer" || v.type === "number";
+        const isEnum = v.type === "enum";
+        return (
+          <div key={name} style={{ marginBottom: "var(--space-xs)" }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr auto auto",
+                gap: "var(--space-sm)",
+                alignItems: "center",
+              }}
+            >
+              <input
+                data-testid={`child-field-id-${name}`}
+                value={name}
+                onChange={(e) => renameVar(name, e.target.value)}
+                style={{
+                  fontSize: "var(--font-size-sm)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              />
+              <input
+                value={v.label ?? ""}
+                onChange={(e) => updateVar(name, "label", e.target.value)}
+                placeholder={name}
+                style={{ fontSize: "var(--font-size-sm)" }}
+              />
+              <input
+                value={v.help ?? ""}
+                onChange={(e) =>
+                  updateVar(name, "help", e.target.value || undefined)
+                }
+                placeholder="Description..."
+                style={{ fontSize: "var(--font-size-sm)" }}
+              />
+              <select
+                value={v.type}
+                onChange={(e) => {
+                  const tt = e.target.value;
+                  updateVar(name, "type", tt);
+                  if (tt !== "integer" && tt !== "number") {
+                    updateVar(name, "min", undefined);
+                    updateVar(name, "max", undefined);
+                    updateVar(name, "step", undefined);
+                  }
+                  if (tt !== "enum") {
+                    updateVar(name, "values", undefined);
+                  }
+                }}
+                style={{ width: 100, fontSize: "var(--font-size-sm)" }}
+              >
+                <option value="string">String</option>
+                <option value="integer">Integer</option>
+                <option value="number">Number</option>
+                <option value="boolean">Boolean</option>
+                <option value="enum">Enum</option>
+              </select>
+              <button
+                onClick={() => removeVar(name)}
+                style={{ padding: "2px", color: "var(--text-muted)" }}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+
+            {(isNumeric || isEnum) && (
+              <div
+                style={{
+                  marginTop: "var(--space-xs)",
+                  marginLeft: "var(--space-sm)",
+                  paddingLeft: "var(--space-sm)",
+                  borderLeft: "2px solid var(--border-color)",
+                }}
+              >
+                {isNumeric && (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "100px 100px 100px 1fr",
+                      gap: "var(--space-sm)",
+                      alignItems: "center",
+                      marginBottom: "var(--space-xs)",
+                    }}
+                  >
+                    <input
+                      type="number"
+                      value={v.min ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        updateVar(
+                          name,
+                          "min",
+                          raw === ""
+                            ? undefined
+                            : v.type === "integer"
+                              ? parseInt(raw, 10)
+                              : parseFloat(raw),
+                        );
+                      }}
+                      placeholder="min"
+                      style={{ fontSize: "var(--font-size-sm)" }}
+                    />
+                    <input
+                      type="number"
+                      value={v.max ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        updateVar(
+                          name,
+                          "max",
+                          raw === ""
+                            ? undefined
+                            : v.type === "integer"
+                              ? parseInt(raw, 10)
+                              : parseFloat(raw),
+                        );
+                      }}
+                      placeholder="max"
+                      style={{ fontSize: "var(--font-size-sm)" }}
+                    />
+                    <input
+                      type="number"
+                      value={v.step ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        updateVar(
+                          name,
+                          "step",
+                          raw === "" ? undefined : parseFloat(raw),
+                        );
+                      }}
+                      placeholder="step"
+                      style={{ fontSize: "var(--font-size-sm)" }}
+                    />
+                    <div style={helpStyle}>Numeric bounds.</div>
+                  </div>
+                )}
+                {isEnum && (
+                  <div>
+                    <input
+                      value={(v.values ?? []).join(", ")}
+                      onChange={(e) => {
+                        const values = e.target.value
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean);
+                        updateVar(
+                          name,
+                          "values",
+                          values.length ? values : undefined,
+                        );
+                      }}
+                      placeholder="Comma-separated values, e.g.: idle, active, fault"
+                      style={{
+                        width: "100%",
+                        fontSize: "var(--font-size-sm)",
+                        fontFamily: "var(--font-mono)",
+                      }}
+                    />
+                    <div style={helpStyle}>
+                      Allowed enum values, separated by commas.
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div
+              style={{
+                marginTop: "var(--space-xs)",
+                marginLeft: "var(--space-sm)",
+                paddingLeft: "var(--space-sm)",
+                borderLeft: "2px solid var(--border-color)",
+                display: "grid",
+                gridTemplateColumns: "180px 1fr",
+                gap: "var(--space-sm)",
+                alignItems: "center",
+              }}
+            >
+              <select
+                value={v.cloud_priority ?? ""}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  updateVar(
+                    name,
+                    "cloud_priority",
+                    raw === "" ? undefined : raw,
+                  );
+                }}
+                style={{ fontSize: "var(--font-size-sm)" }}
+              >
+                <option value="">Cloud priority: default (5s)</option>
+                <option value="high">High (2s, like top-level)</option>
+                <option value="low">Low (30s, verbose state)</option>
+              </select>
+              <div style={helpStyle}>
+                How often the cloud agent flushes this field. Leave default
+                for ordinary per-child telemetry; mark{" "}
+                <strong>high</strong> for latency-sensitive routing/mute
+                fields and <strong>low</strong> for verbose per-IO state.
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      <button
+        data-testid="add-child-field"
+        onClick={addVar}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-xs)",
+          padding: "var(--space-sm) var(--space-md)",
+          borderRadius: "var(--border-radius)",
+          background: "var(--bg-hover)",
+          fontSize: "var(--font-size-sm)",
+          marginTop: "var(--space-sm)",
+        }}
+      >
+        <Plus size={14} /> Add Field
+      </button>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Presentation (summary_fields + label_field)
+// ──────────────────────────────────────────────────────────────────────────
+function PresentationSection({
+  type,
+  onUpdate,
+}: {
+  type: DriverChildEntityType;
+  onUpdate: (partial: Partial<DriverChildEntityType>) => void;
+}) {
+  const varNames = Object.keys(type.state_variables ?? {});
+  const summary = type.summary_fields ?? [];
+
+  const toggleSummary = (name: string, on: boolean) => {
+    const next = on
+      ? Array.from(new Set([...summary, name]))
+      : summary.filter((n) => n !== name);
+    onUpdate({ summary_fields: next.length ? next : undefined });
+  };
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "2fr 1fr",
+        gap: "var(--space-md)",
+      }}
+    >
+      <div>
+        <label style={labelStyle}>Summary fields</label>
+        <div style={helpStyle}>
+          Which fields appear as columns in the device's Child Entities tab
+          list view. Other fields stay visible in the expanded per-child
+          state.
+        </div>
+        {varNames.length === 0 ? (
+          <div
+            style={{
+              fontSize: "11px",
+              color: "var(--text-muted)",
+              fontStyle: "italic",
+              marginTop: 4,
+            }}
+          >
+            Add state fields above first.
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "var(--space-xs)",
+              marginTop: 4,
+            }}
+          >
+            {varNames.map((n) => (
+              <label
+                key={n}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: "var(--font-size-sm)",
+                  padding: "2px var(--space-xs)",
+                  borderRadius: "var(--border-radius)",
+                  background: "var(--bg-hover)",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={summary.includes(n)}
+                  onChange={(e) => toggleSummary(n, e.target.checked)}
+                />
+                <span style={{ fontFamily: "var(--font-mono)" }}>{n}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <label style={labelStyle}>Device-set name field</label>
+        <select
+          value={type.label_field ?? ""}
+          onChange={(e) =>
+            onUpdate({ label_field: e.target.value || undefined })
+          }
+          style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+        >
+          <option value="">(none)</option>
+          {varNames.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <div style={helpStyle}>
+          Which field carries the controller-owned name. The user's friendly
+          label is separate and lives in the project file.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export { TYPE_ID_RE as CHILD_TYPE_ID_RE };

@@ -414,6 +414,7 @@ Notice how much cleaner this is compared to JSON: comments explain the protocol,
 | `config_schema` | No | Describes config fields shown in "Add Device" dialog. |
 | `device_settings` | No | Configurable settings that live on the device. See below. |
 | `state_variables` | No | State properties this driver exposes. |
+| `child_entity_types` | No | Sub-units this device manages (encoders, decoders, zones, presets). See below. |
 | `commands` | No | Commands this driver can send. |
 | `responses` | No | Regex patterns for parsing device replies. |
 | `auth` | No | Login handshake performed between TCP connect and `on_connect`. See `auth` section below. |
@@ -524,6 +525,42 @@ Types: `string`, `integer`, `number`, `float`, `boolean`, `enum`.
 
 The optional `help` field provides a description shown in the Driver Builder UI and available to the AI assistant.
 
+#### `child_entity_types` entry
+
+Some devices are really a controller for many sub-units: a video matrix manages hundreds of encoders and decoders, a DSP has dozens of zones, a presentation switcher has video-wall presets. Declaring `child_entity_types` lets the driver register those sub-units as **child entities** so each gets its own state, its own row in the device's Child Entities tab, and addressable state keys (`device.<id>.<type>.<local_id>.<property>`) — without inventing your own key conventions.
+
+Drivers that don't declare `child_entity_types` behave exactly as before: one flat device.
+
+```yaml
+child_entity_types:
+  encoder:
+    label: Encoder
+    label_plural: Encoders
+    id_format:
+      type: integer      # only integer IDs are supported
+      min: 1
+      max: 762
+      pad_width: 3       # render encoder 5 as "005" in state keys
+    state_variables:
+      name: { type: string }
+      ip: { type: string }
+      signal_present: { type: boolean, cloud_priority: high }
+      edid_block: { type: string, cloud_priority: low }
+    summary_fields: [name, ip, signal_present]
+    label_field: name
+```
+
+- `label` / `label_plural`: Human-readable names shown in the IDE.
+- `id_format`: How the controller addresses this sub-unit. `type` is `integer` (the only supported kind today). `min`/`max` bound the valid range; `pad_width` zero-pads the ID when it appears in state keys.
+- `state_variables`: Same shape as device `state_variables` (types: `string`, `integer`, `number`, `float`, `boolean`, `enum`). The platform always adds a boolean `online` and a string `label` per child, so you don't declare those. Each variable may carry an optional `cloud_priority`:
+  - `high` — relayed to the cloud at the fast top-level cadence (for latency-sensitive fields like routing or mute).
+  - `low` — relayed at the slow verbose cadence (for chatty per-IO state).
+  - omitted — the default per-child cadence.
+- `summary_fields`: Which fields show as columns in the Child Entities list (the rest stay in the expanded per-child view).
+- `label_field`: Which field carries the controller's own name for the unit. The user's friendly label is separate and lives in the project file.
+
+Python drivers declare the same block in `DRIVER_INFO` and register instances at runtime with `self.register_child(type, local_id, initial_state=...)`, update them with `set_child_state` / `set_children_state_batch`, and remove them with `deregister_child`. See the BaseDriver child-entity API for details.
+
 #### `commands` entry
 
 ```yaml
@@ -538,6 +575,17 @@ set_input:
 - `send`: The raw bytes to send. `{param_name}` placeholders are substituted at runtime. Config values like `{set_id}` are also available. Supported escape sequences: `\r`, `\n`, `\t`, `\\`, `\xHH` (hex byte). (The key `string` is accepted as an alias.)
 - `help`: Optional description of what the command does. Shown in the Programmer IDE command testing panel, macro editor, UI builder, and used by the AI assistant to understand commands.
 - `params`: Parameter definitions. Each key matches a `{placeholder}` in the send string. Each parameter can include an optional `help` field describing what values are expected.
+
+Parameter types are `string`, `integer`, `number`, `boolean`, `enum`, and `child_id`. A `child_id` parameter targets one of the driver's declared `child_entity_types` — set `child_type` to the type name. The command picker offers a dropdown of that device's registered children, and the integer local ID is substituted into the `{placeholder}`:
+
+```yaml
+route_decoder:
+  label: Route Decoder
+  send: "SET DEC {decoder_id} SWITCH {encoder_id}\r"
+  params:
+    decoder_id: { type: child_id, child_type: decoder, required: true }
+    encoder_id: { type: child_id, child_type: encoder, required: true }
+```
 
 #### `responses` entry
 
