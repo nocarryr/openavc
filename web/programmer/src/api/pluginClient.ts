@@ -137,7 +137,21 @@ export interface PluginExtension {
   type?: string;
   renderer_url?: string;
   default_size?: { col_span: number; row_span: number };
-  config_schema?: Array<{ key: string; label: string; type: string; default?: unknown; options?: string[] }>;
+  config_schema?: Array<{
+    key: string;
+    label: string;
+    type: string;
+    default?: unknown;
+    /** Static options for `select` type. */
+    options?: string[];
+    /**
+     * For `select` type: state key whose JSON-encoded value populates the
+     * dropdown. Plugins must publish a JSON string like
+     * `'[{"value": "a", "label": "A"}, ...]'` because state values are flat
+     * primitives. Mirrors the plugin macro action convention.
+     */
+    options_source?: string;
+  }>;
 }
 
 // --- Plugin Browse / Install ---

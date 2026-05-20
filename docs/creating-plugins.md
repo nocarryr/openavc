@@ -85,10 +85,39 @@ EXTENSIONS = {
 | `label` | Yes | Human-readable name shown in the Element Palette |
 | `renderer` | Yes | Always `"iframe"` |
 | `renderer_url` | Yes | Path to the HTML file (relative to the plugin's `panel/` directory) |
-| `default_size` | Yes | Default grid size when dragged onto the canvas: `{"col_span": N, "row_span": N}` |
-| `config_schema` | No | Array of configuration fields for the IDE Properties panel (same field types as plugin config: `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `macro_ref`, `device_ref`) |
+| `default_size` | Yes | Default grid size when dragged onto the canvas: `{"col_span": N, "row_span": N}`. The UI Builder uses this on drop and on click-to-add; if you omit it the element falls back to 4×3 cells. |
+| `config_schema` | No | Array of configuration fields for the IDE Properties panel (same field types as plugin config: `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `macro_ref`, `device_ref`). See "Select options" below for static vs. dynamic dropdowns. |
 | `sandbox_permissions` | No | Extra `iframe.sandbox` tokens beyond the default `allow-scripts`. See "Iframe Permissions" below for the whitelist. |
 | `allow_features` | No | Permissions-Policy tokens applied via the iframe's `allow` attribute. See "Iframe Permissions" below for the whitelist. |
+
+### Select Options
+
+A `select` field can populate its dropdown from a static list or from runtime state.
+
+**Static options** — fixed list set at declaration time:
+
+```python
+{"key": "fit", "label": "Fit", "type": "select",
+ "options": ["contain", "cover"], "default": "contain"}
+```
+
+**Dynamic options from state** — list driven by a plugin state key. State values must be flat primitives, so the plugin publishes the option list as a JSON-encoded string of `[{"value": ..., "label": ...}, ...]`:
+
+```python
+{"key": "stream_id", "label": "Stream", "type": "select",
+ "options_source": "plugin.my_plugin.stream_ids"}
+```
+
+And in the plugin code, when the list changes:
+
+```python
+self.api.set_state(
+    "plugin.my_plugin.stream_ids",
+    json.dumps([{"value": s.id, "label": s.name} for s in streams]),
+)
+```
+
+The Properties panel re-renders the dropdown whenever the source state changes. If the currently-selected value isn't in the published list (e.g. the plugin hasn't started yet, or the user renamed the option), the stale value still shows as a selectable option so it doesn't silently switch. This mirrors the convention used by plugin macro action params.
 
 ### Iframe Permissions
 

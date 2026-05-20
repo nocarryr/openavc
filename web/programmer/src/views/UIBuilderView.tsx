@@ -21,6 +21,7 @@ import { showError } from "../store/toastStore";
 import { useProjectStore } from "../store/projectStore";
 import { useUIBuilderStore } from "../store/uiBuilderStore";
 import { useNavigationStore } from "../store/navigationStore";
+import { usePluginStore } from "../store/pluginStore";
 import { ElementPalette } from "../components/ui-builder/ElementPalette";
 import { OutlinePanel } from "../components/ui-builder/OutlinePanel";
 import { Canvas } from "../components/ui-builder/Canvas";
@@ -94,6 +95,7 @@ export function UIBuilderView() {
   const setContextMenu = useUIBuilderStore((s) => s.setContextMenu);
   const setActiveDragSource = useUIBuilderStore((s) => s.setActiveDragSource);
   const activeDragSource = useUIBuilderStore((s) => s.activeDragSource);
+  const panelElements = usePluginStore((s) => s.extensions.panel_elements);
 
   const [showSettings, setShowSettings] = useState(false);
   const openGlobalShortcuts = useCallback(() => {
@@ -794,7 +796,7 @@ export function UIBuilderView() {
       if (data?.source === "canvas" && data?.elementId && cp) {
         draggedElement.current = cp.elements.find((e) => e.id === data.elementId) || null;
       } else if (data?.source === "palette" && data?.elementType) {
-        draggedElement.current = createDefaultElement(data.elementType, 1, 1, new Set());
+        draggedElement.current = createDefaultElement(data.elementType, 1, 1, new Set(), panelElements);
       } else {
         draggedElement.current = null;
       }
@@ -842,7 +844,7 @@ export function UIBuilderView() {
         }
       }
     },
-    [setActiveDragSource, pages, selectedPageId],
+    [setActiveDragSource, pages, selectedPageId, panelElements],
   );
 
   const handleDragEnd = useCallback(
@@ -891,6 +893,7 @@ export function UIBuilderView() {
           col,
           row,
           existingIds,
+          panelElements,
         );
         applyMutation(
           (p) => addElementToPage(p, currentPage.id, newElement),
@@ -924,7 +927,7 @@ export function UIBuilderView() {
 
       dragStartPointer.current = null;
     },
-    [currentPage, pages, project, applyMutation, selectElement, setActiveDragSource],
+    [currentPage, pages, project, applyMutation, selectElement, setActiveDragSource, panelElements],
   );
 
   const handleDragCancel = useCallback(() => {
@@ -1138,7 +1141,7 @@ export function UIBuilderView() {
                               if (!occupied.has(`${c},${r}`)) { col = c; row = r; r = gridRows + 1; break; }
                             }
                           }
-                          const newElement = createDefaultElement(type, col, row, existingIds);
+                          const newElement = createDefaultElement(type, col, row, existingIds, panelElements);
                           applyMutation(
                             (p) => addElementToPage(p, currentPage.id, newElement),
                             `Add ${type}`,

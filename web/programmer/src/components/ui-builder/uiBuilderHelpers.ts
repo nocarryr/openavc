@@ -1,4 +1,5 @@
 import type { UIPage, UIElement, GridArea, MasterElement, PageGroup, MacroConfig, MacroStep, VariableConfig, ScriptConfig, ProjectConfig } from "../../api/types";
+import type { PluginExtension } from "../../api/pluginClient";
 
 // --- Binding type definitions ---
 
@@ -128,6 +129,7 @@ export function createDefaultElement(
   col: number,
   row: number,
   existingIds: Set<string>,
+  panelElements: PluginExtension[] = [],
 ): UIElement {
   const id = generateId(type, existingIds);
   const base: UIElement = {
@@ -312,6 +314,11 @@ export function createDefaultElement(
         const parts = type.split(":");
         const pluginId = parts[1];
         const pluginType = parts.slice(2).join(":");
+        const ext = panelElements.find(
+          (e) => e.plugin_id === pluginId && e.type === pluginType,
+        );
+        const colSpan = ext?.default_size?.col_span ?? 4;
+        const rowSpan = ext?.default_size?.row_span ?? 3;
         return {
           ...base,
           type: "plugin",
@@ -319,7 +326,7 @@ export function createDefaultElement(
           plugin_type: pluginType,
           plugin_id: pluginId,
           plugin_config: {},
-          grid_area: { col, row, col_span: 4, row_span: 3 },
+          grid_area: { col, row, col_span: colSpan, row_span: rowSpan },
         };
       }
       return { ...base, label: type };

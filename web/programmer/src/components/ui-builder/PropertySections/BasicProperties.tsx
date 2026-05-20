@@ -6,6 +6,7 @@ import { IconPicker } from "../IconPicker";
 import { AssetPicker } from "../AssetPicker";
 import { InlineColorPicker } from "../../shared/InlineColorPicker";
 import { usePluginStore } from "../../../store/pluginStore";
+import { useConnectionStore } from "../../../store/connectionStore";
 import { showInfo } from "../../../store/toastStore";
 
 interface MatrixPreset {
@@ -1468,16 +1469,13 @@ function PluginElementConfig({
                   checked={config[field.key] != null ? !!config[field.key] : !!field.default}
                   onChange={(e) => onChange({ ...config, [field.key]: e.target.checked })}
                 />
-              ) : field.type === "select" && field.options ? (
-                <select
+              ) : field.type === "select" && (field.options || field.options_source) ? (
+                <PluginConfigSelect
                   value={String(config[field.key] ?? field.default ?? "")}
-                  onChange={(e) => onChange({ ...config, [field.key]: e.target.value })}
-                  style={{ flex: 1 }}
-                >
-                  {field.options.map((opt) => (
-                    <option key={opt} value={opt}>{opt}</option>
-                  ))}
-                </select>
+                  staticOptions={field.options}
+                  optionsSource={field.options_source}
+                  onChange={(v) => onChange({ ...config, [field.key]: v })}
+                />
               ) : field.type === "integer" || field.type === "float" ? (
                 <input
                   type="number"
@@ -1528,6 +1526,81 @@ function PluginElementConfig({
       )}
     </>
   );
+}
+
+/**
+ * Dropdown for a plugin panel-element config field whose options come from
+ * either a static list (`options`) or a plugin state key (`options_source`).
+ * State-sourced lists are JSON-encoded strings of `[{value, label}, ...]`
+ * (state values are flat primitives so the array can't be stored directly).
+ * Mirrors the macro builder's `resolveOptionsSource` contract.
+ */
+function PluginConfigSelect({
+  value,
+  staticOptions,
+  optionsSource,
+  onChange,
+}: {
+  value: string;
+  staticOptions?: string[];
+  optionsSource?: string;
+  onChange: (v: string) => void;
+}) {
+  const rawStateValue = useConnectionStore((s) =>
+    optionsSource ? s.liveState[optionsSource] : undefined,
+  );
+
+  let options: Array<{ value: string; label: string }> = [];
+  if (staticOptions && staticOptions.length > 0) {
+    options = staticOptions.map((o) => ({ value: o, label: o }));
+  } else if (optionsSource) {
+    options = parseOptionsSourceValue(rawStateValue);
+  }
+
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{ flex: 1 }}
+    >
+      {/* Always include the current value as an option so an unknown stream
+          (e.g. plugin not yet started, or the stream was renamed) stays
+          visible rather than silently switching to the first option. */}
+      {value !== "" && !options.some((o) => o.value === value) && (
+        <option value={value}>{value}</option>
+      )}
+      {options.length === 0 && value === "" && (
+        <option value="" disabled>
+          {optionsSource ? "(no options published yet)" : "(no options)"}
+        </option>
+      )}
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>{opt.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function parseOptionsSourceValue(raw: unknown): Array<{ value: string; label: string }> {
+  if (typeof raw !== "string" || !raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: Array<{ value: string; label: string }> = [];
+  for (const item of parsed) {
+    if (item && typeof item === "object" && "value" in item) {
+      const v = (item as { value: unknown }).value;
+      const l = (item as { label?: unknown }).label;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+        out.push({ value: String(v), label: typeof l === "string" ? l : String(v) });
+      }
+    }
+  }
+  return out;
 }
 
 function GaugeZonesEditor({
