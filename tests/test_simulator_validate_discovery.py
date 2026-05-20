@@ -32,6 +32,22 @@ def test_picks_up_annotated_driver_info(tmp_path):
     assert found == [(driver, "python")]
 
 
+def test_picks_up_class_scoped_driver_info(tmp_path):
+    """DRIVER_INFO declared as a class attribute on a BaseDriver subclass — the
+    convention every Python driver in openavc-drivers actually uses — is a real
+    driver. (Before this, only module-level DRIVER_INFO was detected, so the
+    whole Python-driver fleet was silently skipped by the validator.)
+    """
+    driver = _write(
+        tmp_path / "classy.py",
+        "from base import BaseDriver\n\n\n"
+        "class FooDriver(BaseDriver):\n"
+        "    DRIVER_INFO = {'id': 'foo'}\n",
+    )
+    assert _is_python_driver(driver)
+    assert find_drivers(driver) == [(driver, "python")]
+
+
 def test_ignores_files_only_mentioning_driver_info(tmp_path):
     """Regression for A31: a script that mentions DRIVER_INFO in comments,
     docstrings, or string literals — but never assigns it at the top level —

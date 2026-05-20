@@ -752,18 +752,30 @@ def _extract_respond_calls(handler_code: str) -> list[str]:
 
 
 def _is_python_driver(path: Path) -> bool:
-    """True only when the file has a top-level `DRIVER_INFO = {...}` assignment.
+    """True only when the file has a `DRIVER_INFO = {...}` assignment, either at
+    module level or as a class attribute.
 
-    A plain substring match for "DRIVER_INFO" also catches build scripts,
+    Python drivers almost always define `DRIVER_INFO` as a class attribute on
+    their `BaseDriver` subclass (`class FooDriver(BaseDriver): DRIVER_INFO =
+    {...}`), so we check both module-level statements and the bodies of
+    module-level classes. Function-local assignments are deliberately ignored
+    (a helper that builds a throwaway dict named DRIVER_INFO is not a driver).
+
+    A plain substring match for "DRIVER_INFO" would also catch build scripts,
     docs, and helpers that mention the name in a comment or string literal
-    (e.g. `scripts/build_index.py`), then the validator reports them as
-    broken drivers. Parsing the AST keeps the check honest.
+    (e.g. `scripts/build_index.py`), then the validator reports them as broken
+    drivers. Parsing the AST keeps the check honest.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, OSError, UnicodeDecodeError):
         return False
+    # Module-level statements plus the bodies of module-level classes.
+    candidates = list(tree.body)
     for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            candidates.extend(node.body)
+    for node in candidates:
         if isinstance(node, ast.Assign):
             if any(
                 isinstance(t, ast.Name) and t.id == "DRIVER_INFO"
