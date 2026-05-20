@@ -323,6 +323,7 @@ log.info(f"Cancelled {count} timers")
 | Pattern | Example | Description |
 |---------|---------|-------------|
 | `device.<id>.<property>` | `device.projector_main.power` | Device state |
+| `device.<id>.<type>.<local_id>.<property>` | `device.matrix_main.encoder.005.signal_present` | Child-entity state (sub-units like encoders, zones, presets). Read it, subscribe with `@on_state_change`, and use it in conditions exactly like any other key. |
 | `var.<name>` | `var.room_active` | User-defined variable |
 | `ui.<id>.<property>` | `ui.vol_slider.value` | UI element state |
 | `system.<property>` | `system.uptime` | System state |

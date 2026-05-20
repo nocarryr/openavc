@@ -47,6 +47,21 @@ Every device exposes state variables at `device.<id>.<property>`. Examples:
 
 These state keys are the building blocks of your system. They appear in UI bindings, macros, triggers, and scripts. You do not need to memorize them. The IDE provides autocomplete and pickers everywhere a state key is needed.
 
+## Child Entities
+
+Some devices are really a controller for many sub-units. An AV-over-IP matrix manages hundreds of encoders and decoders, a DSP has dozens of zones, a presentation switcher has video-wall presets. When a device's driver supports this, its detail panel gains a **Child Entities** tab. Devices without sub-units don't show the tab.
+
+The tab groups the sub-units by type (Encoders, Decoders, Zones, and so on), each in its own list with a live count. For each type you get:
+
+- **A searchable, scrollable list.** Filter by ID, label, or the device-reported name. The list stays fast even with thousands of entries.
+- **Summary columns** chosen by the driver, plus an online indicator, so you can scan status at a glance.
+- **Inline labels.** Click a row's label to give the sub-unit a friendly name ("Lobby TV", "Stage Camera"). Your label is saved in the project and is separate from the name the device reports for itself. Labels are what show up in pickers when you build panels, macros, and routing.
+- **Refresh from Device.** Re-poll the controller so newly added or removed sub-units appear without reloading.
+
+Each sub-unit's state is addressable everywhere a state key is, using the pattern `device.<id>.<type>.<local_id>.<property>` (for example `device.matrix_main.encoder.005.signal_present`). You rarely type these by hand. The pickers in UI bindings, macros, triggers, and scripts surface them for you.
+
+Commands that act on a specific sub-unit (route this decoder to that encoder, recall this preset) take the sub-unit as a parameter and present a dropdown of the available children when you run them.
+
 ## Device Management
 
 The device detail panel includes several management actions:
