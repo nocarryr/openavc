@@ -68,32 +68,48 @@ def _check_credentials(provided_user: str, provided_pass: str) -> bool:
     return user_ok and pass_ok
 
 
+def programmer_auth_satisfied(
+    request: Request,
+    credentials: HTTPBasicCredentials | None,
+) -> bool:
+    """Return True if the request carries valid programmer auth (or none is required).
+
+    Checks (in order):
+    1. No password / API key configured — open instance, always True.
+    2. X-API-Key header.
+    3. HTTP Basic credentials (username and password both checked when a
+       username is configured; password-only when no username is set).
+
+    Non-raising so callers that compose auth schemes (e.g. plugin routers that
+    also accept a plugin token) can fall through to their own checks.
+    """
+    pw = _get_password()
+    api_key = _get_api_key()
+
+    if not pw and not api_key:
+        return True
+
+    provided_key = request.headers.get("x-api-key", "")
+    if provided_key and api_key and _check_api_key(provided_key):
+        return True
+
+    if credentials and pw:
+        if _check_credentials(credentials.username, credentials.password):
+            return True
+
+    return False
+
+
 async def require_programmer_auth(
     request: Request,
     credentials: HTTPBasicCredentials | None = Depends(_basic),
 ) -> None:
     """FastAPI dependency: require programmer-level auth on protected routes.
 
-    Checks (in order):
-    1. X-API-Key header
-    2. HTTP Basic credentials (username and password both checked when a
-       username is configured; password-only when no username is set)
-
     If neither PROGRAMMER_PASSWORD nor API_KEY is configured, access is open.
     """
-    pw = _get_password()
-    api_key = _get_api_key()
-
-    if not pw and not api_key:
+    if programmer_auth_satisfied(request, credentials):
         return
-
-    provided_key = request.headers.get("x-api-key", "")
-    if provided_key and api_key and _check_api_key(provided_key):
-        return
-
-    if credentials and pw:
-        if _check_credentials(credentials.username, credentials.password):
-            return
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

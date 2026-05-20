@@ -156,6 +156,27 @@ class PanelApp {
         }
     }
 
+    // Fetch a plugin-scoped token for a panel_elements iframe that declared
+    // ext_auth. Uses the patched fetch so the request is authenticated; the
+    // token is forwarded to the iframe via openavc:init so it can reach its
+    // plugin's /api/plugins/<id>/ext/* routes. Returns undefined when the
+    // instance is open (empty token) or on any error.
+    async _fetchPluginExtToken(pluginId) {
+        const pathParts = location.pathname.split('/panel');
+        const basePath = pathParts[0] || '';
+        try {
+            const res = await fetch(
+                `${basePath}/api/plugins/${encodeURIComponent(pluginId)}/ext-token`
+            );
+            if (!res.ok) return undefined;
+            const data = await res.json();
+            return data && data.token ? data.token : undefined;
+        } catch (err) {
+            console.warn('[panel] failed to fetch plugin ext token:', err);
+            return undefined;
+        }
+    }
+
     async start() {
         // Any embedded iframe accepts project updates from the parent programmer
         // window. Preview mode embeds the iframe but still opens WS for live state;
@@ -3147,7 +3168,7 @@ class PanelApp {
         // postMessage API: send initial config + theme + state snapshot
         // when iframe loads. The state snapshot is filtered to the plugin's
         // own namespace (plugin.<id>.*) so iframes don't see unrelated keys.
-        iframe.addEventListener('load', () => {
+        iframe.addEventListener('load', async () => {
             loadingIndicator.remove();
             const themeVars = {};
             const root = document.documentElement;
@@ -3165,12 +3186,22 @@ class PanelApp {
                     stateSnapshot[key] = value;
                 }
             }
+            // Plugins that call their own /ext/* routes declare ext_auth. Fetch
+            // a plugin-scoped token (our fetch is already authenticated) and pass
+            // it in — the sandboxed iframe can't carry our credentials itself, so
+            // it presents this token instead.
+            let extToken;
+            if (extDef && extDef.ext_auth) {
+                extToken = await this._fetchPluginExtToken(pluginId);
+            }
+            if (!iframe.contentWindow) return;  // element removed during await
             iframe.contentWindow.postMessage({
                 type: 'openavc:init',
                 config: element.plugin_config || {},
                 theme: themeVars,
                 state: stateSnapshot,
                 elementId: element.id,
+                ext_token: extToken,
             }, '*');  // sandboxed iframe has opaque origin; source check provides security
         });
 

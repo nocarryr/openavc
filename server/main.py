@@ -209,6 +209,14 @@ assets_api.set_engine(engine)
 themes_api.set_engine(engine)
 ai_proxy_api.set_engine(engine)
 
+# Let plugins mount HTTP routers under /api/plugins/<id>/ext/* at runtime.
+# The loader calls these when such a plugin starts/stops; the app lives here.
+from server.api.plugin_ext import mount_plugin_router, unmount_plugin_router
+engine.plugin_loader.set_router_hooks(
+    lambda plugin_id, router: mount_plugin_router(app, plugin_id, router),
+    lambda plugin_id: unmount_plugin_router(app, plugin_id),
+)
+
 # Wire discovery engine
 discovery_api.set_discovery_engine(discovery_engine)
 discovery_api.set_broadcast_fn(engine.broadcast_ws)

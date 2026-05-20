@@ -34,6 +34,7 @@ VALID_CAPABILITIES = {
     "state_read", "state_write", "variable_write",
     "event_emit", "event_subscribe",
     "macro_execute", "device_command", "network_listen", "usb_access",
+    "http_endpoints",
 }
 
 # Valid category values
@@ -295,10 +296,24 @@ class PluginLoader:
         self._callback_failures: dict[str, int] = {}
         # Config save callback
         self._save_config_fn = None
+        # Router mount/unmount hooks (set by main.py, which owns the app).
+        # Called when a plugin that registered an APIRouter starts/stops.
+        self._mount_router_fn = None
+        self._unmount_router_fn = None
 
     def set_save_config_fn(self, fn):
         """Set the callback for saving plugin config to the project file."""
         self._save_config_fn = fn
+
+    def set_router_hooks(self, mount_fn, unmount_fn):
+        """Set callbacks that mount/unmount a plugin's registered HTTP router.
+
+        mount_fn(plugin_id, router) is called after a plugin that called
+        api.register_router() starts; unmount_fn(plugin_id) is called on stop.
+        Wired by main.py because the FastAPI app lives there, not in the loader.
+        """
+        self._mount_router_fn = mount_fn
+        self._unmount_router_fn = unmount_fn
 
     # ──── Discovery ────
 
@@ -630,6 +645,15 @@ class PluginLoader:
             self._state.set(f"plugin.{plugin_id}.missing", None, source="system")
             self._state.set(f"plugin.{plugin_id}.missing_reason", None, source="system")
 
+            # Mount any HTTP router the plugin registered during start()
+            if registry.http_router is not None and self._mount_router_fn:
+                try:
+                    self._mount_router_fn(plugin_id, registry.http_router)
+                except Exception:  # Don't let a mount failure abort a started plugin
+                    log.exception(
+                        f"Failed to mount HTTP router for plugin '{plugin_id}'"
+                    )
+
             await self._events.emit("plugin.started", {"plugin_id": plugin_id})
             log.info(f"Plugin '{plugin_id}' started (v{info.get('version', '?')})")
             return True
@@ -666,6 +690,13 @@ class PluginLoader:
 
         if registry is not None:
             await registry.cleanup(self._state, self._events)
+
+        # Remove any HTTP routes the plugin had mounted
+        if self._unmount_router_fn:
+            try:
+                self._unmount_router_fn(plugin_id)
+            except Exception:  # Teardown best-effort; never block stop
+                log.exception(f"Failed to unmount HTTP router for plugin '{plugin_id}'")
 
         self._status[plugin_id] = "stopped"
         self._errors.pop(plugin_id, None)

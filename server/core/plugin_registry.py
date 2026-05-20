@@ -23,6 +23,11 @@ class PluginRegistry:
         self.state_keys_set: set[str] = set()
         self.managed_tasks: list[asyncio.Task] = []
         self.periodic_task_ids: list[str] = []
+        # FastAPI APIRouter the plugin registered via api.register_router().
+        # Mounted under /api/plugins/<id>/ext/* by the engine after start;
+        # unmounted on stop. Route teardown is handled by the loader's
+        # router hooks, not registry.cleanup().
+        self.http_router = None
 
     def track_state_subscription(self, sub_id: str) -> None:
         self.state_subscriptions.append(sub_id)

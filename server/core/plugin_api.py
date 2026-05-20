@@ -17,6 +17,13 @@ from server.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Hop-by-hop headers that must not be forwarded across a proxy boundary
+# (RFC 7230 §6.1). Stripped in both directions by PluginAPI.proxy_to.
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+})
+
 
 class PluginPermissionError(Exception):
     """Raised when a plugin attempts an action it hasn't declared."""
@@ -220,6 +227,73 @@ class PluginAPI:
         """Send a command to a device. Requires: device_command."""
         self._require("device_command")
         return await self._devices.send_command(device_id, command, params)
+
+    # ──── HTTP Endpoints ────
+
+    def register_router(self, router) -> None:
+        """Mount a FastAPI ``APIRouter`` under ``/api/plugins/<id>/ext/*``.
+
+        Requires: http_endpoints.
+
+        Call this from ``start()``. The engine mounts the router after the
+        plugin starts and removes it on stop. Routes are reachable from the
+        authenticated Programmer IDE (HTTP Basic / X-API-Key) and from this
+        plugin's own sandboxed panel iframe. The iframe cannot attach
+        programmer credentials, so the platform mints a plugin-scoped token,
+        injects it into the iframe as ``openavc:init.ext_token``, and the
+        iframe presents it in the ``X-OpenAVC-Plugin-Token`` header. Both
+        paths are accepted automatically; the plugin author writes ordinary
+        route handlers.
+
+        Define routes relative to the mount point — a handler decorated
+        ``@router.post("/whep/{stream_id}")`` is served at
+        ``/api/plugins/<id>/ext/whep/{stream_id}``.
+        """
+        self._require("http_endpoints")
+        from fastapi import APIRouter
+
+        if not isinstance(router, APIRouter):
+            raise TypeError(
+                "register_router expects a fastapi.APIRouter, "
+                f"got {type(router).__name__}"
+            )
+        self._registry.http_router = router
+
+    async def proxy_to(self, url: str, request, *, timeout: float = 30.0):
+        """Proxy an incoming request to ``url`` and return the upstream response.
+
+        Buffered pass-through (httpx) sized for small request/response bodies
+        such as WHEP SDP signaling — forwards the method, query string, body,
+        and headers (minus host / hop-by-hop). Not for streaming media.
+        """
+        import httpx
+        from starlette.responses import Response
+
+        body = await request.body()
+        fwd_headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in _HOP_BY_HOP and k.lower() not in ("host", "content-length")
+        }
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            upstream = await client.request(
+                request.method,
+                url,
+                content=body,
+                headers=fwd_headers,
+                params=dict(request.query_params),
+            )
+        resp_headers = {
+            k: v
+            for k, v in upstream.headers.items()
+            if k.lower() not in _HOP_BY_HOP
+            and k.lower() not in ("content-length", "content-encoding")
+        }
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers=resp_headers,
+        )
 
     # ──── Background Tasks ────
 

@@ -462,6 +462,24 @@ async def get_plugin_data_info_endpoint(plugin_id: str) -> dict[str, Any]:
         raise _api_error(422, f"Invalid plugin id '{plugin_id}'", e)
 
 
+@router.get("/plugins/{plugin_id}/ext-token")
+async def get_plugin_ext_token(plugin_id: str) -> dict[str, Any]:
+    """Mint a short-lived, plugin-scoped token for the plugin's panel iframe.
+
+    The panel runtime fetches this (authenticated as the programmer) and hands
+    it to the plugin iframe via `openavc:init.ext_token`; the iframe presents
+    it to the plugin's `/api/plugins/{id}/ext/*` routes, which can't otherwise
+    carry programmer credentials. When no auth is configured the instance is
+    open, so an empty token is returned with `auth_required: false`.
+    """
+    from server.api.plugin_ext import auth_required, mint_plugin_token
+
+    if not auth_required():
+        return {"token": "", "expires_at": 0, "auth_required": False}
+    token, expires_at = mint_plugin_token(plugin_id)
+    return {"token": token, "expires_at": expires_at, "auth_required": True}
+
+
 @router.delete("/plugins/{plugin_id}")
 async def uninstall_plugin_endpoint(
     plugin_id: str,
