@@ -163,7 +163,7 @@ export function ChildEntities({ deviceId }: { deviceId: string }) {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter by id, label, or name"
+            placeholder="Filter by id, label, name, or any value"
             data-testid="child-search"
             style={{
               width: "100%",
@@ -306,15 +306,19 @@ function ChildEntityList({
     const term = search.trim().toLowerCase();
     if (!term) return entries;
     return entries.filter((entry) => {
-      const liveS = liveStateForChild(entry);
       const labelOverride = labelOverrides[entry.local_id];
-      const haystacks = [
-        String(entry.local_id),
-        entry.local_id_padded,
-        labelOverride ?? entry.label,
-        String(liveS.name ?? ""),
-      ];
-      return haystacks.some((h) => h.toLowerCase().includes(term));
+      if (String(entry.local_id).includes(term)) return true;
+      if (entry.local_id_padded.toLowerCase().includes(term)) return true;
+      if ((labelOverride ?? entry.label).toLowerCase().includes(term)) return true;
+      // Match any of the child's state field values (name, ip, mac, gen, …)
+      // so a child can be found by any of its data, not just id / label.
+      // ~28 fields × 1500 children stays well within a keystroke budget.
+      const liveS = liveStateForChild(entry);
+      for (const v of Object.values(liveS)) {
+        if (v === null || v === undefined || v === "") continue;
+        if (String(v).toLowerCase().includes(term)) return true;
+      }
+      return false;
     });
   }, [entries, search, liveStateForChild, labelOverrides]);
 

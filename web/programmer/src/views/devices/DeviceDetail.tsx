@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { Send, Pencil, Trash2, Wifi, Power, RefreshCw, Copy, Settings, Check, X, Loader2 } from "lucide-react";
+import { Send, Pencil, Trash2, Wifi, Power, RefreshCw, Copy, Settings, Check, X, Loader2, Search, ChevronDown } from "lucide-react";
 import { CopyButton } from "../../components/shared/CopyButton";
 import { DeviceStatusDot } from "../../components/shared/DeviceStatusDot";
 import { useProjectStore } from "../../store/projectStore";
@@ -95,13 +95,33 @@ export function DeviceDetail({
     }
   };
 
+  // Drivers that manage child entities declare them in DRIVER_INFO; those
+  // keys (device.<id>.<type>.<paddedId>.<prop>) belong to the Child Entities
+  // tab, not this flat list — a fully-loaded controller has tens of thousands
+  // of them. We hide them here only; the StateStore, scripts, macros,
+  // triggers, and the cloud relay still see every key (presentation only).
+  const childTypeNames = useMemo(() => {
+    const cet = deviceInfo?.driver_info?.child_entity_types as
+      | Record<string, unknown>
+      | undefined;
+    return cet ? new Set(Object.keys(cet)) : new Set<string>();
+  }, [deviceInfo]);
+
   // Extract device state from flat liveState
   const prefix = `device.${deviceId}.`;
   const stateEntries: [string, string][] = [];
+  let hiddenChildKeyCount = 0;
   for (const [key, value] of Object.entries(liveState)) {
-    if (key.startsWith(prefix)) {
-      stateEntries.push([key.slice(prefix.length), String(value ?? "")]);
+    if (!key.startsWith(prefix)) continue;
+    const rest = key.slice(prefix.length);
+    if (childTypeNames.size > 0) {
+      const dot = rest.indexOf(".");
+      if (dot > 0 && childTypeNames.has(rest.slice(0, dot))) {
+        hiddenChildKeyCount++;
+        continue;
+      }
     }
+    stateEntries.push([rest, String(value ?? "")]);
   }
 
   const deviceName = String(liveState[`device.${deviceId}.name`] ?? deviceId);
@@ -358,6 +378,20 @@ export function DeviceDetail({
       {/* Live State */}
       <div style={sectionStyle}>
         <h3 style={sectionTitleStyle}>Live State</h3>
+        {hiddenChildKeyCount > 0 && (
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              marginTop: "-4px",
+              marginBottom: "var(--space-sm)",
+            }}
+          >
+            {hiddenChildKeyCount.toLocaleString()} child-entity state{" "}
+            {hiddenChildKeyCount === 1 ? "key is" : "keys are"} shown in the
+            Child Entities tab above.
+          </div>
+        )}
         <div
           style={{
             background: "var(--bg-surface)",
@@ -418,9 +452,9 @@ export function DeviceDetail({
       {/* Device Settings */}
       <DeviceSettingsSection deviceId={deviceId} connected={connected} />
 
-      {/* Command Testing */}
+      {/* Send Command */}
       <div style={sectionStyle}>
-        <h3 style={sectionTitleStyle}>Command Testing</h3>
+        <h3 style={sectionTitleStyle}>Send Command</h3>
         <div
           style={{
             background: "var(--bg-surface)",
@@ -439,22 +473,15 @@ export function DeviceDetail({
             <>
               <div style={{ marginBottom: "var(--space-md)" }}>
                 <div style={{ display: "flex", gap: "var(--space-sm)" }}>
-                <select
+                <CommandPicker
+                  commands={commands}
                   value={selectedCommand}
-                  onChange={(e) => {
-                    setSelectedCommand(e.target.value);
+                  onChange={(cmd) => {
+                    setSelectedCommand(cmd);
                     setCommandParams({});
                     setCommandResult(null);
                   }}
-                  style={{ flex: 1 }}
-                >
-                  <option value="">Select a command...</option>
-                  {commandNames.map((cmd) => (
-                    <option key={cmd} value={cmd}>
-                      {cmd}
-                    </option>
-                  ))}
-                </select>
+                />
                 <button
                   onClick={handleSendCommand}
                   disabled={!selectedCommand || sending}
@@ -562,6 +589,172 @@ export function DeviceDetail({
 
       {/* Device Log */}
       <DeviceLog deviceId={deviceId} />
+    </div>
+  );
+}
+
+// --- Command Picker ---
+
+// Searchable command dropdown. Devices like the Chazy Control Pro expose
+// 200+ commands; a native <select> is unusable at that size. Filters by
+// command id and human label, shows both, and closes on outside click.
+function CommandPicker({
+  commands,
+  value,
+  onChange,
+}: {
+  commands: Record<string, unknown>;
+  value: string;
+  onChange: (cmd: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  const names = useMemo(() => Object.keys(commands), [commands]);
+  const labelOf = useCallback(
+    (cmd: string): string => {
+      const lbl = (commands[cmd] as Record<string, unknown> | undefined)?.label;
+      return typeof lbl === "string" ? lbl : "";
+    },
+    [commands],
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return names;
+    return names.filter(
+      (n) => n.toLowerCase().includes(q) || labelOf(n).toLowerCase().includes(q),
+    );
+  }, [names, query, labelOf]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const selectedDisplay = value
+    ? labelOf(value)
+      ? `${labelOf(value)} (${value})`
+      : value
+    : "";
+
+  return (
+    <div ref={ref} style={{ position: "relative", flex: 1 }}>
+      <div style={{ position: "relative" }}>
+        <Search
+          size={14}
+          style={{
+            position: "absolute",
+            left: 8,
+            top: "50%",
+            transform: "translateY(-50%)",
+            color: "var(--text-muted)",
+            pointerEvents: "none",
+          }}
+        />
+        <input
+          value={open ? query : selectedDisplay}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            if (!open) setOpen(true);
+          }}
+          onFocus={() => {
+            setOpen(true);
+            setQuery("");
+          }}
+          placeholder="Search commands..."
+          data-testid="command-search"
+          style={{ width: "100%", padding: "var(--space-xs) 28px" }}
+        />
+        <ChevronDown
+          size={14}
+          style={{
+            position: "absolute",
+            right: 8,
+            top: "50%",
+            transform: "translateY(-50%)",
+            color: "var(--text-muted)",
+            pointerEvents: "none",
+          }}
+        />
+      </div>
+      {open && (
+        <div
+          data-testid="command-options"
+          style={{
+            position: "absolute",
+            top: "100%",
+            left: 0,
+            right: 0,
+            zIndex: 30,
+            marginTop: 2,
+            maxHeight: 280,
+            overflowY: "auto",
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border-color)",
+            borderRadius: "var(--border-radius)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+          }}
+        >
+          {filtered.length === 0 ? (
+            <div
+              style={{
+                padding: "var(--space-sm) var(--space-md)",
+                color: "var(--text-muted)",
+                fontSize: "var(--font-size-sm)",
+              }}
+            >
+              No commands match "{query}"
+            </div>
+          ) : (
+            filtered.map((cmd) => {
+              const lbl = labelOf(cmd);
+              const isSelected = cmd === value;
+              return (
+                <button
+                  key={cmd}
+                  onClick={() => {
+                    onChange(cmd);
+                    setOpen(false);
+                    setQuery("");
+                  }}
+                  data-testid={`command-option-${cmd}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: "var(--space-sm)",
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "var(--space-xs) var(--space-md)",
+                    background: isSelected ? "var(--accent-bg)" : "transparent",
+                    color: isSelected ? "var(--text-on-accent)" : "var(--text-primary)",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "var(--font-size-sm)",
+                  }}
+                >
+                  {lbl && <span>{lbl}</span>}
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 11,
+                      color: isSelected ? "var(--text-on-accent)" : "var(--text-muted)",
+                      opacity: lbl ? 0.8 : 1,
+                    }}
+                  >
+                    {cmd}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
     </div>
   );
 }
