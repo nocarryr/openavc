@@ -35,6 +35,17 @@ from urllib.request import urlopen
 
 import pytest
 
+# Playwright drives a real browser and is an optional dev dependency, so it is
+# deliberately not installed in CI. When it isn't importable (CI's unit job, or
+# any box without the dev extras) skip collecting the e2e tests entirely, so a
+# missing import doesn't abort the whole pytest run. They still run anywhere
+# Playwright is installed -- locally: `pip install -e .[dev] &&
+# python -m playwright install chromium`, then `pytest tests/e2e/`.
+try:
+    import playwright  # noqa: F401
+except ImportError:
+    collect_ignore_glob = ["test_*.py"]
+
 OPENAVC_ROOT = Path(__file__).resolve().parents[2]
 DRIVER_SRC = Path(__file__).with_name("_controller_driver_src.py")
 INSTALLED_DRIVER_NAME = "e2e_test_controller.py"
