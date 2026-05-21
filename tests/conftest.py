@@ -67,6 +67,25 @@ def _reset_global_state():
         _PLUGIN_CLASS_REGISTRY.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_buckets():
+    """Clear per-IP rate-limiter buckets before each test.
+
+    The limiter keeps module-level state (`_ip_buckets`, `_warn_dedup`) that
+    persists across requests within the single in-process test run. The
+    TestClient sends requests as the IP 'testclient', which the localhost
+    exemption doesn't cover, so buckets filled by earlier tests spill over and
+    return 429 to unrelated tests (notably test_assets.py). Clearing before
+    each test gives every test a fresh budget. Tests that exercise the limiter
+    itself (test_rate_limit.py) trip the limit from a clean bucket within their
+    own test, so this stays compatible with them.
+    """
+    from server.middleware.rate_limit import _ip_buckets, _warn_dedup
+    _ip_buckets.clear()
+    _warn_dedup.clear()
+    yield
+
+
 @pytest.fixture
 def state():
     """Fresh StateStore instance."""
