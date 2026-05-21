@@ -696,6 +696,20 @@ class Engine:
                 await self.plugin_loader.stop_plugin(plugin_id)
                 await self.plugin_loader.start_plugin(plugin_id, new_config)
 
+    def bump_project_revision(self) -> None:
+        """Advance the project revision after a server-side save that bypasses
+        the reload path.
+
+        Plugin enable/disable and plugin-config saves (e.g. the Video Streams
+        editor) persist the project directly, without going through
+        ``reload_project`` (which is what normally increments the revision).
+        Left un-bumped, an open editor's cached ETag still matches the server,
+        so its next full-project ``PUT /api/project`` overwrites these changes
+        instead of being rejected with a 409. Bumping here keeps the
+        optimistic-concurrency guard authoritative for every persisted change.
+        """
+        self._project_revision += 1
+
     async def _save_plugin_config(self, plugin_id: str, config: dict) -> None:
         """Save updated plugin config to the project file (callback for PluginAPI)."""
         if not self.project:
@@ -704,6 +718,7 @@ class Engine:
             self.project.plugins[plugin_id].config = config
             try:
                 save_project(self.project_path, self.project)
+                self.bump_project_revision()
             except (OSError, ValueError, TypeError) as e:
                 log.error(f"Failed to save plugin config for '{plugin_id}': {e}")
                 await self.broadcast_ws({

@@ -9,6 +9,18 @@ import { create } from "zustand";
 import type { PluginInfo } from "../api/types";
 import type { PluginExtension, CommunityPlugin, InstalledPlugin } from "../api/restClient";
 import * as api from "../api/restClient";
+import { useProjectStore } from "./projectStore";
+
+// Enabling/disabling a plugin or saving its config mutates the project
+// server-side (the plugins table), outside the project store's own save path.
+// Re-sync the project store so its in-memory project + ETag match the server;
+// otherwise the next full-project save from the UI Builder would overwrite the
+// change (e.g. silently disabling a freshly enabled plugin). load() is a no-op
+// when there are unsaved edits — the server-side revision bump + 409 guard
+// covers that case instead.
+async function syncProjectStore() {
+  await useProjectStore.getState().load();
+}
 
 interface PluginExtensions {
   views: PluginExtension[];
@@ -91,6 +103,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     try {
       await api.enablePlugin(pluginId);
       await get().load();
+      await syncProjectStore();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -100,6 +113,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     try {
       await api.disablePlugin(pluginId);
       await get().load();
+      await syncProjectStore();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -109,6 +123,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     try {
       await api.updatePluginConfig(pluginId, config);
       await get().load();
+      await syncProjectStore();
     } catch (e) {
       set({ error: String(e) });
     }

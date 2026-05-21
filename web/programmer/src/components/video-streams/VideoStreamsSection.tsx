@@ -4,8 +4,18 @@ import { Plus, Trash2, Pencil, RefreshCw, Image as ImageIcon } from "lucide-reac
 import { Dialog } from "../shared/Dialog";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { showError, showSuccess } from "../../store/toastStore";
+import { useProjectStore } from "../../store/projectStore";
 import * as streamsApi from "../../api/streamsClient";
 import type { Stream, ProbeResult } from "../../api/streamsClient";
+
+// Stream add/edit/delete persists into the project's plugin config server-side,
+// outside the project store's save path. Re-sync the project store afterward so
+// its in-memory project + ETag track the server and a later UI Builder save
+// can't overwrite the stream list. No-op when there are unsaved edits; the
+// server-side revision bump + 409 guard covers that case.
+async function syncProjectStore() {
+  await useProjectStore.getState().load();
+}
 
 const TRANSCODE_OPTS: [string, string][] = [
   ["auto", "Auto (only when needed)"],
@@ -316,6 +326,7 @@ export function VideoStreamsSection() {
       await streamsApi.deleteStream(s.stream_id);
       showSuccess(`Removed "${s.name}".`);
       refresh();
+      syncProjectStore();
     } catch (err) {
       showError(streamsApi.errorMessage(err));
     }
@@ -404,6 +415,7 @@ export function VideoStreamsSection() {
           onSaved={() => {
             setEditing(null);
             refresh();
+            syncProjectStore();
           }}
         />
       )}

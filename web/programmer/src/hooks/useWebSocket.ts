@@ -26,6 +26,11 @@ export function useWebSocket() {
       // Re-subscribe to log stream
       ws.send({ type: "log.subscribe" });
       useLogStore.getState().setLogSubscribed(true);
+      // Load plugins + their UI extensions on every (re)connect. plugin.* events
+      // only fire on changes, not on a fresh connect, so without this the UI
+      // Builder's plugin-element config form has no schema after a reload and
+      // falls back to the raw-JSON editor.
+      usePluginStore.getState().load();
       // Always load server state first on reconnect to avoid overwriting
       // external changes with stale local data
       const store = useProjectStore.getState();

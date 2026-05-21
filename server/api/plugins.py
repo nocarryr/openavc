@@ -237,6 +237,7 @@ async def enable_plugin(plugin_id: str) -> dict[str, Any]:
         engine.project.plugins[plugin_id].enabled = False
 
     save_project(engine.project_path, engine.project)
+    engine.bump_project_revision()
 
     return {
         "status": "enabled" if success else "error",
@@ -257,6 +258,7 @@ async def disable_plugin(plugin_id: str) -> dict[str, Any]:
 
     engine.project.plugins[plugin_id].enabled = False
     save_project(engine.project_path, engine.project)
+    engine.bump_project_revision()
     await engine.plugin_loader.stop_plugin(plugin_id)
 
     return {"status": "disabled", "plugin_id": plugin_id}
@@ -293,6 +295,7 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
 
     engine.project.plugins[plugin_id].config = new_config
     save_project(engine.project_path, engine.project)
+    engine.bump_project_revision()
 
     # Restart if running
     if engine.plugin_loader.is_running(plugin_id):

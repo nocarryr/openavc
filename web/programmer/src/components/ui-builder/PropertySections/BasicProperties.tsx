@@ -1563,16 +1563,24 @@ function PluginConfigSelect({
       onChange={(e) => onChange(e.target.value)}
       style={{ flex: 1 }}
     >
-      {/* Always include the current value as an option so an unknown stream
-          (e.g. plugin not yet started, or the stream was renamed) stays
-          visible rather than silently switching to the first option. */}
+      {/* Placeholder shown whenever nothing is selected yet. This is required,
+          not cosmetic: a controlled <select value=""> with no option whose
+          value is "" visually falls back to displaying the first option while
+          the committed value stays "" — so picking that lone option fires no
+          change event and never persists. A disabled empty option makes
+          "nothing selected" a distinct state, so choosing a real stream is a
+          genuine change that calls onChange. */}
+      {value === "" && (
+        <option value="" disabled>
+          {options.length === 0
+            ? (optionsSource ? "(no options published yet)" : "(no options)")
+            : "Select a stream…"}
+        </option>
+      )}
+      {/* Keep an unknown current value visible (plugin not started, or the
+          stream was renamed) rather than silently switching to another. */}
       {value !== "" && !options.some((o) => o.value === value) && (
         <option value={value}>{value}</option>
-      )}
-      {options.length === 0 && value === "" && (
-        <option value="" disabled>
-          {optionsSource ? "(no options published yet)" : "(no options)"}
-        </option>
       )}
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>{opt.label}</option>
