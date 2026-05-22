@@ -517,6 +517,11 @@ async def uninstall_plugin_endpoint(
                 if d.plugin_id != plugin_id
             ]
             save_project(engine.project_path, engine.project)
+            # Like enable/disable/config-save, this server-side project mutation
+            # must bump the revision. Otherwise an open editor's stale full-project
+            # PUT (still holding this plugin entry) is accepted instead of 409'd,
+            # silently restoring the just-removed plugin and its config.
+            engine.bump_project_revision()
 
         # Clear missing plugin state if tracked
         engine.plugin_loader.clear_missing(plugin_id)
