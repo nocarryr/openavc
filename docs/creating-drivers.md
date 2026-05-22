@@ -1395,6 +1395,70 @@ class WakeOnLANDriver(BaseDriver):
 
 **Reachability for UDP drivers.** UDP is purely connectionless — there's no `verify()` probe and no socket-level disconnect signal. If your device is meant to be bidirectional (i.e., you poll status, not just fire-and-forget like Wake-on-LAN), declare a positive `poll_interval` in `default_config` and implement `poll()` to send a status query. A successful round-trip keeps `connected: True`; consecutive failures flip it to `False` and start auto-reconnect. Without polling, the platform has no way to know the device went away and `connected` stays `True` against a dead host. The Wake-on-LAN example above is the rare case where omitting polling is correct, because there's nothing to read back.
 
+### Controller drivers: managing many child entities
+
+Some devices are really a controller for many sub-units — a video matrix with hundreds of encoders and decoders, a DSP with dozens of zones, a presentation switcher with video-wall presets. Declare those sub-units as **child entities** (the [`child_entity_types`](#child_entity_types-entry) block in `DRIVER_INFO`) and the platform gives each one its own state, a row in the device's Child Entities tab, and addressable keys (`device.<id>.<type>.<local_id>.<property>`) — you never assemble those key strings yourself.
+
+Only Python drivers can register children at runtime (a YAML driver just declares the types). Every controller driver follows the same pattern, worked end-to-end in `chazy_control_pro.py`:
+
+1. **On connect, enumerate the roster.** Run one cheap "list everything" command, parse it, and register each unit. `register_child` is idempotent, so calling it again on every poll is safe.
+2. **Fill in detail** with `poll_children`, which batches the registered IDs (50 at a time) instead of firing one request per unit.
+3. **On poll, reconcile** — register units that appeared, deregister ones the controller no longer reports. Keep the roster query on the normal poll interval and run the heavier per-unit detail refresh on a slower cadence (a separate `detail_poll_interval`) so a large controller doesn't flood the network every cycle.
+4. **Set `online` to match the unit's nature.** Physical endpoints (encoders/decoders) that come and go derive `online` from their link state and stay registered while offline; virtual objects (groups, walls, presets) are online whenever the controller lists them, and only disappear when deleted on the device.
+5. **Support "Refresh from Device"** by overriding `refresh_children`.
+
+```python
+class MatrixControllerDriver(BaseDriver):
+    DRIVER_INFO = {
+        # …identity, connection, default_config (poll_interval, detail_poll_interval)…
+        "child_entity_types": {
+            "encoder": {
+                "label": "Encoder", "label_plural": "Encoders",
+                "id_format": {"type": "integer", "min": 1, "max": 256, "pad_width": 3},
+                "state_variables": {
+                    "name": {"type": "string"},
+                    "ip": {"type": "string"},
+                    "signal_present": {"type": "boolean"},
+                },
+                "summary_fields": ["name", "ip", "signal_present"],
+                "label_field": "name",
+            },
+            # decoder, video_wall, …
+        },
+    }
+
+    async def connect(self) -> None:
+        await super().connect()
+        await self._reconcile_roster()                      # register from the roster
+        await self.poll_children("encoder", self._fetch_encoder_detail)
+
+    async def poll(self) -> None:
+        await self._reconcile_roster()                      # add new / drop gone
+        if self._detail_due():                              # slower cadence
+            await self.poll_children("encoder", self._fetch_encoder_detail)
+
+    async def _reconcile_roster(self) -> None:
+        roster = self._parse_status(await self._send("GET STATUS"))
+        seen = set()
+        for unit in roster:
+            seen.add(unit.id)
+            self.register_child(
+                "encoder", unit.id,
+                initial_state={"name": unit.name, "online": unit.linked},
+            )
+        for stale in set(self.list_children("encoder")) - seen:
+            self.deregister_child("encoder", stale)
+
+    async def refresh_children(self) -> dict:               # IDE "Refresh from Device"
+        await self._reconcile_roster()
+        return {"encoders": len(self.list_children("encoder"))}
+
+    async def _fetch_encoder_detail(self, ids: list[int]) -> dict[int, dict]:
+        ...                                                 # return {id: {prop: value}}
+```
+
+Commands that act on a specific child take a `child_id` parameter (see the [`commands`](#commands-entry) reference) — the platform substitutes the integer local ID into the wire template, so there's no separate per-child command surface.
+
 ### BaseDriver Hooks Reference
 
 These methods can be overridden in your driver subclass:
