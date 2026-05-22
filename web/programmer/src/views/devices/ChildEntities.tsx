@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, ChevronRight, Pencil, RefreshCw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Pencil, RefreshCw } from "lucide-react";
 import * as api from "../../api/restClient";
 import { useConnectionStore } from "../../store/connectionStore";
 import type {
@@ -25,12 +25,19 @@ const LIST_HEIGHT = 480;
  * driver-side `refresh_children` call. Inter-fetch live state mutations
  * are picked up reactively via the connection store subscription.
  */
-export function ChildEntities({ deviceId }: { deviceId: string }) {
+export function ChildEntities({
+  deviceId,
+  search,
+}: {
+  deviceId: string;
+  /** Controlled filter term, owned by the parent device page so one box
+      filters both child rows and the Live State list. */
+  search: string;
+}) {
   const [data, setData] = useState<ChildEntitiesListResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeType, setActiveType] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
@@ -91,12 +98,15 @@ export function ChildEntities({ deviceId }: { deviceId: string }) {
   const types = Object.keys(data.child_entity_types);
   if (types.length === 0) return null; // Driver doesn't declare any.
 
+  const term = search.trim().toLowerCase();
   const schema = activeType ? data.child_entity_types[activeType] : null;
   const entries = activeType ? data.children[activeType] ?? [] : [];
 
   return (
     <Section title="Child Entities">
-      {/* Type tabs */}
+      {/* Type tabs — hidden while a search is active, since the search spans
+          every type instead of the selected tab. */}
+      {!term && (
       <div
         style={{
           display: "flex",
@@ -138,59 +148,17 @@ export function ChildEntities({ deviceId }: { deviceId: string }) {
           );
         })}
       </div>
+      )}
 
-      {/* Search + refresh */}
+      {/* Refresh (the filter box lives at the top of the device page and is
+          passed in as `search`, so one box filters children + Live State). */}
       <div
         style={{
           display: "flex",
-          gap: "var(--space-sm)",
+          justifyContent: "flex-end",
           marginBottom: "var(--space-sm)",
-          alignItems: "center",
         }}
       >
-        <div style={{ position: "relative", flex: 1 }}>
-          <Search
-            size={14}
-            style={{
-              position: "absolute",
-              left: 8,
-              top: "50%",
-              transform: "translateY(-50%)",
-              color: "var(--text-muted)",
-              pointerEvents: "none",
-            }}
-          />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter by id, label, name, or any value"
-            data-testid="child-search"
-            style={{
-              width: "100%",
-              padding: "var(--space-xs) var(--space-xs) var(--space-xs) 28px",
-              fontSize: "var(--font-size-sm)",
-            }}
-          />
-          {search && (
-            <button
-              onClick={() => setSearch("")}
-              title="Clear filter"
-              style={{
-                position: "absolute",
-                right: 4,
-                top: "50%",
-                transform: "translateY(-50%)",
-                padding: 2,
-                background: "transparent",
-                color: "var(--text-muted)",
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
-              <X size={14} />
-            </button>
-          )}
-        </div>
         <button
           onClick={handleDriverRefresh}
           disabled={refreshing}
@@ -223,16 +191,203 @@ export function ChildEntities({ deviceId }: { deviceId: string }) {
         </div>
       )}
 
-      {schema && (
-        <ChildEntityList
-          deviceId={deviceId}
-          childType={activeType!}
-          schema={schema}
-          entries={entries}
-          search={search}
-        />
+      {term ? (
+        <ChildSearchResults data={data} term={term} deviceId={deviceId} />
+      ) : (
+        schema && (
+          <ChildEntityList
+            deviceId={deviceId}
+            childType={activeType!}
+            schema={schema}
+            entries={entries}
+          />
+        )
       )}
     </Section>
+  );
+}
+
+
+/**
+ * Global child search. When the device-page filter has a term, this replaces
+ * the per-type tabbed browse with a single flat list of every matching child
+ * across ALL types — no tab is involved. A child matches by id / padded id /
+ * label, by any state-key name, or by any state value, and each result shows
+ * the specific state rows that matched so it's clear what was found.
+ */
+function ChildSearchResults({
+  data,
+  term,
+  deviceId,
+}: {
+  data: ChildEntitiesListResponse;
+  term: string;
+  deviceId: string;
+}) {
+  const liveState = useConnectionStore((s) => s.liveState);
+
+  // Index live state by `${type}/${paddedId}` once per change so per-child
+  // lookup is O(1) (a loaded controller has tens of thousands of keys).
+  const liveIndex = useMemo(() => {
+    const idx = new Map<string, Record<string, unknown>>();
+    const root = `device.${deviceId}.`;
+    for (const [key, value] of Object.entries(liveState)) {
+      if (!key.startsWith(root)) continue;
+      const parts = key.slice(root.length).split("."); // type . padded . prop…
+      if (parts.length < 3) continue;
+      const bucketKey = `${parts[0]}/${parts[1]}`;
+      const prop = parts.slice(2).join(".");
+      let bucket = idx.get(bucketKey);
+      if (!bucket) {
+        bucket = {};
+        idx.set(bucketKey, bucket);
+      }
+      bucket[prop] = value;
+    }
+    return idx;
+  }, [liveState, deviceId]);
+
+  const results = useMemo(() => {
+    const out: {
+      type: string;
+      typeLabel: string;
+      entry: ChildEntityEntry;
+      name: string;
+      rows: [string, string][];
+    }[] = [];
+    for (const type of Object.keys(data.child_entity_types)) {
+      const tSchema = data.child_entity_types[type];
+      const typeLabel = tSchema.label || tSchema.label_plural || type;
+      for (const entry of data.children[type] ?? []) {
+        const live = liveIndex.get(`${type}/${entry.local_id_padded}`);
+        const state = live ? { ...entry.state, ...live } : entry.state;
+        const rows = Object.entries(state)
+          .filter(
+            ([k, v]) =>
+              k.toLowerCase().includes(term) ||
+              formatStateValue(v).toLowerCase().includes(term),
+          )
+          .map(([k, v]) => [k, formatStateValue(v)] as [string, string]);
+        const idMatch =
+          String(entry.local_id).includes(term) ||
+          entry.local_id_padded.toLowerCase().includes(term) ||
+          (entry.label ?? "").toLowerCase().includes(term);
+        if (rows.length > 0 || idMatch) {
+          out.push({
+            type,
+            typeLabel,
+            entry,
+            name: formatStateValue(state.name),
+            rows,
+          });
+        }
+      }
+    }
+    return out;
+  }, [data, term, liveIndex]);
+
+  if (results.length === 0) {
+    return (
+      <div style={mutedStyle} data-testid="child-empty-filter">
+        No children match "{term}".
+      </div>
+    );
+  }
+
+  const SHOWN = 200;
+  const shown = results.slice(0, SHOWN);
+
+  return (
+    <div
+      data-testid="child-search-results"
+      style={{
+        background: "var(--bg-surface)",
+        borderRadius: "var(--border-radius)",
+        border: "1px solid var(--border-color)",
+        maxHeight: LIST_HEIGHT,
+        overflow: "auto",
+      }}
+    >
+      {shown.map(({ type, typeLabel, entry, name, rows }) => (
+        <div
+          key={`${type}/${entry.local_id_padded}`}
+          data-testid={`child-row-${entry.local_id_padded}`}
+          style={{
+            padding: "var(--space-sm) var(--space-md)",
+            borderBottom: "1px solid var(--border-color)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: "var(--space-sm)",
+              marginBottom: rows.length ? "var(--space-xs)" : 0,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 10,
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                color: "var(--text-muted)",
+                background: "var(--bg-hover)",
+                borderRadius: "var(--border-radius)",
+                padding: "1px 6px",
+              }}
+            >
+              {typeLabel}
+            </span>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--font-size-sm)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              {entry.local_id_padded}
+            </span>
+            <span style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}>
+              {entry.label || name || "(no label)"}
+            </span>
+          </div>
+          {rows.length > 0 && (
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: "var(--font-size-sm)",
+              }}
+            >
+              <tbody>
+                {rows.map(([k, v]) => (
+                  <tr key={k} style={{ borderBottom: "1px solid var(--border-color)" }}>
+                    <td
+                      style={{
+                        padding: "2px 8px",
+                        width: "30%",
+                        fontFamily: "var(--font-mono)",
+                        color: "var(--text-secondary)",
+                      }}
+                    >
+                      {k}
+                    </td>
+                    <td style={{ padding: "2px 8px", fontFamily: "var(--font-mono)" }}>
+                      {v}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ))}
+      {results.length > SHOWN && (
+        <div style={{ ...mutedStyle, border: "none" }}>
+          Showing first {SHOWN} of {results.length} matches — refine the filter to narrow.
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -242,13 +397,11 @@ function ChildEntityList({
   childType,
   schema,
   entries,
-  search,
 }: {
   deviceId: string;
   childType: string;
   schema: ChildEntityTypeSchema;
   entries: ChildEntityEntry[];
-  search: string;
 }) {
   const liveState = useConnectionStore((s) => s.liveState);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -302,39 +455,19 @@ function ChildEntityList({
     [liveStateByPaddedId],
   );
 
-  const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return entries;
-    return entries.filter((entry) => {
-      const labelOverride = labelOverrides[entry.local_id];
-      if (String(entry.local_id).includes(term)) return true;
-      if (entry.local_id_padded.toLowerCase().includes(term)) return true;
-      if ((labelOverride ?? entry.label).toLowerCase().includes(term)) return true;
-      // Match any of the child's state field values (name, ip, mac, gen, …)
-      // so a child can be found by any of its data, not just id / label.
-      // ~28 fields × 1500 children stays well within a keystroke budget.
-      const liveS = liveStateForChild(entry);
-      for (const v of Object.values(liveS)) {
-        if (v === null || v === undefined || v === "") continue;
-        if (String(v).toLowerCase().includes(term)) return true;
-      }
-      return false;
-    });
-  }, [entries, search, liveStateForChild, labelOverrides]);
-
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
-    count: filtered.length,
+    count: entries.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => {
-      const entry = filtered[index];
+      const entry = entries[index];
       return entry && expanded.has(entry.local_id)
         ? ROW_HEIGHT + EXPANDED_EXTRA
         : ROW_HEIGHT;
     },
     overscan: 6,
-    // Key on padded id so virtualization survives filter reorderings.
-    getItemKey: (index) => filtered[index]?.local_id_padded ?? index,
+    // Key on padded id so virtualization survives list changes.
+    getItemKey: (index) => entries[index]?.local_id_padded ?? index,
   });
 
   // Re-measure when expanded set changes so row heights reflow.
@@ -385,14 +518,6 @@ function ChildEntityList({
     );
   }
 
-  if (filtered.length === 0) {
-    return (
-      <div style={mutedStyle} data-testid="child-empty-filter">
-        No matches for "{search}".
-      </div>
-    );
-  }
-
   const items = virtualizer.getVirtualItems();
 
   return (
@@ -433,7 +558,7 @@ function ChildEntityList({
           }}
         >
           {items.map((virtualItem) => {
-            const entry = filtered[virtualItem.index];
+            const entry = entries[virtualItem.index];
             if (!entry) return null;
             const isExpanded = expanded.has(entry.local_id);
             const isEditing = editing?.id === entry.local_id;

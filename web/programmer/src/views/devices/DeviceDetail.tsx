@@ -41,6 +41,7 @@ export function DeviceDetail({
   } | null>(null);
   const [testing, setTesting] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
     api.getDevice(deviceId).then(setDeviceInfo).catch(console.error);
@@ -111,6 +112,7 @@ export function DeviceDetail({
   const prefix = `device.${deviceId}.`;
   const stateEntries: [string, string][] = [];
   let hiddenChildKeyCount = 0;
+  const stateTerm = searchTerm.trim().toLowerCase();
   for (const [key, value] of Object.entries(liveState)) {
     if (!key.startsWith(prefix)) continue;
     const rest = key.slice(prefix.length);
@@ -121,7 +123,15 @@ export function DeviceDetail({
         continue;
       }
     }
-    stateEntries.push([rest, String(value ?? "")]);
+    const valueStr = String(value ?? "");
+    if (
+      stateTerm &&
+      !rest.toLowerCase().includes(stateTerm) &&
+      !valueStr.toLowerCase().includes(stateTerm)
+    ) {
+      continue;
+    }
+    stateEntries.push([rest, valueStr]);
   }
 
   const deviceName = String(liveState[`device.${deviceId}.name`] ?? deviceId);
@@ -372,8 +382,51 @@ export function DeviceDetail({
         </div>
       )}
 
+      {/* Unified filter — one box narrows both the child-entity rows (across
+          every value in each row, not just the summary columns) and the Live
+          State list below. */}
+      <div style={{ position: "relative", marginBottom: "var(--space-lg)" }}>
+        <Search
+          size={16}
+          style={{
+            position: "absolute",
+            left: 10,
+            top: "50%",
+            transform: "translateY(-50%)",
+            color: "var(--text-muted)",
+            pointerEvents: "none",
+          }}
+        />
+        <input
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          placeholder="Filter children and live state by id, label, name, or any value"
+          data-testid="device-filter"
+          style={{ width: "100%", padding: "var(--space-sm) 34px" }}
+        />
+        {searchTerm && (
+          <button
+            onClick={() => setSearchTerm("")}
+            title="Clear filter"
+            style={{
+              position: "absolute",
+              right: 8,
+              top: "50%",
+              transform: "translateY(-50%)",
+              padding: 2,
+              background: "transparent",
+              color: "var(--text-muted)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            <X size={16} />
+          </button>
+        )}
+      </div>
+
       {/* Child Entities (only renders when the driver declares any) */}
-      <ChildEntities deviceId={deviceId} />
+      <ChildEntities deviceId={deviceId} search={searchTerm} />
 
       {/* Live State */}
       <div style={sectionStyle}>
@@ -408,7 +461,7 @@ export function DeviceDetail({
                 fontSize: "var(--font-size-sm)",
               }}
             >
-              No state values yet
+              {stateTerm ? `No state matches "${searchTerm}"` : "No state values yet"}
             </div>
           ) : (
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
