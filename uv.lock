@@ -879,14 +879,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+pi = [
+    { name = "gpiozero" },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-playwright" },
     { name = "ruff" },
-]
-pi = [
-    { name = "gpiozero" },
 ]
 
 [package.metadata]
@@ -903,16 +905,20 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.11.1" },
     { name = "pyserial", specifier = "==3.5" },
     { name = "pyserial-asyncio", specifier = "==0.6" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = "==8.3.5" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = "==0.26.0" },
-    { name = "pytest-playwright", marker = "extra == 'dev'", specifier = "==0.7.0" },
     { name = "python-multipart", specifier = "==0.0.24" },
     { name = "pyyaml", specifier = "==6.0.3" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.44.0" },
     { name = "websockets", specifier = "==16.0" },
 ]
-provides-extras = ["dev", "pi"]
+provides-extras = ["pi"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = "==8.3.5" },
+    { name = "pytest-asyncio", specifier = "==0.26.0" },
+    { name = "pytest-playwright", specifier = "==0.7.0" },
+    { name = "ruff", specifier = ">=0.6.0" },
+]
 
 [[package]]
 name = "packaging"
