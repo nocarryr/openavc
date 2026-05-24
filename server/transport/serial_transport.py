@@ -14,10 +14,11 @@ on machines without serial hardware.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from typing import Any
 
 from server.transport.frame_parsers import DelimiterFrameParser, FrameParser
 from server.utils.logger import get_logger
+from .types import Callback
 
 log = get_logger(__name__)
 
@@ -37,8 +38,8 @@ class SerialTransport:
         self,
         port: str,
         baudrate: int,
-        on_data: Callable[[bytes], None],
-        on_disconnect: Callable[[], None],
+        on_data: Callback[[bytes], None],
+        on_disconnect: Callback[[], None],
         frame_parser: FrameParser | None = None,
         delimiter: bytes | None = b"\r",
         timeout: float = 5.0,
@@ -89,8 +90,8 @@ class SerialTransport:
         cls,
         port: str,
         baudrate: int = 9600,
-        on_data: Callable[[bytes], None] = lambda d: None,
-        on_disconnect: Callable[[], None] = lambda: None,
+        on_data: Callback[[bytes], None] = lambda d: None,
+        on_disconnect: Callback[[], None] = lambda: None,
         frame_parser: FrameParser | None = None,
         delimiter: bytes | None = b"\r",
         timeout: float = 5.0,

@@ -15,11 +15,12 @@ only when the device documentation specifies a separate feedback port.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from typing import Any
 
 from server.transport.osc_codec import osc_encode_message
 from server.transport.udp import UDPTransport
 from server.utils.logger import get_logger
+from .types import Callback
 
 log = get_logger(__name__)
 
@@ -32,8 +33,8 @@ class OSCTransport:
         host: str | None = None,
         port: int | None = None,
         listen_port: int = 0,
-        on_data: Callable[[bytes], None] | None = None,
-        on_disconnect: Callable[[], None] | None = None,
+        on_data: Callback[[bytes], None] | None = None,
+        on_disconnect: Callback[[], None] | None = None,
         inter_command_delay: float = 0.0,
         name: str | None = None,
     ) -> None:
@@ -187,7 +188,7 @@ class _OSCListenProtocol(asyncio.DatagramProtocol):
 
     def __init__(
         self,
-        on_data: Callable[[bytes], None] | None,
+        on_data: Callback[[bytes], None] | None,
         name: str,
         parent: OSCTransport | None = None,
     ) -> None:
