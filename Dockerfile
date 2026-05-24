@@ -52,6 +52,9 @@ ENV UV_COMPILE_BYTECODE=1
 # Disable UV's cache dir
 ENV UV_NO_CACHE=1
 
+# Disable development dependencies
+ENV UV_NO_DEV=1
+
 # Create non-root user
 RUN groupadd -r openavc && useradd -r -g openavc -d /app -s /usr/sbin/nologin openavc
 
