@@ -675,7 +675,7 @@ async def _run_tls() -> None:
         task.result()
 
 
-if __name__ == "__main__":
+def main() -> None:
     # The pre-flight port is whichever port we'll actually bind primary.
     # When TLS is on with redirect, the HTTP redirect listener is best-effort
     # and pre-flighted inside _run_tls (logs a warning, never blocks startup).
@@ -711,3 +711,6 @@ if __name__ == "__main__":
             reload=False,
             log_level="info",
         )
+
+if __name__ == "__main__":
+    main()
