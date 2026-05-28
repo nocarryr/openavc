@@ -19,6 +19,7 @@ import asyncio
 from typing import Callable
 
 from server.utils.logger import get_logger
+from .types import Callback
 
 log = get_logger(__name__)
 
@@ -30,8 +31,8 @@ class UDPTransport:
         self,
         host: str | None = None,
         port: int | None = None,
-        on_data: Callable[[bytes], None] | None = None,
-        on_disconnect: Callable[[], None] | None = None,
+        on_data: Callback[[bytes], None] | None = None,
+        on_disconnect: Callback[[], None] | None = None,
         inter_command_delay: float = 0.0,
         name: str | None = None,
     ) -> None:

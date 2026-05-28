@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import ssl as ssl_module
-from typing import Callable
 
 from server.transport.frame_parsers import DelimiterFrameParser, FrameParser
 from server.utils.logger import get_logger
+from .types import Callback
 
 log = get_logger(__name__)
 
@@ -30,8 +30,8 @@ class TCPTransport:
         self,
         host: str,
         port: int,
-        on_data: Callable[[bytes], None],
-        on_disconnect: Callable[[], None],
+        on_data: Callback[[bytes], None],
+        on_disconnect: Callback[[], None],
         delimiter: bytes | None,
         timeout: float,
         inter_command_delay: float,
@@ -77,8 +77,8 @@ class TCPTransport:
         cls,
         host: str,
         port: int,
-        on_data: Callable[[bytes], None],
-        on_disconnect: Callable[[], None],
+        on_data: Callback[[bytes], None],
+        on_disconnect: Callback[[], None],
         delimiter: bytes | None = b"\r",
         timeout: float = 5.0,
         inter_command_delay: float = 0.0,
