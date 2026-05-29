@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from server.utils.paths import safe_path_within
+
 
 class DeviceToolsMixin:
     """Device, driver, and script management tools."""
@@ -687,7 +689,9 @@ class DeviceToolsMixin:
         for s in engine.project.scripts:
             if s.id == script_id:
                 scripts_dir = engine.project_path.parent / "scripts"
-                path = scripts_dir / s.file
+                path = safe_path_within(scripts_dir, s.file)
+                if path is None:
+                    return {"error": "Invalid script filename"}
                 if path.exists():
                     source = path.read_text(encoding="utf-8")
                     return {"id": script_id, "file": s.file, "source": source}
@@ -716,8 +720,10 @@ class DeviceToolsMixin:
                 return {"error": f"Script '{script_id}': {err}"}
 
         scripts_dir = engine.project_path.parent / "scripts"
+        path = safe_path_within(scripts_dir, filename)
+        if path is None:
+            return {"error": "Invalid script filename"}
         scripts_dir.mkdir(parents=True, exist_ok=True)
-        path = scripts_dir / filename
         path.write_text(source, encoding="utf-8")
 
         from server.core.project_loader import ScriptConfig, save_project
@@ -742,7 +748,9 @@ class DeviceToolsMixin:
                     if err:
                         return {"error": f"Script '{script_id}': {err}"}
                 scripts_dir = engine.project_path.parent / "scripts"
-                path = scripts_dir / s.file
+                path = safe_path_within(scripts_dir, s.file)
+                if path is None:
+                    return {"error": "Invalid script filename"}
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(source, encoding="utf-8")
                 return {"status": "saved"}
@@ -762,7 +770,9 @@ class DeviceToolsMixin:
             return {"error": f"Script '{script_id}' not found"}
 
         scripts_dir = engine.project_path.parent / "scripts"
-        path = scripts_dir / cfg.file
+        path = safe_path_within(scripts_dir, cfg.file)
+        if path is None:
+            return {"error": "Invalid script filename"}
         if path.exists():
             path.unlink()
         from server.core.project_loader import save_project

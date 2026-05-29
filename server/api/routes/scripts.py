@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from server.api._engine import _get_engine
 from server.api.models import ScriptCreateRequest
 from server.core.project_loader import save_project
+from server.utils.paths import safe_path_within
 
 router = APIRouter()
 
@@ -32,10 +33,8 @@ def _find_script_config(script_id: str) -> dict[str, Any] | None:
 
 def _safe_script_path(scripts_dir: Path, filename: str) -> Path:
     """Resolve a script filename safely within the scripts directory."""
-    resolved = (scripts_dir / filename).resolve()
-    try:
-        resolved.relative_to(scripts_dir.resolve())
-    except ValueError:
+    resolved = safe_path_within(scripts_dir, filename)
+    if resolved is None:
         raise HTTPException(status_code=400, detail="Invalid script filename")
     return resolved
 
