@@ -36,6 +36,7 @@ from server.system_config import (
     SEED_TEMPLATES_DIR,
 )
 from server.utils.logger import get_logger
+from server.utils.paths import safe_path_within
 
 log = get_logger(__name__)
 
@@ -680,7 +681,12 @@ def _install_bundled_plugins(zf: zipfile.ZipFile) -> list[str]:
             plugin_dirs.add(parts[1])
 
     for plugin_id in sorted(plugin_dirs):
-        dest_dir = plugin_repo / plugin_id
+        # Zip-slip guard: a malicious plugin_id (e.g. "..") would escape the
+        # repo. Skip anything that doesn't resolve to a dir inside plugin_repo.
+        dest_dir = safe_path_within(plugin_repo, plugin_id)
+        if dest_dir is None:
+            log.warning("Skipping bundled plugin with unsafe id: %r", plugin_id)
+            continue
         if dest_dir.exists():
             continue  # Don't overwrite existing plugins
 
@@ -693,7 +699,13 @@ def _install_bundled_plugins(zf: zipfile.ZipFile) -> list[str]:
             rel = name[len(prefix):]
             if not rel:
                 continue
-            dest_file = dest_dir / rel
+            # Zip-slip guard: reject members whose path escapes the plugin dir
+            # (e.g. "plugins/foo/../../evil.py"). Plugin .py files get imported,
+            # so an escape here is arbitrary code execution.
+            dest_file = safe_path_within(dest_dir, rel)
+            if dest_file is None:
+                log.warning("Skipping unsafe plugin file path in bundle: %r", name)
+                continue
             dest_file.parent.mkdir(parents=True, exist_ok=True)
             dest_file.write_bytes(zf.read(name))
 
