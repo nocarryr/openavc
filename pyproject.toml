@@ -17,6 +17,7 @@ dependencies = [
     "pyserial-asyncio==0.6",     # BSD-3 - Async serial support
     "pydantic==2.11.1",          # MIT - Data validation
     "pyyaml==6.0.3",             # MIT - YAML parsing
+    "packaging==24.2",           # Apache-2.0/BSD-2 - version parsing (plugin/driver min-version gates)
     "httpx==0.28.1",             # BSD-3 - Async HTTP client (for HTTP transport)
     "croniter==6.2.2",           # MIT - Cron expression parser (pure Python)
     "defusedxml==0.7.1",         # PSF - Safe XML parsing (prevents XXE/billion laughs)
@@ -27,11 +28,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
+# Lightweight test/lint tools used by the CI gate. Pinned so CI runs against
+# the same versions everywhere (the gate installs this, not `dev`).
+test = [
     "pytest==8.3.5",             # MIT - Testing framework
     "pytest-asyncio==0.26.0",    # Apache-2.0 - Async test support
-    "pytest-playwright==0.7.0",  # Apache-2.0 - Playwright pytest integration (E2E IDE tests). Bundles `playwright`; install browsers with `python -m playwright install chromium` after `pip install -e .[dev]`.
     "ruff>=0.6.0",               # MIT - Fast Python linter/formatter (unpinned, linter updates are safe)
+]
+# Full local dev environment: the test tools plus the Playwright E2E stack.
+dev = [
+    "openavc[test]",
+    "pytest-playwright==0.7.0",  # Apache-2.0 - Playwright pytest integration (E2E IDE tests). Install browsers with `python -m playwright install chromium` after `pip install -e .[dev]`.
 ]
 pi = [
     "gpiozero>=2.0.0",           # BSD-3 - GPIO access (Pi only)
