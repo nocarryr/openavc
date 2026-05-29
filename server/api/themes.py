@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from server.api.auth import require_programmer_auth
 from server.system_config import THEMES_DIR as BUILTIN_THEMES_DIR
+from server.utils.paths import safe_path_within
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -46,6 +47,20 @@ def _custom_themes_dir() -> Path:
     themes_dir = project_dir / "themes"
     themes_dir.mkdir(parents=True, exist_ok=True)
     return themes_dir
+
+
+def _safe_theme_path(base: Path, theme_id: str) -> Path:
+    """Resolve ``<base>/<theme_id>.json`` within ``base``.
+
+    Theme ids are bare slugs (THEME_ID_PATTERN); a ``theme_id`` that escapes
+    the themes directory (``..``, an absolute path, or a Windows backslash
+    jump) is rejected with 400. Mirrors ``_safe_script_path`` in the scripts
+    routes — themes was the lone file handler without a containment guard.
+    """
+    resolved = safe_path_within(base, f"{theme_id}.json")
+    if resolved is None:
+        raise HTTPException(status_code=400, detail="Invalid theme id")
+    return resolved
 
 
 def _load_theme(path: Path) -> dict[str, Any]:
@@ -122,14 +137,14 @@ async def list_themes() -> list[dict[str, Any]]:
 async def get_theme(theme_id: str) -> dict[str, Any]:
     """Get full theme definition."""
     # Check built-in first
-    builtin_path = BUILTIN_THEMES_DIR / f"{theme_id}.json"
+    builtin_path = _safe_theme_path(BUILTIN_THEMES_DIR, theme_id)
     if builtin_path.exists():
         theme = _load_theme(builtin_path)
         theme["_source"] = "builtin"
         return theme
 
     # Check custom
-    custom_path = _custom_themes_dir() / f"{theme_id}.json"
+    custom_path = _safe_theme_path(_custom_themes_dir(), theme_id)
     if custom_path.exists():
         theme = _load_theme(custom_path)
         theme["_source"] = "custom"
@@ -160,10 +175,10 @@ async def create_theme(data: dict[str, Any]) -> dict[str, Any]:
 @router.put("/themes/{theme_id}")
 async def update_theme(theme_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Update a custom theme."""
-    if (BUILTIN_THEMES_DIR / f"{theme_id}.json").exists():
+    if _safe_theme_path(BUILTIN_THEMES_DIR, theme_id).exists():
         raise HTTPException(status_code=403, detail="Cannot modify built-in themes")
 
-    custom_path = _custom_themes_dir() / f"{theme_id}.json"
+    custom_path = _safe_theme_path(_custom_themes_dir(), theme_id)
     if not custom_path.exists():
         raise HTTPException(status_code=404, detail=f"Custom theme '{theme_id}' not found")
 
@@ -177,10 +192,10 @@ async def update_theme(theme_id: str, data: dict[str, Any]) -> dict[str, Any]:
 @router.delete("/themes/{theme_id}")
 async def delete_theme(theme_id: str) -> dict[str, str]:
     """Delete a custom theme. Built-in themes cannot be deleted."""
-    if (BUILTIN_THEMES_DIR / f"{theme_id}.json").exists():
+    if _safe_theme_path(BUILTIN_THEMES_DIR, theme_id).exists():
         raise HTTPException(status_code=403, detail="Cannot delete built-in themes")
 
-    custom_path = _custom_themes_dir() / f"{theme_id}.json"
+    custom_path = _safe_theme_path(_custom_themes_dir(), theme_id)
     if not custom_path.exists():
         raise HTTPException(status_code=404, detail=f"Custom theme '{theme_id}' not found")
 
@@ -194,7 +209,7 @@ async def export_theme(theme_id: str):
     """Download theme as .avctheme file (JSON)."""
     # Try built-in then custom
     for base in [BUILTIN_THEMES_DIR, _custom_themes_dir()]:
-        path = base / f"{theme_id}.json"
+        path = _safe_theme_path(base, theme_id)
         if path.exists():
             theme = _load_theme(path)
             # Remove internal fields

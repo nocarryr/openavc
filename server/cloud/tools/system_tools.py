@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from server.utils.logger import get_logger
+from server.utils.paths import safe_path_within
 
 log = get_logger(__name__)
 
@@ -160,15 +161,20 @@ class SystemToolsMixin:
         if not theme_id:
             return {"error": "theme_id is required"}
 
-        builtin_path = BUILTIN_THEMES_DIR / f"{theme_id}.json"
+        # Reject a theme_id that escapes the themes dir (../, absolute, or a
+        # Windows backslash jump) — otherwise it reads arbitrary .json files
+        # (e.g. cloud.json, the system key) and returns them to the cloud AI.
+        builtin_path = safe_path_within(BUILTIN_THEMES_DIR, f"{theme_id}.json")
+        if builtin_path is None:
+            return {"error": "Invalid theme id"}
         if builtin_path.exists():
             theme = _load_theme(builtin_path)
             theme["_source"] = "builtin"
             return theme
 
         try:
-            custom_path = _custom_themes_dir() / f"{theme_id}.json"
-            if custom_path.exists():
+            custom_path = safe_path_within(_custom_themes_dir(), f"{theme_id}.json")
+            if custom_path and custom_path.exists():
                 theme = _load_theme(custom_path)
                 theme["_source"] = "custom"
                 return theme
@@ -189,10 +195,17 @@ class SystemToolsMixin:
         if not theme_id:
             return {"error": "theme_id is required"}
 
+        # Reject a traversal theme_id before probing the filesystem or
+        # persisting it as the active theme.
+        builtin_path = safe_path_within(BUILTIN_THEMES_DIR, f"{theme_id}.json")
+        if builtin_path is None:
+            return {"error": "Invalid theme id"}
+
         # Verify theme exists
-        builtin = (BUILTIN_THEMES_DIR / f"{theme_id}.json").exists()
+        builtin = builtin_path.exists()
         try:
-            custom = (_custom_themes_dir() / f"{theme_id}.json").exists()
+            custom_path = safe_path_within(_custom_themes_dir(), f"{theme_id}.json")
+            custom = bool(custom_path) and custom_path.exists()
         except Exception:
             log.debug("Failed to check custom themes directory", exc_info=True)
             custom = False
