@@ -531,7 +531,19 @@ export function DeviceDetail({
                   value={selectedCommand}
                   onChange={(cmd) => {
                     setSelectedCommand(cmd);
-                    setCommandParams({});
+                    // Seed defaults so enum params show a real selection (not a
+                    // blank box) and booleans default to No.
+                    const pdefs = (commands[cmd] as Record<string, unknown>)
+                      ?.params as Record<string, Record<string, unknown>> | undefined;
+                    const defaults: Record<string, string> = {};
+                    for (const [name, d] of Object.entries(pdefs ?? {})) {
+                      const t = String(d?.type ?? "string");
+                      const vals = d?.values as string[] | undefined;
+                      if (t === "enum" && vals && vals.length > 0) defaults[name] = vals[0];
+                      else if (t === "boolean") defaults[name] = "false";
+                      else defaults[name] = "";
+                    }
+                    setCommandParams(defaults);
                     setCommandResult(null);
                   }}
                 />
@@ -568,7 +580,16 @@ export function DeviceDetail({
                 <div style={{ marginBottom: "var(--space-md)" }}>
                   {paramKeys.map((paramName) => {
                     const pDef = (commands[selectedCommand] as Record<string, unknown>)?.params as Record<string, Record<string, unknown>> | undefined;
-                    const paramHelp = pDef?.[paramName]?.help as string | undefined;
+                    const def = pDef?.[paramName];
+                    const paramHelp = def?.help as string | undefined;
+                    const paramType = String(def?.type ?? "string");
+                    const paramValues = def?.values as string[] | undefined;
+                    const paramMin = def?.min as number | undefined;
+                    const paramMax = def?.max as number | undefined;
+                    const required = def?.required === true;
+                    const current = commandParams[paramName] ?? "";
+                    const setParam = (val: string) =>
+                      setCommandParams((p) => ({ ...p, [paramName]: val }));
                     return (
                     <div
                       key={paramName}
@@ -586,17 +607,41 @@ export function DeviceDetail({
                       >
                         {paramName}
                       </label>
-                      <input
-                        value={commandParams[paramName] ?? ""}
-                        onChange={(e) =>
-                          setCommandParams((p) => ({
-                            ...p,
-                            [paramName]: e.target.value,
-                          }))
-                        }
-                        placeholder={paramName}
-                        style={{ flex: 1 }}
-                      />
+                      {paramType === "enum" && paramValues ? (
+                        <select
+                          value={current}
+                          onChange={(e) => setParam(e.target.value)}
+                          style={{ flex: 1 }}
+                        >
+                          {!required && <option value="">(none)</option>}
+                          {paramValues.map((v) => (
+                            <option key={v} value={v}>{v}</option>
+                          ))}
+                        </select>
+                      ) : paramType === "boolean" ? (
+                        <select
+                          value={current || "false"}
+                          onChange={(e) => setParam(e.target.value)}
+                          style={{ flex: 1 }}
+                        >
+                          <option value="true">Yes</option>
+                          <option value="false">No</option>
+                        </select>
+                      ) : (
+                        <input
+                          type={paramType === "integer" || paramType === "number" ? "number" : "text"}
+                          value={current}
+                          min={paramMin}
+                          max={paramMax}
+                          onChange={(e) => setParam(e.target.value)}
+                          placeholder={
+                            paramMin !== undefined && paramMax !== undefined
+                              ? `${paramMin}-${paramMax}`
+                              : paramName
+                          }
+                          style={{ flex: 1 }}
+                        />
+                      )}
                       </div>
                       {paramHelp && (
                         <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, marginLeft: 120 }}>
