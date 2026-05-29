@@ -48,6 +48,7 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 | **8443** | TCP (HTTPS) | Web interface and REST API over TLS | Only when HTTPS is enabled in Settings > Security |
 | **19500** | TCP (HTTP) | Device Simulator UI (development/testing only) | No |
 | **19872** | UDP | ISC auto-discovery (multi-instance setups only) | No |
+| **8189** | UDP | WebRTC media for the Video Panel plugin (live camera/RTSP streams on the panel) | Only when the Video Panel plugin is installed and a panel is viewing a stream |
 
 **Port 8080** is the only port that must be accessible for a standard single-room deployment when HTTPS is off (the default). This is configurable via the `OPENAVC_PORT` environment variable or `system.json`.
 
@@ -56,6 +57,8 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 **Port 19500** is used by the device simulator during development and testing. It is only active when the simulator is running. It does not need to be accessible from other machines.
 
 **Port 19872** is used only when multiple OpenAVC instances need to discover each other on the same LAN (inter-system communication). It can be disabled entirely.
+
+**Port 8189** is opened only when the optional Video Panel plugin is installed. That plugin displays live IP camera and RTSP streams on the touch panel, and it delivers video to the browser over WebRTC. The browser sends its media to UDP 8189 on the OpenAVC host. For a panel on the same subnet as the host this often works without any change, because consumer firewalls tend to allow same-subnet UDP. If panels are on a different VLAN or subnet, or video tiles stay black while the rest of the panel works, allow inbound UDP 8189 to the OpenAVC host from the panel devices' subnet. OpenAVC does not add this firewall rule for you, so on a managed network you should add it explicitly. The port is only active while the plugin is running. If the Video Panel plugin is not installed, this port is never opened.
 
 The application does not listen on any other ports by default. There is no SSH server, no SNMP agent, no embedded database port, and no proprietary discovery protocol that accepts inbound connections.
 
