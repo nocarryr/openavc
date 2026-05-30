@@ -325,8 +325,10 @@ class TestTierMatcherIdentified:
         idx.add_rule(SignalRule.for_amx_ddp("polycom_ssc", "Polycom", "SoundStructureC*"))
         m = TierMatcher(idx)
 
+        # A real beacon carries a concrete model, which must glob-match the
+        # registered "SoundStructureC*" pattern (not be looked up exactly).
         result = m.match([
-            evidence_amx_ddp("Polycom", "SoundStructureC*"),
+            evidence_amx_ddp("Polycom", "SoundStructureC16"),
         ])
         assert result.state == DeviceState.IDENTIFIED
         assert result.driver_id == "polycom_ssc"
@@ -611,3 +613,75 @@ class TestDriverCount:
         idx = SignalIndex()
         idx.add_rule(SignalRule.for_hostname("qsc_core", r"^qsys-"))
         assert idx.driver_count() == 1
+
+
+class TestAmxDdpGlobMatching:
+    """AMX-DDP rules register a ``<make>/<model_glob>`` pattern, but beacons
+    carry a concrete model. The matcher must glob-match (case-insensitively),
+    not look up by exact key — otherwise the whole DDP identification path is
+    dead (audit C5)."""
+
+    def _index(self, *rules: SignalRule) -> SignalIndex:
+        idx = SignalIndex()
+        for r in rules:
+            idx.add_rule(r)
+        return idx
+
+    def test_concrete_model_matches_glob(self):
+        # The audit's verify case: make + "SoundStructure*" glob, real beacon.
+        idx = self._index(
+            SignalRule.for_amx_ddp("acme_ss", "AcmeCo", "SoundStructure*"),
+        )
+        rule = idx.find_strong(KIND_AMX_DDP, "AcmeCo/SoundStructure SR12")
+        assert rule is not None
+        assert rule.driver_id == "acme_ss"
+
+    def test_match_is_case_insensitive(self):
+        idx = self._index(
+            SignalRule.for_amx_ddp("acme_ss", "AcmeCo", "SoundStructure*"),
+        )
+        # Beacon make/model differ in case from the registered rule.
+        rule = idx.find_strong(KIND_AMX_DDP, "acmeco/soundstructure sr12")
+        assert rule is not None
+        assert rule.driver_id == "acme_ss"
+
+    def test_bare_make_wildcard_matches_any_model(self):
+        idx = self._index(SignalRule.for_amx_ddp("acme_any", "AcmeCo", "*"))
+        rule = idx.find_strong(KIND_AMX_DDP, "AcmeCo/AnyModel-9000")
+        assert rule is not None
+        assert rule.driver_id == "acme_any"
+
+    def test_non_matching_make_is_unknown(self):
+        idx = self._index(
+            SignalRule.for_amx_ddp("acme_ss", "AcmeCo", "SoundStructure*"),
+        )
+        m = TierMatcher(idx)
+        result = m.match([evidence_amx_ddp("OtherCo", "SoundStructure SR12")])
+        assert result.state == DeviceState.UNKNOWN
+
+    def test_non_matching_model_is_unknown(self):
+        idx = self._index(
+            SignalRule.for_amx_ddp("acme_ss", "AcmeCo", "SoundStructure*"),
+        )
+        rule = idx.find_strong(KIND_AMX_DDP, "AcmeCo/Projector-Z")
+        assert rule is None
+
+    def test_most_specific_pattern_wins(self):
+        # A device matching both a broad and a narrow pattern resolves to the
+        # narrower (more literal) one.
+        idx = self._index(
+            SignalRule.for_amx_ddp("acme_generic", "AcmeCo", "*"),
+            SignalRule.for_amx_ddp("acme_ss", "AcmeCo", "SoundStructure*"),
+        )
+        rule = idx.find_strong(KIND_AMX_DDP, "AcmeCo/SoundStructureC16")
+        assert rule is not None
+        assert rule.driver_id == "acme_ss"
+
+    def test_end_to_end_match_via_evidence(self):
+        idx = self._index(
+            SignalRule.for_amx_ddp("acme_ss", "AcmeCo", "SoundStructure*"),
+        )
+        m = TierMatcher(idx)
+        result = m.match([evidence_amx_ddp("AcmeCo", "SoundStructure SR12")])
+        assert result.state == DeviceState.IDENTIFIED
+        assert result.driver_id == "acme_ss"

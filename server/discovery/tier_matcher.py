@@ -41,6 +41,7 @@ See ``OpenAVC-Discovery-Spec.md`` for the full architecture.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 from dataclasses import dataclass, field
@@ -409,17 +410,53 @@ class SignalIndex:
         """Look up a strong-signal rule. Returns None if no match."""
         if kind not in _STRONG_KINDS:
             return None
+        observed = {k.lower(): str(v) for k, v in (txt or {}).items()}
+        if kind == KIND_AMX_DDP:
+            # AMX-DDP source_ids are "<make>/<model_glob>" patterns, so the
+            # observed concrete "<make>/<model>" must be glob-matched, not
+            # looked up by exact key (which never matches a wildcard model).
+            return self._find_amx_ddp_glob(source_id, observed)
         normalized_source = self._normalize_source_for_kind(kind, source_id)
         bucket = self._rules.get((kind, normalized_source), [])
         if not bucket:
             return None
         # Filter rules: pick the one whose txt_match (if any) is satisfied.
         # When multiple match, prefer the most-specific filter (longest dict).
-        observed = {k.lower(): str(v) for k, v in (txt or {}).items()}
         matching = [r for r in bucket if _txt_match_satisfied(r.txt_match, observed)]
         if not matching:
             return None
         matching.sort(key=lambda r: -len(r.txt_match))
+        return matching[0]
+
+    def _find_amx_ddp_glob(
+        self, source_id: str, observed_txt: dict[str, str],
+    ) -> SignalRule | None:
+        """Glob-match an observed AMX-DDP ``<make>/<model>`` against the
+        registered ``<make>/<model_pattern>`` rules, case-insensitively.
+
+        A real beacon carries a concrete model (``Polycom/SoundStructureC16``)
+        while rules register a glob (``Polycom/SoundStructureC*``), so this
+        can't be an exact dict lookup. When several patterns match, the most
+        specific one (most literal characters, then most TXT constraints) wins.
+        """
+        observed = source_id.strip().lower()
+        matching = [
+            rule
+            for (rkind, _rsid), bucket in self._rules.items()
+            if rkind == KIND_AMX_DDP
+            for rule in bucket
+            if fnmatch.fnmatchcase(observed, rule.source_id.strip().lower())
+            and _txt_match_satisfied(rule.txt_match, observed_txt)
+        ]
+        if not matching:
+            return None
+
+        def _rank(rule: SignalRule) -> tuple[int, int, str]:
+            pat = rule.source_id.strip().lower()
+            wildcards = pat.count("*") + pat.count("?") + pat.count("[")
+            return (len(pat) - wildcards, len(rule.txt_match), pat)
+
+        matching.sort(key=_rank, reverse=True)
         return matching[0]
 
     def find_soft_oui(self, mac: str) -> list[str]:
