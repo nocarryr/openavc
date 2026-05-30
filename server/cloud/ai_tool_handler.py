@@ -699,6 +699,14 @@ class AIToolHandler(
         "get_discovery_results", "wait",
     }
 
+    # Tools that may run without the project-serialization lock: every
+    # read-only tool, plus execute_macro — it awaits a full (possibly long)
+    # macro run but never mutates engine.project, so holding the lock would
+    # needlessly block project edits behind a running macro. Everything else
+    # (all project-mutating tools, and unclassified tools) takes the lock by
+    # default, so a new write tool is serialized automatically.
+    _CONCURRENT_SAFE_TOOLS = _READ_ONLY_TOOLS | {"execute_macro"}
+
     # Idle timeout before resetting the AI backup flag (seconds)
     _AI_BACKUP_IDLE_TIMEOUT = 300  # 5 minutes
 
@@ -719,6 +727,13 @@ class AIToolHandler(
         # Backup tracking: create one backup before the first write in a conversation
         self._ai_backup_created: bool = False
         self._ai_last_write_time: float = 0
+
+        # Serialize project-mutating tools so concurrent tool tasks can't
+        # interleave on the shared engine.project (lost updates). Hold strong
+        # refs to in-flight tasks so they aren't GC'd mid-run and can be
+        # cancelled on shutdown.
+        self._project_lock = asyncio.Lock()
+        self._pending_tasks: set[asyncio.Task] = set()
 
         # Tool dispatch table
         self._tools: dict[str, Any] = {
@@ -831,36 +846,68 @@ class AIToolHandler(
             )
             return
 
-        # Run in background so the receive loop stays responsive to pings/acks
-        asyncio.create_task(self._execute_tool(request_id, tool_name, handler, tool_input))
+        # Run in background so the receive loop stays responsive to pings/acks.
+        # Keep a strong ref (GC-safety) and track it so shutdown() can cancel
+        # in-flight tools when the agent stops.
+        task = asyncio.create_task(self._execute_tool(request_id, tool_name, handler, tool_input))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def _execute_tool(
         self, request_id: str, tool_name: str, handler: Any, tool_input: dict
     ) -> None:
         """Execute a tool handler and send the result back to the cloud."""
         try:
-            # Create a backup before the first write operation in this AI conversation
-            if tool_name not in self._READ_ONLY_TOOLS:
-                # Reset backup flag if idle for too long (new conversation)
-                if (self._ai_last_write_time
-                        and time.monotonic() - self._ai_last_write_time > self._AI_BACKUP_IDLE_TIMEOUT):
-                    self._ai_backup_created = False
-
-                if not self._ai_backup_created and self._project_path:
-                    try:
-                        from server.core.backup_manager import create_backup
-                        await asyncio.to_thread(create_backup, Path(self._project_path).parent, "Before AI changes")
-                    except Exception:
-                        log.debug("Could not create pre-AI backup", exc_info=True)
-                    self._ai_backup_created = True
-
-                self._ai_last_write_time = time.monotonic()
-
-            result = await handler(tool_input)
+            if tool_name in self._CONCURRENT_SAFE_TOOLS:
+                result = await handler(tool_input)
+            else:
+                # Project-mutating tool: serialize on the project lock so two
+                # concurrent tools can't interleave on engine.project, and run
+                # the one-time pre-AI backup under the same lock so it happens
+                # exactly once even under concurrency.
+                async with self._project_lock:
+                    await self._maybe_create_pre_ai_backup()
+                    result = await handler(tool_input)
             await self._send_result(request_id, True, result=result)
         except Exception as e:
             log.exception(f"AI tool handler: error executing {tool_name}")
             await self._send_result(request_id, False, error=str(e))
+
+    async def _maybe_create_pre_ai_backup(self) -> None:
+        """Create one backup before the first project-mutating tool in an AI
+        conversation. The caller holds ``self._project_lock`` so the flag
+        check and the backup are atomic (no double backup under concurrency).
+        """
+        # Reset the flag if idle for too long (treat as a new conversation).
+        if (self._ai_last_write_time
+                and time.monotonic() - self._ai_last_write_time > self._AI_BACKUP_IDLE_TIMEOUT):
+            self._ai_backup_created = False
+
+        if not self._ai_backup_created and self._project_path:
+            try:
+                from server.core.backup_manager import create_backup
+                await asyncio.to_thread(create_backup, Path(self._project_path).parent, "Before AI changes")
+            except Exception:
+                log.debug("Could not create pre-AI backup", exc_info=True)
+            self._ai_backup_created = True
+
+        self._ai_last_write_time = time.monotonic()
+
+    async def shutdown(self) -> None:
+        """Cancel any in-flight tool tasks.
+
+        Called when the cloud agent stops so background tool execution doesn't
+        outlive the agent, write to a torn-down engine, or leak tasks.
+        """
+        tasks = list(self._pending_tasks)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._pending_tasks.clear()
 
     # Tool handler methods are defined in the domain-specific mixins:
     # - ProjectToolsMixin: project state, metadata

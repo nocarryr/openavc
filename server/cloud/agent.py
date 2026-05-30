@@ -204,6 +204,14 @@ class CloudAgent:
                 except asyncio.CancelledError:
                     pass
 
+        # Cancel any in-flight AI tool tasks (the receive loop is stopped, so
+        # no new ones will start) before tearing down subsystems.
+        if self._ai_tool_handler:
+            try:
+                await self._ai_tool_handler.shutdown()
+            except Exception:
+                log.debug("Error shutting down AI tool handler", exc_info=True)
+
         # Stop subsystems
         if self._tunnel_handler:
             await self._tunnel_handler.stop()
