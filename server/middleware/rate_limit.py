@@ -73,9 +73,15 @@ def _classify(method: str, path: str) -> str:
 
 
 def _get_client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    # Only trust X-Forwarded-For when explicitly configured to sit behind a
+    # known reverse proxy. Otherwise a client could set the header to spoof its
+    # source IP — dodging per-IP limits AND the 127.0.0.1 rate-limit exemption
+    # below, which would defeat the 401 brute-force counter. Default to the
+    # real TCP peer.
+    if config.TRUST_FORWARDED_FOR:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     if request.client:
         return request.client.host
     return "unknown"

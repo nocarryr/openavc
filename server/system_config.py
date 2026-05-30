@@ -165,6 +165,10 @@ DEFAULTS: dict[str, Any] = {
         "http_port": 8080,
         "bind_address": "127.0.0.1",
         "control_interface": "",
+        # Trust the X-Forwarded-For header for the client IP only when behind a
+        # known reverse proxy. Off by default so a client can't spoof its
+        # source IP to dodge rate limits / the localhost exemption.
+        "trust_forwarded_for": False,
     },
     "auth": {
         "programmer_username": "",
@@ -219,6 +223,7 @@ ENV_OVERRIDES: dict[tuple[str, str], tuple[str, type]] = {
     ("network", "http_port"): ("OPENAVC_PORT", int),
     ("network", "bind_address"): ("OPENAVC_BIND", str),
     ("network", "control_interface"): ("OPENAVC_CONTROL_INTERFACE", str),
+    ("network", "trust_forwarded_for"): ("OPENAVC_TRUST_FORWARDED_FOR", bool),
     ("auth", "programmer_username"): ("OPENAVC_PROGRAMMER_USERNAME", str),
     ("auth", "programmer_password"): ("OPENAVC_PROGRAMMER_PASSWORD", str),
     ("auth", "api_key"): ("OPENAVC_API_KEY", str),

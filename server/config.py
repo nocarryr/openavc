@@ -45,6 +45,10 @@ _cfg = _load_config_values()
 # Network
 HTTP_PORT: int = _cfg.get("network", "http_port", 8080)
 BIND_ADDRESS: str = _cfg.get("network", "bind_address", "0.0.0.0")
+# Only honor X-Forwarded-For when explicitly fronted by a trusted reverse
+# proxy. Default False: use the real TCP peer so the client IP can't be
+# spoofed to bypass rate limiting or the localhost exemption.
+TRUST_FORWARDED_FOR: bool = _cfg.get("network", "trust_forwarded_for", False)
 
 # HTTPS / TLS (DEFAULTS owns the truth — no fallback args)
 TLS_ENABLED: bool = _cfg.get("tls", "enabled")

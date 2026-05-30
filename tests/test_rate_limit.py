@@ -332,3 +332,55 @@ def test_library_routes_are_standard_tier():
         # Third hit on a sibling standard-tier path should be throttled
         r = client.get("/api/devices")
         assert r.status_code == 429
+
+
+# --- X-Forwarded-For trust (client-IP spoofing) ---
+
+
+def _req_with_xff(peer_host: str, xff: str | None) -> Request:
+    """Build a minimal Starlette Request with a TCP peer and optional XFF."""
+    headers = [(b"x-forwarded-for", xff.encode())] if xff else []
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/devices",
+        "headers": headers,
+        "client": (peer_host, 5555),
+        "query_string": b"",
+    }
+    return Request(scope)
+
+
+def test_xff_ignored_by_default(monkeypatch):
+    """Default posture: X-Forwarded-For is NOT trusted, so the real TCP peer is
+    used and a client can't spoof its source IP."""
+    from server.middleware.rate_limit import _get_client_ip
+
+    monkeypatch.setattr("server.config.TRUST_FORWARDED_FOR", False)
+    req = _req_with_xff("203.0.113.9", "127.0.0.1")
+    assert _get_client_ip(req) == "203.0.113.9"
+
+
+def test_xff_honored_when_trusted(monkeypatch):
+    """When explicitly behind a trusted proxy, the first XFF hop is used."""
+    from server.middleware.rate_limit import _get_client_ip
+
+    monkeypatch.setattr("server.config.TRUST_FORWARDED_FOR", True)
+    req = _req_with_xff("10.0.0.1", "198.51.100.7, 10.0.0.1")
+    assert _get_client_ip(req) == "198.51.100.7"
+
+
+def test_spoofed_xff_localhost_does_not_exempt(monkeypatch):
+    """Security regression: a client must not be able to spoof
+    `X-Forwarded-For: 127.0.0.1` to claim the localhost rate-limit exemption
+    (which would also defeat the 401 brute-force counter)."""
+    monkeypatch.setattr("server.config.TRUST_FORWARDED_FOR", False)
+    app = _make_app(standard_limit=1)
+    client = TestClient(app)
+
+    with patch("server.config.RATE_LIMIT_STANDARD_PER_MINUTE", 1):
+        _reset_state()
+        spoof = {"X-Forwarded-For": "127.0.0.1"}
+        assert client.get("/api/devices", headers=spoof).status_code == 200
+        # Second hit must still be throttled — the spoof did NOT exempt it.
+        assert client.get("/api/devices", headers=spoof).status_code == 429
