@@ -129,6 +129,41 @@ def _tcp_responder(port: int, reply: bytes) -> threading.Thread:
     return t
 
 
+def _tcp_responder_segments(
+    port: int, segments: list[bytes], *, gap: float = 0.2,
+) -> threading.Thread:
+    """Spawn a one-shot TCP server that emits ``segments`` as separate sends.
+
+    Simulates a device whose identifying banner arrives in a later TCP
+    segment than its first — e.g. a telnet controller that sends IAC
+    negotiation in one segment and the welcome line in the next. Does not
+    read from the client (connect-only banner-grab style), then closes.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(1)
+    s.settimeout(4.0)
+
+    def serve():
+        try:
+            conn, _ = s.accept()
+            try:
+                for i, seg in enumerate(segments):
+                    if i > 0:
+                        time.sleep(gap)
+                    conn.sendall(seg)
+            finally:
+                conn.close()
+        except OSError:
+            pass
+        finally:
+            s.close()
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t
+
+
 _NEXT_PORT = [39600]
 
 
@@ -477,6 +512,55 @@ class TestProbeRunnerIntegration:
             source_ip="127.0.0.1", stagger_ms=0,
         )
         assert ev is None
+
+    @pytest.mark.asyncio
+    async def test_tcp_probe_matches_banner_in_later_segment(self):
+        # Regression: a single read captures only the first TCP segment, so
+        # a device that sends telnet IAC negotiation first and its
+        # identifying banner in a later segment would never match. The
+        # runner must accumulate across segments. Mirrors the TurtleAV
+        # controllers (IAC, then "Welcome To Controller(h)...").
+        port = _next_port()
+        iac = b"\xff\xfb\x03\xff\xfb\x01\xff\xfe\x01\xff\xfd\x00"
+        banner = (
+            b"\r\n====\r\nWelcome To Controller(h) Terminal Control System"
+            b"\r\nFW Version: 1.50.02\r\nCONTROLLER> "
+        )
+        _tcp_responder_segments(port, [iac, banner], gap=0.2)
+        h = _make_hint("darwinish", tcp_probe={
+            "port": port,
+            "expect_regex": r"Controller\(h\)|DARWIN CONTROL",
+            "timeout_ms": 4000,
+        })
+        ev = await run_tcp_active_probe(
+            h.tcp_probe, target="127.0.0.1",
+            source_ip="127.0.0.1", stagger_ms=0,
+        )
+        assert ev is not None
+        assert ev.data["source_id"] == "custom_darwinish_tcp"
+        assert "Controller(h)" in ev.data["response"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_tcp_probe_iac_only_no_banner_returns_none(self):
+        # A telnet host that negotiates but never sends the expected banner
+        # must not match — and must not hang to the full budget.
+        port = _next_port()
+        iac = b"\xff\xfb\x03\xff\xfb\x01"
+        _tcp_responder_segments(port, [iac], gap=0.0)
+        h = _make_hint("darwinish_neg", tcp_probe={
+            "port": port,
+            "expect_regex": r"Controller\(h\)",
+            "timeout_ms": 5000,
+        })
+        t0 = time.monotonic()
+        ev = await run_tcp_active_probe(
+            h.tcp_probe, target="127.0.0.1",
+            source_ip="127.0.0.1", stagger_ms=0,
+        )
+        elapsed = time.monotonic() - t0
+        assert ev is None
+        # Released on EOF / quiet gap, well under the 5s budget.
+        assert elapsed < 4.0, f"runner hung past the quiet gap: {elapsed:.2f}s"
 
 
 # ---------------------------------------------------------------------------

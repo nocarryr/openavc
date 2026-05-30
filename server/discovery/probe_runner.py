@@ -49,6 +49,17 @@ log = logging.getLogger("discovery.probe_runner")
 # discarded. Real AV discovery responses fit easily in 4096 bytes.
 _MAX_RESPONSE_BYTES = 4096
 
+# Quiet-gap timeout for the TCP active-probe accumulation loop. A device
+# may send its identifying banner in a later TCP segment than the first
+# (telnet controllers emit IAC negotiation in its own segment ahead of the
+# welcome line; SSH/banner protocols are similar). We keep reading while
+# data is actively arriving and stop the first time the peer goes silent
+# for this long — so a multi-segment banner lands, while a non-matching
+# host that sends one chunk and waits is released promptly instead of
+# sitting through the whole probe budget. 1.5s matches the validated
+# inter-segment margin the Python banner-grab companions already use.
+_PROBE_READ_QUIET_SECONDS = 1.5
+
 
 class RateLimiter:
     """Async token-bucket-style limiter, ``rate`` calls per second.
@@ -321,12 +332,46 @@ async def run_tcp_active_probe(
                 await asyncio.wait_for(writer.drain(), timeout=timeout)
             except (TimeoutError, asyncio.TimeoutError):
                 pass
-        try:
-            payload = await asyncio.wait_for(
-                reader.read(_MAX_RESPONSE_BYTES), timeout=timeout,
-            )
-        except (TimeoutError, asyncio.TimeoutError):
-            payload = b""
+        # Accumulate short reads rather than a single read. A single read
+        # can return just the first TCP segment; for telnet/SSH-style
+        # devices that send IAC negotiation (or a partial greeting) in its
+        # own segment ahead of the identifying banner, that first segment
+        # never carries the fingerprint. Read until the matcher hits, the
+        # peer closes, the byte cap is reached, or the peer goes quiet for
+        # _PROBE_READ_QUIET_SECONDS (whichever comes first). A connect-only
+        # probe (no matcher) returns as soon as any reply arrives.
+        match = spec.response_match
+        has_matcher = (
+            match.starts_with is not None
+            or match.contains is not None
+            or match.regex is not None
+        )
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        acc = bytearray()
+        while loop.time() < deadline and len(acc) < _MAX_RESPONSE_BYTES:
+            remaining = deadline - loop.time()
+            # Wait the full remaining budget for the first byte (a device can
+            # be slow to start sending), but once data is flowing only wait a
+            # short quiet-gap for further segments — so a multi-segment banner
+            # lands while a non-matching host that sent one chunk and went
+            # silent is released promptly.
+            read_timeout = remaining if not acc else min(_PROBE_READ_QUIET_SECONDS, remaining)
+            try:
+                chunk = await asyncio.wait_for(
+                    reader.read(_MAX_RESPONSE_BYTES - len(acc)),
+                    timeout=read_timeout,
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                break  # first-byte budget elapsed, or peer went quiet mid-banner
+            if not chunk:
+                break  # peer closed the connection
+            acc += chunk
+            if not has_matcher:
+                break  # connect-only probe: any reply is enough
+            if _matches(bytes(acc), match):
+                break  # fingerprint satisfied — return immediately
+        payload = bytes(acc)
     except (ConnectionResetError, BrokenPipeError, OSError) as exc:
         log.debug(
             "probe_runner: %s read from %s:%d failed: %s",
