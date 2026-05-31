@@ -12,9 +12,15 @@ RELEASE=trixie
 # If no display is connected, the server still runs headless over the network.
 STAGE_LIST="stage0 stage1 stage2 stage3 stage-openavc"
 
-# First user (openavc, password set at build time)
+# First user (openavc). FIRST_USER_PASS must be SET for
+# DISABLE_FIRST_BOOT_USER_RENAME=1 to work (pi-gen README: "Requires
+# FIRST_USER_PASS to be set."), but this build-time value never ships as a
+# usable credential: stage-openavc/02-configure LOCKS the account, so the
+# published login is gone out of the box. The integrator sets the real
+# password once in the web setup, which syncs it to this OS account (C10).
+# The value here is a throwaway and is deliberately not the username.
 FIRST_USER_NAME=openavc
-FIRST_USER_PASS=openavc
+FIRST_USER_PASS=locked-at-build-3f9a2c7e1b8d4056
 
 # Skip the Raspberry Pi OS first-boot user-rename wizard. With this set,
 # export-image/01-user-rename never installs rpi-first-boot-wizard, never
@@ -30,8 +36,11 @@ KEYBOARD_LAYOUT="English (US)"
 TIMEZONE_DEFAULT=Etc/UTC
 LOCALE_DEFAULT=en_US.UTF-8
 
-# Enable SSH by default (headless access)
-ENABLE_SSH=1
+# SSH ships OFF (pi-gen README: ENABLE_SSH default 0; "common passwords create
+# high risk of attackers taking over the device"). The integrator turns it on
+# with one click in Settings > Security when they want remote login; it then
+# uses the openavc account + the admin password set during web setup (C10).
+ENABLE_SSH=0
 
 # Image compression
 DEPLOY_COMPRESSION=xz

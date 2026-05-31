@@ -5,7 +5,7 @@ import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { RestartProgressDialog } from "../components/shared/RestartProgressDialog";
 import { showError, showSuccess } from "../store/toastStore";
 import * as api from "../api/restClient";
-import type { SystemConfig, NetworkAdapter, TlsStatus, TlsUploadResult } from "../api/restClient";
+import type { SystemConfig, NetworkAdapter, TlsStatus, TlsUploadResult, SshStatus } from "../api/restClient";
 
 const REDACTED = "***";
 
@@ -335,6 +335,8 @@ export function SystemSettingsView() {
   const certInputRef = useRef<HTMLInputElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const [kioskAvailable, setKioskAvailable] = useState(false);
+  const [ssh, setSsh] = useState<SshStatus | null>(null);
+  const [sshBusy, setSshBusy] = useState(false);
   const [adapters, setAdapters] = useState<NetworkAdapter[]>([]);
   const [adaptersLoading, setAdaptersLoading] = useState(false);
   const [tlsStatus, setTlsStatus] = useState<TlsStatus | null>(null);
@@ -357,6 +359,7 @@ export function SystemSettingsView() {
   useEffect(() => {
     api.getSystemConfig().then(setConfig).catch((e) => showError("Failed to load config: " + e));
     api.getSystemVersion().then((v) => setKioskAvailable(v.kiosk_available)).catch(() => {});
+    api.getSshStatus().then(setSsh).catch(() => setSsh(null));
     loadAdapters();
     loadTlsStatus();
   }, [loadAdapters, loadTlsStatus]);
@@ -425,6 +428,28 @@ export function SystemSettingsView() {
       showError("Failed to save: " + String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSshToggle = async (enabled: boolean) => {
+    if (sshBusy) return;
+    setSshBusy(true);
+    try {
+      const r = await api.setSsh(enabled);
+      if (r.ok) {
+        setSsh((s) => (s ? { ...s, enabled } : s));
+        showSuccess(enabled ? "SSH enabled." : "SSH disabled.");
+      } else if (r.pending) {
+        showSuccess("SSH change submitted. Confirming...");
+        const fresh = await api.getSshStatus().catch(() => null);
+        if (fresh) setSsh(fresh);
+      } else {
+        showError("SSH change failed: " + (r.error || "unknown error"));
+      }
+    } catch (e) {
+      showError("SSH change failed: " + String(e));
+    } finally {
+      setSshBusy(false);
     }
   };
 
@@ -1220,9 +1245,34 @@ export function SystemSettingsView() {
             />
             <span style={helpText}>
               Set this if anyone else on your network could open the Programmer IDE.
+              {ssh?.supported && " On this controller it is also the SSH and console login for the openavc user."}
             </span>
           </div>
         </div>
+
+        {ssh?.supported && (
+          <div style={cardStyle}>
+            <h4 style={subCardTitle}>SSH access</h4>
+            <div style={subCardDescription}>
+              Remote command-line login to this controller. Off by default. When on, log in as user <code>openavc</code> with your admin password.
+            </div>
+            <div style={toggleRow}>
+              <div>
+                <div style={{ fontSize: "var(--font-size-sm)" }}>Enable SSH</div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  {sshBusy
+                    ? "Applying..."
+                    : ssh.enabled === null
+                    ? "Current state unknown"
+                    : ssh.enabled
+                    ? "SSH is on"
+                    : "SSH is off"}
+                </div>
+              </div>
+              <Toggle checked={!!ssh.enabled} onChange={handleSshToggle} />
+            </div>
+          </div>
+        )}
 
         <div style={cardStyle}>
           <h4 style={subCardTitle}>API key (for integrations)</h4>

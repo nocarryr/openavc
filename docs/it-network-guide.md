@@ -49,6 +49,7 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 | **19500** | TCP (HTTP) | Device Simulator UI (development/testing only) | No |
 | **19872** | UDP | ISC auto-discovery (multi-instance setups only) | No |
 | **8189** | UDP | WebRTC media for the Video Panel plugin (live camera/RTSP streams on the panel) | Only when the Video Panel plugin is installed and a panel is viewing a stream |
+| **22** | TCP (SSH) | Remote console login — Raspberry Pi appliance image only | No — ships disabled; operator-enabled in Settings > Security |
 
 **Port 8080** is the only port that must be accessible for a standard single-room deployment when HTTPS is off (the default). This is configurable via the `OPENAVC_PORT` environment variable or `system.json`.
 
@@ -60,7 +61,7 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 
 **Port 8189** is opened only when the optional Video Panel plugin is installed. That plugin displays live IP camera and RTSP streams on the touch panel, and it delivers video to the browser over WebRTC. The browser sends its media to UDP 8189 on the OpenAVC host. For a panel on the same subnet as the host this often works without any change, because consumer firewalls tend to allow same-subnet UDP. If panels are on a different VLAN or subnet, or video tiles stay black while the rest of the panel works, allow inbound UDP 8189 to the OpenAVC host from the panel devices' subnet. OpenAVC does not add this firewall rule for you, so on a managed network you should add it explicitly. The port is only active while the plugin is running. If the Video Panel plugin is not installed, this port is never opened.
 
-The application does not listen on any other ports by default. There is no SSH server, no SNMP agent, no embedded database port, and no proprietary discovery protocol that accepts inbound connections.
+The application itself does not listen on any other ports by default: no SNMP agent, no embedded database port, and no proprietary discovery protocol that accepts inbound connections. The Raspberry Pi appliance image can optionally run an SSH server (port 22) for remote console access, but it ships **disabled** — an operator turns it on in Settings > Security when it is needed (see [Raspberry Pi appliance](#raspberry-pi-appliance-login-and-ssh) below).
 
 ### Who can access the web interface
 
@@ -76,6 +77,16 @@ OpenAVC separates two surfaces with different access rules:
 **Binding.** Packaged deployments bind to `0.0.0.0` (all interfaces). A bare manual run (`python -m server.main` from source) binds to `127.0.0.1` (localhost only). To force localhost-only on a packaged deployment, set `OPENAVC_BIND=127.0.0.1` (e.g. `sudo systemctl edit openavc` on Linux, or the `network.bind_address` field in `system.json`).
 
 **Credentials.** The admin password set during first-run setup is stored in `system.json` on the host. It can be changed later in **Settings > Security**. For unattended provisioning, it can also be supplied up front via `OPENAVC_PROGRAMMER_PASSWORD` (and optionally `OPENAVC_PROGRAMMER_USERNAME`) or an `OPENAVC_API_KEY` for programmatic clients — an instance configured this way is already "claimed" and goes straight to the login screen.
+
+### Raspberry Pi appliance: login and SSH
+
+The Raspberry Pi appliance image hardens the operating-system login as well as the web interface:
+
+- **No shipped OS password.** The `openavc` Linux account is **locked** in the image — there is no `openavc/openavc` (or any other) default login. The kiosk display still starts automatically; auto-login does not use a password.
+- **One credential.** The admin password set during first-run setup becomes the OS console/SSH login for the `openavc` user too, so there is a single password to manage. Changing it in **Settings > Security** re-syncs the OS login.
+- **SSH off by default.** No SSH server runs until you enable it with the **Enable SSH** toggle in **Settings > Security**. Once on, log in as `openavc` with the admin password over port 22. Turn it back off from the same toggle.
+
+This is Pi-image-specific. On a generic Linux `install.sh` host, OpenAVC does not touch the operating-system account or `sshd` — the server runs as an unprivileged service user and you manage OS login and SSH yourself.
 
 **Fronting OpenAVC with your own auth** (an SSO reverse proxy, for example): set `OPENAVC_ALLOW_ANONYMOUS=true` to opt back into open admin access, and restrict reachability at the proxy. If you do this behind a trusted proxy that sets `X-Forwarded-For`, also set `network.trust_forwarded_for: true` in `system.json` so per-client rate limiting sees the real client IP.
 

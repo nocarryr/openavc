@@ -108,6 +108,14 @@ else
         NETWORK_INFO="<div class=\"field\"><span class=\"label\">Network</span><span class=\"value\">No connection detected. Connect Ethernet and reboot.</span></div>"
     fi
 
+    # SSH ships off (C10). Show the live state: the integrator enables it from
+    # the Programmer under Settings > Security when remote login is wanted.
+    if systemctl is-active ssh >/dev/null 2>&1; then
+        SSH_VALUE="ssh openavc@${HOSTNAME}.local"
+    else
+        SSH_VALUE="Off (enable in Settings &gt; Security)"
+    fi
+
     cat > "$INFO_PAGE" << INFOHTML
 <!DOCTYPE html>
 <html lang="en">
@@ -212,7 +220,7 @@ else
     <h2>Access From Another Computer</h2>
     <div class="field"><span class="label">Programmer</span><span class="value">${PROGRAMMER_URL}</span></div>
     <div class="field"><span class="label">Panel</span><span class="value">${PANEL_URL}</span></div>
-    <div class="field"><span class="label">SSH</span><span class="value">ssh openavc@${HOSTNAME}.local</span></div>
+    <div class="field"><span class="label">SSH</span><span class="value">${SSH_VALUE}</span></div>
   </div>
 
   <div class="hint">

@@ -29,6 +29,9 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from server.system_config import get_system_config
+from server.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 _basic = HTTPBasic(auto_error=False)
 
@@ -141,6 +144,13 @@ def claim_instance(password: str, username: str = "") -> None:
         cfg.set("auth", "programmer_username", username.strip())
     cfg.set("auth", "programmer_password", password)
     cfg.save()
+    # On a Pi appliance, this same password is the OS login — sync it to the
+    # 'openavc' account via the root helper (no-op everywhere else). C10.
+    try:
+        from server import host_control
+        host_control.sync_os_password()
+    except Exception:  # noqa: BLE001 — OS sync must never break the claim
+        log.warning("OS password sync after claim failed", exc_info=True)
 
 
 def programmer_auth_satisfied(

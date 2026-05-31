@@ -253,6 +253,29 @@ export async function rebootSystem(): Promise<{ status: string }> {
   return request("/system/reboot", { method: "POST" });
 }
 
+/** SSH availability + state. `supported` is true only on a Pi appliance (the
+ *  privileged helper is installed); the toggle is hidden otherwise. `enabled`
+ *  reflects whether sshd is running now (null if undeterminable). */
+export interface SshStatus {
+  supported: boolean;
+  enabled: boolean | null;
+}
+
+export async function getSshStatus(): Promise<SshStatus> {
+  return request("/system/ssh");
+}
+
+/** Enable/disable SSH on a Pi appliance. `pending` means the change was
+ *  submitted but unconfirmed before the server's short wait elapsed. */
+export async function setSsh(
+  enabled: boolean
+): Promise<{ ok: boolean; enabled: boolean; pending?: boolean; error?: string }> {
+  return request("/system/ssh", {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 export interface RestartResult {
   status: string;
   mode: "graceful" | "hard";

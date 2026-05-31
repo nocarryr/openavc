@@ -303,6 +303,16 @@ The `panel-kiosk.sh` script reads the kiosk settings from `system.json`, waits f
 
 On the Raspberry Pi image, an `openavc-info.service` also displays the IP address and access URLs on the HDMI console at boot, so you can find the device on the network even without mDNS.
 
+### Raspberry Pi: OS login and SSH
+
+The Pi appliance image ships with the operating-system login locked down:
+
+- There is **no default OS password**. The `openavc` Linux account is locked in the image, so there is no `openavc/openavc` shared login to exploit. The kiosk display still auto-starts (auto-login does not use a password).
+- The admin password you set on the first-run **Create admin password** screen becomes the OS console/SSH login for the `openavc` user as well — one credential for both. Changing it in **Settings > Security** re-syncs the OS login.
+- **SSH is off by default.** Enable it with the **Enable SSH** toggle in **Settings > Security** when you need remote console access; log in as `openavc` with the admin password. Turn it off from the same toggle.
+
+This applies only to the Pi appliance image. A generic Linux `install.sh` host runs OpenAVC as an unprivileged service account and does not manage the OS login or `sshd` — set those up yourself as usual.
+
 ## Authentication
 
 Authentication is optional. When the server is only accessible locally (bind address `127.0.0.1`), no credentials are needed. When the server is accessible on the network (`0.0.0.0`), you should set at least a programmer password to prevent unauthorized changes to your project.

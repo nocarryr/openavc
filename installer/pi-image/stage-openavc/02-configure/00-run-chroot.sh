@@ -18,9 +18,156 @@ chown -R "$OPENAVC_USER:$OPENAVC_USER" /var/log/openavc
 # Add openavc user to video and input groups (needed for display + touch)
 usermod -aG video,input,dialout "$OPENAVC_USER"
 
-# Allow passwordless reboot from the server (used by Programmer UI reboot button)
-echo "$OPENAVC_USER ALL=(ALL) NOPASSWD: /sbin/reboot" > /etc/sudoers.d/openavc-reboot
-chmod 440 /etc/sudoers.d/openavc-reboot
+# --- Privileged action helper (C10) ---
+#
+# The server runs as the unprivileged 'openavc' user with NoNewPrivileges=true,
+# so it CANNOT use sudo (setuid is ignored — that also means the old
+# `sudo /sbin/reboot` approach never worked). Privileged actions — syncing the
+# OS account password to the web admin password, toggling SSH, rebooting — are
+# performed by this root-owned helper, triggered by a systemd .path unit when
+# the server drops a request file in the spool directory.
+#
+# The helper lives in /usr/local/sbin (root-only-writable) — NOT under
+# /opt/openavc, which is chowned to 'openavc' and could otherwise be rewritten
+# by a compromised server to gain root. It is hard-coded to the openavc user
+# and a fixed action set, so the server can never target root or run arbitrary
+# commands. Reusable for the planned Host Network Config UI (nmcli).
+mkdir -p /usr/local/sbin
+cat > /usr/local/sbin/openavc-privileged-helper.sh << 'HELPER'
+#!/bin/bash
+# OpenAVC privileged action helper. Runs as ROOT via openavc-privileged.service,
+# triggered by openavc-privileged.path when the unprivileged server drops a
+# request file. Hard-coded to the 'openavc' user and a fixed action vocabulary;
+# it never executes content from a request file. set_password reads the password
+# from system.json (which the server already controls), so it grants no
+# privilege the server didn't already have.
+set -u
+
+DATA_DIR="${1:-/var/lib/openavc}"
+REQ_DIR="$DATA_DIR/priv-requests"
+RES_DIR="$DATA_DIR/priv-results"
+CONFIG_FILE="$DATA_DIR/system.json"
+OPENAVC_USER="openavc"
+PYTHON="${PYTHON:-/usr/bin/python3}"
+LOG_TAG="openavc-privileged"
+
+mkdir -p "$RES_DIR"
+chown "$OPENAVC_USER:$OPENAVC_USER" "$RES_DIR" 2>/dev/null || true
+
+reboot_after=0
+shopt -s nullglob
+for req in "$REQ_DIR"/*.json; do
+    id="$(basename "$req" .json)"
+    action="$("$PYTHON" -c "import json,sys; print(json.load(open(sys.argv[1])).get('action',''))" "$req" 2>/dev/null)"
+    want_result="$("$PYTHON" -c "import json,sys; print(bool(json.load(open(sys.argv[1])).get('want_result', False)))" "$req" 2>/dev/null)"
+    ok=false
+    error=""
+
+    case "$action" in
+        set_password)
+            pw="$("$PYTHON" -c "import json,sys; print(json.load(open(sys.argv[1])).get('auth',{}).get('programmer_password',''))" "$CONFIG_FILE" 2>/dev/null)"
+            if [ -n "$pw" ]; then
+                if printf '%s:%s\n' "$OPENAVC_USER" "$pw" | chpasswd; then
+                    ok=true
+                    echo "$LOG_TAG: synced OS password for $OPENAVC_USER"
+                else
+                    error="chpasswd failed"
+                fi
+            else
+                # No web password (unclaimed / cleared) -> keep the account
+                # locked so it never has a usable password.
+                if passwd -l "$OPENAVC_USER" >/dev/null 2>&1; then
+                    ok=true
+                    echo "$LOG_TAG: no web password set; locked $OPENAVC_USER"
+                else
+                    error="lock failed"
+                fi
+            fi
+            ;;
+        set_ssh)
+            enabled="$("$PYTHON" -c "import json,sys; print(bool(json.load(open(sys.argv[1])).get('enabled', False)))" "$req" 2>/dev/null)"
+            if [ "$enabled" = "True" ]; then
+                if systemctl enable --now ssh >/dev/null 2>&1; then ok=true; else error="ssh enable failed"; fi
+            else
+                systemctl disable --now ssh >/dev/null 2>&1
+                systemctl disable --now ssh.socket >/dev/null 2>&1
+                ok=true
+            fi
+            ;;
+        reboot)
+            ok=true
+            reboot_after=1
+            ;;
+        *)
+            error="unknown action"
+            ;;
+    esac
+
+    # Result file (only when the server is waiting on one). error strings are a
+    # fixed ASCII set with no quotes/backslashes, so this raw JSON is safe.
+    if [ "$want_result" = "True" ]; then
+        if [ "$ok" = "true" ]; then
+            printf '{"ok": true, "error": ""}\n' > "$RES_DIR/$id.json"
+        else
+            printf '{"ok": false, "error": "%s"}\n' "$error" > "$RES_DIR/$id.json"
+        fi
+        chown "$OPENAVC_USER:$OPENAVC_USER" "$RES_DIR/$id.json" 2>/dev/null || true
+    fi
+    rm -f "$req"
+    [ -n "$error" ] && echo "$LOG_TAG: action=$action id=$id error=$error"
+done
+
+if [ "$reboot_after" -eq 1 ]; then
+    ( sleep 2; /sbin/reboot ) &
+fi
+exit 0
+HELPER
+chown root:root /usr/local/sbin/openavc-privileged-helper.sh
+chmod 755 /usr/local/sbin/openavc-privileged-helper.sh
+
+# systemd path unit: watch the request spool, trigger the helper. A separate
+# root unit is unaffected by the server's NoNewPrivileges (systemd.exec(5):
+# "no effect on processes ... invoked ... through ... arbitrary IPC services").
+cat > /etc/systemd/system/openavc-privileged.path << 'PATHUNIT'
+[Unit]
+Description=Watch for OpenAVC privileged action requests
+
+[Path]
+DirectoryNotEmpty=/var/lib/openavc/priv-requests
+Unit=openavc-privileged.service
+
+[Install]
+WantedBy=multi-user.target
+PATHUNIT
+
+cat > /etc/systemd/system/openavc-privileged.service << 'SVCUNIT'
+[Unit]
+Description=OpenAVC privileged action helper
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openavc-privileged-helper.sh /var/lib/openavc
+SVCUNIT
+
+# Request/result spool (server-writable; the watcher watches only requests so
+# result files can't re-trigger it). The data dir itself is created by the host
+# 01-install stage; ensure the subdirs exist and are owned by the server user.
+mkdir -p "$DATA_DIR/priv-requests" "$DATA_DIR/priv-results"
+chown "$OPENAVC_USER:$OPENAVC_USER" "$DATA_DIR/priv-requests" "$DATA_DIR/priv-results"
+chmod 700 "$DATA_DIR/priv-requests" "$DATA_DIR/priv-results"
+
+# --- Lock the OS account; ship SSH off (C10) ---
+#
+# The build-time FIRST_USER_PASS is a throwaway. Lock the account so no
+# published credential ships. The integrator's web setup syncs a real password
+# via the helper above (chpasswd unlocks + sets in one step). Kiosk autologin
+# does not use the password, so locking does not affect the kiosk display.
+passwd -l "$OPENAVC_USER"
+
+# SSH ships disabled (ENABLE_SSH=0 in config). Defensive in case the base image
+# enabled it; the integrator turns it on from Settings > Security.
+systemctl disable ssh 2>/dev/null || true
+systemctl disable ssh.socket 2>/dev/null || true
 
 # --- Enable services ---
 
@@ -37,6 +184,8 @@ systemctl enable openavc.service
 # and has proper access to the Wayland display.
 systemctl enable openavc-firstboot.service
 systemctl enable avahi-daemon.service
+# Watcher for privileged actions (OS password sync, SSH toggle, reboot).
+systemctl enable openavc-privileged.path
 
 # Create first-boot marker
 touch "$DATA_DIR/.firstboot"
@@ -201,6 +350,38 @@ if [ ! -f "$LABWC_DIR/autostart" ]; then
     echo "FATAL: openavc labwc autostart missing at $LABWC_DIR/autostart"
     errors=$((errors + 1))
 fi
+
+# C10: the published OS login must be gone, the privileged helper must be in
+# place and root-owned, and SSH must not ship enabled.
+acct_status=$(passwd -S "$OPENAVC_USER" 2>/dev/null | awk '{print $2}')
+if [ "$acct_status" != "L" ]; then
+    echo "FATAL: $OPENAVC_USER account is not locked (status='$acct_status'; published password would ship)"
+    errors=$((errors + 1))
+fi
+
+if [ ! -x /usr/local/sbin/openavc-privileged-helper.sh ]; then
+    echo "FATAL: privileged helper missing or not executable"
+    errors=$((errors + 1))
+else
+    helper_owner=$(stat -c '%U' /usr/local/sbin/openavc-privileged-helper.sh 2>/dev/null || echo '?')
+    if [ "$helper_owner" != "root" ]; then
+        echo "FATAL: privileged helper not owned by root (owner='$helper_owner' could let the server escalate)"
+        errors=$((errors + 1))
+    fi
+fi
+
+priv_state=$(systemctl is-enabled openavc-privileged.path 2>&1 || true)
+if [ "$priv_state" != "enabled" ]; then
+    echo "FATAL: openavc-privileged.path is not enabled: $priv_state"
+    errors=$((errors + 1))
+fi
+
+for unit in ssh ssh.socket; do
+    if [ "$(systemctl is-enabled "$unit" 2>&1 || true)" = "enabled" ]; then
+        echo "FATAL: $unit is unexpectedly enabled (SSH must ship off)"
+        errors=$((errors + 1))
+    fi
+done
 
 if [ "$errors" -gt 0 ]; then
     echo "Pi-image build aborted: $errors verification error(s) above"

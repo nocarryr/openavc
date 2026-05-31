@@ -379,6 +379,16 @@ async def update_system_config(request: Request) -> dict[str, Any]:
 
     cfg.save()
 
+    # If the admin password changed, re-sync the OS login on a Pi appliance
+    # (no-op everywhere else). C10.
+    if isinstance(body.get("auth"), dict) and "programmer_password" in body["auth"]:
+        try:
+            from server import host_control
+            host_control.sync_os_password()
+        except Exception:  # noqa: BLE001 — OS sync must never fail the save
+            from server.utils.logger import get_logger
+            get_logger(__name__).warning("OS password sync after change failed", exc_info=True)
+
     return {"success": True, "updated_sections": updated_sections}
 
 
@@ -688,41 +698,63 @@ async def get_network_adapters() -> dict[str, Any]:
 
 @router.post("/system/reboot")
 async def reboot_system() -> dict[str, str]:
-    """Reboot the host machine. Only works on Linux where the openavc user has passwordless sudo reboot."""
-    import asyncio
-    import platform
-    from pathlib import Path
+    """Reboot the host via the root privileged helper (Pi appliance).
+
+    The server runs with NoNewPrivileges=true, so it cannot reboot directly
+    (sudo can't elevate). The root-owned helper performs the reboot; this just
+    submits the request. Available only where the helper is installed.
+    """
+    from server import host_control
     from server.utils.logger import get_logger
-    log = get_logger(__name__)
 
-    if platform.system() != "Linux":
-        raise HTTPException(status_code=501, detail="Reboot is only supported on Linux deployments")
-
-    if Path("/.dockerenv").exists():
-        raise HTTPException(status_code=501, detail="Reboot is not supported in Docker containers")
-
-    # Only allow reboot if our sudoers entry was installed (Pi image sets this up)
-    if not Path("/etc/sudoers.d/openavc-reboot").exists():
-        raise HTTPException(status_code=501, detail="Reboot not available. Restart the device manually.")
-
-    log.info("System reboot requested via API")
-
-    async def _delayed_reboot():
-        await asyncio.sleep(1)
-        # Explicit /sbin/reboot to match the sudoers rule. sudo's secure_path
-        # resolves bare "reboot" to /usr/sbin/reboot first, which isn't in the
-        # allow list, so the bare command silently fails.
-        proc = await asyncio.create_subprocess_exec(
-            "sudo", "-n", "/sbin/reboot",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    if not host_control.helper_available():
+        raise HTTPException(
+            status_code=501,
+            detail="Reboot is not available on this deployment. Restart the device manually.",
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            log.error("Reboot command failed (exit %d): %s",
-                      proc.returncode, stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip())
 
-    asyncio.create_task(_delayed_reboot())
+    get_logger(__name__).info("System reboot requested via API")
+    if not host_control.request_reboot():
+        raise HTTPException(status_code=500, detail="Could not submit reboot request.")
     return {"status": "rebooting"}
+
+
+# --- SSH (Pi appliance) ---
+
+
+@router.get("/system/ssh")
+async def get_ssh_status() -> dict[str, Any]:
+    """SSH availability and current state for the Settings toggle.
+
+    ``supported`` is true only on a Pi appliance (the privileged helper is
+    installed); the toggle is hidden otherwise. ``enabled`` reflects whether
+    sshd is running now (null if it couldn't be determined).
+    """
+    from server import host_control
+    return host_control.ssh_status()
+
+
+@router.post("/system/ssh")
+async def set_ssh_state(request: Request) -> dict[str, Any]:
+    """Enable or disable SSH on a Pi appliance.
+
+    SSH ships off; enabling it allows logging in as the ``openavc`` user with
+    the admin password. The root helper performs the change; this waits briefly
+    for its result. Returns ``{ok, enabled, pending, error}`` — ``pending`` means
+    the change was submitted but unconfirmed before the timeout.
+    """
+    from server import host_control
+    if not host_control.helper_available():
+        raise HTTPException(status_code=501, detail="SSH control is not available on this deployment.")
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        body = {}
+    if not isinstance(body, dict) or "enabled" not in body:
+        raise HTTPException(status_code=422, detail="Missing 'enabled' boolean.")
+    enabled = bool(body["enabled"])
+    result = await host_control.set_ssh(enabled)
+    return {**result, "enabled": enabled}
 
 
 # --- Update System ---
