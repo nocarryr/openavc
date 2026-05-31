@@ -23,8 +23,10 @@ import pytest
 
 from server.api.routes.drivers import (
     _try_download_python_companion,
+    delete_python_driver,
     export_python_driver_bundle,
     install_community_driver,
+    uninstall_driver,
     upload_driver_bundle,
 )
 from server.api.models import CommunityDriverInstallRequest
@@ -57,12 +59,17 @@ def stub_engine_wiring(monkeypatch):
         "server.core.device_manager.register_driver", lambda cls: None
     )
     monkeypatch.setattr(
+        "server.core.device_manager.unregister_driver", lambda driver_id: None
+    )
+    monkeypatch.setattr(
         "server.api.discovery.refresh_all_device_matches",
         AsyncMock(return_value=None),
         raising=False,
     )
     fake_engine = MagicMock()
+    fake_engine.project = None  # uninstall skips the in-use device check
     fake_engine.devices.retry_all_orphans = AsyncMock(return_value=[])
+    fake_engine.devices.get_devices_using_driver = lambda driver_id: []
     monkeypatch.setattr(
         "server.api.routes.drivers._get_engine", lambda: fake_engine
     )
@@ -353,3 +360,43 @@ async def test_export_missing_driver_404(driver_repo):
     with pytest.raises(Exception) as exc:
         await export_python_driver_bundle("nonexistent")
     assert getattr(exc.value, "status_code", None) == 404
+
+
+# --- delete / uninstall remove companions ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_companions(driver_repo):
+    (driver_repo / "foo.py").write_text("# m\n", encoding="utf-8")
+    (driver_repo / "foo_discovery.py").write_text("# d\n", encoding="utf-8")
+    (driver_repo / "foo_sim.py").write_text("# s\n", encoding="utf-8")
+
+    result = await delete_python_driver("foo")
+
+    assert result["status"] == "deleted"
+    assert not (driver_repo / "foo.py").exists()
+    assert not (driver_repo / "foo_discovery.py").exists()
+    assert not (driver_repo / "foo_sim.py").exists()
+    assert set(result["removed_companions"]) == {"foo_discovery.py", "foo_sim.py"}
+
+
+@pytest.mark.asyncio
+async def test_delete_without_companions_is_clean(driver_repo):
+    (driver_repo / "solo.py").write_text("# m\n", encoding="utf-8")
+    result = await delete_python_driver("solo")
+    assert result["status"] == "deleted"
+    assert result["removed_companions"] == []
+
+
+@pytest.mark.asyncio
+async def test_uninstall_python_driver_removes_companions(driver_repo):
+    (driver_repo / "foo.py").write_text("# m\n", encoding="utf-8")
+    (driver_repo / "foo_discovery.py").write_text("# d\n", encoding="utf-8")
+    (driver_repo / "foo_sim.py").write_text("# s\n", encoding="utf-8")
+
+    result = await uninstall_driver("foo")
+
+    assert result["status"] == "uninstalled"
+    assert not (driver_repo / "foo.py").exists()
+    assert not (driver_repo / "foo_discovery.py").exists()
+    assert not (driver_repo / "foo_sim.py").exists()

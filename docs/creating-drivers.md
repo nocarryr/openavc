@@ -1230,7 +1230,7 @@ A Python driver is usually more than one file. Alongside the main `<driver>.py` 
 - `<driver>_discovery.py` — an optional discovery companion that helps the network scan identify the device.
 - `<driver>_sim.py` — an optional simulator so the device can be tested without hardware.
 
-These companions sit next to the main file in `driver_repo/`. They don't appear in the **Python Drivers** list (only the driver itself does), but they travel with it.
+These companions sit next to the main file in `driver_repo/`. They don't appear in the **Python Drivers** list (only the driver itself does), but they travel with it: exporting, installing, and deleting the driver all act on the whole set.
 
 ### Importing and Exporting Python Drivers
 

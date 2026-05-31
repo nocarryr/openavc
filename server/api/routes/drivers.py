@@ -270,6 +270,27 @@ async def _try_download_python_companion(
     return companion_filepath
 
 
+def _remove_python_companions(main_path: Path) -> list[str]:
+    """Delete a Python driver's conventional sibling companions.
+
+    Given the main ``<stem>.py``, removes ``<stem>_discovery.py`` and
+    ``<stem>_sim.py`` from the same directory when present. Install / import
+    fetch the trio as one unit, so deleting the driver removes it as one unit
+    too — otherwise orphaned companions linger in ``driver_repo/``. Safe by
+    construction: only the two documented suffixes, only the driver's own
+    siblings, only inside the driver's directory. Returns the names removed.
+    """
+    removed: list[str] = []
+    repo = main_path.parent
+    stem = main_path.stem
+    for suffix in ("_discovery.py", "_sim.py"):
+        companion = repo / f"{stem}{suffix}"
+        if companion.is_file():
+            companion.unlink(missing_ok=True)
+            removed.append(companion.name)
+    return removed
+
+
 @router.get("/drivers/community")
 async def get_community_drivers() -> dict[str, Any]:
     """Fetch the community driver index from GitHub (cached)."""
@@ -823,6 +844,11 @@ async def uninstall_driver(driver_id: str) -> dict[str, Any]:
     deleted_file.unlink(missing_ok=True)
     if companion_to_delete is not None:
         companion_to_delete.unlink(missing_ok=True)
+    # Python drivers carry their companions by naming convention rather than a
+    # YAML declaration; drop the discovery / sim siblings to match the install
+    # side, which fetches them as part of the same install.
+    if deleted_file.suffix == ".py":
+        _remove_python_companions(deleted_file)
     unregister_driver(driver_id)
 
     # Refresh discovery engine so stale matches are cleared
@@ -1938,8 +1964,10 @@ async def delete_python_driver(driver_id: str) -> dict:
             detail=f"Cannot delete driver '{driver_id}': used by devices: {', '.join(using)}",
         )
 
-    # Remove file
+    # Remove file + its sibling companions (discovery / sim), so deleting a
+    # driver that was imported or installed as a bundle doesn't leave orphans.
     filepath.unlink()
+    removed_companions = _remove_python_companions(filepath)
 
     # Unregister from driver registry
     from server.core.device_manager import unregister_driver
@@ -1951,7 +1979,7 @@ async def delete_python_driver(driver_id: str) -> dict:
     sys.modules.pop(module_name, None)
 
     log.info(f"Deleted Python driver: {driver_id}")
-    return {"status": "deleted", "id": driver_id}
+    return {"status": "deleted", "id": driver_id, "removed_companions": removed_companions}
 
 
 @router.post("/python-drivers/{driver_id}/reload", dependencies=[Depends(require_claimed_auth)])
