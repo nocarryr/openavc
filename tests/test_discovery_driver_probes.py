@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import ssl
 import threading
 import time
 
@@ -799,3 +800,147 @@ class TestNetworkSafety:
         )
         # Restore (monkeypatch undoes this automatically; explicit for clarity).
         monkeypatch.setattr(asyncio, "open_connection", original)
+
+
+class TestTLSProbe:
+    """``tls: true`` tcp probes TLS-wrap the connection before send/read.
+
+    Lets an HTTPS-only device be fingerprinted from its own landing page —
+    the only vendor-specific signal a device that ships encrypted-only and
+    advertises a generic Dante mDNS service exposes pre-install.
+    """
+
+    def test_tls_flag_parses_tcp_and_defaults_false(self):
+        h = _make_hint("https_dev", tcp_probe={
+            "port": 443, "tls": True,
+            "send_ascii": "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "expect": "SoundCoreHero",
+        })
+        assert h.tcp_probe.tls is True
+        # Omitted -> False (every existing probe stays plain TCP).
+        h2 = _make_hint("plain_dev", tcp_probe={
+            "port": 23, "send_ascii": "x", "expect": "y",
+        })
+        assert h2.tcp_probe.tls is False
+
+    def test_tls_must_be_bool(self):
+        with pytest.raises(DiscoveryHintError, match="tls"):
+            _make_hint("bad", tcp_probe={
+                "port": 443, "tls": "yes", "send_ascii": "x", "expect": "y",
+            })
+
+    def test_tls_rejected_on_udp_probe(self):
+        with pytest.raises(DiscoveryHintError, match="tls is only valid on a tcp_probe"):
+            _make_hint("bad", udp_probe={
+                "port": 6000, "tls": True, "send_ascii": "x", "expect": "y",
+            })
+
+    @pytest.mark.asyncio
+    async def test_tls_probe_reads_banner_over_real_tls(self, tmp_path):
+        """End-to-end: handshake a real self-signed TLS server, read its
+        landing page, match the fingerprint. A non-None evidence return only
+        happens when the expect string matched over the encrypted channel."""
+        from server.tls import generate_self_signed
+
+        certs = generate_self_signed(tmp_path, hostnames=["localhost"], ips=["127.0.0.1"])
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(certs.cert_path, certs.key_path)
+
+        async def handle(reader, writer):
+            await reader.read(1024)  # consume the GET request
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                b"<title>SoundCoreHero</title>"
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            h = _make_hint("sch_tls", tcp_probe={
+                "port": port, "tls": True,
+                "send_ascii": "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+                "expect": "SoundCoreHero",
+                "timeout_ms": 3000,
+            })
+            ev = await run_tcp_active_probe(
+                h.tcp_probe, target="127.0.0.1", source_ip="127.0.0.1", stagger_ms=0,
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert ev is not None, "tls probe should match the banner over TLS"
+
+    @pytest.mark.asyncio
+    async def test_tls_probe_drops_plain_tcp_host(self):
+        """A plain (non-TLS) listener on the probed port fails the handshake,
+        so the probe returns None instead of a false match — even though the
+        host would have sent the matching string in cleartext."""
+        async def handle(reader, writer):
+            try:
+                await reader.read(1024)
+                writer.write(b"<title>SoundCoreHero</title>")
+                await writer.drain()
+            except OSError:
+                pass
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)  # no ssl
+        try:
+            port = server.sockets[0].getsockname()[1]
+            h = _make_hint("sch_plain", tcp_probe={
+                "port": port, "tls": True,
+                "send_ascii": "GET /\r\n", "expect": "SoundCoreHero",
+                "timeout_ms": 1500,
+            })
+            ev = await run_tcp_active_probe(
+                h.tcp_probe, target="127.0.0.1", source_ip="127.0.0.1", stagger_ms=0,
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert ev is None, "tls probe must not match a plain-TCP host"
+
+    @pytest.mark.asyncio
+    async def test_tls_probe_passes_ssl_context_to_open_connection(self, monkeypatch):
+        captured = {}
+
+        async def spy(host, port, *, local_addr=None, ssl=None, server_hostname=None, **kw):
+            captured["ssl"] = ssl
+            captured["server_hostname"] = server_hostname
+            raise OSError("synthetic connect refused")
+
+        monkeypatch.setattr(asyncio, "open_connection", spy)
+        h = _make_hint("tls_args", tcp_probe={
+            "port": 443, "tls": True, "send_ascii": "x", "expect": "y",
+            "timeout_ms": 500,
+        })
+        ev = await run_tcp_active_probe(
+            h.tcp_probe, target="10.0.0.1", source_ip="192.0.2.5", stagger_ms=0,
+        )
+        assert ev is None
+        assert isinstance(captured["ssl"], ssl.SSLContext), (
+            "tls probe must hand an SSLContext to asyncio.open_connection"
+        )
+        assert captured["server_hostname"] == "10.0.0.1"
+
+    @pytest.mark.asyncio
+    async def test_plain_probe_passes_no_ssl_context(self, monkeypatch):
+        captured = {}
+
+        async def spy(host, port, *, local_addr=None, ssl=None, server_hostname=None, **kw):
+            captured["ssl"] = ssl
+            raise OSError("synthetic connect refused")
+
+        monkeypatch.setattr(asyncio, "open_connection", spy)
+        h = _make_hint("plain_args", tcp_probe={
+            "port": 23, "send_ascii": "x", "expect": "y", "timeout_ms": 500,
+        })
+        ev = await run_tcp_active_probe(
+            h.tcp_probe, target="10.0.0.1", source_ip="192.0.2.5", stagger_ms=0,
+        )
+        assert ev is None
+        assert captured["ssl"] is None, "plain tcp probe must not pass an ssl context"

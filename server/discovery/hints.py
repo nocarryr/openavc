@@ -162,6 +162,8 @@ class CustomProbeSpec:
     timeout_ms: int
     cross_vendor: bool
     extract: tuple[ExtractRule, ...]
+    tls: bool = False   # tcp only: wrap the connection in TLS before send/read
+                        # (no cert verification — devices ship self-signed certs)
 
     @property
     def probe_id(self) -> str:
@@ -543,6 +545,9 @@ def _parse_probe(
 
         tcp_probe:
           port: 12345
+          tls: false                        # optional (tcp only): TLS-wrap the
+                                            # socket before send/read, for an
+                                            # HTTPS-only device. Default false.
           send_ascii: "QUERY\\r"            # exactly one of send_ascii, send_hex
           expect: "RESPONSE_PREFIX"         # one of expect, expect_regex, expect_hex
           cross_vendor: false               # optional, default false
@@ -594,6 +599,13 @@ def _parse_probe(
 
     cross_vendor = _ensure_bool(driver_id, f"{where}.cross_vendor", block.get("cross_vendor"))
 
+    tls = _ensure_bool(driver_id, f"{where}.tls", block.get("tls"))
+    if tls and kind != "tcp":
+        # TLS over UDP would be DTLS, which the probe runner doesn't speak.
+        raise DiscoveryHintError(
+            f"{driver_id}: discovery.{where}.tls is only valid on a tcp_probe"
+        )
+
     extract = _parse_extract(driver_id, where, block.get("extract"))
 
     # Sugar: extract_manufacturer: "AcmeCorp" produces an ExtractRule
@@ -616,7 +628,7 @@ def _parse_probe(
     known = {
         "port", "send_hex", "send_ascii",
         "expect", "expect_regex", "expect_hex",
-        "cross_vendor", "timeout_ms",
+        "cross_vendor", "timeout_ms", "tls",
         "extract", "extract_manufacturer",
     }
     unknown = set(block.keys()) - known
@@ -634,6 +646,7 @@ def _parse_probe(
         timeout_ms=timeout_ms,
         cross_vendor=cross_vendor,
         extract=tuple(extract),
+        tls=tls,
     )
 
 

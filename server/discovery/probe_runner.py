@@ -26,6 +26,7 @@ import asyncio
 import logging
 import re
 import socket
+import ssl
 from typing import Sequence
 
 from server.discovery.hints import (
@@ -59,6 +60,24 @@ _MAX_RESPONSE_BYTES = 4096
 # sitting through the whole probe budget. 1.5s matches the validated
 # inter-segment margin the Python banner-grab companions already use.
 _PROBE_READ_QUIET_SECONDS = 1.5
+
+
+def _make_probe_tls_context() -> ssl.SSLContext:
+    """A permissive TLS context for ``tls: true`` tcp probes.
+
+    Discovery happens before a device is trusted or configured, and AV gear
+    ships self-signed certs out of the box, so a probe can't verify the chain
+    or hostname — it only needs the encrypted channel to read the device's
+    own banner/landing page. Verification is the runtime driver's job once the
+    user adds the device. Built once and reused; it holds no per-host state.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+_PROBE_TLS_CONTEXT = _make_probe_tls_context()
 
 
 class RateLimiter:
@@ -311,10 +330,17 @@ async def run_tcp_active_probe(
 
     timeout = spec.timeout_ms / 1000.0
     local_addr = (source_ip, 0) if source_ip else None
+    # For a tls probe, hand asyncio a permissive context so the handshake runs
+    # before send/read. A plain-TCP host on this port fails the handshake with
+    # ssl.SSLError (an OSError subclass) and is dropped like any other miss.
+    tls_ctx = _PROBE_TLS_CONTEXT if spec.tls else None
 
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target, spec.port, local_addr=local_addr),
+            asyncio.open_connection(
+                target, spec.port, local_addr=local_addr,
+                ssl=tls_ctx, server_hostname=target if tls_ctx else None,
+            ),
             timeout=timeout,
         )
     except (TimeoutError, asyncio.TimeoutError, ConnectionRefusedError, OSError) as exc:

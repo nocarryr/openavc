@@ -168,7 +168,7 @@ Declarations the discovery engine uses to match found devices to this driver. Th
 - **mDNS service** — the service type the device announces (e.g. `_pjlink._tcp.local.`). Optional TXT-record filter when the service type is generic.
 - **SSDP device-type** — the UPnP device-type URN (e.g. `urn:schemas-upnp-org:device:MediaRenderer:1`).
 - **AMX DDP beacon** — `make` (required) and optional `model_pattern` glob.
-- **TCP probe** — connect to a port, optionally send bytes, match the response. Set the port, choose `send_ascii` or `send_hex` (or omit for connect-only banner reads), and pick exactly one of `expect` (substring), `expect_regex`, or `expect_hex`. Optional `extract_manufacturer` lifts a manufacturer string into the matcher's enrichment path so peer drivers can claim the device via `manufacturer_alias`. Free-form `extract` rules pull other metadata (model, version) out of the response.
+- **TCP probe** — connect to a port, optionally send bytes, match the response. Set the port, choose `send_ascii` or `send_hex` (or omit for connect-only banner reads), and pick exactly one of `expect` (substring), `expect_regex`, or `expect_hex`. Set `tls: true` for an HTTPS-only device — the probe wraps the connection in TLS (without cert verification) before sending, so you can fingerprint the device's own landing page (e.g. send an HTTP `GET /` and `expect` a string from the returned HTML). Optional `extract_manufacturer` lifts a manufacturer string into the matcher's enrichment path so peer drivers can claim the device via `manufacturer_alias`. Free-form `extract` rules pull other metadata (model, version) out of the response.
 - **UDP probe** — same shape as TCP probe, but broadcasts on the chosen port.
 - **Python file** — sibling `<driver_id>_discovery.py` that implements multi-step handshakes, binary parsers, broadcast-then-per-host TCP follow-ups, or any wire format too dynamic for the declarative blocks. The escape-hatch when the other fingerprint types don't fit. The companion exposes `async def probe(ctx)` and emits evidence via `ctx.emit_broadcast(host, *, response, txt, port, matched_pattern)`, `ctx.emit_active(host, response, *, port, matched_pattern)`, or `ctx.emit_oui(mac, host, *, vendor)`. Pass `port=` and `matched_pattern=` so the scan-results "Why?" reveal can render the full `"UDP probe on port <p> matched <kind:value>"` / `"TCP probe on port <p> returned <excerpt>"` phrasing (binary TCP probes whose response excerpt would be gibberish fall back to `"TCP probe on port <p> matched <kind:value>"`). Bind every socket to `ctx.source_ip`; consult the engine's existing port-scan results via `ctx.hosts_by_open_port` instead of re-iterating subnets. The platform enforces a hard timeout (default 10 s, capped at 30 s).
 
@@ -747,6 +747,8 @@ discovery:
 
   tcp_probe:
     port: 4352
+    tls: false                          # optional — TLS-wrap before send/read
+                                        # for an HTTPS-only device. Default false.
     send_ascii: "%1POWR ?\r"           # exactly one of: send_ascii, send_hex,
                                         # (omit for connect-only banner read)
     expect: "%1POWR=[01]"               # exactly one of: expect (substring),
@@ -787,7 +789,7 @@ discovery:
 | `mdns` | Fingerprint | mDNS service type the device announces. Bare string or list; list entries can be `{service, txt}` for TXT-record disambiguation when the service type is generic. |
 | `ssdp` | Fingerprint | UPnP device-type URN announced in SSDP `ST` / `NT` headers. Bare string or list. |
 | `amx_ddp` | Fingerprint | AMX Device Discovery Protocol beacon match. Provide `make` (required) and optional `model_pattern` glob. |
-| `tcp_probe` | Fingerprint | Connect to `port`, optionally send `send_ascii` / `send_hex`, match exactly one of `expect` / `expect_regex` / `expect_hex`. Optional `cross_vendor`, `extract_manufacturer`, `extract` rules, `timeout_ms` (≤ 10000). |
+| `tcp_probe` | Fingerprint | Connect to `port`, optionally send `send_ascii` / `send_hex`, match exactly one of `expect` / `expect_regex` / `expect_hex`. Optional `tls` (TLS-wrap the connection, no cert verification, for an HTTPS-only device), `cross_vendor`, `extract_manufacturer`, `extract` rules, `timeout_ms` (≤ 10000). |
 | `udp_probe` | Fingerprint | Broadcast on `port`, match the response. Same sub-fields as `tcp_probe`. |
 | `python` | Fingerprint | Sibling `<driver_id>_discovery.py` with `async def probe(ctx) -> None`. Use when the wire format needs Python (multi-step handshakes, binary parsers, broadcast-then-per-host TCP follow-ups). Sub-fields: `file` (path relative to the driver) and optional `cross_vendor`. |
 | `oui` | Hint | MAC OUI prefixes (e.g. `["00:05:a6"]`). Drives the *possible* state and the "Unknown device, vendor: …" display. |
