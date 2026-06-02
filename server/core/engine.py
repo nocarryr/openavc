@@ -44,6 +44,36 @@ def _log_task_exception(task: asyncio.Task) -> None:
 # keys that exist with a None value. Used by _on_state_change.
 _STATE_MISSING = object()
 
+# The state store documents flat primitives only (str, int, float, bool,
+# None) — WS broadcast, the ISC mesh, the cloud relay, and persistence all
+# rely on it. bool is intentionally listed though it's an int subclass.
+_FLAT_PRIMITIVE_TYPES = (str, int, float, bool, type(None))
+
+# Glob metacharacters that turn a single-key subscription into a multi-key
+# fan-in (see StateStore pattern grammar). A variable source_key must be one
+# concrete key, never a pattern.
+_GLOB_METACHARS = "*?["
+
+
+def _coerce_flat_primitive(value: Any) -> tuple[Any, bool]:
+    """Coerce a value to the flat-primitive state invariant.
+
+    A few engine write paths take author- or runtime-supplied values
+    (variable ``source_map`` results, static ``state.set`` binding values)
+    that the project schema types as ``Any``, so a list/dict could otherwise
+    reach the store and break downstream consumers that assume primitives.
+    Primitives pass through unchanged; anything else is flattened to a JSON
+    string so it stays representable.
+
+    Returns ``(coerced_value, was_coerced)`` so callers can log with context.
+    """
+    if isinstance(value, _FLAT_PRIMITIVE_TYPES):
+        return value, False
+    try:
+        return json.dumps(value, ensure_ascii=False), True
+    except (TypeError, ValueError):
+        return str(value), True
+
 
 class Engine:
     """
@@ -92,6 +122,10 @@ class Engine:
         # Variable-to-state binding subscriptions
         self._var_binding_subs: list[str] = []
         self._var_validation_subs: list[str] = []
+        # Keys currently mid-propagation in a variable-binding cascade. A
+        # re-entrancy guard so chained bindings (var bound to another var's
+        # key) propagate while genuine cycles (A<->B) terminate.
+        self._var_binding_active: set[str] = set()
         self._project_revision: int = 0  # incremented on every save
 
         # Event/state subscription IDs (for cleanup on stop/reload)
@@ -110,6 +144,10 @@ class Engine:
         self._periodic_backup_task: asyncio.Task | None = None
         self._dirty_since_backup: bool = False
         self._last_backup_time: float = 0
+
+        # Cached (local_ip, hostname) for get_status. Detection does blocking
+        # socket / gethostname syscalls; they rarely change, so compute once.
+        self._network_info: tuple[str, str] | None = None
 
     async def start(self) -> None:
         """
@@ -165,16 +203,8 @@ class Engine:
         self.persister = StatePersister(state_file, self.state)
         persisted_values = self.persister.load()
 
-        # Initialize user variables: persisted value takes priority over default
-        persistent_keys: set[str] = set()
-        for var in self.project.variables:
-            key = f"var.{var.id}"
-            if var.persist:
-                persistent_keys.add(key)
-            if key in persisted_values:
-                self.state.set(key, persisted_values[key], source="system")
-            else:
-                self.state.set(key, var.default, source="system")
+        # Initialize user variables from defaults / persisted values.
+        persistent_keys = self._init_variable_values(persisted_values)
 
         # Start watching persistent variables for changes
         self.persister.start(persistent_keys)
@@ -294,9 +324,16 @@ class Engine:
 
         self._running = True
 
-        # Record startup errors (if any) for UI visibility
+        # Pre-warm the network-info cache off the event loop so the first
+        # status/health poll never blocks on socket / gethostname syscalls.
+        prime_task = asyncio.create_task(asyncio.to_thread(self._detect_network_info))
+        prime_task.add_done_callback(_log_task_exception)
+
+        # Record startup error count for UI visibility. Always set it (0 when
+        # clean) so a previous run's count can't linger in the store / cloud
+        # relay after the project is fixed and reloaded.
+        self.state.set("system.startup_errors", len(startup_errors), source="system")
         if startup_errors:
-            self.state.set("system.startup_errors", len(startup_errors), source="system")
             log.warning(f"Engine started with {len(startup_errors)} error(s): {'; '.join(startup_errors)}")
 
         # System state
@@ -353,7 +390,15 @@ class Engine:
         """Stop the engine gracefully."""
         log.info("Engine stopping...")
         self._running = False
+        # Serialize teardown against an in-flight reload_project (reachable
+        # from REST, the cloud command handler, and AI tools). Tearing
+        # subsystems down while a hot-reload runs interleaves trigger and
+        # subscription start/stop. Wait for any reload to finish first.
+        async with self._reload_lock:
+            await self._stop_inner()
 
+    async def _stop_inner(self) -> None:
+        """Tear down all subsystems. Caller holds _reload_lock."""
         # Cancel startup confirmation timer
         if self._marker_confirm_task and not self._marker_confirm_task.done():
             self._marker_confirm_task.cancel()
@@ -427,6 +472,10 @@ class Engine:
 
         # Disconnect all devices
         await self.devices.disconnect_all()
+
+        # Drain any in-flight state.changed EventBus emissions so they aren't
+        # silently dropped mid-shutdown.
+        await self.state.flush_pending_events()
 
         self.state.set("system.started", False, source="system")
         log.info("Engine stopped")
@@ -537,8 +586,16 @@ class Engine:
             self._project_revision = prev_revision
             self._dirty_since_backup = prev_dirty
 
-            # Best-effort: re-sync lightweight subsystems with the restored project
+            # Best-effort: re-sync subsystems with the restored project so the
+            # runtime doesn't diverge from self.project. The failure may have
+            # landed after _sync_devices / _sync_plugins already applied part
+            # of the new project (devices removed/added, plugins started or
+            # stopped); re-running both against the restored project reconciles
+            # the live device and plugin set back to it.
             try:
+                await self._sync_devices()
+                await self._sync_plugins()
+
                 macros_data = [m.model_dump() for m in self.project.macros]
                 self.macros.load_macros(macros_data)
                 groups_data = [g.model_dump() for g in self.project.device_groups]
@@ -562,6 +619,11 @@ class Engine:
                 log.error("Rollback re-sync also failed", exc_info=True)
 
             raise
+
+        # Clean reload succeeded — zero the startup-error count so a stale
+        # count from the initial start (now fixed) doesn't linger in the store
+        # and cloud relay.
+        self.state.set("system.startup_errors", 0, source="system")
 
         # Push new UI definition to all connected panels
         await self.broadcast_ws({
@@ -643,8 +705,16 @@ class Engine:
             new_config = project_devices[device_id]
             old_conn = old_config.get("config", {})
             new_conn = new_config.get("config", {})
+            # Re-add (update_device does remove+add) when any field that
+            # add_device acts on changes — not just name/driver/connection.
+            # enabled gates connect/poll, child_entities seeds child labels,
+            # and pending_settings is applied on (re)connect; omitting them
+            # left those edits inert on the hot-reload path until a restart.
             if (old_config.get("name") != new_config.get("name") or
                     old_config.get("driver") != new_config.get("driver") or
+                    old_config.get("enabled", True) != new_config.get("enabled", True) or
+                    (old_config.get("child_entities") or {}) != (new_config.get("child_entities") or {}) or
+                    (old_config.get("pending_settings") or {}) != (new_config.get("pending_settings") or {}) or
                     old_conn != new_conn):
                 changed_ids.append(device_id)
         if changed_ids:
@@ -758,6 +828,19 @@ class Engine:
                     raw = data.get("value")
                     self.state.set(var_key, self._scale_value_forward(element, raw), source="ui")
 
+        # Two-way list selection: on "select" events, write the tapped item's
+        # value to the list's `selected` binding key. The panel reads this same
+        # key to highlight the active row, so without the write a
+        # selectable/multi_select list's selection never reaches state (and
+        # bindings/triggers/macros can't react to it). Value is already a flat
+        # primitive (validated at the WS boundary).
+        if event_type == "select":
+            selected_binding = bindings.get("selected")
+            if isinstance(selected_binding, dict):
+                sel_key = selected_binding.get("key", "")
+                if sel_key:
+                    self.state.set(sel_key, data.get("value"), source="ui")
+
         # Look up the binding for this event type (always a list of actions)
         binding = bindings.get(event_type)
 
@@ -844,6 +927,14 @@ class Engine:
                 value = data.get("value")
             else:
                 value = action_def.get("value")
+            # A hand-edited / AI-authored binding may carry a nested literal;
+            # keep the store's flat-primitive invariant.
+            value, coerced = _coerce_flat_primitive(value)
+            if coerced:
+                log.warning(
+                    "state.set binding for key '%s' had a non-primitive value; "
+                    "coerced to a JSON string", key,
+                )
             self.state.set(key, value, source="ui")
 
         elif action in ("page", "navigate"):
@@ -965,6 +1056,29 @@ class Engine:
             if loaded:
                 log.info(f"Loaded {loaded} driver(s) from {driver_repo}")
 
+    def _init_variable_values(self, persisted_values: dict[str, Any]) -> set[str]:
+        """Seed ``var.*`` state from defaults / persisted values.
+
+        Returns the set of currently-persistent var keys (for the persister to
+        watch). A still-persistent variable's saved value wins over its
+        default; a variable whose persist flag was turned OFF reverts to its
+        default even if state.json still holds a stale value — the restore is
+        gated on the *current* persist flag, not merely on the key's presence
+        in the file.
+        """
+        persistent_keys: set[str] = set()
+        if not self.project:
+            return persistent_keys
+        for var in self.project.variables:
+            key = f"var.{var.id}"
+            if var.persist:
+                persistent_keys.add(key)
+            if var.persist and key in persisted_values:
+                self.state.set(key, persisted_values[key], source="system")
+            else:
+                self.state.set(key, var.default, source="system")
+        return persistent_keys
+
     def _bind_variable_sources(self) -> None:
         """
         Set up auto-sync subscriptions for variables with source_key.
@@ -975,9 +1089,26 @@ class Engine:
         for sub_id in self._var_binding_subs:
             self.state.unsubscribe(sub_id)
         self._var_binding_subs.clear()
+        self._var_binding_active.clear()
 
         if not self.project:
             return
+
+        def _map_value(raw: Any, sm: dict | None, vk: str) -> Any:
+            """Apply source_map then enforce the flat-primitive invariant.
+
+            source_map values are typed Any in the schema, so an author can
+            map to a list/dict; flatten those rather than letting a nested
+            value into the store and out to WS / ISC / the cloud relay.
+            """
+            mapped = sm.get(str(raw), raw) if sm else raw
+            value, was_coerced = _coerce_flat_primitive(mapped)
+            if was_coerced:
+                log.warning(
+                    "Variable binding %s: mapped value for source %r is not a "
+                    "flat primitive; coerced to a JSON string", vk, mapped,
+                )
+            return value
 
         for var in self.project.variables:
             if not var.source_key:
@@ -987,19 +1118,38 @@ class Engine:
             source_key = var.source_key
             source_map = var.source_map
 
+            # A source_key must be one concrete state key. Glob metacharacters
+            # would register a multi-key fan-in (no defined value, last-writer-
+            # wins thrash), so reject rather than silently binding a pattern.
+            if any(c in source_key for c in _GLOB_METACHARS):
+                log.warning(
+                    "Variable '%s' source_key %r contains glob metacharacters; "
+                    "skipping binding (source_key must be a single state key)",
+                    var.id, source_key,
+                )
+                continue
+
             # Initial sync: read current source value and apply
             current = self.state.get(source_key)
             if current is not None:
-                mapped = source_map.get(str(current), current) if source_map else current
-                self.state.set(var_key, mapped, source="variable_binding")
+                self.state.set(var_key, _map_value(current, source_map, var_key),
+                               source="variable_binding")
 
-            # Subscribe to changes
+            # Subscribe to changes. The re-entrancy guard keys on the variable
+            # being written, not on the source string: chained bindings (var B
+            # bound to var A's key) propagate when A updates, while a genuine
+            # cycle (A<->B) terminates after one hop. The previous blanket
+            # "ignore variable_binding source" guard froze every chain.
             def make_handler(vk: str, sm: dict | None):
                 def handler(key: str, old_value: Any, new_value: Any, source: str):
-                    if source == "variable_binding":
-                        return  # Prevent loops
-                    mapped = sm.get(str(new_value), new_value) if sm else new_value
-                    self.state.set(vk, mapped, source="variable_binding")
+                    if vk in self._var_binding_active:
+                        return  # cycle — this var is already mid-propagation
+                    value = _map_value(new_value, sm, vk)
+                    self._var_binding_active.add(vk)
+                    try:
+                        self.state.set(vk, value, source="variable_binding")
+                    finally:
+                        self._var_binding_active.discard(vk)
                 return handler
 
             sub_id = self.state.subscribe(
@@ -1264,7 +1414,13 @@ class Engine:
                     continue
                 try:
                     from server.core.backup_manager import create_backup
-                    create_backup(self.project_path.parent, "Auto-backup")
+                    # Offload the (uncapped) project+assets ZIP compression to a
+                    # worker thread — running it inline stalls device polling, WS
+                    # state pushes, command dispatch, and cloud heartbeats for
+                    # the whole compression on the event-loop thread.
+                    await asyncio.to_thread(
+                        create_backup, self.project_path.parent, "Auto-backup"
+                    )
                     self._dirty_since_backup = False
                     self._last_backup_time = time.time()
                 except Exception:
@@ -1284,7 +1440,12 @@ class Engine:
 
     async def _start_isc(self) -> None:
         """Initialize ISC if enabled in both system config and project."""
-        if not self.project or not config.ISC_ENABLED or not self.project.isc.enabled:
+        # Read the live system-config value, not the import-time
+        # config.ISC_ENABLED constant, so a PATCH /system/config toggle is
+        # honored on reload/reconcile without a restart.
+        from server.system_config import get_system_config
+        isc_enabled = bool(get_system_config().get("isc", "enabled", True))
+        if not self.project or not isc_enabled or not self.project.isc.enabled:
             return
         try:
             from server.core.isc import ISCManager, get_or_create_instance_id
@@ -1316,7 +1477,9 @@ class Engine:
         """Reload ISC configuration after project change."""
         if not self.project:
             return
-        isc_should_run = config.ISC_ENABLED and self.project.isc.enabled
+        from server.system_config import get_system_config
+        isc_enabled = bool(get_system_config().get("isc", "enabled", True))
+        isc_should_run = isc_enabled and self.project.isc.enabled
 
         if self.isc and isc_should_run:
             # Hot-reload config
@@ -1345,7 +1508,10 @@ class Engine:
 
     async def _start_mdns_advertiser(self) -> None:
         """Start mDNS service advertisement if enabled in system config."""
-        if not config.MDNS_ADVERTISE:
+        # Live system-config read (not the import-time config.MDNS_ADVERTISE
+        # constant) so a PATCH /system/config toggle is honored on reconcile.
+        from server.system_config import get_system_config
+        if not get_system_config().get("discovery", "advertise", True):
             return
         try:
             from server.core.isc import get_or_create_instance_id
@@ -1364,6 +1530,24 @@ class Engine:
         except Exception:
             log.exception("mDNS advertiser: failed to start — continuing without advertisement")
             self.mdns_advertiser = None
+
+    async def _reconcile_mdns(self) -> None:
+        """Start or stop the mDNS advertiser to match the live system config."""
+        from server.system_config import get_system_config
+        should_run = bool(get_system_config().get("discovery", "advertise", True))
+        if should_run and not self.mdns_advertiser:
+            await self._start_mdns_advertiser()
+        elif not should_run and self.mdns_advertiser:
+            await self.mdns_advertiser.stop()
+            self.mdns_advertiser = None
+
+    async def reconcile_runtime_services(self) -> None:
+        """Re-evaluate ISC and mDNS advertisement against the live system
+        config so a ``PATCH /system/config`` toggle takes effect without a
+        restart. Safe to call when nothing changed (each branch is a no-op if
+        the subsystem already matches the desired state)."""
+        await self._reload_isc()
+        await self._reconcile_mdns()
 
     # --- Cloud Agent helpers ---
 
@@ -1432,22 +1616,41 @@ class Engine:
 
     # --- Status ---
 
-    def get_status(self) -> dict[str, Any]:
-        """Return system status info."""
-        uptime = time.time() - self._start_time if self._start_time else 0
-        # Detect network address for panel access URLs
+    def _detect_network_info(self) -> tuple[str, str]:
+        """Return ``(local_ip, hostname)``, cached after the first call.
+
+        Uses a context-managed socket so the descriptor is always closed even
+        when ``connect()`` fails (no FD leak on isolated/no-route control
+        networks), and caches the result — both syscalls block the event loop
+        and the values rarely change over a process's lifetime.
+        """
+        if self._network_info is not None:
+            return self._network_info
+        local_ip = "127.0.0.1"
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0.5)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            local_ip = "127.0.0.1"
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(0.5)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+        except OSError:
+            pass
         try:
             hostname = socket.gethostname()
-        except Exception:
+        except OSError:
             hostname = ""
+        self._network_info = (local_ip, hostname)
+        return self._network_info
+
+    def get_status(self, include_sensitive: bool = True) -> dict[str, Any]:
+        """Return system status info.
+
+        ``include_sensitive`` gates host/network identifiers (hostname, local
+        IP, bind address). The open, unauthenticated ``/api/status`` route
+        passes ``False`` for anonymous callers so a claimed instance doesn't
+        disclose LAN reconnaissance details; authenticated callers (the IDE,
+        which needs them to build panel access URLs) get the full set.
+        """
+        uptime = time.time() - self._start_time if self._start_time else 0
 
         status = {
             "status": "running" if self._running else "stopped",
@@ -1466,11 +1669,13 @@ class Engine:
             "ws_clients": len(self._ws_clients),
             "isc_enabled": self.isc is not None,
             "cloud_enabled": self.cloud_agent is not None,
-            "hostname": hostname,
-            "local_ip": local_ip,
             "http_port": config.HTTP_PORT,
-            "bind_address": config.BIND_ADDRESS,
         }
+        if include_sensitive:
+            local_ip, hostname = self._detect_network_info()
+            status["hostname"] = hostname
+            status["local_ip"] = local_ip
+            status["bind_address"] = config.BIND_ADDRESS
         if self.isc:
             status["isc_peers"] = sum(
                 1 for p in self.isc._peers.values() if p.connected

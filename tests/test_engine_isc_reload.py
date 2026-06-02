@@ -56,7 +56,7 @@ async def test_disable_isc_on_reload_unbinds_script_proxy(tmp_path):
     reaching the stopped manager.
     """
     from server.core.project_loader import load_project
-    from server import config as server_config
+    from server.system_config import get_system_config
 
     project_path = _project_with_isc(tmp_path, enabled=False)
     eng = Engine(project_path)
@@ -67,15 +67,17 @@ async def test_disable_isc_on_reload_unbinds_script_proxy(tmp_path):
     isc_proxy._bind(fake_manager)
     assert isc_proxy._manager is fake_manager
 
-    # Force ISC_ENABLED True so the gate only depends on project.isc.enabled.
-    # Without this the function short-circuits on system config before the
-    # disable branch — the audit failure mode requires that path.
-    original_isc_enabled = server_config.ISC_ENABLED
-    server_config.ISC_ENABLED = True
+    # Enable ISC in the live system config so the gate depends only on
+    # project.isc.enabled (which is False here). _reload_isc reads the system
+    # config at call time, so this exercises the "system on, project off ->
+    # disable" branch the audit failure mode requires.
+    sys_cfg = get_system_config()
+    original_isc_enabled = sys_cfg.get("isc", "enabled", True)
+    sys_cfg.set("isc", "enabled", True)
     try:
         await eng._reload_isc()
     finally:
-        server_config.ISC_ENABLED = original_isc_enabled
+        sys_cfg.set("isc", "enabled", original_isc_enabled)
 
     assert fake_manager.stopped, "manager.stop() should have been awaited"
     assert eng.isc is None

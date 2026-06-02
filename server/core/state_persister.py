@@ -64,7 +64,14 @@ class StatePersister:
             log.info(f"Watching {len(persistent_keys)} persistent variable(s)")
 
     def update_keys(self, persistent_keys: set[str]) -> None:
-        """Update the set of watched keys (called on reload)."""
+        """Update the set of watched keys (called on reload).
+
+        When variables are de-persisted (their keys drop out of the set),
+        rewrite state.json immediately so their stale values don't survive to
+        the next restart — ``_write()`` only emits the *current* persistent
+        keys, which prunes the removed ones from disk.
+        """
+        removed = self._persistent_keys - persistent_keys
         # Unsubscribe old
         for sub_id in self._sub_ids:
             self._state_store.unsubscribe(sub_id)
@@ -76,6 +83,9 @@ class StatePersister:
                 key, self._on_state_change
             )
             self._sub_ids.append(sub_id)
+        # Prune de-persisted keys from disk so they aren't restored next start.
+        if removed and self._state_file.exists():
+            self._write()
 
     def _on_state_change(self, key: str, old_value: Any, new_value: Any, source: str) -> None:
         """Called when a persistent variable changes."""

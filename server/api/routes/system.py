@@ -2,9 +2,11 @@
 
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.security import HTTPBasicCredentials
 
 from server.api._engine import _get_engine
+from server.api.auth import _basic, programmer_auth_satisfied
 from server.api.errors import api_error as _api_error
 from server.api.models import CloudPairRequest
 
@@ -71,9 +73,20 @@ async def auth_setup(request: Request) -> dict[str, Any]:
 
 
 @open_router.get("/status")
-async def get_status() -> dict[str, Any]:
-    """System status, uptime, project info."""
-    return _get_engine().get_status()
+async def get_status(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(_basic),
+) -> dict[str, Any]:
+    """System status, uptime, project info.
+
+    Host/network identifiers (hostname, local IP, bind address) are returned
+    only to authenticated callers. On a claimed instance an anonymous caller
+    gets the non-sensitive subset so this open endpoint can't be used for LAN
+    reconnaissance; on an open (dev / anonymous-allowed) instance everything
+    is already public, so the full set is returned.
+    """
+    include_sensitive = programmer_auth_satisfied(request, credentials)
+    return _get_engine().get_status(include_sensitive=include_sensitive)
 
 
 @open_router.get("/health")
@@ -388,6 +401,17 @@ async def update_system_config(request: Request) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 — OS sync must never fail the save
             from server.utils.logger import get_logger
             get_logger(__name__).warning("OS password sync after change failed", exc_info=True)
+
+    # ISC / mDNS-advertise toggles take effect immediately (no restart) by
+    # reconciling the live subsystems against the just-saved config.
+    if "isc" in body or "discovery" in body:
+        try:
+            await _get_engine().reconcile_runtime_services()
+        except Exception:  # noqa: BLE001 — reconcile must never fail the save
+            from server.utils.logger import get_logger
+            get_logger(__name__).warning(
+                "Runtime service reconcile after config change failed", exc_info=True
+            )
 
     return {"success": True, "updated_sections": updated_sections}
 
