@@ -361,6 +361,11 @@ class ISCConfig(_ForwardCompatModel):
     shared_state: list[str] = Field(default_factory=list)
     auth_key: str = ""
     peers: list[str] = Field(default_factory=list)  # Manual peer addresses, e.g. ["192.168.1.10:8080"]
+    # Glob allowlist (matched against "<device_id>.<command>") for device
+    # commands a remote peer may execute on this instance. Empty = deny all
+    # remote commands; authenticating to the mesh does not by itself grant
+    # device control. Example: ["projector1.*", "*.power_off"], or ["*"] for all.
+    allowed_remote_commands: list[str] = Field(default_factory=list)
 
 
 class DriverDependency(_ForwardCompatModel):

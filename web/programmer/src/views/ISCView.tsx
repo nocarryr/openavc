@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Shield,
   Eye,
+  Terminal,
 } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { useProjectStore } from "../store/projectStore";
@@ -47,6 +48,7 @@ export function ISCView() {
   // Config editing
   const [newPattern, setNewPattern] = useState("");
   const [newPeer, setNewPeer] = useState("");
+  const [newCommand, setNewCommand] = useState("");
   const [authKey, setAuthKey] = useState("");
   const [authVisible, setAuthVisible] = useState(false);
 
@@ -85,6 +87,7 @@ export function ISCView() {
   const enabled = isc?.enabled ?? false;
   const sharedState = isc?.shared_state ?? [];
   const manualPeers = isc?.peers ?? [];
+  const allowedCommands = isc?.allowed_remote_commands ?? [];
 
   const handleToggleEnabled = useCallback(() => {
     if (!project) return;
@@ -143,6 +146,34 @@ export function ISCView() {
       useProjectStore.getState().debouncedSave();
     },
     [project, manualPeers, update]
+  );
+
+  const handleAddCommand = useCallback(() => {
+    if (!project || !newCommand.trim()) return;
+    const pattern = newCommand.trim();
+    if (allowedCommands.includes(pattern)) return;
+    update({
+      isc: {
+        ...project.isc,
+        allowed_remote_commands: [...allowedCommands, pattern],
+      },
+    });
+    setNewCommand("");
+    useProjectStore.getState().debouncedSave();
+  }, [project, newCommand, allowedCommands, update]);
+
+  const handleRemoveCommand = useCallback(
+    (pattern: string) => {
+      if (!project) return;
+      update({
+        isc: {
+          ...project.isc,
+          allowed_remote_commands: allowedCommands.filter((p) => p !== pattern),
+        },
+      });
+      useProjectStore.getState().debouncedSave();
+    },
+    [project, allowedCommands, update]
   );
 
   const handleSaveAuthKey = useCallback(() => {
@@ -371,6 +402,57 @@ export function ISCView() {
                 onKeyDown={(e) => e.key === "Enter" && handleAddPeer()}
               />
               <button onClick={handleAddPeer} style={btnSmall} disabled={!newPeer.trim()}>
+                <Plus size={14} />
+              </button>
+            </div>
+          </div>
+
+          {/* Remote Command Allowlist */}
+          <div style={cardStyle}>
+            <h3 style={sectionTitle}>
+              <Terminal size={14} style={{ marginRight: 6 }} />
+              Remote Command Allowlist
+            </h3>
+            <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", marginBottom: "var(--space-md)", lineHeight: 1.5 }}>
+              Device commands a peer is allowed to run on this instance. Patterns
+              match <code style={codeStyle}>device_id.command</code> — for example{" "}
+              <code style={codeStyle}>projector1.*</code> allows every projector1
+              command, <code style={codeStyle}>*.power_off</code> allows power_off
+              on any device, and <code style={codeStyle}>*</code> allows all.
+            </div>
+            {allowedCommands.length === 0 && (
+              <div style={{ fontSize: "var(--font-size-sm)", color: "var(--color-warning, #f59e0b)", marginBottom: "var(--space-sm)", lineHeight: 1.5 }}>
+                No commands allowed. Peers can share state and events but cannot
+                control any device here until you add a pattern.
+              </div>
+            )}
+
+            {allowedCommands.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: "var(--space-sm)" }}>
+                {allowedCommands.map((pattern) => (
+                  <div key={pattern} style={listItemStyle}>
+                    <code style={codeStyle}>{pattern}</code>
+                    <button
+                      onClick={() => handleRemoveCommand(pattern)}
+                      style={iconBtn}
+                      title="Remove pattern"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "var(--space-xs)" }}>
+              <input
+                style={fieldInput}
+                value={newCommand}
+                onChange={(e) => setNewCommand(e.target.value)}
+                placeholder="e.g. projector1.* or *.power_off"
+                onKeyDown={(e) => e.key === "Enter" && handleAddCommand()}
+              />
+              <button onClick={handleAddCommand} style={btnSmall} disabled={!newCommand.trim()}>
                 <Plus size={14} />
               </button>
             </div>

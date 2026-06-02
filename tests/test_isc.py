@@ -6,11 +6,15 @@ import json
 import pytest
 
 from server.core.isc import (
+    MAX_AUTH_FAIL_ENTRIES,
     ISCManager,
     PeerConnection,
     PeerInfo,
+    _client_proof,
     _get_local_ip,
+    _ISCAuthRejected,
     _parse_peer_address,
+    _server_proof,
     get_or_create_instance_id,
 )
 
@@ -209,6 +213,12 @@ def test_clear_isc_state(isc, state):
     assert state.get("isc.peer1.power") is None
     assert state.get("isc.peer2.active") is None
     assert state.get("device.proj1.power") == "on"  # Not cleared
+    # L-024: keys are deleted outright, not left as ghost None entries in the
+    # snapshot every subscriber sees.
+    snap = state.snapshot()
+    assert "isc.peer1.power" not in snap
+    assert "isc.peer2.active" not in snap
+    assert "device.proj1.power" in snap
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +237,13 @@ class FakeWebSocket:
         self.sent.append(data)
 
     async def receive_text(self) -> str:
-        """Auto-respond to challenge with HMAC if auth_key is set."""
-        from server.core.isc import _compute_isc_hmac
+        """Auto-respond to the mutual-auth challenge if auth_key is set."""
         last_msg = json.loads(self.sent[-1]) if self.sent else {}
         if last_msg.get("type") == "isc.challenge" and self._auth_key:
             nonce = last_msg["nonce"]
             return json.dumps({
                 "type": "isc.auth",
-                "response": _compute_isc_hmac(self._auth_key, nonce),
+                "response": _client_proof(self._auth_key, nonce),
             })
         return json.dumps({"type": "isc.auth", "response": "bad"})
 
@@ -360,7 +369,9 @@ async def test_handle_state_message(isc, state):
 
 
 async def test_handle_command_message(isc, devices):
-    """isc.command should execute on local DeviceManager and send result."""
+    """isc.command should execute on local DeviceManager and send result —
+    when the command is permitted by the allowlist (H-023)."""
+    isc._allowed_remote_commands = ["proj1.*"]
     ws = FakeWebSocket(auth_key="testkey")
     await isc.accept_inbound(ws, {
         "type": "isc.hello", "instance_id": "peer-cmd", "name": "Cmd",     })
@@ -383,6 +394,48 @@ async def test_handle_command_message(isc, devices):
     assert result_msg["id"] == "req-1"
     assert result_msg["success"] is True
     assert result_msg["result"] == "ok:power_on"
+
+
+async def test_remote_command_denied_by_default(isc, devices):
+    """H-023: with an empty allowlist a peer cannot run any device command;
+    the request is refused without ever reaching the DeviceManager."""
+    assert isc._allowed_remote_commands == []
+    ws = FakeWebSocket(auth_key="testkey")
+    await isc.accept_inbound(ws, {
+        "type": "isc.hello", "instance_id": "peer-deny", "name": "Deny",     })
+    ws.sent.clear()
+
+    await isc.handle_message("peer-deny", {
+        "type": "isc.command", "id": "req-x", "device": "proj1",
+        "command": "power_on", "params": {},
+    })
+
+    assert devices.commands == []  # never executed
+    result = next(m for m in ws.get_sent_msgs() if m["type"] == "isc.command_result")
+    assert result["id"] == "req-x"
+    assert result["success"] is False
+    assert "not authorized" in result["error"]
+
+
+async def test_remote_command_allowlist_is_scoped(isc, devices):
+    """H-023: a specific allowlist entry permits only its target, not siblings."""
+    isc._allowed_remote_commands = ["proj1.power_off"]
+    assert isc._is_remote_command_allowed("proj1", "power_off") is True
+    assert isc._is_remote_command_allowed("proj1", "power_on") is False
+    assert isc._is_remote_command_allowed("proj2", "power_off") is False
+
+    ws = FakeWebSocket(auth_key="testkey")
+    await isc.accept_inbound(ws, {
+        "type": "isc.hello", "instance_id": "peer-scope", "name": "Scope",     })
+    ws.sent.clear()
+    # A non-allowed command on an allowed device is still refused.
+    await isc.handle_message("peer-scope", {
+        "type": "isc.command", "id": "req-y", "device": "proj1",
+        "command": "power_on", "params": {},
+    })
+    assert devices.commands == []
+    result = next(m for m in ws.get_sent_msgs() if m["type"] == "isc.command_result")
+    assert result["success"] is False
 
 
 async def test_handle_command_result(isc):
@@ -893,3 +946,334 @@ def test_handle_beacon_https_falls_back_to_port_when_tls_port_missing(isc, monke
     peer = isc._peers["xxxx-7777"]
     assert peer.scheme == "https"
     assert peer.port == 8443
+
+
+# ---------------------------------------------------------------------------
+# Mutual auth (M-037) — inbound side
+# ---------------------------------------------------------------------------
+
+
+async def test_inbound_challenge_includes_server_proof(isc_with_auth):
+    """M-037: the acceptor proves key possession over the peer's client_nonce
+    in the challenge, so the peer can verify us before disclosing its HMAC."""
+    ws = FakeWebSocket(auth_key="secret123")
+    peer_id = await isc_with_auth.accept_inbound(ws, {
+        "type": "isc.hello", "instance_id": "peer-mp", "name": "MP",
+        "client_nonce": "abc123",
+    })
+    assert peer_id == "peer-mp"
+    challenge = next(m for m in ws.get_sent_msgs() if m["type"] == "isc.challenge")
+    assert challenge["server_proof"] == _server_proof("secret123", "abc123")
+
+
+async def test_inbound_tolerates_missing_client_nonce(isc_with_auth):
+    """A hello without client_nonce still authenticates (proof over empty)."""
+    ws = FakeWebSocket(auth_key="secret123")
+    peer_id = await isc_with_auth.accept_inbound(ws, {
+        "type": "isc.hello", "instance_id": "peer-old", "name": "Old",
+    })
+    assert peer_id == "peer-old"
+    challenge = next(m for m in ws.get_sent_msgs() if m["type"] == "isc.challenge")
+    assert challenge["server_proof"] == _server_proof("secret123", "")
+
+
+# ---------------------------------------------------------------------------
+# Outbound handshake harness (H-022, M-037, M-040)
+# ---------------------------------------------------------------------------
+
+
+class FakeClientWS:
+    """Scripts the *server* side of an outbound handshake.
+
+    ``_outbound_connect`` does ``import websockets; async with
+    websockets.connect(url) as ws``. We monkeypatch ``websockets.connect`` to
+    return one of these. It records what the client sends, derives the
+    server_proof/welcome from the client's hello, and can raise mid-loop to
+    simulate an abnormal disconnect.
+    """
+
+    def __init__(self, auth_key, server_id="srv-0000", server_name="Server",
+                 good_server_proof=True, loop_raises=None):
+        self.sent: list[dict] = []
+        self._auth_key = auth_key
+        self._server_id = server_id
+        self._server_name = server_name
+        self._good_proof = good_server_proof
+        self._loop_raises = loop_raises
+        self.closed = False
+        self._stage = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, text):
+        self.sent.append(json.loads(text))
+
+    async def recv(self):
+        self._stage += 1
+        if self._stage == 1:
+            # Answer the hello with a challenge proving the key over client_nonce.
+            client_nonce = self.sent[-1].get("client_nonce", "")
+            proof = _server_proof(self._auth_key, client_nonce)
+            if not self._good_proof:
+                proof = "deadbeef"  # a keyless/rogue server can't produce this
+            return json.dumps({
+                "type": "isc.challenge",
+                "nonce": "server-nonce-fixed",
+                "server_proof": proof,
+            })
+        # Answer the auth with a welcome.
+        return json.dumps({
+            "type": "isc.welcome",
+            "instance_id": self._server_id,
+            "name": self._server_name,
+            "version": "9.9.9",
+            "protocol": "1",
+        })
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._loop_raises is not None:
+            exc = self._loop_raises
+            self._loop_raises = None
+            raise exc
+        raise StopAsyncIteration
+
+    async def close(self):
+        self.closed = True
+
+
+def _patch_websockets(monkeypatch, fake_ws):
+    """Make ``import websockets; websockets.connect(...)`` yield ``fake_ws``."""
+    import sys
+    import types
+
+    mod = types.ModuleType("websockets")
+
+    def connect(url, **kwargs):
+        fake_ws.url = url
+        return fake_ws
+
+    mod.connect = connect
+    monkeypatch.setitem(sys.modules, "websockets", mod)
+    return fake_ws
+
+
+async def test_outbound_connect_registers_and_cleans_up(isc, monkeypatch):
+    """M-040 happy path + H-022 clean close: full handshake registers the peer,
+    and a normal message-loop end reconciles tracking (no leak)."""
+    fake = FakeClientWS(auth_key="testkey", server_id="srv-1")
+    _patch_websockets(monkeypatch, fake)
+
+    await isc._outbound_connect("srv-1", "10.0.0.5", 8080, "http")
+
+    hello = next(m for m in fake.sent if m["type"] == "isc.hello")
+    assert hello["client_nonce"]  # we sent our nonce for mutual auth
+    assert any(m["type"] == "isc.auth" for m in fake.sent)
+    # Message loop ended → finally ran → connection not leaked.
+    assert "srv-1" not in isc._connections
+    assert isc._peers["srv-1"].connected is False
+
+
+async def test_outbound_aborts_on_bad_server_proof(isc, monkeypatch):
+    """M-037: a server that can't prove the key gets no HMAC from us — we abort
+    before sending isc.auth, denying the relay/oracle."""
+    fake = FakeClientWS(auth_key="testkey", good_server_proof=False)
+    _patch_websockets(monkeypatch, fake)
+
+    with pytest.raises(_ISCAuthRejected):
+        await isc._outbound_connect("srv-2", "10.0.0.6", 8080, "http")
+
+    assert any(m["type"] == "isc.hello" for m in fake.sent)
+    assert not any(m["type"] == "isc.auth" for m in fake.sent)  # never disclosed
+    assert "srv-2" not in isc._connections
+
+
+async def test_outbound_no_leak_on_abnormal_disconnect(isc, monkeypatch):
+    """H-022: an abnormal disconnect (exception out of the message loop) still
+    reconciles tracking via the finally — the entry doesn't leak as connected."""
+    fake = FakeClientWS(
+        auth_key="testkey", server_id="srv-3",
+        loop_raises=ConnectionResetError("cable pull"),
+    )
+    _patch_websockets(monkeypatch, fake)
+
+    with pytest.raises(ConnectionResetError):
+        await isc._outbound_connect("srv-3", "10.0.0.7", 8080, "http")
+
+    assert "srv-3" not in isc._connections
+    assert isc._peers["srv-3"].connected is False
+
+
+async def test_outbound_tiebreak_preserves_inbound(isc, monkeypatch):
+    """M-040: when a live inbound at a smaller peer id already exists, the
+    outbound loses the tie-break (our id is larger) and must abort without
+    touching the canonical inbound connection."""
+    ws_in = FakeWebSocket()
+    inbound = PeerConnection(ws_in, "inbound")
+    isc._connections["0000-0000"] = inbound
+    isc._peers["0000-0000"] = PeerInfo(
+        instance_id="0000-0000", name="Zero", host="1.2.3.4", port=8080,
+        connected=True,
+    )
+    fake = FakeClientWS(auth_key="testkey", server_id="0000-0000")
+    _patch_websockets(monkeypatch, fake)
+
+    with pytest.raises(ConnectionRefusedError, match="duplicate"):
+        await isc._outbound_connect("0000-0000", "1.2.3.4", 8080, "http")
+
+    assert isc._connections["0000-0000"] is inbound  # untouched
+
+
+# ---------------------------------------------------------------------------
+# Remote-state validation (H-024)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_remote_state_drops_non_primitives(isc, state):
+    """H-024: nested/list values and non-string keys are dropped so a peer
+    can't break the flat-primitive store invariant."""
+    isc._apply_remote_state("peer-bad", {
+        "good": "on",
+        "num": 5,
+        "flag": True,
+        "nested": {"a": 1},      # dropped
+        "listy": [1, 2, 3],      # dropped
+        123: "bad-key",          # non-str key dropped
+    })
+    snap = state.snapshot()
+    assert snap.get("isc.peer-bad.good") == "on"
+    assert snap.get("isc.peer-bad.num") == 5
+    assert snap.get("isc.peer-bad.flag") is True
+    assert "isc.peer-bad.nested" not in snap
+    assert "isc.peer-bad.listy" not in snap
+
+
+def test_apply_remote_state_ignores_non_dict(isc, state):
+    """H-024: a non-dict isc.state payload is ignored without raising."""
+    isc._apply_remote_state("peer-bad", ["not", "a", "dict"])  # no exception
+    assert not any(k.startswith("isc.peer-bad.") for k in state.snapshot())
+
+
+# ---------------------------------------------------------------------------
+# Stale-state + peer pruning (M-034, M-039)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_stale_peers_removes_silent_discovered(isc):
+    """M-034: a discovered peer silent past BEACON_TTL is pruned; a connected
+    peer and a manual (configured) peer are kept regardless of last_seen."""
+    isc._peers["ghost"] = PeerInfo(
+        instance_id="ghost", name="Ghost", host="10.0.0.1", port=8080,
+        source="discovered", connected=False, last_seen=0.0,
+    )
+    isc._peers["live"] = PeerInfo(
+        instance_id="live", name="Live", host="10.0.0.2", port=8080,
+        source="discovered", connected=True, last_seen=0.0,
+    )
+    isc._peers["manual:x"] = PeerInfo(
+        instance_id="manual:x", name="m", host="10.0.0.3", port=8080,
+        source="manual", connected=False, last_seen=0.0,
+    )
+
+    isc._prune_stale_peers()
+
+    assert "ghost" not in isc._peers
+    assert "live" in isc._peers
+    assert "manual:x" in isc._peers
+    assert isc._peers  # sanity
+
+
+def test_prune_clears_pruned_peer_state(isc, state):
+    """M-034/M-039: pruning a ghost peer also clears its shared-state keys."""
+    state.set("isc.ghost.device.x.power", "on", source="isc")
+    isc._peers["ghost"] = PeerInfo(
+        instance_id="ghost", name="Ghost", host="10.0.0.1", port=8080,
+        source="discovered", connected=False, last_seen=0.0,
+    )
+    isc._prune_stale_peers()
+    assert "isc.ghost.device.x.power" not in state.snapshot()
+
+
+async def test_peer_state_cleared_on_disconnect(isc, state):
+    """M-039: a peer's isc.<peer>.* keys are removed when it disconnects so
+    stale values can't keep driving bindings/triggers."""
+    ws = FakeWebSocket(auth_key="testkey")
+    await isc.accept_inbound(ws, {
+        "type": "isc.hello", "instance_id": "peer-s", "name": "S",     })
+    isc._apply_remote_state("peer-s", {"device.x.power": "on", "var.y": 1})
+    assert state.get("isc.peer-s.device.x.power") == "on"
+
+    await isc.peer_disconnected("peer-s")
+
+    assert state.get("isc.peer-s.device.x.power") is None
+    assert "isc.peer-s.var.y" not in state.snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Connect-task lifecycle (M-035) + auth-fail cap (M-036)
+# ---------------------------------------------------------------------------
+
+
+async def test_completed_connect_task_self_removes(isc, monkeypatch):
+    """M-035: a finished outbound loop drops itself from _connect_tasks so a
+    later beacon's _schedule_connect can re-dial the peer."""
+    async def quick_loop(peer_id, host, port, scheme="http"):
+        return
+
+    monkeypatch.setattr(isc, "_outbound_loop", quick_loop)
+    isc._schedule_connect("peer-q", "10.0.0.9", 8080)
+    assert "peer-q" in isc._connect_tasks
+    await asyncio.sleep(0.05)  # let the task finish + done-callback run
+    assert "peer-q" not in isc._connect_tasks
+
+
+def test_inbound_auth_fail_map_is_capped(isc_with_auth):
+    """M-036: a flood of fresh attacker-chosen instance_ids can't grow the
+    auth-fail dedupe map without bound."""
+    for i in range(MAX_AUTH_FAIL_ENTRIES + 50):
+        isc_with_auth._log_inbound_auth_fail(f"peer-{i}", "bad")
+    assert len(isc_with_auth._inbound_auth_fails) <= MAX_AUTH_FAIL_ENTRIES
+
+
+# ---------------------------------------------------------------------------
+# send_to / send_command robustness (L-025, L-026)
+# ---------------------------------------------------------------------------
+
+
+async def test_send_to_distinguishes_known_but_unconnected(isc):
+    """L-025: a known-but-not-yet-connected peer gets a precise error, distinct
+    from an entirely unknown instance."""
+    isc._peers["peer-known"] = PeerInfo(
+        instance_id="peer-known", name="K", host="1.2.3.4", port=8080,
+        connected=False,
+    )
+    with pytest.raises(ConnectionError, match="not connected yet"):
+        await isc.send_to("peer-known", "evt", {})
+    with pytest.raises(ConnectionError, match="Not connected to instance"):
+        await isc.send_to("totally-unknown", "evt", {})
+
+
+async def test_send_command_cleans_pending_on_send_failure(isc):
+    """L-026: if conn.send() raises after the future is registered, both
+    pending maps are cleaned via finally — no leaked future."""
+    class BoomConn:
+        async def send(self, msg):
+            raise RuntimeError("socket dead")
+
+    isc._connections["peer-boom"] = BoomConn()
+    isc._peers["peer-boom"] = PeerInfo(
+        instance_id="peer-boom", name="B", host="1.2.3.4", port=8080,
+        connected=True,
+    )
+
+    with pytest.raises(RuntimeError, match="socket dead"):
+        await isc.send_command("peer-boom", "dev", "cmd", {})
+
+    assert isc._pending_commands == {}
+    assert isc._pending_command_peers == {}

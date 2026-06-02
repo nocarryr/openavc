@@ -1461,6 +1461,7 @@ class Engine:
                 instance_name=instance_name,
                 http_port=config.HTTP_PORT,
                 manual_peers=self.project.isc.peers,
+                allowed_remote_commands=self.project.isc.allowed_remote_commands,
             )
             await self.isc.start()
             # Wire ISC manager into the ISC WebSocket endpoint
@@ -1487,6 +1488,7 @@ class Engine:
                 shared_state_patterns=self.project.isc.shared_state,
                 auth_key=self.project.isc.auth_key,
                 manual_peers=self.project.isc.peers,
+                allowed_remote_commands=self.project.isc.allowed_remote_commands,
             )
         elif self.isc and not isc_should_run:
             # ISC was running but project disabled it

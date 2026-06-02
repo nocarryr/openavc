@@ -72,8 +72,19 @@ class _ISCAuthRejected(ConnectionRefusedError):
 PING_INTERVAL = 30.0
 PING_TIMEOUT = 10.0
 
+# Cap on the inbound auth-fail dedupe map. It is keyed by the peer's
+# pre-auth (attacker-controlled) instance_id, so an unbounded map is a slow
+# LAN memory-growth vector. The map is only a log-dedupe aid, not security
+# state, so it's safe to drop wholesale once the cap is hit.
+MAX_AUTH_FAIL_ENTRIES = 1024
+
 # State batch window (seconds)
 STATE_BATCH_INTERVAL = 0.2
+
+# Flat-primitive types accepted from remote peers (plus None). Anything else
+# is dropped rather than stored, preserving the store's flat-primitive
+# invariant that WS broadcast / bindings / condition_eval / cloud relay rely on.
+_REMOTE_STATE_PRIMITIVES = (bool, int, float, str)
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +102,23 @@ def _compute_isc_hmac(auth_key: str, nonce: str) -> str:
     return hmac_mod.new(key, nonce.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _verify_isc_hmac(auth_key: str, nonce: str, response_hex: str) -> bool:
-    """Verify an HMAC response using constant-time comparison."""
-    expected = _compute_isc_hmac(auth_key, nonce)
-    return hmac_mod.compare_digest(expected, response_hex)
+# Mutual-auth domain separation. The inbound side proves key possession over
+# the *client's* nonce (so a keyless rogue server can't extract an outbound
+# instance's HMAC and relay it — see the chosen-message-oracle finding), and
+# the outbound side answers over the *server's* nonce. The distinct prefixes
+# stop a proof from one direction being replayed as the other.
+_SERVER_PROOF_PREFIX = "isc-server:"
+_CLIENT_PROOF_PREFIX = "isc-client:"
+
+
+def _server_proof(auth_key: str, client_nonce: str) -> str:
+    """HMAC the inbound side returns so the outbound side can verify it."""
+    return _compute_isc_hmac(auth_key, _SERVER_PROOF_PREFIX + client_nonce)
+
+
+def _client_proof(auth_key: str, server_nonce: str) -> str:
+    """HMAC the outbound side returns to answer the inbound challenge."""
+    return _compute_isc_hmac(auth_key, _CLIENT_PROOF_PREFIX + server_nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +253,18 @@ class ISCManager:
         instance_name: str,
         http_port: int,
         manual_peers: list[str] | None = None,
+        allowed_remote_commands: list[str] | None = None,
     ):
         self.state = state
         self.events = events
         self.devices = devices
         self._shared_patterns = list(shared_state_patterns)
         self._auth_key = auth_key
+        # Glob allowlist (matched against "<device_id>.<command>") gating which
+        # device commands a peer may execute on us. Empty = deny all remote
+        # commands. Authenticating to the mesh does not by itself grant device
+        # control; the operator opts in per device/command.
+        self._allowed_remote_commands = list(allowed_remote_commands or [])
         self.instance_id = instance_id
         self.instance_name = instance_name
         self.http_port = http_port
@@ -376,9 +406,11 @@ class ISCManager:
         shared_state_patterns: list[str],
         auth_key: str,
         manual_peers: list[str],
+        allowed_remote_commands: list[str] | None = None,
     ) -> None:
         """Hot-reload ISC config without full restart."""
         self._shared_patterns = list(shared_state_patterns)
+        self._allowed_remote_commands = list(allowed_remote_commands or [])
 
         # Capture the old auth key before overwriting it so we can detect
         # rotation and force-disconnect existing peers below.
@@ -463,13 +495,29 @@ class ISCManager:
     # Public API (used by REST endpoints & script proxy)
     # ------------------------------------------------------------------
 
+    def _require_connection(self, instance_id: str) -> PeerConnection:
+        """Resolve a live peer connection or raise a precise ConnectionError.
+
+        Distinguishes a peer that's known but still mid-handshake (the
+        connection is keyed by the real instance_id only once the handshake
+        completes) from one we've never heard of, so callers get an accurate
+        message instead of a bare "not connected".
+        """
+        conn = self._connections.get(instance_id)
+        if conn is not None:
+            return conn
+        if instance_id in self._peers:
+            raise ConnectionError(
+                f"Peer '{instance_id}' is known but not connected yet "
+                f"(handshake pending)"
+            )
+        raise ConnectionError(f"Not connected to instance '{instance_id}'")
+
     async def send_to(
         self, instance_id: str, event: str, payload: dict[str, Any] | None = None,
     ) -> None:
         """Send an event to a specific peer instance."""
-        conn = self._connections.get(instance_id)
-        if conn is None:
-            raise ConnectionError(f"Not connected to instance '{instance_id}'")
+        conn = self._require_connection(instance_id)
         await conn.send({
             "type": "isc.event",
             "event": event,
@@ -495,9 +543,7 @@ class ISCManager:
         params: dict[str, Any] | None = None,
     ) -> Any:
         """Send a device command to a remote instance and wait for the result."""
-        conn = self._connections.get(instance_id)
-        if conn is None:
-            raise ConnectionError(f"Not connected to instance '{instance_id}'")
+        conn = self._require_connection(instance_id)
 
         request_id = str(uuid.uuid4())
         loop = asyncio.get_running_loop()
@@ -505,22 +551,26 @@ class ISCManager:
         self._pending_commands[request_id] = future
         self._pending_command_peers[request_id] = (future, instance_id)
 
-        await conn.send({
-            "type": "isc.command",
-            "id": request_id,
-            "device": device_id,
-            "command": command,
-            "params": params or {},
-        })
-
+        # try/finally guarantees both pending maps are cleaned even if the
+        # send() raises after registration or the wait_for times out —
+        # otherwise the future leaks when _close_peer never runs for this
+        # peer (e.g. a leaked connection entry).
         try:
+            await conn.send({
+                "type": "isc.command",
+                "id": request_id,
+                "device": device_id,
+                "command": command,
+                "params": params or {},
+            })
             return await asyncio.wait_for(future, timeout=10.0)
         except asyncio.TimeoutError:
-            self._pending_commands.pop(request_id, None)
-            self._pending_command_peers.pop(request_id, None)
             raise TimeoutError(
                 f"Command to {instance_id[:8]}:{device_id}.{command} timed out"
             )
+        finally:
+            self._pending_commands.pop(request_id, None)
+            self._pending_command_peers.pop(request_id, None)
 
     def get_instances(self) -> list[dict[str, Any]]:
         """List all discovered/configured peer instances."""
@@ -557,7 +607,15 @@ class ISCManager:
 
     def _log_inbound_auth_fail(self, peer_id: str, reason: str) -> None:
         """Log an inbound auth rejection, downgrading repeats to debug (A57)."""
-        n = self._inbound_auth_fails.get(peer_id, 0) + 1
+        n = self._inbound_auth_fails.get(peer_id, 0)
+        if n == 0 and len(self._inbound_auth_fails) >= MAX_AUTH_FAIL_ENTRIES:
+            # A fresh attacker-chosen instance_id would grow the map without
+            # bound. Drop the accumulated counters (log-dedupe only) so memory
+            # stays capped; the worst case is a few repeat rejections logging
+            # at WARNING again.
+            log.debug("ISC: auth-fail dedupe map full (%d), clearing", len(self._inbound_auth_fails))
+            self._inbound_auth_fails.clear()
+        n += 1
         self._inbound_auth_fails[peer_id] = n
         if n == 1:
             log.warning(f"ISC: Rejected {peer_id[:8]} — {reason}")
@@ -584,9 +642,21 @@ class ISCManager:
             self._log_inbound_auth_fail(peer_id, "no auth key configured")
             return None
 
-        # HMAC challenge-response: send a nonce, peer must prove it has the key
+        # Mutual HMAC challenge-response. We send our own nonce *and* a proof
+        # over the peer's client_nonce, so the peer can confirm we hold the key
+        # before it discloses its own HMAC. This denies a keyless rogue server
+        # the chosen-message oracle it would otherwise use to relay an honest
+        # instance's response into a forged auth elsewhere. A peer that omits
+        # client_nonce (older client) just gets a proof over the empty string.
+        peer_client_nonce = hello.get("client_nonce", "")
+        if not isinstance(peer_client_nonce, str):
+            peer_client_nonce = ""
         nonce = secrets.token_hex(32)
-        await _ws_send_fastapi(ws, {"type": "isc.challenge", "nonce": nonce})
+        await _ws_send_fastapi(ws, {
+            "type": "isc.challenge",
+            "nonce": nonce,
+            "server_proof": _server_proof(self._auth_key, peer_client_nonce),
+        })
 
         try:
             auth_text = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
@@ -599,7 +669,8 @@ class ISCManager:
             await _ws_send_fastapi(ws, {"type": "isc.reject", "reason": "expected isc.auth"})
             return None
 
-        if not _verify_isc_hmac(self._auth_key, nonce, auth_msg.get("response", "")):
+        expected_response = _client_proof(self._auth_key, nonce)
+        if not hmac_mod.compare_digest(expected_response, str(auth_msg.get("response", ""))):
             await _ws_send_fastapi(ws, {"type": "isc.reject", "reason": "auth_failed"})
             self._log_inbound_auth_fail(peer_id, "HMAC verification failed")
             return None
@@ -769,6 +840,9 @@ class ISCManager:
         beacon = self._build_beacon()
         try:
             while self._running:
+                # Reap peers that have gone silent past BEACON_TTL so ghosts
+                # don't linger forever and inflate peer_count.
+                self._prune_stale_peers()
                 if self._discovery_transport:
                     self._discovery_transport.sendto(
                         beacon, ("255.255.255.255", DISCOVERY_PORT),
@@ -880,6 +954,16 @@ class ISCManager:
             return
         task = asyncio.create_task(self._outbound_loop(peer_id, host, port, scheme))
         self._connect_tasks[peer_id] = task
+        # Self-remove once the loop ends (e.g. it returned after losing a
+        # bidirectional tie-break). Otherwise the completed task lingers and a
+        # later beacon's _schedule_connect short-circuits on membership, so we
+        # never re-dial a peer whose canonical inbound connection later drops.
+        task.add_done_callback(lambda t, pid=peer_id: self._on_connect_task_done(pid, t))
+
+    def _on_connect_task_done(self, peer_id: str, task: asyncio.Task) -> None:
+        """Drop a finished outbound task from tracking (identity-checked)."""
+        if self._connect_tasks.get(peer_id) is task:
+            self._connect_tasks.pop(peer_id, None)
 
     async def _outbound_loop(self, peer_id: str, host: str, port: int, scheme: str = "http") -> None:
         """Maintain an outbound connection to a peer with reconnection."""
@@ -951,13 +1035,16 @@ class ISCManager:
         log.debug(f"ISC: Connecting to {url}")
 
         async with websockets.connect(url, close_timeout=5, ssl=ssl_ctx) as ws:
-            # Send hello (no auth key — challenge-response handles auth)
+            # Send hello with our own nonce so the peer must prove key
+            # possession over it before we disclose our HMAC.
+            client_nonce = secrets.token_hex(32)
             await ws.send(json.dumps({
                 "type": "isc.hello",
                 "instance_id": self.instance_id,
                 "name": self.instance_name,
                 "version": _platform_version,
                 "protocol": ISC_PROTOCOL_VERSION,
+                "client_nonce": client_nonce,
             }))
 
             # Wait for challenge or reject
@@ -974,12 +1061,20 @@ class ISCManager:
             if resp.get("type") != "isc.challenge":
                 raise ConnectionError(f"Expected isc.challenge, got: {resp.get('type')}")
 
-            # Respond to challenge with HMAC
+            # Verify the peer's proof over our client_nonce BEFORE answering.
+            # A keyless rogue server can't produce it, so we never hand it an
+            # HMAC it could relay into a forged auth elsewhere. (Mutual auth.)
+            expected_server_proof = _server_proof(self._auth_key, client_nonce)
+            if not hmac_mod.compare_digest(
+                expected_server_proof, str(resp.get("server_proof", ""))
+            ):
+                raise _ISCAuthRejected("server_auth_failed")
+
+            # Respond to the peer's challenge with our domain-separated proof.
             nonce = resp.get("nonce", "")
-            hmac_response = _compute_isc_hmac(self._auth_key, nonce)
             await ws.send(json.dumps({
                 "type": "isc.auth",
-                "response": hmac_response,
+                "response": _client_proof(self._auth_key, nonce),
             }))
 
             # Wait for welcome or reject
@@ -1048,38 +1143,76 @@ class ISCManager:
                 conn = PeerConnection(ws, "outbound")
                 self._connections[peer_id] = conn
 
-            log.info(f"ISC: Connected to «{peer.name}» ({peer_id[:8]}) at {host}:{port}")
+            # conn is now registered in _connections. Everything below can
+            # raise (abnormal disconnect, a handler exception), so guarantee
+            # cleanup in a finally — otherwise the entry leaks as 'connected'
+            # forever and the batch/ping loops keep sending to a dead socket.
+            # Pass `conn` so a stale disconnect can't pop a newer inbound that
+            # replaced this one in the meantime (A55).
+            try:
+                log.info(f"ISC: Connected to «{peer.name}» ({peer_id[:8]}) at {host}:{port}")
 
-            # Send our shared state
-            shared = self._get_shared_state()
-            if shared:
-                await conn.send({"type": "isc.state", "changes": shared})
+                # Send our shared state
+                shared = self._get_shared_state()
+                if shared:
+                    await conn.send({"type": "isc.state", "changes": shared})
 
-            await self.events.emit("isc.peer_connected", {
-                "instance_id": peer_id, "name": peer.name,
-            })
-            self._push_isc_update()
+                await self.events.emit("isc.peer_connected", {
+                    "instance_id": peer_id, "name": peer.name,
+                })
+                self._push_isc_update()
 
-            # Message loop
-            async for raw in ws:
-                if not self._running:
-                    break
-                msg = json.loads(raw)
-                await self.handle_message(peer_id, msg)
-
-        # Connection closed normally. Pass `conn` so a stale outbound
-        # disconnect can't kill a newer inbound that replaced it (A55).
-        await self._close_peer(peer_id, emit=True, conn=conn)
+                # Message loop
+                async for raw in ws:
+                    if not self._running:
+                        break
+                    msg = json.loads(raw)
+                    await self.handle_message(peer_id, msg)
+            finally:
+                await self._close_peer(peer_id, emit=True, conn=conn)
 
     # ------------------------------------------------------------------
     # Message handlers
     # ------------------------------------------------------------------
 
     def _apply_remote_state(self, peer_id: str, changes: dict[str, Any]) -> None:
-        """Write remote state changes into the local StateStore."""
+        """Write remote state changes into the local StateStore.
+
+        Remote peers are only semi-trusted, so the wire shape is validated
+        here: a buggy or malicious peer must not be able to store a nested
+        object under ``isc.<peer>.<key>`` and break the flat-primitive state
+        invariant. Non-dict payloads, non-string keys, and non-primitive
+        values are dropped (not coerced — we don't want to persist a peer's
+        arbitrary blob even as a string).
+        """
+        if not isinstance(changes, dict):
+            log.debug("ISC: ignoring non-dict isc.state from %s", peer_id[:8])
+            return
         for key, value in changes.items():
+            if not isinstance(key, str):
+                continue
+            if value is not None and not isinstance(value, _REMOTE_STATE_PRIMITIVES):
+                log.debug(
+                    "ISC: dropping non-primitive remote state %r from %s (%s)",
+                    key, peer_id[:8], type(value).__name__,
+                )
+                continue
             local_key = f"isc.{peer_id}.{key}"
             self.state.set(local_key, value, source="isc")
+
+    def _is_remote_command_allowed(self, device_id: str, command: str) -> bool:
+        """Check a remote device command against the operator's allowlist.
+
+        Patterns are globs matched against ``"<device_id>.<command>"``. An
+        empty allowlist denies every remote command: passing the shared-key
+        handshake authenticates a peer to the mesh but does not, on its own,
+        grant it control of any device. The operator opts in per device or
+        command (e.g. ``projector1.*`` or ``*.power_off``; ``*`` allows all).
+        """
+        if not self._allowed_remote_commands:
+            return False
+        target = f"{device_id}.{command}"
+        return any(fnmatch(target, pattern) for pattern in self._allowed_remote_commands)
 
     async def _handle_remote_command(self, peer_id: str, msg: dict[str, Any]) -> None:
         """Execute a device command requested by a remote peer."""
@@ -1090,6 +1223,19 @@ class ISCManager:
 
         conn = self._connections.get(peer_id)
         if conn is None:
+            return
+
+        if not self._is_remote_command_allowed(device_id, command):
+            log.warning(
+                "ISC: peer %s denied command %s.%s (not in allowed_remote_commands)",
+                peer_id[:8], device_id, command,
+            )
+            await conn.send({
+                "type": "isc.command_result",
+                "id": request_id,
+                "success": False,
+                "error": "command not authorized by remote instance's ISC policy",
+            })
             return
 
         try:
@@ -1181,7 +1327,47 @@ class ISCManager:
         snapshot = self.state.snapshot()
         for key in snapshot:
             if key.startswith("isc."):
-                self.state.set(key, None, source="system")
+                # delete() removes the key entirely; set(key, None) would leave
+                # a ghost None-valued key in the snapshot every subscriber sees.
+                self.state.delete(key, source="system")
+
+    def _clear_peer_state(self, peer_id: str) -> None:
+        """Delete the isc.<peer_id>.* keys a peer published into our store.
+
+        Called when a peer disconnects or is pruned so stale shared state can't
+        keep feeding UI bindings, macro skip_if guards, and trigger conditions
+        long after the source is gone (a cross-room control firing on stale
+        state). On reconnect the peer re-sends its full shared snapshot.
+        """
+        prefix = f"isc.{peer_id}."
+        for key in [k for k in self.state.snapshot() if k.startswith(prefix)]:
+            self.state.delete(key, source="isc")
+
+    def _prune_stale_peers(self) -> None:
+        """Drop discovered/inbound peers gone silent past BEACON_TTL.
+
+        A live peer keeps last_seen fresh through beacons and messages even
+        while its WS is briefly down, so only a genuinely-gone peer trips the
+        TTL. Manual peers are operator-configured (not discovered) and keep
+        their reconnect loop, so they're never pruned. Pruning also cancels a
+        dangling reconnect task and clears the peer's stale shared state.
+        """
+        now = time()
+        stale = [
+            pid for pid, p in self._peers.items()
+            if p.source != "manual"
+            and not p.connected
+            and now - p.last_seen > BEACON_TTL
+        ]
+        for pid in stale:
+            task = self._connect_tasks.pop(pid, None)
+            if task and not task.done():
+                task.cancel()
+            self._peers.pop(pid, None)
+            self._clear_peer_state(pid)
+        if stale:
+            log.debug("ISC: pruned %d stale peer(s)", len(stale))
+            self._push_isc_update()
 
     # ------------------------------------------------------------------
     # Keepalive
@@ -1272,6 +1458,9 @@ class ISCManager:
         peer = self._peers.get(peer_id)
         if peer and peer.connected:
             peer.connected = False
+            # Clear the peer's shared state so stale isc.<peer>.* values don't
+            # keep driving bindings/triggers after the source is gone.
+            self._clear_peer_state(peer_id)
             log.info(f"ISC: Peer «{peer.name}» ({peer_id[:8]}) disconnected")
             if emit:
                 await self.events.emit("isc.peer_disconnected", {

@@ -315,6 +315,9 @@ export interface ISCConfig {
   shared_state: string[];
   auth_key: string;
   peers: string[];
+  // Glob allowlist (matched against "<device_id>.<command>") for device
+  // commands a remote peer may run on this instance. Empty = deny all.
+  allowed_remote_commands: string[];
 }
 
 export interface DriverDependency {
