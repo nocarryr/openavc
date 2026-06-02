@@ -80,6 +80,18 @@ async def _initialize_engine(app: FastAPI) -> None:
                 log.warning("Rollback initiated, exiting process (code %d)", exit_code)
                 os._exit(exit_code)
 
+        # Defense in depth: drop any stale Linux apply-update.json left behind by
+        # a failed/aborted apply, so update-helper.sh (root, ExecStartPre) can't
+        # re-consume it on an unrelated restart. On systemd the helper runs
+        # before us, so this mainly covers non-systemd / crash-before-helper.
+        stale_apply = data_dir / "apply-update.json"
+        if stale_apply.exists():
+            try:
+                stale_apply.unlink()
+                log.warning("Removed stale apply-update.json at startup")
+            except OSError:
+                log.exception("Could not remove stale apply-update.json at startup")
+
         await engine.start()
 
         # Load driver hints into discovery engine after drivers are registered

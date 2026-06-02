@@ -288,3 +288,43 @@ def _rollback_linux(data_dir: Path, from_version: str, to_version: str) -> bool:
     )
     clear_pending_marker(data_dir)
     return True
+
+
+def rollback_target_version(app_dir: Path) -> str:
+    """Best-effort version that ``perform_rollback`` would restore to.
+
+    Display-only. Derived from the same source the rollback actually uses (the
+    highest cached installer on Windows, the ``.previous`` tree on Linux) rather
+    than update history — history could name the version just rejected, or one
+    with no cached installer. Returns "" when the target can't be determined
+    (rollback may still be possible; the caller reports availability separately).
+    """
+    from server.updater.checker import parse_semver
+    from server.version import __version__
+
+    if sys.platform == "win32":
+        from server.system_config import get_system_config
+        cache_dir = get_system_config().data_dir / "update-cache"
+        if not cache_dir.exists():
+            return ""
+        current = parse_semver(__version__)
+        candidates = [
+            inst for inst in cache_dir.glob("OpenAVC-Setup-*.exe")
+            if _installer_version(inst) != current
+        ]
+        if not candidates:
+            return ""
+        best = max(candidates, key=_installer_version)
+        return best.stem.removeprefix("OpenAVC-Setup-")
+
+    # Linux: read the version recorded in the .previous install tree if present.
+    previous = app_dir.parent / f"{app_dir.name}.previous"
+    pyproject = previous / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            return str(data.get("project", {}).get("version", "") or "")
+        except (OSError, ValueError) as e:
+            log.debug("Could not read rollback target version: %s", e)
+    return ""

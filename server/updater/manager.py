@@ -80,14 +80,32 @@ class UpdateManager:
         if history_path.exists():
             try:
                 self._history = json.loads(history_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as e:
+                # Log rather than silently swallow: a corrupt history skips the
+                # pending->success/failed reconciliation below, so a real update
+                # would otherwise vanish from history with no trace.
+                log.warning("Could not read update history (%s); starting fresh", e)
                 self._history = []
 
         if self._history and self._history[0].get("status") == "pending":
             expected = self._history[0].get("to_version", "")
-            if expected and expected == __version__:
+            from_version = self._history[0].get("from_version", "")
+            # The update applied if the running version is no longer the version
+            # we updated FROM. Don't require an exact match against `expected`:
+            # `expected` is the release tag while __version__ comes from the
+            # bundled pyproject, and a documented tag/pyproject skew would
+            # otherwise mark a genuinely-applied update as failed.
+            applied = (
+                (bool(expected) and __version__ == expected)
+                or (bool(from_version) and __version__ != from_version)
+            )
+            if applied:
                 self._history[0]["status"] = "success"
-                log.info("Confirmed update to v%s succeeded", expected)
+                if expected and __version__ != expected:
+                    self._history[0]["note"] = (
+                        f"Applied; running v{__version__} (release tag v{expected})"
+                    )
+                log.info("Confirmed update succeeded (running v%s)", __version__)
             else:
                 self._history[0]["status"] = "failed"
                 self._history[0]["error"] = (
@@ -143,6 +161,23 @@ class UpdateManager:
                 return asset.get("url", "")
         return ""
 
+    def _safe_artifact_filename(self, url_path: str, target_version: str) -> str:
+        """Derive a safe artifact filename from a cloud-provided URL path.
+
+        Returns the URL's basename only when it's a plain, separator-free token;
+        otherwise synthesizes ``update-<sanitized-version>.<ext>``. This keeps
+        URL-controlled path components (traversal, odd characters, Windows-invalid
+        names) out of the download cache path and the scheduled-task XML.
+        """
+        import os
+        import re
+        base = os.path.basename(url_path or "")
+        if base and not base.startswith(".") and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", base):
+            return base
+        safe_ver = re.sub(r"[^A-Za-z0-9._-]", "_", target_version or "")[:32] or "unknown"
+        ext = ".exe" if self._deployment_type == DeploymentType.WINDOWS_INSTALLER else ".tar.gz"
+        return f"update-{safe_ver}{ext}"
+
     async def _download_update(self, release: ReleaseInfo) -> Path:
         """Download the platform-specific update artifact from GitHub release assets.
 
@@ -194,18 +229,25 @@ class UpdateManager:
 
         downloaded = 0
         total = 0
-        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                total = int(response.headers.get("content-length", 0))
+        try:
+            async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    total = int(response.headers.get("content-length", 0))
 
-                with open(artifact_path, "wb") as f:
-                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            pct = min(int(downloaded * 100 / total), 99)
-                            self._set_state("system.update_progress", pct)
+                    with open(artifact_path, "wb") as f:
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                pct = min(int(downloaded * 100 / total), 99)
+                                self._set_state("system.update_progress", pct)
+        except BaseException:
+            # A mid-stream error/cancellation must not leave a partial artifact
+            # in the cache (it would never be applied — the size/checksum gates
+            # catch it — but it wastes disk until the next download).
+            artifact_path.unlink(missing_ok=True)
+            raise
 
         actual_size = artifact_path.stat().st_size
         log.info("Downloaded: %s (%d bytes, expected %d)", artifact_path.name, actual_size, total)
@@ -272,18 +314,24 @@ class UpdateManager:
             from server.system_config import get_system_config
             channel = get_system_config().get("updates", "channel", "stable")
 
-        self._set_state("system.update_status", "checking")
-        self._set_state("system.update_error", "")
+        # Don't clobber an in-flight apply's status/progress UI. A concurrent
+        # check (operator or cloud) would otherwise flip system.update_status to
+        # checking/idle and stomp the apply's error mid-update.
+        touch_status = not self._update_in_progress
+        if touch_status:
+            self._set_state("system.update_status", "checking")
+            self._set_state("system.update_error", "")
 
         try:
             result = await self._checker.check(channel)
         finally:
-            self._set_state("system.update_status", "idle")
+            if touch_status:
+                self._set_state("system.update_status", "idle")
 
         if result is None:
             self._set_state("system.update_available", "")
             error = self._checker.last_error
-            if error:
+            if error and touch_status:
                 self._set_state("system.update_error", error)
             return {
                 "update_available": False,
@@ -328,12 +376,17 @@ class UpdateManager:
         # without applying it immediately (A63).
         staged = self.get_staged_update()
         if staged:
-            self.clear_staged_update()
-            return await self.apply_cloud_update(
+            result = await self.apply_cloud_update(
                 staged["target_version"],
                 staged["update_url"],
                 staged.get("checksum_sha256"),
             )
+            # Clear the staged record only after a successful apply. A transient
+            # failure (network blip during download) must keep it so the
+            # operator's queued update can retry instead of silently vanishing.
+            if result.get("success"):
+                self.clear_staged_update()
+            return result
 
         release = self._checker.last_result
         if release is None:
@@ -386,21 +439,15 @@ class UpdateManager:
 
             return {"success": True, "message": f"Update to v{release.version} started"}
 
+        except asyncio.CancelledError:
+            # A cancellation at a download await point still needs the markers
+            # cleared and a history row recorded, then must propagate.
+            self._cleanup_failed_apply(release.version, "Update cancelled")
+            raise
         except Exception as e:
             error_msg = f"Update failed: {e}"
             log.exception(error_msg)
-            # Clear the pending-update marker so a subsequent manual restart
-            # doesn't trigger a false rollback against a stale from_version
-            # (A58). The marker is meaningful only after the apply step has
-            # successfully scheduled the version transition.
-            from server.updater.rollback import clear_pending_marker
-            try:
-                clear_pending_marker(self._data_dir)
-            except OSError:
-                log.exception("Failed to clear stale pending-update marker")
-            self._set_state("system.update_status", "error")
-            self._set_state("system.update_error", error_msg)
-            self._add_history_entry(__version__, release.version, "failed", error_msg)
+            self._cleanup_failed_apply(release.version, error_msg)
             return {"success": False, "error": error_msg}
         finally:
             self._update_in_progress = False
@@ -424,6 +471,18 @@ class UpdateManager:
                 "instructions": update_instructions(self._deployment_type, target_version),
             }
 
+        # Validate the cloud-provided URL before fetching anything: require
+        # https so a plain-HTTP or downgraded URL can't steer the download to an
+        # attacker. The checksum is already fail-closed, so integrity is assured
+        # regardless of host; this is defense in depth on the transport.
+        from urllib.parse import urlparse
+        parsed = urlparse(update_url)
+        if parsed.scheme != "https":
+            return {
+                "success": False,
+                "error": f"Refusing non-HTTPS update URL (scheme: {parsed.scheme or 'none'})",
+            }
+
         self._update_in_progress = True
         self._set_state("system.update_error", "")
 
@@ -435,11 +494,12 @@ class UpdateManager:
             cleanup_old_backups(self._data_dir)
             log.info("Pre-update backup created: %s", backup_path)
 
-            # Step 2: Download from cloud-provided URL
-            # Derive filename from URL path (GitHub URLs end with the artifact name)
-            from urllib.parse import urlparse
-            url_path = urlparse(update_url).path
-            filename = url_path.rsplit("/", 1)[-1] if "/" in url_path else f"update-{target_version}"
+            # Step 2: Download from cloud-provided URL.
+            # Sanitize the URL-derived filename to a safe basename — it reaches
+            # the cache path and (on Windows) the scheduled-task XML, so path
+            # separators / odd characters must never pass through. Fall back to a
+            # synthesized name built from a sanitized version string.
+            filename = self._safe_artifact_filename(parsed.path, target_version)
 
             self._set_state("system.update_status", "downloading")
             self._set_state("system.update_progress", 0)
@@ -479,20 +539,13 @@ class UpdateManager:
 
             return {"success": True, "message": f"Update to v{target_version} started"}
 
+        except asyncio.CancelledError:
+            self._cleanup_failed_apply(target_version, "Update cancelled")
+            raise
         except Exception as e:
             error_msg = f"Update failed: {e}"
             log.exception(error_msg)
-            # Clear the pending-update marker so a subsequent manual restart
-            # doesn't trigger a false rollback against a stale from_version
-            # (A58). Same rationale as the GitHub-driven apply_update path.
-            from server.updater.rollback import clear_pending_marker
-            try:
-                clear_pending_marker(self._data_dir)
-            except OSError:
-                log.exception("Failed to clear stale pending-update marker")
-            self._set_state("system.update_status", "error")
-            self._set_state("system.update_error", error_msg)
-            self._add_history_entry(__version__, target_version, "failed", error_msg)
+            self._cleanup_failed_apply(target_version, error_msg)
             return {"success": False, "error": error_msg}
         finally:
             self._update_in_progress = False
@@ -612,6 +665,37 @@ class UpdateManager:
         instruction_path.write_text(json.dumps(instruction), encoding="utf-8")
         log.info("Wrote update instruction: %s -> v%s (%s)", __version__, to_version, instruction_path)
 
+    def _clear_linux_apply_instruction(self) -> None:
+        """Remove a stale Linux apply-update.json.
+
+        update-helper.sh (ExecStartPre, runs as root) unconditionally consumes
+        this file on the next service start, so a stale instruction left by a
+        failed/aborted apply would otherwise drive a root-level apply on an
+        unrelated future restart.
+        """
+        try:
+            (self._data_dir / "apply-update.json").unlink(missing_ok=True)
+        except OSError:
+            log.exception("Failed to clear stale apply-update instruction")
+
+    def _cleanup_failed_apply(self, to_version: str, error_msg: str) -> None:
+        """Shared cleanup for a failed or cancelled apply.
+
+        Clears the pending-update marker (so a later restart doesn't trigger a
+        false rollback against a stale from_version) and the Linux apply
+        instruction (so the root helper can't re-consume it), records the
+        failure in history, and surfaces the error in state.
+        """
+        from server.updater.rollback import clear_pending_marker
+        try:
+            clear_pending_marker(self._data_dir)
+        except OSError:
+            log.exception("Failed to clear stale pending-update marker")
+        self._clear_linux_apply_instruction()
+        self._set_state("system.update_status", "error")
+        self._set_state("system.update_error", error_msg)
+        self._add_history_entry(__version__, to_version, "failed", error_msg)
+
     def _restart_process(self) -> None:
         """Exit the process so the external update mechanism can apply changes.
 
@@ -640,10 +724,16 @@ class UpdateManager:
         # Create a backup of current state before rolling back
         self._set_state("system.update_status", "backing_up")
         try:
-            from server.updater.backup import create_backup
+            from server.updater.backup import create_backup, cleanup_old_backups
             create_backup(self._data_dir, __version__, project_path=self._project_path)
+            cleanup_old_backups(self._data_dir)  # rotate like the apply paths (don't leave rollback backups unbounded)
         except Exception as e:
             log.warning("Pre-rollback backup failed: %s", e)
+
+        # Drop any cloud-staged update before rolling back: it targets the very
+        # version we're abandoning, and would otherwise be re-applied by the
+        # next apply_update() (which prefers a staged record).
+        self.clear_staged_update()
 
         self._set_state("system.update_status", "applying")
         success = perform_rollback(self._data_dir)
@@ -669,11 +759,12 @@ class UpdateManager:
         has_rollback = can_rollback(APP_DIR)
         rollback_version = ""
         if has_rollback:
-            # Check history for the version we'd roll back to
-            for entry in self._history:
-                if entry.get("status") in ("success", "applied"):
-                    rollback_version = entry.get("from_version", "")
-                    break
+            # Derive the rollback target from what perform_rollback would
+            # actually restore (cached installer / .previous tree), not from
+            # history — history can name the version just rejected (the rollback
+            # entry's own from_version) or one with no cached installer.
+            from server.updater.rollback import rollback_target_version
+            rollback_version = rollback_target_version(APP_DIR)
 
         return {
             "current_version": __version__,
@@ -703,7 +794,18 @@ class UpdateManager:
             log.info("Automatic update checks disabled")
             return
 
-        interval_hours = cfg.get("updates", "auto_check_interval_hours", interval_hours)
+        # Coerce + bound the configured interval: a string (e.g. "12" from
+        # hand-edited system.json) would crash asyncio.sleep and stop checks
+        # forever; 0/negative would turn the loop into a busy spin.
+        raw_interval = cfg.get("updates", "auto_check_interval_hours", interval_hours)
+        try:
+            interval_hours = int(raw_interval)
+        except (TypeError, ValueError):
+            log.warning("Invalid auto_check_interval_hours %r; using 24", raw_interval)
+            interval_hours = 24
+        if interval_hours <= 0:
+            log.warning("auto_check_interval_hours must be positive (got %r); using 24", raw_interval)
+            interval_hours = 24
 
         async def _periodic_check():
             # Check shortly after startup
@@ -732,76 +834,126 @@ class UpdateManager:
             except asyncio.CancelledError:
                 pass
             self._auto_check_task = None
-        if self._maintenance_task and not self._maintenance_task.done():
-            self._maintenance_task.cancel()
+        await self._cancel_maintenance_task()
+
+    async def _cancel_maintenance_task(self) -> None:
+        """Cancel the maintenance-window loop and wait for it to actually stop.
+
+        Awaiting matters when reconfiguring: a cancel-without-await leaves the
+        old loop running to its next await point, so two loops could briefly
+        coexist and issue redundant checks/applies.
+        """
+        task = self._maintenance_task
+        self._maintenance_task = None
+        if task and not task.done():
+            task.cancel()
             try:
-                await self._maintenance_task
+                await task
             except asyncio.CancelledError:
                 pass
-            self._maintenance_task = None
 
-    def apply_update_policy(self, policy_config: dict[str, Any]) -> None:
+    @staticmethod
+    def _parse_window_time(value: Any):
+        """Parse a 'HH:MM' string into a datetime.time, or None if invalid.
+
+        Rejects out-of-range values (e.g. 25:99) and non-strings so a hostile or
+        malformed cloud field can never raise out of dt_time() and kill the
+        maintenance task.
+        """
+        from datetime import time as dt_time
+        if not isinstance(value, str):
+            return None
+        parts = value.split(":")
+        if len(parts) != 2:
+            return None
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return dt_time(hour, minute)
+
+    @staticmethod
+    def _resolve_tz(tz_name: Any):
+        """Resolve a timezone name to a tzinfo, or None (UTC) on any failure.
+
+        Cloud-supplied tz is unvalidated: ZoneInfo raises ValueError/OSError on
+        empty/garbage/oversized values, which must not escape and kill the loop.
+        """
+        if not tz_name or not isinstance(tz_name, str):
+            return None
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(tz_name)
+        except (ImportError, KeyError, ValueError, OSError) as e:
+            log.warning("Invalid maintenance_window_tz %r (%s); using UTC", tz_name, e)
+            return None
+
+    async def apply_update_policy(self, policy_config: dict[str, Any]) -> None:
         """Apply an update policy received from the cloud.
 
-        Args:
-            policy_config: Dict with keys: policy, maintenance_window_start,
-                           maintenance_window_end, maintenance_window_tz
+        ``policy_config`` crosses the cloud trust boundary, so every field is
+        validated before use: an unknown ``policy`` falls back to manual, a
+        malformed/missing/out-of-range window disables the auto loop (rather
+        than crashing the maintenance task), and a bad timezone falls back to
+        UTC. Keys: policy, maintenance_window_start, maintenance_window_end,
+        maintenance_window_tz.
         """
-        policy = policy_config.get("policy", "manual")
+        policy = policy_config.get("policy")
+        if policy not in ("auto", "manual"):
+            if policy is not None:
+                log.warning("Unknown cloud update policy %r; treating as manual", policy)
+            policy = "manual"
         log.info("Cloud update policy: %s", policy)
 
-        # Cancel any existing maintenance task
-        if self._maintenance_task and not self._maintenance_task.done():
-            self._maintenance_task.cancel()
-            self._maintenance_task = None
+        # Tear down any existing maintenance loop and WAIT for it to stop before
+        # starting a new one, so two loops can't transiently overlap (M-013).
+        await self._cancel_maintenance_task()
 
-        if policy == "auto" and can_self_update(self._deployment_type):
-            window_start = policy_config.get("maintenance_window_start")
-            window_end = policy_config.get("maintenance_window_end")
-            window_tz = policy_config.get("maintenance_window_tz")
-            if window_start and window_end:
-                self._maintenance_task = asyncio.create_task(
-                    self._maintenance_window_loop(window_start, window_end, window_tz)
-                )
-                log.info(
-                    "Auto-update scheduled during %s-%s %s",
-                    window_start, window_end, window_tz or "UTC",
-                )
-
-    async def _maintenance_window_loop(
-        self, window_start: str, window_end: str, tz_name: str | None
-    ) -> None:
-        """Check periodically if we're in the maintenance window and apply updates."""
-        from datetime import time as dt_time
-        try:
-            start_h, start_m = (int(x) for x in window_start.split(":"))
-            end_h, end_m = (int(x) for x in window_end.split(":"))
-        except (ValueError, AttributeError):
-            log.warning("Invalid maintenance window format: %s-%s", window_start, window_end)
+        if policy != "auto" or not can_self_update(self._deployment_type):
             return
 
-        start_time = dt_time(start_h, start_m)
-        max_retries = 7  # Days to retry
+        start_time = self._parse_window_time(policy_config.get("maintenance_window_start"))
+        end_time = self._parse_window_time(policy_config.get("maintenance_window_end"))
+        if start_time is None or end_time is None:
+            log.warning(
+                "Auto update policy with invalid/missing maintenance window "
+                "(%r-%r); not scheduling auto-updates.",
+                policy_config.get("maintenance_window_start"),
+                policy_config.get("maintenance_window_end"),
+            )
+            return
+        tz = self._resolve_tz(policy_config.get("maintenance_window_tz"))
 
+        self._maintenance_task = asyncio.create_task(
+            self._maintenance_window_loop(start_time, end_time, tz)
+        )
+        log.info(
+            "Auto-update scheduled during %02d:%02d-%02d:%02d %s",
+            start_time.hour, start_time.minute, end_time.hour, end_time.minute,
+            getattr(tz, "key", None) or "UTC",
+        )
+
+    async def _maintenance_window_loop(self, start_time, end_time, tz) -> None:
+        """Apply updates only while inside the [start, end) maintenance window."""
+        max_retries = 7  # days to retry
         try:
             for _ in range(max_retries):
-                # Wait until the maintenance window opens
-                await self._sleep_until_window(start_time, tz_name)
+                # Wait until we're actually inside the window (enforces the end,
+                # so an update can't fire any time after the start).
+                await self._sleep_until_in_window(start_time, end_time, tz)
 
-                # Check if an update is available
                 result = await self.check_for_updates()
                 if not result.get("update_available"):
-                    # No update, sleep until next day's window
                     await asyncio.sleep(24 * 3600)
                     continue
 
-                # Check if system is actively being used
                 if self._is_system_active():
                     log.info("System is active during maintenance window, deferring update")
                     await asyncio.sleep(24 * 3600)
                     continue
 
-                # Apply the update
                 log.info("Maintenance window: applying update")
                 await self.apply_update()
                 return  # Update applied (or failed), stop the loop
@@ -809,26 +961,21 @@ class UpdateManager:
         except asyncio.CancelledError:
             pass
 
-    async def _sleep_until_window(self, start_time, tz_name: str | None) -> None:
-        """Sleep until the next occurrence of the maintenance window start time."""
-        while True:
-            now = datetime.now(timezone.utc)
-            # Convert to target timezone if specified
-            if tz_name:
-                try:
-                    from zoneinfo import ZoneInfo
-                    now_local = now.astimezone(ZoneInfo(tz_name))
-                except (ImportError, KeyError):
-                    now_local = now
-            else:
-                now_local = now
-
-            current_time = now_local.time()
-            if current_time >= start_time:
-                # Window already started or passed, check if we're still in it
-                return
-            # Sleep until window start (check every 5 minutes to handle drift)
+    async def _sleep_until_in_window(self, start_time, end_time, tz) -> None:
+        """Sleep (re-checking every 5 minutes) until inside [start, end)."""
+        while not self._in_window(start_time, end_time, tz):
             await asyncio.sleep(300)
+
+    def _in_window(self, start_time, end_time, tz) -> bool:
+        """True when the current local time is within the [start, end) window."""
+        now = datetime.now(timezone.utc)
+        if tz is not None:
+            now = now.astimezone(tz)
+        now_t = now.time()
+        if start_time <= end_time:
+            return start_time <= now_t < end_time
+        # Overnight window (e.g. 23:00-02:00) wraps past midnight.
+        return now_t >= start_time or now_t < end_time
 
     def _is_system_active(self) -> bool:
         """Check if the system is actively being used (WS clients connected)."""

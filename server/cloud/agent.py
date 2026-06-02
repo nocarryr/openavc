@@ -360,7 +360,7 @@ class CloudAgent:
             if update_policy and self._command_handler and hasattr(self._command_handler, '_update_manager'):
                 mgr = self._command_handler._update_manager
                 if mgr:
-                    mgr.apply_update_policy(update_policy)
+                    await mgr.apply_update_policy(update_policy)
 
             # Reset sequencer for new session
             self._sequencer.reset_for_new_session()
