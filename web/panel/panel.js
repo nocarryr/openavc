@@ -121,8 +121,11 @@ class PanelApp {
         this._navigatingBack = false; // Skip history push when navigateToPage is recursing for $back
         this._runningMacros = {};    // macro_id -> { description, step_index, total_steps }
         this.reconnectDelay = 1000;
-        this.maxReconnectDelay = 10000;
+        this.maxReconnectDelay = 30000; // matches the backoff cap used in onclose
         this.reconnectAttempts = 0;
+        this._offline = false;           // true while the WS is disconnected
+        this._lockInitialized = false;   // lock screen shown once per session, not on every reconnect
+        this._meetingStartTimes = {};    // element_id -> meeting start Date (survives re-render)
         this.themeElementDefaults = {};
         this.currentTheme = null;
         this._themeApplyInProgress = false;
@@ -325,9 +328,9 @@ class PanelApp {
             if (retryEl) {
                 retryEl.textContent = `Reconnecting (attempt ${this.reconnectAttempts})...`;
             }
-            // Always retry with exponential backoff (max 30s)
+            // Always retry with exponential backoff (capped at maxReconnectDelay)
             setTimeout(() => this.connect(), this.reconnectDelay);
-            this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30000);
+            this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, this.maxReconnectDelay);
         };
 
         this.ws.onerror = () => {
@@ -375,6 +378,27 @@ class PanelApp {
         // Disable panel interaction when offline
         if (this.root) {
             this.root.style.pointerEvents = connected ? '' : 'none';
+        }
+        // Open overlays/sidebars live on document.body, outside this.root, so
+        // toggle their interactivity too — otherwise taps on an already-open
+        // overlay (matrix lock/mute, keypad) still flip local optimistic UI
+        // while the command is silently dropped offline.
+        document.querySelectorAll('.panel-overlay').forEach(o => {
+            o.style.pointerEvents = connected ? '' : 'none';
+        });
+
+        this._offline = !connected;
+        if (!connected) {
+            // Don't let a previously-scheduled idle timer fire while offline —
+            // it would navigate the dead panel and stack a lock screen over the
+            // offline overlay. resetIdleTimer re-arms it on reconnect.
+            if (this.idleTimer) {
+                clearTimeout(this.idleTimer);
+                this.idleTimer = null;
+            }
+            // Stop any in-flight notification audio; stale chimes on reconnect
+            // are worse than missed ones, and this bounds _activeAudio.
+            this._stopAllAudio();
         }
     }
 
@@ -435,7 +459,7 @@ class PanelApp {
                 if (this.snapshotReceived) {
                     this.renderCurrentPage();
                 }
-                this.showLockScreen();
+                this._reconcileLockOnDefinition();
                 this.resetIdleTimer();
                 break;
 
@@ -544,9 +568,24 @@ class PanelApp {
                     delete this.holdTimers[eid];
                 }
             });
-            // Clean up clock intervals for overlay elements
+            // Clean up clock update closures for overlay elements. Clocks share
+            // a single global interval (this._clockInterval) and register their
+            // update fn in this._clockElements, so removing the element alone
+            // would leave a dead closure running every second forever.
             overlayEl.querySelectorAll('.panel-clock').forEach(el => {
-                if (el._clockInterval) clearInterval(el._clockInterval);
+                if (el._clockUpdate) {
+                    const idx = this._clockElements.indexOf(el._clockUpdate);
+                    if (idx !== -1) this._clockElements.splice(idx, 1);
+                }
+            });
+            // Remove window 'message' listeners registered by plugin iframes in
+            // this overlay — otherwise each open/dismiss cycle leaks one stale
+            // listener (retaining the removed iframe's closure).
+            overlayEl.querySelectorAll('.panel-plugin').forEach(el => {
+                if (el._pluginMessageHandler) {
+                    window.removeEventListener('message', el._pluginMessageHandler);
+                    this._pluginMessageHandlers.delete(el._pluginMessageHandler);
+                }
             });
             overlayEl.classList.add('dismissing');
             overlayEl.addEventListener('transitionend', () => overlayEl.remove(), { once: true });
@@ -641,6 +680,11 @@ class PanelApp {
 
         // Append to root (on top of everything)
         document.body.appendChild(container);
+
+        // Keep a newly-opened overlay non-interactive while offline; commands
+        // would be silently dropped but local optimistic UI would still flip.
+        // setConnectionStatus re-enables overlays on reconnect.
+        if (this._offline) container.style.pointerEvents = 'none';
 
         // Trigger animation
         requestAnimationFrame(() => container.classList.add('active'));
@@ -1288,6 +1332,17 @@ class PanelApp {
             this.debounceTimers.push(changeTimeout);
         });
 
+        // Track active dragging so inbound state echoes don't fight the operator
+        // (see evaluateSliderValue). Range inputs aren't reliably focused during
+        // touch drags, so a pointer/touch flag is needed alongside activeElement.
+        input.addEventListener('pointerdown', () => { input._dragging = true; });
+        const sliderEndDrag = () => { input._dragging = false; };
+        input.addEventListener('pointerup', sliderEndDrag);
+        input.addEventListener('pointercancel', sliderEndDrag);
+        input.addEventListener('blur', sliderEndDrag);
+        input.addEventListener('touchend', sliderEndDrag);
+        input.addEventListener('touchcancel', sliderEndDrag);
+
         wrapper.appendChild(input);
         el.appendChild(wrapper);
         if (valueDisplay) el.appendChild(valueDisplay);
@@ -1597,17 +1652,20 @@ class PanelApp {
                         if (listStyle === 'selectable') {
                             selectedValues.clear();
                             selectedValues.add(String(item.value));
-                            this.send({ type: 'ui.change', element_id: element.id, value: item.value });
                         } else if (listStyle === 'multi_select') {
                             if (selectedValues.has(String(item.value))) {
                                 selectedValues.delete(String(item.value));
                             } else {
                                 selectedValues.add(String(item.value));
                             }
-                            this.send({ type: 'ui.change', element_id: element.id, value: item.value });
-                        } else if (listStyle === 'action') {
-                            this.send({ type: 'ui.press', element_id: element.id, value: item.value });
                         }
+                        // The list's action binding slot is `select` (see the UI
+                        // Builder). Emit ui.select so that authored action fires.
+                        // Previously selectable/multi_select sent ui.change and
+                        // action sent ui.press, neither of which the engine maps
+                        // to the `select` binding, so the configured action was a
+                        // silent no-op on the end-user panel.
+                        this.send({ type: 'ui.select', element_id: element.id, value: item.value });
                         // Re-render items to update selection visuals
                         renderItems(items);
                     });
@@ -2108,13 +2166,21 @@ class PanelApp {
         el.appendChild(scrollWrap);
         this.elementMap[element.id] = { el, elementDef: element };
 
-        // State binding for routes
+        // State binding for routes. Carry every glob pattern the matrix reads
+        // (route, audio route, dynamic in/out labels) as `_patterns` so the
+        // incremental state.update filter re-evaluates the matrix when any of
+        // them change. The old `key: routePattern` stored a literal glob that
+        // the concrete-key filter could never match, so routes only refreshed
+        // on a full re-render.
         if (routePattern) {
             this.bindings.push({
                 type: 'matrix_routes',
                 element: el,
                 elementDef: element,
-                binding: { key: routePattern },
+                binding: {
+                    _patterns: [routePattern, audioRoutePattern, inputKeyPattern, outputKeyPattern]
+                        .filter(Boolean),
+                },
                 _matrix: {
                     routePattern, audioRoutePattern,
                     inputKeyPattern, outputKeyPattern,
@@ -2340,13 +2406,19 @@ class PanelApp {
 
     evaluateGaugeValue(b) {
         const raw = this.state[b.binding.key];
-        if (raw === undefined || raw === null) return;
-        // Memoize: skip if value unchanged
+        // Memoize: skip if unchanged (also short-circuits the undefined steady state)
         if (b._lastGaugeRaw === raw) return;
         b._lastGaugeRaw = raw;
         const { fgPath, valueText, startAngle, endAngle, radius, min, max, unit, gaugeColor, zones, showValue, arcPath: arcPathFn } = b._svg;
+        if (raw === undefined || raw === null) {
+            // Bound key was deleted (device removed/offline) — revert to the
+            // no-data placeholder instead of freezing on the last reading.
+            fgPath.setAttribute('d', '');
+            if (showValue) valueText.textContent = `--${unit}`;
+            return;
+        }
         const value = Math.max(min, Math.min(max, Number(raw)));
-        const frac = (value - min) / (max - min);
+        const frac = max > min ? (value - min) / (max - min) : 0;
         const valAngle = startAngle + frac * (endAngle - startAngle);
 
         if (frac > 0.001) {
@@ -2408,7 +2480,8 @@ class PanelApp {
         for (let i = 0; i < segments; i++) {
             const seg = document.createElement('div');
             seg.className = 'meter-segment';
-            const segValue = min + (i / (segments - 1)) * (max - min);
+            const segFrac = segments > 1 ? i / (segments - 1) : 0;
+            const segValue = min + segFrac * (max - min);
             if (segValue >= yellowTo) {
                 seg.dataset.zone = 'red';
             } else if (segValue >= greenTo) {
@@ -2440,10 +2513,19 @@ class PanelApp {
 
     evaluateLevelMeterValue(b) {
         const raw = this.state[b.binding.key];
-        if (raw === undefined || raw === null) return;
+        if (b._lastMeterRaw === raw) return;
+        b._lastMeterRaw = raw;
         const { segments, min, max, bar, showPeak, peakHoldMs } = b._meter;
+        const segs = bar.querySelectorAll('.meter-segment');
+        if (raw === undefined || raw === null) {
+            // Bound key deleted — clear the meter rather than freezing the level.
+            b._meter.peakValue = -Infinity;
+            for (const s of segs) { s.classList.remove('lit'); s.classList.remove('peak'); }
+            return;
+        }
         const value = Math.max(min, Math.min(max, Number(raw)));
-        const frac = (value - min) / (max - min);
+        const span = max - min;
+        const frac = span > 0 ? (value - min) / span : 0;
         const litCount = Math.round(frac * segments);
 
         // Peak hold
@@ -2452,11 +2534,10 @@ class PanelApp {
             b._meter.peakValue = value;
             b._meter.peakTime = now;
         }
-        const peakFrac = (b._meter.peakValue - min) / (max - min);
-        const peakIdx = Math.round(peakFrac * (segments - 1));
+        const peakFrac = span > 0 ? (b._meter.peakValue - min) / span : 0;
+        const peakIdx = segments > 1 ? Math.round(peakFrac * (segments - 1)) : 0;
 
         // Toggle CSS classes; backgrounds come from theme tokens via panel-elements.css.
-        const segs = bar.querySelectorAll('.meter-segment');
         for (let i = 0; i < segs.length; i++) {
             segs[i].classList.toggle('lit', i < litCount);
             segs[i].classList.toggle('peak', showPeak && i === peakIdx && i >= litCount);
@@ -2626,6 +2707,7 @@ class PanelApp {
         const onStart = (e) => {
             e.preventDefault();
             dragging = true;
+            handle._dragging = true; // suppress inbound state echoes mid-drag
             const val = getValueFromEvent(e);
             updateFader(val);
             sendChange(val);
@@ -2639,6 +2721,7 @@ class PanelApp {
         };
         const onEnd = () => {
             dragging = false;
+            handle._dragging = false;
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onEnd);
             document.removeEventListener('touchmove', onMove);
@@ -2734,12 +2817,22 @@ class PanelApp {
 
     evaluateFaderValue(b) {
         const raw = this.state[b.binding.key];
-        if (raw === undefined || raw === null) return;
         if (b._lastFaderRaw === raw) return;
         b._lastFaderRaw = raw;
         const { handle, valueDisplay, min, max, unit, horizontal, outputMin, outputMax, scaleToFull } = b._fader;
+        // Don't fight the operator while they're dragging the handle.
+        if (handle._dragging) return;
+        const span = max - min;
+        if (raw === undefined || raw === null) {
+            // Bound key deleted — return the handle to the floor rather than
+            // leaving it parked at the last device value.
+            if (horizontal) handle.style.left = '0%';
+            else handle.style.bottom = '0%';
+            if (valueDisplay) valueDisplay.textContent = `${Math.round(min * 10) / 10} ${unit}`;
+            return;
+        }
         const value = Math.max(min, Math.min(max, this._reverseScale(Number(raw), min, max, outputMin, outputMax, scaleToFull)));
-        const frac = (value - min) / (max - min);
+        const frac = span > 0 ? (value - min) / span : 0;
         if (horizontal) handle.style.left = `${frac * 100}%`;
         else handle.style.bottom = `${frac * 100}%`;
         if (valueDisplay) valueDisplay.textContent = `${Math.round(value * 10) / 10} ${unit}`;
@@ -2802,10 +2895,6 @@ class PanelApp {
         const timezone = element.timezone || undefined;
         const durationMin = element.duration_minutes || 60;
 
-        // Meeting timer state
-        let meetingStarted = false;
-        let meetingStartTime = null;
-
         const updateClock = () => {
             const now = new Date();
             let text = '';
@@ -2821,29 +2910,29 @@ class PanelApp {
                     text = this._formatDateTime(now, format, timezone);
                     break;
                 case 'countdown': {
-                    if (element.target_time) {
-                        const target = new Date(element.target_time);
+                    // A live state key takes priority over a static target_time,
+                    // matching the builder help text. Both are validated as dates
+                    // so a non-ISO / garbage value renders the placeholder, not
+                    // NaN:NaN:NaN.
+                    const key = element.bindings?.value?.key || element.start_key;
+                    const stateVal = key ? this.state[key] : null;
+                    const targetStr = (stateVal !== undefined && stateVal !== null && stateVal !== '')
+                        ? stateVal
+                        : element.target_time;
+                    const target = targetStr != null ? new Date(targetStr) : null;
+                    if (target && !isNaN(target.getTime())) {
                         const diff = Math.max(0, target - now);
                         text = this._formatDuration(diff);
                     } else {
-                        // Check state binding for countdown target
-                        const key = element.bindings?.value?.key || element.start_key;
-                        const stateVal = key ? this.state[key] : null;
-                        if (stateVal) {
-                            const target = new Date(stateVal);
-                            const diff = Math.max(0, target - now);
-                            text = this._formatDuration(diff);
-                        } else {
-                            text = '--:--:--';
-                        }
+                        text = '--:--:--';
                     }
                     break;
                 }
                 case 'elapsed': {
                     const key = element.start_key;
                     const stateVal = key ? this.state[key] : null;
-                    if (stateVal) {
-                        const start = new Date(stateVal);
+                    const start = stateVal != null ? new Date(stateVal) : null;
+                    if (start && !isNaN(start.getTime())) {
                         const diff = Math.max(0, now - start);
                         text = this._formatDuration(diff);
                     } else {
@@ -2852,9 +2941,13 @@ class PanelApp {
                     break;
                 }
                 case 'meeting': {
-                    if (!meetingStarted) {
-                        meetingStarted = true;
+                    // Anchor the meeting start on the app instance keyed by element
+                    // id so navigating away and back (or a theme/idle re-render)
+                    // doesn't restart the countdown from its full duration.
+                    let meetingStartTime = this._meetingStartTimes[element.id];
+                    if (!meetingStartTime) {
                         meetingStartTime = now;
+                        this._meetingStartTimes[element.id] = meetingStartTime;
                     }
                     const elapsed = now - meetingStartTime;
                     const totalMs = durationMin * 60 * 1000;
@@ -2874,7 +2967,9 @@ class PanelApp {
         };
 
         updateClock();
-        // Register with global clock interval instead of per-element interval
+        // Register with global clock interval instead of per-element interval.
+        // Stash the closure on the element so dismissOverlay can unregister it.
+        el._clockUpdate = updateClock;
         this._clockElements.push(updateClock);
         if (!this._clockInterval) {
             this._clockInterval = setInterval(() => {
@@ -3163,6 +3258,9 @@ class PanelApp {
         this.elementMap[element.id] = el;
         el._pluginIframe = iframe;
         el._pluginId = pluginId;
+        // The plugin's declared capabilities gate what the iframe bridge will
+        // forward (see the openavc:action handler). Mirrors server PluginAPI.
+        el._pluginCaps = extDef?.capabilities || [];
         el._pluginConfig = element.plugin_config || {};
 
         // postMessage API: send initial config + theme + state snapshot
@@ -3212,9 +3310,20 @@ class PanelApp {
             if (!msg || !msg.type) return;
 
             switch (msg.type) {
-                case 'openavc:action':
-                    // Plugin requests a device command or state change
+                case 'openavc:action': {
+                    // This bridge carries the panel's WS authority, so gate it
+                    // against the plugin's declared capabilities, mirroring the
+                    // server-side PluginAPI: device commands require
+                    // device_command; state writes are limited to the plugin's
+                    // own plugin.<id>.* namespace (state_write) or var.*
+                    // (variable_write). Anything else is a confused-deputy write
+                    // and is dropped.
+                    const caps = el._pluginCaps || [];
                     if (msg.action === 'device.command' && msg.device && msg.command) {
+                        if (!caps.includes('device_command')) {
+                            console.warn(`[panel] plugin '${pluginId}' attempted device.command without the device_command capability`);
+                            break;
+                        }
                         this.ws?.send(JSON.stringify({
                             type: 'command',
                             device_id: msg.device,
@@ -3222,6 +3331,15 @@ class PanelApp {
                             params: msg.params || {},
                         }));
                     } else if (msg.action === 'state.set' && msg.key) {
+                        const key = String(msg.key);
+                        const ownNamespace = key.startsWith(`plugin.${pluginId}.`);
+                        const isVariable = key.startsWith('var.');
+                        const allowed = (ownNamespace && caps.includes('state_write')) ||
+                            (isVariable && caps.includes('variable_write'));
+                        if (!allowed) {
+                            console.warn(`[panel] plugin '${pluginId}' attempted state.set on '${key}' outside its declared scope`);
+                            break;
+                        }
                         this.ws?.send(JSON.stringify({
                             type: 'state.set',
                             key: msg.key,
@@ -3229,6 +3347,7 @@ class PanelApp {
                         }));
                     }
                     break;
+                }
                 case 'openavc:navigate':
                     if (msg.page) this.navigateToPage(msg.page);
                     break;
@@ -3342,6 +3461,18 @@ class PanelApp {
 
     _playSound(url, volume) {
         if (!url) return;
+        // Prune elements that finished but never fired 'ended' (looping/streamed
+        // sounds) and cap concurrency so _activeAudio can't accumulate detached
+        // HTMLAudioElements over a multi-week kiosk uptime.
+        for (const a of this._activeAudio) {
+            if (a.ended) this._activeAudio.delete(a);
+        }
+        while (this._activeAudio.size >= 8) {
+            const oldest = this._activeAudio.values().next().value;
+            if (!oldest) break;
+            try { oldest.pause(); } catch { /* element may be in a bad state */ }
+            this._activeAudio.delete(oldest);
+        }
         const audio = new Audio(url);
         audio.volume = volume;
         this._activeAudio.add(audio);
@@ -3374,13 +3505,18 @@ class PanelApp {
     // Send state update to plugin iframes
     _notifyPluginIframes(key, value) {
         for (const [id, el] of Object.entries(this.elementMap)) {
-            if (el?._pluginIframe?.contentWindow) {
-                el._pluginIframe.contentWindow.postMessage({
-                    type: 'openavc:state',
-                    key,
-                    value,
-                }, '*');  // sandboxed iframe has opaque origin; source check provides security
-            }
+            if (!el?._pluginIframe?.contentWindow) continue;
+            // Scope live updates to each iframe's own namespace, exactly like the
+            // init snapshot (plugin.<id>.*). Broadcasting every key let any
+            // plugin passively observe all device/var/ui/system/other-plugin
+            // state it was never granted, making the scoped init snapshot moot.
+            const pid = el._pluginId;
+            if (!pid || !String(key).startsWith(`plugin.${pid}.`)) continue;
+            el._pluginIframe.contentWindow.postMessage({
+                type: 'openavc:state',
+                key,
+                value,
+            }, '*');  // sandboxed iframe has opaque origin; source check provides security
         }
     }
 
@@ -3441,15 +3577,22 @@ class PanelApp {
                 // Skip bindings not affected by changed keys
                 if (changedKeys) {
                     const bKey = b.binding?.key;
-                    const bKeys = b.binding?._keys;  // visible_when: array of keys
+                    const bKeys = b.binding?._keys;        // visible_when: array of keys
+                    const bPatterns = b.binding?._patterns; // matrix: array of glob patterns
                     const bPattern = b.binding?.key_pattern || b._routePattern;
                     if (bKeys && !bKeys.some(k => changedKeys.includes(k))) continue;
                     if (bKey && !bKeys && !changedKeys.includes(bKey)) continue;
-                    if (bPattern) {
+                    if (bPatterns) {
+                        const hit = bPatterns.some(p => {
+                            const prefix = p.replace(/\*.*$/, '');
+                            return changedKeys.some(k => k.startsWith(prefix));
+                        });
+                        if (!hit) continue;
+                    } else if (bPattern) {
                         const prefix = bPattern.replace(/\*.*$/, '');
                         if (!changedKeys.some(k => k.startsWith(prefix))) continue;
                     }
-                    if (!bKey && !bPattern) { /* safety: evaluate anyway */ }
+                    if (!bKey && !bPattern && !bPatterns) { /* safety: evaluate anyway */ }
                 }
                 switch (b.type) {
                     case 'visible_when':
@@ -3504,35 +3647,77 @@ class PanelApp {
 
     evaluateUiOverrides() {
         for (const [elementId, entry] of Object.entries(this.elementMap)) {
-            const { el, elementDef } = entry;
+            // Plugin entries store the element directly; others store {el, elementDef}.
+            const el = entry.el || entry;
+            const elementDef = entry.elementDef;
+            if (!el || !el.style) continue;
             const prefix = `ui.${elementId}.`;
 
-            // Check for label override (preserve image layer and other element children)
+            // Lazily snapshot the rendered base so an override can be reverted
+            // when its state key is later deleted. Without this, a script/macro
+            // that sets ui.<id>.* and then clears it can't visually revert the
+            // element until a full page re-render (one-way-invariant violation).
+            if (!entry._uiBase) {
+                entry._uiBase = {
+                    backgroundColor: el.style.backgroundColor,
+                    color: el.style.color,
+                    opacity: el.style.opacity,
+                    display: el.style.display,
+                    label: elementDef?.label,
+                };
+                entry._uiApplied = new Set();
+            }
+            const base = entry._uiBase;
+            const applied = entry._uiApplied;
+
+            // Label override (preserve image layer and other element children)
             const labelOverride = this.state[prefix + 'label'];
             if (labelOverride !== undefined && labelOverride !== null) {
                 this._setLabelText(el, String(labelOverride));
+                applied.add('label');
+            } else if (applied.has('label')) {
+                this._setLabelText(el, base.label != null ? String(base.label) : '');
+                applied.delete('label');
             }
 
-            // Check for style overrides
             const bgOverride = this.state[prefix + 'bg_color'];
             if (bgOverride !== undefined && bgOverride !== null) {
                 el.style.backgroundColor = String(bgOverride);
+                applied.add('bg');
+            } else if (applied.has('bg')) {
+                el.style.backgroundColor = base.backgroundColor;
+                applied.delete('bg');
             }
 
             const textColorOverride = this.state[prefix + 'text_color'];
             if (textColorOverride !== undefined && textColorOverride !== null) {
                 el.style.color = String(textColorOverride);
+                applied.add('text');
+            } else if (applied.has('text')) {
+                el.style.color = base.color;
+                applied.delete('text');
             }
 
             const opacityOverride = this.state[prefix + 'opacity'];
             if (opacityOverride !== undefined && opacityOverride !== null) {
                 el.style.opacity = String(opacityOverride);
+                applied.add('opacity');
+            } else if (applied.has('opacity')) {
+                el.style.opacity = base.opacity;
+                applied.delete('opacity');
             }
 
             const visibleOverride = this.state[prefix + 'visible'];
             if (visibleOverride !== undefined && visibleOverride !== null) {
                 el.style.display = (visibleOverride === false || visibleOverride === 'false')
                     ? 'none' : '';
+                applied.add('visible');
+            } else if (applied.has('visible')) {
+                // Hand display back to a visible_when binding if one governs this
+                // element (it re-asserts on the next evaluation); otherwise
+                // restore the rendered base.
+                el.style.display = elementDef?.bindings?.visible_when ? '' : base.display;
+                applied.delete('visible');
             }
         }
     }
@@ -3688,7 +3873,11 @@ class PanelApp {
         };
 
         if (binding.condition) {
-            const isMatch = value === binding.condition.equals;
+            // Normalized compare (matches feedback/visible_when), so a numeric 1
+            // or boolean true matches a condition.equals of '1'/'true' instead of
+            // silently failing the strict-=== check and sticking on text_false.
+            const isMatch = value !== undefined && value !== null &&
+                String(value).toLowerCase() === String(binding.condition.equals).toLowerCase();
             setText(isMatch ? (binding.text_true || '') : (binding.text_false || ''));
             return;
         }
@@ -3698,7 +3887,10 @@ class PanelApp {
             return;
         }
         if (binding.format) {
-            setText(binding.format.replace('{value}', value));
+            // split/join replaces every {value} and treats the value literally,
+            // so device values containing $-sequences (track titles, paths)
+            // aren't reinterpreted the way String.replace would.
+            setText(String(binding.format).split('{value}').join(String(value)));
         } else {
             setText(String(value));
         }
@@ -3713,7 +3905,12 @@ class PanelApp {
 
         element.style.backgroundColor = color;
         element.style.color = color;
-        element.classList.toggle('active', value !== null && value !== undefined && value !== 'off');
+        // Treat all off-like values as inactive, not just the literal string
+        // 'off' — 0 / false / '' / '0' / 'false' from a device should not light
+        // the LED's active/glow treatment.
+        const isOff = value === null || value === undefined || value === false || value === 0 ||
+            (typeof value === 'string' && ['', 'off', 'false', '0', 'no'].includes(value.trim().toLowerCase()));
+        element.classList.toggle('active', !isOff);
 
         // Add glow effect for active states
         if (color !== defaultColor) {
@@ -3725,37 +3922,49 @@ class PanelApp {
 
     evaluateSliderValue(b) {
         const { element, binding, fill, valueDisplay, isVertical, outputMin, outputMax, scaleToFull } = b;
+        // Don't yank the thumb out from under an operator who is actively
+        // dragging it (or has it focused) when a device echo / another panel's
+        // change arrives mid-gesture.
+        if (element._dragging || document.activeElement === element) return;
         const rawValue = this.state[binding.key];
-        if (rawValue !== undefined && rawValue !== null) {
-            if (b._lastSliderRaw === rawValue) return;
-            b._lastSliderRaw = rawValue;
-            const min = parseFloat(element.min);
-            const max = parseFloat(element.max);
-            const displayValue = this._reverseScale(Number(rawValue), min, max, outputMin, outputMax, scaleToFull);
-            element.value = displayValue;
-            // Update fill bar
-            if (fill) {
-                const pct = max > min ? ((displayValue - min) / (max - min)) * 100 : 0;
-                if (isVertical) {
-                    fill.style.height = pct + '%';
-                } else {
-                    fill.style.width = pct + '%';
-                }
-            }
-            // Update value display
+        if (b._lastSliderRaw === rawValue) return;
+        b._lastSliderRaw = rawValue;
+        const min = parseFloat(element.min);
+        const max = parseFloat(element.max);
+        const setFill = (pct) => {
+            if (!fill) return;
+            if (isVertical) fill.style.height = pct + '%';
+            else fill.style.width = pct + '%';
+        };
+        if (rawValue === undefined || rawValue === null) {
+            // Bound key deleted — return the slider to its minimum.
+            element.value = min;
+            setFill(0);
             if (valueDisplay) {
                 const step = parseFloat(element.step) || 1;
-                valueDisplay.textContent = step < 1 ? parseFloat(displayValue).toFixed(1) : String(Math.round(displayValue));
+                valueDisplay.textContent = step < 1 ? min.toFixed(1) : String(Math.round(min));
             }
+            return;
+        }
+        const displayValue = this._reverseScale(Number(rawValue), min, max, outputMin, outputMax, scaleToFull);
+        element.value = displayValue;
+        setFill(max > min ? ((displayValue - min) / (max - min)) * 100 : 0);
+        if (valueDisplay) {
+            const step = parseFloat(element.step) || 1;
+            valueDisplay.textContent = step < 1 ? parseFloat(displayValue).toFixed(1) : String(Math.round(displayValue));
         }
     }
 
     evaluateSelectValue(b) {
         const { element, binding } = b;
         const value = this.state[binding.key];
-        if (value !== undefined && value !== null) {
-            element.value = String(value);
+        if (value === undefined || value === null) {
+            // Bound key deleted — fall back to the first option rather than
+            // pinning the last device selection.
+            if (element.options.length) element.selectedIndex = 0;
+            return;
         }
+        element.value = String(value);
     }
 
     evaluateTextInputValue(b) {
@@ -3763,12 +3972,41 @@ class PanelApp {
         // Don't overwrite if user is actively editing (prevents cursor loss)
         if (document.activeElement === element) return;
         const value = this.state[binding.key];
-        if (value !== undefined && value !== null) {
-            element.value = String(value);
+        if (value === undefined || value === null) {
+            // Bound key deleted — clear rather than keeping the stale value.
+            element.value = '';
+            return;
         }
+        element.value = String(value);
     }
 
     // --- Lock Screen ---
+
+    /**
+     * Reconcile the lock overlay against a freshly-received ui.definition.
+     *
+     * The server resends state.snapshot + ui.definition on every (re)connect,
+     * so a transient socket drop must NOT re-lock a panel the operator already
+     * unlocked. We therefore show the lock screen at most once per session
+     * here; idle return-to-lock still re-shows it explicitly via resetIdleTimer.
+     * Also reconciles a project edit that cleared the PIN while a panel sat
+     * locked: a now-unconfigured lock overlay is removed so it can't get stuck.
+     */
+    _reconcileLockOnDefinition() {
+        if (this.editMode) return;
+        const lockCode = this.uiSettings?.lock_code;
+        const overlay = document.getElementById('lock-overlay');
+        if (!lockCode) {
+            // Lock disabled (or removed mid-session) — clear any stuck overlay.
+            if (overlay) overlay.remove();
+            this.locked = false;
+            return;
+        }
+        if (!this._lockInitialized) {
+            this._lockInitialized = true;
+            this.showLockScreen();
+        }
+    }
 
     showLockScreen() {
         if (this.editMode) return;
@@ -3843,11 +4081,21 @@ class PanelApp {
 
     resetIdleTimer() {
         if (this.idleTimer) clearTimeout(this.idleTimer);
+        // Never arm the idle timer while disconnected — it would navigate a
+        // dead panel and stack a lock screen over the offline overlay.
+        if (this._offline) return;
         const timeout = this.uiSettings?.idle_timeout_seconds;
         if (!timeout || timeout <= 0 || this.locked) return;
 
         this.idleTimer = setTimeout(() => {
-            const idlePage = this.uiSettings?.idle_page || 'main';
+            let idlePage = this.uiSettings?.idle_page || 'main';
+            // Validate against the current pages so a deleted/renamed idle_page
+            // resolves deterministically to the first page instead of relying on
+            // renderCurrentPage's silent fallback.
+            const pages = this.uiDef?.pages || [];
+            if (pages.length && !pages.some(p => p.id === idlePage)) {
+                idlePage = pages[0].id;
+            }
             if (this.currentPage !== idlePage || this.overlayStack.length > 0) {
                 this.dismissAllOverlays();
                 this.currentPage = idlePage;
@@ -4259,21 +4507,48 @@ class PanelApp {
     }
 
     _sanitizeCssValue(value) {
-        // Strip CSS injection vectors: expressions, url(), @import, javascript:, behavior
+        // These values are interpolated into a CSS declaration (gradient stops,
+        // background-size/position). Strip everything that could break out of
+        // the value and inject another declaration or a url() — semicolons,
+        // braces, quotes, comments, url()/image-set(), expression(), and the
+        // usual scheme tricks. Parentheses and commas are kept so legitimate
+        // color functions like rgb(0,0,0) / hsl(...) still work.
         if (typeof value !== 'string') return String(value ?? '');
         return value.replace(/expression\s*\(/gi, '')
                      .replace(/javascript\s*:/gi, '')
                      .replace(/behavior\s*:/gi, '')
                      .replace(/@import/gi, '')
-                     .replace(/\\/g, '');
+                     .replace(/url\s*\(/gi, '')
+                     .replace(/image-set\s*\(/gi, '')
+                     .replace(/\/\*/g, '')
+                     .replace(/\*\//g, '')
+                     .replace(/[;{}"']/g, '')
+                     .replace(/\\/g, '')
+                     .replace(/[\r\n]/g, '');
     }
 
     _sanitizeCssUrl(url) {
-        // Only allow http:, https:, data:image, and relative URLs
+        // The result is interpolated into url("...") so it must not contain
+        // characters that close the string/paren, and must use an allowed
+        // scheme (http:, https:, data:image/, or relative/no-scheme).
         if (typeof url !== 'string') return '';
         const trimmed = url.trim();
-        if (trimmed.startsWith('javascript:') || trimmed.startsWith('data:text')) return '';
-        return CSS.escape ? trimmed : trimmed.replace(/['"\\()]/g, '');
+        const lower = trimmed.toLowerCase();
+        if (lower.startsWith('javascript:') || lower.startsWith('vbscript:')) return '';
+        if (lower.startsWith('data:') && !lower.startsWith('data:image/')) return '';
+        const scheme = trimmed.match(/^([a-z][a-z0-9+.-]*):/i);
+        if (scheme) {
+            const s = scheme[1].toLowerCase();
+            if (s !== 'http' && s !== 'https' && s !== 'data') return '';
+        }
+        // Percent-encode the few characters that could escape the url("...")
+        // context. Structural URL characters (:/?&=%#) are left intact, so real
+        // asset URLs keep working; spaces and quotes become %20/%22 etc. We map
+        // by char code rather than encodeURIComponent because the latter leaves
+        // ( ) ' unescaped (they're "unreserved marks") — exactly the breakout
+        // characters we need to neutralize.
+        return trimmed.replace(/[\\"'()\s]/g,
+            (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
     }
 
     resolveAssetUrl(ref) {

@@ -183,9 +183,9 @@ The panel and the plugin iframe communicate through `window.postMessage`. All me
 | Message Type | When Sent | Payload |
 |-------------|-----------|---------|
 | `openavc:init` | Once, when the iframe loads | `{config, theme, state, elementId}`: the element's `plugin_config` values, the active theme's CSS variables, a snapshot of state keys in the plugin's namespace (`plugin.<plugin_id>.*`), and this element's ID |
-| `openavc:state` | On every state change in the system | `{key, value}`: the state key that changed and its new value |
+| `openavc:state` | When a key in the plugin's own namespace changes | `{key, value}`: the changed `plugin.<plugin_id>.*` key and its new value |
 
-The init payload includes a snapshot of the plugin's own namespace (`plugin.<plugin_id>.*`) so the iframe can render its current state immediately. State outside that namespace is delivered only as `openavc:state` updates after the change occurs.
+The init payload includes a snapshot of the plugin's own namespace (`plugin.<plugin_id>.*`) so the iframe can render its current state immediately. `openavc:state` updates are scoped to that same namespace — a plugin iframe sees only its own state, never other devices', variables', or other plugins' keys.
 
 **iframe to panel (outgoing messages):**
 
@@ -197,7 +197,7 @@ Outgoing messages use `type: "openavc:action"` for both device commands and stat
 | `openavc:action` | `state.set` | Write a state key | `{key, value}` |
 | `openavc:navigate` | — | Navigate to a page | `{page}` |
 
-State writes from iframes are restricted to the `var.*` and `plugin.*` namespaces. Writes to `device.*`, `system.*`, `isc.*`, `ui.*`, or any other internal namespace are rejected.
+`openavc:action` requests are gated by the plugin's declared `capabilities`, mirroring the server-side checks for Python plugins: `device.command` requires `device_command`; `state.set` to a `plugin.<plugin_id>.*` key requires `state_write`; `state.set` to a `var.*` key requires `variable_write`. Writes to `device.*`, `system.*`, `isc.*`, `ui.*`, another plugin's namespace, or any action the plugin didn't declare a capability for are dropped.
 
 ### Example: Custom Status Display
 

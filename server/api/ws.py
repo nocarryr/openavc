@@ -197,7 +197,7 @@ def _is_flat_primitive(value: Any) -> bool:
 # execute macros (presets), and set state (plugin iframes).
 _PANEL_ALLOWED_TYPES = frozenset({
     "ui.press", "ui.release", "ui.hold", "ui.toggle_off", "ui.change",
-    "ui.route", "ui.submit",
+    "ui.select", "ui.route", "ui.submit",
     "ui.page", "command", "macro.execute", "state.set",
     "log.subscribe", "log.unsubscribe", "pong",
 })
@@ -283,6 +283,24 @@ async def _handle_message(
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.change failed: {e}")
+            await _send_ws_error(ws, msg_type, friendly_error(e))
+
+    elif msg_type == "ui.select":
+        # List item selection — drives the list element's `select` action
+        # binding (and its two-way `selected`/`variable` write in the engine).
+        element_id = msg.get("element_id", "")
+        if not element_id:
+            await _send_ws_error(ws, msg_type, "Missing element_id")
+            return
+        value = msg.get("value")
+        if not _is_flat_primitive(value):
+            await _send_ws_error(ws, msg_type, "Value must be a flat primitive (str, int, float, bool, or null)")
+            return
+        try:
+            await _engine.handle_ui_event("select", element_id, {"value": value})
+        except Exception as e:
+            # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
+            log.error(f"ui.select failed: {e}")
             await _send_ws_error(ws, msg_type, friendly_error(e))
 
     elif msg_type == "ui.route":

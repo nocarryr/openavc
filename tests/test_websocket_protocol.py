@@ -369,6 +369,24 @@ async def test_ui_change_valid_value():
 
 
 @pytest.mark.asyncio
+async def test_ui_select_dispatches():
+    """ui.select (list item tap) dispatches the select event to the engine."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api.ws._engine", engine):
+        await _handle_message(
+            ws, {"type": "ui.select", "element_id": "src_list", "value": "hdmi_1"}, "panel"
+        )
+    engine.handle_ui_event.assert_awaited_once_with("select", "src_list", {"value": "hdmi_1"})
+
+
+@pytest.mark.asyncio
+async def test_ui_select_in_panel_allowed_types():
+    """Panel clients are permitted to send ui.select."""
+    assert "ui.select" in _PANEL_ALLOWED_TYPES
+
+
+@pytest.mark.asyncio
 async def test_ui_route_dispatches():
     """ui.route without audio/mute dispatches to the route binding."""
     ws = FakeWS()

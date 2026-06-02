@@ -1056,7 +1056,7 @@ class Engine:
         for page in self.project.ui.pages:
             for element in page.elements:
                 if element.bindings:
-                    for event_type in ("press", "release", "change"):
+                    for event_type in ("press", "release", "change", "select"):
                         if event_type in element.bindings:
                             count += 1
         log.info(f"Registered {count} UI binding(s)")

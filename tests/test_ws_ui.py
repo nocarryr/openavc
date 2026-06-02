@@ -111,6 +111,25 @@ TEST_PROJECT = {
                             "variable": {"key": "var.slider_val"},
                         },
                     },
+                    {
+                        "id": "list1",
+                        "type": "list",
+                        "label": "Sources",
+                        "list_style": "selectable",
+                        "items": [
+                            {"label": "HDMI 1", "value": "hdmi_1"},
+                            {"label": "HDMI 2", "value": "hdmi_2"},
+                        ],
+                        "grid_area": {"col": 9, "row": 1, "col_span": 3, "row_span": 4},
+                        "style": {},
+                        "bindings": {
+                            "select": {
+                                "action": "state.set",
+                                "key": "var.channel",
+                                "value_from": "element",
+                            }
+                        },
+                    },
                 ],
             },
             {
@@ -244,6 +263,31 @@ async def test_ws_submit_dispatches_event(engine_and_client):
     # The binding has value: "$value" which is set literally
     # (not substituted — that's a macro engine feature)
     assert engine.state.get("var.channel") == "$value"
+
+
+# ---------------------------------------------------------------------------
+# List item select → state change (the list `select` binding)
+# ---------------------------------------------------------------------------
+
+async def test_ws_select_fires_list_select_binding(engine_and_client):
+    """Tapping a list item sends ui.select, which fires the list's `select`
+    binding. The binding uses value_from: element, so the tapped value lands
+    in state — proving the previously-dead select binding now works end to end.
+    """
+    engine, client = engine_and_client
+    with client.websocket_connect("/ws?client=panel") as websocket:
+        websocket.receive_json()  # snapshot
+        websocket.receive_json()  # ui.definition
+
+        websocket.send_json({
+            "type": "ui.select",
+            "element_id": "list1",
+            "value": "hdmi_2",
+        })
+
+        time.sleep(0.1)
+
+    assert engine.state.get("var.channel") == "hdmi_2"
 
 
 # ---------------------------------------------------------------------------

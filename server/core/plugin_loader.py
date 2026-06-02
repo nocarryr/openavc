@@ -1016,6 +1016,11 @@ class PluginLoader:
                             _ALLOWED_ALLOW_FEATURES,
                             plugin_id, "allow_features",
                         )
+                        # Surface the plugin's declared capabilities so the panel
+                        # iframe bridge can gate openavc:action requests
+                        # (device.command / state.set) against them, mirroring the
+                        # server-side PluginAPI capability checks.
+                        safe_ext["capabilities"] = list(info.get("capabilities", []))
                     result[ext_type].append(safe_ext)
 
         return result

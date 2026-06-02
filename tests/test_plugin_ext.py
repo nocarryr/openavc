@@ -447,3 +447,56 @@ def test_ext_auth_flag_passes_through_extensions():
     assert panel_elements[0]["ext_auth"] is True
     # Phase C sanitization still applies alongside the new flag.
     assert panel_elements[0]["sandbox_permissions"] == ["allow-same-origin"]
+
+
+def test_panel_element_surfaces_capabilities():
+    """panel_elements carry the plugin's declared capabilities so the panel
+    iframe bridge can gate openavc:action requests against them."""
+    loader = _make_loader()
+
+    class CapPlugin:
+        PLUGIN_INFO = {
+            "id": "cp",
+            "name": "CP",
+            "version": "1.0.0",
+            "author": "T",
+            "description": "d",
+            "category": "utility",
+            "license": "MIT",
+            "capabilities": ["device_command", "state_write"],
+        }
+        EXTENSIONS = {
+            "panel_elements": [
+                {"type": "widget", "label": "W", "renderer": "iframe", "renderer_url": "panel/w.html"}
+            ]
+        }
+
+    loader._instances = {"cp": CapPlugin()}
+    panel_elements = loader.get_all_extensions()["panel_elements"]
+    assert panel_elements[0]["capabilities"] == ["device_command", "state_write"]
+
+
+def test_panel_element_capabilities_default_empty():
+    """A plugin that declares no capabilities surfaces an empty list (not None),
+    so the panel treats it as 'no actions permitted'."""
+    loader = _make_loader()
+
+    class NoCapPlugin:
+        PLUGIN_INFO = {
+            "id": "ncp",
+            "name": "NCP",
+            "version": "1.0.0",
+            "author": "T",
+            "description": "d",
+            "category": "utility",
+            "license": "MIT",
+        }
+        EXTENSIONS = {
+            "panel_elements": [
+                {"type": "widget", "label": "W", "renderer": "iframe", "renderer_url": "panel/w.html"}
+            ]
+        }
+
+    loader._instances = {"ncp": NoCapPlugin()}
+    panel_elements = loader.get_all_extensions()["panel_elements"]
+    assert panel_elements[0]["capabilities"] == []
