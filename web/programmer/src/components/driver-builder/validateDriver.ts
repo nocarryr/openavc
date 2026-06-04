@@ -305,6 +305,53 @@ export function validateDriver(
     }
   }
 
+  // ── Auth login handshake ─────────────────────────────────────────────
+  // Mirror the runtime's load-time rules (validate_driver_definition in
+  // driver_loader.py) so authors see these in the Connection tab rather than
+  // only as a save rejection. A misdeclared handshake silently connects
+  // unauthenticated or breaks the transport's data path at runtime.
+  const auth = draft.auth;
+  if (auth) {
+    if (auth.type && auth.type !== "telnet_login") {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "auth.type",
+        message: `Login handshake type "${auth.type}" isn't supported (only "telnet_login").`,
+      });
+    }
+    if (
+      draft.transport &&
+      draft.transport !== "tcp" &&
+      draft.transport !== "serial"
+    ) {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "auth",
+        message: `Login handshake only works on TCP or serial transports, not ${draft.transport}. Disable it or change the transport.`,
+      });
+    }
+    if (!auth.username_prompt?.trim()) {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "auth.username_prompt",
+        message:
+          "Login handshake needs a username prompt to watch for, or it connects unauthenticated.",
+      });
+    }
+    if (!auth.password_prompt?.trim()) {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "auth.password_prompt",
+        message:
+          "Login handshake needs a password prompt to watch for, or it connects unauthenticated.",
+      });
+    }
+  }
+
   return issues;
 }
 

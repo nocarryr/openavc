@@ -59,6 +59,77 @@ def _is_driver_file(filepath: Path) -> bool:
     return True
 
 
+# A group close followed by a quantifier (`)+`, `)*`, `)?`, `){`). Used only to
+# decide whether to run the (secondary) empirical probe — the structural
+# detectors below are the primary, reliable check.
+_REDOS_RISK_RE = re.compile(r"\)[*+?{]")
+
+# Nested quantifier where a single quantified atom (a char, escape, or class)
+# sits inside a quantified group: (.+)+, (\d+)*, ([a-z]+)+. These are the
+# textbook exponential-backtracking shapes. The atom restriction avoids
+# flagging benign repeats like (In\d+)+ whose literal prefix disambiguates.
+_NESTED_QUANT_RE = re.compile(r"\((?:\\.|\[[^\]]*\]|[^()\[\]\\*+?])[*+]\)[*+]")
+
+# A flat alternation group immediately followed by + or *. Captures the
+# alternation body so we can check for the overlap that makes (a|a)+ and
+# (foo|foobar)* blow up — duplicate or prefix-overlapping branches.
+_ALT_QUANT_RE = re.compile(r"\(([^()]*\|[^()]*)\)[*+]")
+
+# Short non-matching inputs for the secondary empirical probe. A safe regex
+# finishes these instantly; some backtracking shapes the structural checks
+# don't model will still blow past the threshold here.
+_REDOS_PROBE_STRINGS = ("a" * 25, "x" * 25 + "!", "0123456789" * 3, "\t \n" * 10)
+
+
+def _redos_structural_reason(pattern: str) -> str | None:
+    """Detect the catastrophic-backtracking shapes by structure (reliable)."""
+    if _NESTED_QUANT_RE.search(pattern):
+        return "has a nested quantifier"
+    for m in _ALT_QUANT_RE.finditer(pattern):
+        alts = m.group(1).split("|")
+        if len(set(alts)) != len(alts):
+            return "has duplicate alternatives under a quantifier"
+        for a in alts:
+            for b in alts:
+                if a and a != b and b.startswith(a):
+                    return "has overlapping alternatives under a quantifier"
+    return None
+
+
+def _regex_redos_error(label: str, pattern: str) -> str | None:
+    """Compile ``pattern`` and check it for catastrophic backtracking.
+
+    Returns an error string (prefixed with ``label``) when the pattern is
+    invalid or shows exponential blow-up; ``None`` when it looks safe. Used for
+    both ``responses[]`` patterns and the ``auth:`` handshake patterns, which
+    run synchronously on raw pre-auth device bytes. Structural detection is the
+    primary check; the empirical probe is a secondary backstop for shapes the
+    structural rules don't model.
+    """
+    try:
+        compiled = re.compile(pattern)
+    except re.error as e:
+        return f"{label}: invalid regex '{pattern}': {e}"
+
+    reason = _redos_structural_reason(pattern)
+    if reason is None and _REDOS_RISK_RE.search(pattern):
+        import time as _time
+
+        for test_str in _REDOS_PROBE_STRINGS:
+            t0 = _time.monotonic()
+            compiled.search(test_str)
+            if _time.monotonic() - t0 > 0.1:
+                reason = "shows runaway backtracking on a short input"
+                break
+
+    if reason:
+        return (
+            f"{label}: regex '{pattern}' {reason}; this can cause catastrophic "
+            f"backtracking against hostile device input"
+        )
+    return None
+
+
 def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
     """
     Validate a driver definition.
@@ -88,31 +159,9 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
         if not pattern:
             errors.append(f"Response {i}: missing pattern, match, or address")
         else:
-            try:
-                compiled = re.compile(pattern)
-                # Heuristic: detect nested quantifiers that cause exponential
-                # backtracking (e.g., (.+)+, (.*)*). Test with multiple non-matching
-                # strings — if any take measurably long, warn.
-                if re.search(r'[+*]\)[+*?]', pattern):
-                    import time as _time
-                    test_strings = [
-                        "a" * 25,
-                        "x" * 25 + "!",
-                        "0123456789" * 3,
-                        "\t \n" * 10,
-                    ]
-                    for test_str in test_strings:
-                        t0 = _time.monotonic()
-                        compiled.search(test_str)
-                        elapsed = _time.monotonic() - t0
-                        if elapsed > 0.1:
-                            errors.append(
-                                f"Response {i}: regex '{pattern}' has nested "
-                                f"quantifiers that may cause catastrophic backtracking"
-                            )
-                            break
-            except re.error as e:
-                errors.append(f"Response {i}: invalid regex '{pattern}': {e}")
+            err = _regex_redos_error(f"Response {i}", pattern)
+            if err:
+                errors.append(err)
 
     # Validate commands structure
     for cmd_name, cmd_def in driver_def.get("commands", {}).items():
@@ -142,6 +191,48 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             parse_driver_discovery(driver_def)
         except DiscoveryHintError as exc:
             errors.append(f"discovery: {exc}")
+
+    # Validate the optional `auth:` login handshake block. The runtime swaps to
+    # raw byte buffering and types credentials before any other traffic — so a
+    # misdeclared block silently connects unauthenticated or mangles the
+    # transport's data path instead of erroring. Enforce the requirements at
+    # load time where the author can see them.
+    auth_def = driver_def.get("auth")
+    if auth_def is not None:
+        if not isinstance(auth_def, dict):
+            errors.append("auth: must be a mapping")
+        else:
+            auth_type = auth_def.get("type", "telnet_login")
+            if auth_type != "telnet_login":
+                errors.append(
+                    f"auth: unsupported type '{auth_type}' (only 'telnet_login')"
+                )
+            # The handshake assumes a TCP/serial byte stream; on udp/http/osc the
+            # frame-parser swap and raw buffering break the normal data path.
+            if transport and transport not in ("tcp", "serial"):
+                errors.append(
+                    f"auth: login handshake is only supported on tcp/serial "
+                    f"transports, not '{transport}'"
+                )
+            # Both prompts are required — without them the handshake silently
+            # no-ops and the device connects unauthenticated.
+            for required in ("username_prompt", "password_prompt"):
+                if not auth_def.get(required):
+                    errors.append(f"auth: missing required '{required}'")
+            # The prompt/success/failure regexes run synchronously on raw
+            # pre-auth device bytes, so they get the same ReDoS check as
+            # response patterns.
+            for key in (
+                "username_prompt",
+                "password_prompt",
+                "success_pattern",
+                "failure_pattern",
+            ):
+                pat = auth_def.get(key)
+                if pat:
+                    err = _regex_redos_error(f"auth.{key}", pat)
+                    if err:
+                        errors.append(err)
 
     # Validate state_variables structure
     valid_types = {"string", "integer", "number", "boolean", "enum", "float"}

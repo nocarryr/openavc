@@ -643,9 +643,11 @@ The shorthand `set` format is recommended (cleaner, matches community driver con
 - `mappings[].group`: Which regex capture group (1-based).
 - `mappings[].state`: Which state variable to update.
 - `mappings[].type`: How to convert the captured text: `string`, `integer`, `float`, `boolean`.
-- `mappings[].map` (optional): A lookup table. If the captured value is a key in this object, the mapped value is used instead.
+- `mappings[].map` (optional): A lookup table. If the captured value is a key in this object, the mapped value is used instead. The mapped value is then converted with `type` just like an unmapped capture, so the stored state matches its declared type regardless of transport.
 
 Responses are checked in order. The first matching pattern wins.
+
+Response patterns (and the `auth` prompt regexes) are validated when the driver loads: an invalid regex, or one with nested/overlapping quantifiers that can cause catastrophic backtracking against hostile device input (for example `(.+)+`, `(a|a)+`, `(foo|foobar)*`), is rejected and the driver won't load. Anchor and bound your patterns instead.
 
 **Config values in patterns**: You can use config value placeholders like `{level_control}` in response patterns. They are resolved when the driver connects. This is useful for protocols like QSC Q-SYS where responses include user-configured control names.
 
@@ -668,6 +670,8 @@ Many AV devices can push state changes in real-time (volume knob turned, input s
 #### `auth` section
 
 For Telnet-style devices that present `Username:` / `Password:` prompts before accepting commands. The handshake runs after the TCP connection is established and before `on_connect` commands are sent. Add `username` and `password` fields to `default_config` and `config_schema` so the user can enter credentials in the Add Device dialog.
+
+The handshake reads a raw byte stream, so it is only valid on `tcp` and `serial` transports — declaring `auth` on `udp`, `http`, or `osc` is a validation error. Both `username_prompt` and `password_prompt` are required; a handshake declared without them is rejected at load time rather than silently connecting unauthenticated.
 
 ```yaml
 auth:

@@ -21,10 +21,27 @@ from typing import Any
 
 from server.drivers.base import BaseDriver
 from server.transport.binary_helpers import encode_escape_sequences as _safe_encode_escapes
-from server.transport.frame_parsers import FrameParser
+from server.transport.frame_parsers import DEFAULT_MAX_BUFFER, FrameParser
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# httpx transport/timeout/status errors are transport-level for missed-poll
+# watchdog purposes (mirrors BaseDriver._poll_loop). poll() re-raises these so
+# an unreachable HTTP device trips the watchdog instead of looking connected.
+try:
+    import httpx as _httpx
+
+    _HTTP_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (_httpx.HTTPError,)
+except ImportError:  # pragma: no cover - httpx is a hard dependency in practice
+    _HTTP_TRANSPORT_ERRORS = ()
+
+# Hard cap on bytes buffered during the pre-auth login handshake. The handshake
+# runs in raw mode (no frame parser), so without a cap a device — or anything
+# spoofing its IP — could stream forever before any prompt match, growing memory
+# and forcing an O(n^2) re-scan per chunk on an unauthenticated path. Reuse the
+# frame parser's buffer ceiling; a login banner + prompts never approach it.
+_AUTH_MAX_BUFFER = DEFAULT_MAX_BUFFER
 
 
 # Tracks (driver_id, legacy_key) tuples that have already been warned about,
@@ -99,12 +116,18 @@ class ConfigurableDriver(BaseDriver):
         self._auth_mode: bool = False
         self._auth_buffer: bytearray = bytearray()
         self._auth_event: asyncio.Event = asyncio.Event()
+        # Set by on_data_received when _auth_buffer exceeds _AUTH_MAX_BUFFER so
+        # _auth_wait_for can abort the handshake instead of growing unbounded.
+        self._auth_overflow: bool = False
 
         for resp in self._definition.get("responses", []):
             # OSC responses use "address" key instead of "pattern"/"match"
             if "address" in resp:
                 addr = self._safe_substitute(resp["address"], self.config)
-                mappings = resp.get("mappings", [])
+                # Copy per-instance: the source list lives in the shared class
+                # _definition; aliasing it would let one instance's edits leak
+                # into every instance of this driver type.
+                mappings = list(resp.get("mappings", []))
                 self._osc_responses.append((addr, mappings))
                 continue
 
@@ -116,8 +139,12 @@ class ConfigurableDriver(BaseDriver):
                 resolved = self._safe_substitute(raw_pattern, self.config)
                 pattern = re.compile(resolved)
 
-                # Accept both "mappings" (detailed) and "set" (shorthand) formats
-                mappings = resp.get("mappings", [])
+                # Accept both "mappings" (detailed) and "set" (shorthand)
+                # formats. Copy per-instance — the source list lives in the
+                # shared class _definition, and the shorthand path below
+                # appends to it; mutating the shared list would corrupt every
+                # other instance of this driver type.
+                mappings = list(resp.get("mappings", []))
                 if not mappings and "set" in resp:
                     # Convert shorthand: {"set": {"input": "$1", "mute": "true"}}
                     # to mappings: [{"group": 1, "state": "input"}, ...]
@@ -129,7 +156,18 @@ class ConfigurableDriver(BaseDriver):
                             try:
                                 group = int(value_expr[1:])
                             except ValueError:
-                                group = 0
+                                # A non-numeric $-reference is an author typo.
+                                # Silently capturing group 0 (the whole match)
+                                # would write a wrong value with no warning, so
+                                # surface it and skip this mapping. Use "$0"
+                                # explicitly if the whole match is intended.
+                                log.warning(
+                                    "[%s] set-shorthand reference %r for state "
+                                    "'%s' is not a numeric group ($1, $2, ...); "
+                                    "skipping this mapping",
+                                    self.device_id, value_expr, state_key,
+                                )
+                                continue
                             mappings.append({"group": group, "state": state_key, "type": var_type})
                         else:
                             mappings.append({"group": 0, "state": state_key, "value": value_expr})
@@ -160,6 +198,7 @@ class ConfigurableDriver(BaseDriver):
         if has_auth:
             self._auth_buffer = bytearray()
             self._auth_event = asyncio.Event()
+            self._auth_overflow = False
             self._auth_mode = True
 
         try:
@@ -267,6 +306,12 @@ class ConfigurableDriver(BaseDriver):
         incoming bytes for the handshake. Mirrors the early-exit checks
         in _perform_auth_handshake so the two stay aligned."""
         if auth_def.get("type", "telnet_login") != "telnet_login":
+            return False
+        # The handshake assumes a TCP/serial byte stream — it swaps out the
+        # frame parser and buffers raw bytes. On udp/http/osc that breaks the
+        # transport's normal data path, so never run it there. The loader also
+        # rejects auth on these transports; this is the runtime backstop.
+        if self._definition.get("transport") not in ("tcp", "serial"):
             return False
         if not auth_def.get("username_prompt") or not auth_def.get("password_prompt"):
             return False
@@ -387,6 +432,11 @@ class ConfigurableDriver(BaseDriver):
             # it; if it arrives after the check, the set() will unblock
             # the wait() below.
             self._auth_event.clear()
+            if self._auth_overflow:
+                raise ConnectionError(
+                    f"auth aborted: more than {_AUTH_MAX_BUFFER} bytes received "
+                    f"before matching {target.pattern!r}"
+                )
             text = self._auth_buffer.decode("utf-8", errors="replace")
             if failure is not None and failure.search(text):
                 raise ConnectionError(
@@ -460,7 +510,18 @@ class ConfigurableDriver(BaseDriver):
         self, command: str, cmd_def: dict[str, Any], params: dict[str, Any]
     ) -> Any:
         """Send an OSC command: encode address + typed args and send."""
+        from server.transport.osc import OSCTransport
         from server.transport.osc_codec import osc_encode_message
+
+        # Guard against silently emitting OSC bytes on a non-OSC socket when a
+        # command's declared shape (an `address`) doesn't match the active
+        # transport. Mirrors the HTTP path's isinstance check.
+        if not isinstance(self.transport, OSCTransport):
+            log.error(
+                f"[{self.device_id}] Command '{command}' uses OSC fields "
+                f"but transport is not OSC"
+            )
+            return None
 
         all_params = {**self.config, **params}
 
@@ -472,6 +533,21 @@ class ConfigurableDriver(BaseDriver):
         await self.transport.send(data)
         log.debug(f"[{self.device_id}] Sent OSC command '{command}': {address}")
         return True
+
+    @staticmethod
+    def _osc_num(tag: str, value: str, converter: Any) -> Any:
+        """Coerce an OSC arg value to a number, raising a clear error.
+
+        A missing/unresolved value (e.g. ``float("")`` or an unmatched
+        ``{placeholder}``) would otherwise surface as a bare ValueError with no
+        context. Turn it into an actionable message naming the OSC type tag.
+        """
+        try:
+            return converter(value)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"OSC arg of type '{tag}' requires a numeric value, got {value!r}"
+            ) from e
 
     @staticmethod
     def _build_osc_args(
@@ -490,15 +566,15 @@ class ConfigurableDriver(BaseDriver):
                 resolved = raw_value
 
             if tag == "f":
-                args.append(("f", float(resolved)))
+                args.append(("f", ConfigurableDriver._osc_num("f", resolved, float)))
             elif tag == "i":
-                args.append(("i", int(float(resolved))))
+                args.append(("i", int(ConfigurableDriver._osc_num("i", resolved, float))))
             elif tag == "s":
                 args.append(("s", resolved))
             elif tag == "h":
-                args.append(("h", int(resolved)))
+                args.append(("h", ConfigurableDriver._osc_num("h", resolved, int)))
             elif tag == "d":
-                args.append(("d", float(resolved)))
+                args.append(("d", ConfigurableDriver._osc_num("d", resolved, float)))
             elif tag == "T":
                 args.append(("T", True))
             elif tag == "F":
@@ -644,6 +720,11 @@ class ConfigurableDriver(BaseDriver):
         # the normal response-matching path entirely.
         if self._auth_mode:
             self._auth_buffer.extend(data)
+            if len(self._auth_buffer) > _AUTH_MAX_BUFFER:
+                # Pre-auth flood: stop accumulating and signal _auth_wait_for to
+                # abort the handshake. Keeps memory and per-chunk re-scan bounded
+                # on this unauthenticated path.
+                self._auth_overflow = True
             self._auth_event.set()
             return
 
@@ -683,9 +764,13 @@ class ConfigurableDriver(BaseDriver):
                     if raw_value is None:
                         continue
 
-                    # Apply value map if defined
+                    # Apply value map if defined. Coerce the mapped value too
+                    # (parity with the OSC path): without this the same map+type
+                    # stores "5" on TCP but 5 on OSC, and str() collapses a
+                    # hostile list/dict map target to a flat primitive, keeping
+                    # the state store's flat-primitives invariant intact.
                     if value_map and raw_value in value_map:
-                        coerced = value_map[raw_value]
+                        coerced = self._coerce_value(str(value_map[raw_value]), value_type)
                     else:
                         coerced = self._coerce_value(raw_value, value_type)
 
@@ -791,10 +876,18 @@ class ConfigurableDriver(BaseDriver):
 
         # OSC write
         if "address" in write_def:
+            from server.transport.osc import OSCTransport
             from server.transport.osc_codec import osc_encode_message
 
             if not self.transport or not self.transport.connected:
                 raise ConnectionError(f"[{self.device_id}] Not connected")
+
+            # Don't emit OSC bytes on a non-OSC socket — mirrors the HTTP guard.
+            if not isinstance(self.transport, OSCTransport):
+                raise ConnectionError(
+                    f"[{self.device_id}] Setting '{key}' uses OSC write "
+                    f"but transport is not OSC"
+                )
 
             raw_address = write_def.get("address", "")
             address = self._safe_substitute(raw_address, all_params)
@@ -925,12 +1018,24 @@ class ConfigurableDriver(BaseDriver):
                     formatted = self._safe_substitute(query, self.config) if "{" in query else query
                     data = _safe_encode_escapes(formatted)
                     await self.transport.send(data)
-            except ConnectionError:
-                # Transport gone — device.disconnected.<id> fires from the
-                # transport callback. No device.error here.
-                log.warning(f"[{self.device_id}] Poll query failed — not connected")
-                return
-            except Exception as exc:  # Template substitution, encoding, or HTTP errors
+            except (ConnectionError, TimeoutError, OSError):
+                # Transport-level failure: propagate so BaseDriver._poll_loop's
+                # missed-poll watchdog counts it and can eventually mark the
+                # device disconnected. Swallowing this is what let HTTP/OSC/UDP
+                # devices report connected while unreachable. (HTTP connect
+                # errors arrive here as builtin ConnectionError — http_client
+                # translates httpx.ConnectError before it propagates.)
+                log.warning(f"[{self.device_id}] Poll query failed (transport)")
+                raise
+            except _HTTP_TRANSPORT_ERRORS as exc:
+                # httpx timeout / status / other transport errors are also
+                # transport-level for the watchdog — re-raise, don't swallow.
+                log.warning(f"[{self.device_id}] Poll query failed (HTTP): {exc}")
+                raise
+            except Exception as exc:  # Template substitution, encoding, parse errors
+                # Protocol-level: the device answered but the query/response was
+                # malformed. Surface device.error, don't penalize the watchdog,
+                # and continue to the next query.
                 log.exception(f"[{self.device_id}] Poll query error")
                 try:
                     await self.events.emit(
