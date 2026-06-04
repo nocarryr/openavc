@@ -1,8 +1,9 @@
 """Tests for /api/certificate and /api/system/tls-status endpoints.
 
-The endpoints read ``server.config`` module attributes at request time,
-so tests monkeypatch those attributes plus ``data_dir`` to point at a
-tmp_path-backed cert store.
+The endpoints read the live system config (``get_system_config()``) at request
+time so a just-saved PATCH is reflected without a restart, so tests set those
+values on the singleton plus ``data_dir`` to point at a tmp_path-backed cert
+store.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from server import config
 from server.main import app
 from server import tls as tls_module
 from server.system_config import get_system_config
@@ -32,6 +32,13 @@ def tls_dir(tmp_path, monkeypatch) -> Path:
     return tmp_path / "tls"
 
 
+def _set_cfg(monkeypatch, section: str, **values) -> None:
+    """Set live system-config values for the duration of a test (auto-restored)."""
+    cfg = get_system_config()
+    for key, value in values.items():
+        monkeypatch.setitem(cfg._data[section], key, value)
+
+
 def _generate_test_cert(data_dir: Path) -> Path:
     """Run the cert generator into ``data_dir/tls/`` and return the cert path."""
     paths = tls_module.generate_self_signed(
@@ -46,29 +53,26 @@ def _generate_test_cert(data_dir: Path) -> Path:
 
 
 def test_certificate_404_when_tls_off(client, monkeypatch):
-    monkeypatch.setattr(config, "TLS_ENABLED", False)
+    _set_cfg(monkeypatch, "tls", enabled=False)
     resp = client.get("/api/certificate")
     assert resp.status_code == 404
 
 
 def test_certificate_404_when_provided_mode(client, monkeypatch, tls_dir):
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", False)
+    _set_cfg(monkeypatch, "tls", enabled=True, auto_generate=False)
     resp = client.get("/api/certificate")
     assert resp.status_code == 404
 
 
 def test_certificate_404_when_ca_file_missing(client, monkeypatch, tls_dir):
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", True)
+    _set_cfg(monkeypatch, "tls", enabled=True, auto_generate=True)
     # No cert generated → ca.crt does not exist.
     resp = client.get("/api/certificate")
     assert resp.status_code == 404
 
 
 def test_certificate_returns_pem_when_enabled(client, monkeypatch, tls_dir):
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", True)
+    _set_cfg(monkeypatch, "tls", enabled=True, auto_generate=True)
     _generate_test_cert(tls_dir.parent)
 
     resp = client.get("/api/certificate")
@@ -84,20 +88,24 @@ def test_certificate_returns_pem_when_enabled(client, monkeypatch, tls_dir):
 
 
 def test_tls_status_off(client, monkeypatch):
-    monkeypatch.setattr(config, "TLS_ENABLED", False)
+    _set_cfg(monkeypatch, "tls", enabled=False)
     resp = client.get("/api/system/tls-status")
     assert resp.status_code == 200
     assert resp.json() == {"enabled": False}
 
 
 def test_tls_status_on_auto(client, monkeypatch, tls_dir):
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_PORT", 8443)
-    monkeypatch.setattr(config, "TLS_REDIRECT_HTTP", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", True)
-    monkeypatch.setattr(config, "TLS_CERT_FILE", "")
-    monkeypatch.setattr(config, "TLS_KEY_FILE", "")
-    monkeypatch.setattr(config, "BIND_ADDRESS", "127.0.0.1")
+    _set_cfg(
+        monkeypatch,
+        "tls",
+        enabled=True,
+        port=8443,
+        redirect_http=True,
+        auto_generate=True,
+        cert_file="",
+        key_file="",
+    )
+    _set_cfg(monkeypatch, "network", bind_address="127.0.0.1")
     _generate_test_cert(tls_dir.parent)
 
     resp = client.get("/api/system/tls-status")
@@ -124,13 +132,17 @@ def test_tls_status_on_provided(client, monkeypatch, tls_dir, tmp_path):
     paths = tls_module.generate_self_signed(
         tmp_path, hostnames=["localhost"], ips=["127.0.0.1"]
     )
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_PORT", 8443)
-    monkeypatch.setattr(config, "TLS_REDIRECT_HTTP", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", False)
-    monkeypatch.setattr(config, "TLS_CERT_FILE", str(paths.cert_path))
-    monkeypatch.setattr(config, "TLS_KEY_FILE", str(paths.key_path))
-    monkeypatch.setattr(config, "BIND_ADDRESS", "127.0.0.1")
+    _set_cfg(
+        monkeypatch,
+        "tls",
+        enabled=True,
+        port=8443,
+        redirect_http=True,
+        auto_generate=False,
+        cert_file=str(paths.cert_path),
+        key_file=str(paths.key_path),
+    )
+    _set_cfg(monkeypatch, "network", bind_address="127.0.0.1")
 
     resp = client.get("/api/system/tls-status")
     assert resp.status_code == 200
@@ -141,10 +153,7 @@ def test_tls_status_on_provided(client, monkeypatch, tls_dir, tmp_path):
 
 
 def test_tls_status_cert_missing_returns_error(client, monkeypatch, tls_dir):
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", True)
-    monkeypatch.setattr(config, "TLS_CERT_FILE", "")
-    monkeypatch.setattr(config, "TLS_KEY_FILE", "")
+    _set_cfg(monkeypatch, "tls", enabled=True, auto_generate=True, cert_file="", key_file="")
     # No cert generated → server.crt missing.
     resp = client.get("/api/system/tls-status")
     assert resp.status_code == 200
@@ -191,13 +200,17 @@ def test_tls_status_flags_expired_cert(client, monkeypatch, tmp_path):
         )
     )
 
-    monkeypatch.setattr(config, "TLS_ENABLED", True)
-    monkeypatch.setattr(config, "TLS_PORT", 8443)
-    monkeypatch.setattr(config, "TLS_REDIRECT_HTTP", True)
-    monkeypatch.setattr(config, "TLS_AUTO_GENERATE", False)
-    monkeypatch.setattr(config, "TLS_CERT_FILE", str(cert_path))
-    monkeypatch.setattr(config, "TLS_KEY_FILE", str(key_path))
-    monkeypatch.setattr(config, "BIND_ADDRESS", "127.0.0.1")
+    _set_cfg(
+        monkeypatch,
+        "tls",
+        enabled=True,
+        port=8443,
+        redirect_http=True,
+        auto_generate=False,
+        cert_file=str(cert_path),
+        key_file=str(key_path),
+    )
+    _set_cfg(monkeypatch, "network", bind_address="127.0.0.1")
 
     resp = client.get("/api/system/tls-status")
     assert resp.status_code == 200

@@ -116,8 +116,14 @@ export function CloudSettingsView() {
     setSuccess(null);
     try {
       const result = await cloudPair(pairingToken.trim(), cloudApiUrl.trim());
-      setSuccess(`Paired successfully! System ID: ${result.system_id}`);
       setPairingToken("");
+      if (result.agent_started === false) {
+        // Pairing persisted but the agent didn't connect — show the server's
+        // warning instead of an unqualified success.
+        setError(result.warning ?? "Paired, but the cloud connection did not start. Check the server logs.");
+      } else {
+        setSuccess(`Paired successfully! System ID: ${result.system_id}`);
+      }
       await fetchStatus();
     } catch (e) {
       setError(String(e));

@@ -13,6 +13,11 @@ from server.api.models import CloudPairRequest
 router = APIRouter()
 open_router = APIRouter()
 
+# Strong references to fire-and-forget tasks. asyncio only holds a weak
+# reference to a bare create_task(), so an unreferenced task can be garbage
+# collected mid-flight; keep it alive until it finishes.
+_BACKGROUND_TASKS: set = set()
+
 
 # --- System ---
 
@@ -220,6 +225,59 @@ async def cloud_status() -> dict[str, Any]:
     }
 
 
+async def _validate_cloud_api_url(url: str) -> str:
+    """Validate a caller-supplied cloud API base URL before the server makes an
+    outbound request to it, closing the SSRF vector on an open instance.
+
+    Rejects non-http(s) schemes and hosts that resolve into cloud-metadata
+    (link-local), multicast, reserved, unspecified, or — outside a dev
+    checkout — loopback address space. Private LAN ranges stay allowed so a
+    self-hosted cloud on the local network can still be paired. Returns the
+    URL with any trailing slash stripped.
+    """
+    import asyncio
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=400, detail="Cloud API URL must start with http:// or https://."
+        )
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="Cloud API URL is missing a host.")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    try:
+        infos = await asyncio.get_event_loop().getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        )
+    except (OSError, socket.gaierror) as e:
+        raise _api_error(400, f"Could not resolve cloud API host '{host}'.", e)
+
+    from server.api.auth import _deployment_is_dev
+    allow_loopback = _deployment_is_dev()
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (
+            ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+            or (ip.is_loopback and not allow_loopback)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cloud API URL resolves to a disallowed address ({ip}).",
+            )
+    return url.rstrip("/")
+
+
 @router.post("/cloud/pair")
 async def cloud_pair(request: Request) -> dict[str, Any]:
     """Pair this instance with the OpenAVC Cloud platform."""
@@ -227,12 +285,14 @@ async def cloud_pair(request: Request) -> dict[str, Any]:
     body = await request.json()
     data = CloudPairRequest(**body)
 
+    cloud_api_url = await _validate_cloud_api_url(data.cloud_api_url)
+
     # Exchange the pairing token with the cloud API
     import httpx
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                f"{data.cloud_api_url}/api/v1/systems/pair",
+                f"{cloud_api_url}/api/v1/systems/pair",
                 json={"token": data.token},
             )
             if resp.status_code != 200:
@@ -241,11 +301,27 @@ async def cloud_pair(request: Request) -> dict[str, Any]:
                 except Exception:
                     detail = resp.text or "Pairing failed"
                 raise HTTPException(status_code=resp.status_code, detail=detail)
-            pair_data = resp.json()
+            try:
+                pair_data = resp.json()
+            except ValueError as e:
+                raise _api_error(502, "Cloud returned a non-JSON pairing response.", e)
     except httpx.HTTPError as e:
         raise _api_error(502, "Failed to reach cloud API for pairing", e)
 
-    # Save cloud config locally
+    # Guard the cross-service contract: a 200 with a partial or renamed body
+    # must surface as a clean 502, not an opaque KeyError 500.
+    if not isinstance(pair_data, dict):
+        raise _api_error(502, "Cloud returned an unexpected pairing response.")
+    missing = [k for k in ("endpoint", "system_key", "system_id") if not pair_data.get(k)]
+    if missing:
+        raise _api_error(
+            502, "Cloud pairing response is missing required field(s): " + ", ".join(missing)
+        )
+
+    # Save cloud config locally. The cloud has already registered this system,
+    # so if persistence fails we must not claim success — surface the split
+    # brain clearly and leave the runtime/agent untouched instead of a generic
+    # 500 over a half-paired state.
     from server.cloud.config import save_cloud_config
     cloud_cfg = {
         "enabled": True,
@@ -253,7 +329,15 @@ async def cloud_pair(request: Request) -> dict[str, Any]:
         "system_key": pair_data["system_key"],
         "system_id": pair_data["system_id"],
     }
-    save_cloud_config(cloud_cfg)
+    try:
+        save_cloud_config(cloud_cfg)
+    except OSError as e:
+        raise _api_error(
+            500,
+            "Paired with the cloud but could not save credentials locally; "
+            "resolve the disk/permission issue and pair again.",
+            e,
+        )
 
     # Update runtime config
     import server.config as cfg
@@ -269,11 +353,23 @@ async def cloud_pair(request: Request) -> dict[str, Any]:
         engine.cloud_agent = None
     await engine._start_cloud_agent()
 
-    return {
+    # _start_cloud_agent isolates its own failures and leaves cloud_agent None;
+    # reflect that so the UI doesn't report "enabled" over an agent that never
+    # started.
+    agent_started = engine.cloud_agent is not None
+
+    result: dict[str, Any] = {
         "success": True,
         "system_id": pair_data["system_id"],
         "endpoint": pair_data["endpoint"],
+        "agent_started": agent_started,
     }
+    if not agent_started:
+        result["warning"] = (
+            "Pairing saved, but the cloud connection did not start. "
+            "Check the server logs and reconnect."
+        )
+    return result
 
 
 @router.post("/cloud/unpair")
@@ -413,6 +509,25 @@ async def update_system_config(request: Request) -> dict[str, Any]:
                 "Runtime service reconcile after config change failed", exc_info=True
             )
 
+    # Log level applies live (no restart) so the "Settings saved" toast is
+    # truthful and switching to Debug actually engages verbose console logging.
+    if isinstance(body.get("logging"), dict) and "level" in body["logging"]:
+        from server.utils.logger import set_log_level
+        set_log_level(str(cfg.get("logging", "level", "info")))
+
+    # Mirror the effective update channel into state so the Updates view shows
+    # the new channel after a Settings change instead of a stale value until
+    # restart (system.update_channel is otherwise only written at boot).
+    if isinstance(body.get("updates"), dict) and "channel" in body["updates"]:
+        try:
+            _get_engine().state.set(
+                "system.update_channel",
+                cfg.get("updates", "channel", "stable"),
+                source="system",
+            )
+        except Exception:  # noqa: BLE001 — state mirror must never fail the save
+            pass
+
     return {"success": True, "updated_sections": updated_sections}
 
 
@@ -443,7 +558,9 @@ async def restart_system(request: Request) -> dict[str, Any]:
     # — the dialog uses this 200 as its cue to start polling for the new
     # listener to come back up.
     import asyncio
-    asyncio.create_task(engine.events.emit("system.restart_requested", {"mode": mode}))
+    task = asyncio.create_task(engine.events.emit("system.restart_requested", {"mode": mode}))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     return {
         "status": "restarting",
@@ -469,13 +586,15 @@ async def download_ca_certificate():
       - TLS is on with auto_generate but the CA file is missing.
     """
     from fastapi.responses import Response
-    from server import config
+    from server.system_config import get_system_config
 
-    if not config.TLS_ENABLED or not config.TLS_AUTO_GENERATE:
+    # Read live config (not the import-time constants) so a just-saved TLS
+    # change is reflected without waiting for a restart.
+    sys_cfg = get_system_config()
+    if not sys_cfg.get("tls", "enabled") or not sys_cfg.get("tls", "auto_generate"):
         raise HTTPException(status_code=404, detail="No CA certificate available")
 
-    from server.system_config import get_system_config
-    ca_path = get_system_config().data_dir / "tls" / "ca.crt"
+    ca_path = sys_cfg.data_dir / "tls" / "ca.crt"
     if not ca_path.exists():
         raise HTTPException(status_code=404, detail="CA certificate not found")
 
@@ -499,25 +618,31 @@ async def get_tls_status() -> dict[str, Any]:
 
     Warnings may include: "expired", "expiring-soon", "hostname-mismatch".
     On cert-read failure, "error" is set at the top level and "cert" is null.
-    """
-    from server import config
 
-    if not config.TLS_ENABLED:
+    Reads live config (not the import-time constants) so the Security card's
+    immediate re-fetch after a PATCH reflects the just-saved cert/mode rather
+    than the stale pre-restart state.
+    """
+    from server.system_config import get_system_config
+
+    sys_cfg = get_system_config()
+    if not sys_cfg.get("tls", "enabled"):
         return {"enabled": False}
 
-    mode = "provided" if (config.TLS_CERT_FILE and config.TLS_KEY_FILE) else "auto"
+    cert_file = str(sys_cfg.get("tls", "cert_file") or "")
+    key_file = str(sys_cfg.get("tls", "key_file") or "")
+    mode = "provided" if (cert_file and key_file) else "auto"
 
     if mode == "provided":
         from pathlib import Path
-        cert_path = Path(config.TLS_CERT_FILE)
+        cert_path = Path(cert_file)
     else:
-        from server.system_config import get_system_config
-        cert_path = get_system_config().data_dir / "tls" / "server.crt"
+        cert_path = sys_cfg.data_dir / "tls" / "server.crt"
 
     status: dict[str, Any] = {
         "enabled": True,
-        "port": config.TLS_PORT,
-        "redirect_http": config.TLS_REDIRECT_HTTP,
+        "port": sys_cfg.get("tls", "port"),
+        "redirect_http": sys_cfg.get("tls", "redirect_http"),
         "mode": mode,
         "cert": None,
     }
@@ -536,7 +661,8 @@ async def get_tls_status() -> dict[str, Any]:
     warnings = list(info.warnings)
     # Hostname-mismatch: compare cert SANs against the host's current identifiers.
     try:
-        hostnames, ips = tls_module.collect_local_identifiers(config.BIND_ADDRESS)
+        bind_address = sys_cfg.get("network", "bind_address", "0.0.0.0")
+        hostnames, ips = tls_module.collect_local_identifiers(bind_address)
         all_current = set(hostnames) | set(ips)
         all_current.discard("127.0.0.1")
         all_current.discard("localhost")
@@ -838,14 +964,30 @@ async def simulation_status() -> dict[str, Any]:
 
 @router.post("/simulation/start")
 async def simulation_start(request: Request) -> dict[str, Any]:
-    """Start simulation for all devices (or specific device_ids)."""
+    """Start simulation for all devices (or specific device_ids).
+
+    An empty or absent body simulates every device. A present body must be
+    valid JSON; ``device_ids``, when supplied, must be a list of device-id
+    strings. Malformed JSON is a 400 rather than a silent simulate-all, and a
+    non-list ``device_ids`` is a 400 rather than an opaque 500.
+    """
+    import json
     device_ids = None
-    try:
-        body = await request.json()
-        if body and "device_ids" in body:
+    raw = await request.body()
+    if raw and raw.strip():
+        try:
+            body = json.loads(raw)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}")
+        if isinstance(body, dict) and body.get("device_ids") is not None:
             device_ids = body["device_ids"]
-    except Exception:
-        pass  # No body or invalid JSON — simulate all devices
+            if not isinstance(device_ids, list) or not all(
+                isinstance(d, str) for d in device_ids
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="'device_ids' must be a list of device id strings.",
+                )
     try:
         result = await _get_engine().simulation.start(device_ids)
         return result

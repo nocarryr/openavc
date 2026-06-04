@@ -17,6 +17,8 @@ export interface CloudPairResult {
   success: boolean;
   system_id: string;
   endpoint: string;
+  agent_started?: boolean;
+  warning?: string;
 }
 
 export async function getCloudStatus(): Promise<CloudStatus> {

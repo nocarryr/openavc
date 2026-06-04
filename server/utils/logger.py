@@ -17,6 +17,9 @@ LOG_FORMAT = "[%(asctime)s.%(msecs)03d] [%(levelname)-5s] [%(name)s] %(message)s
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _configured = False
+# Reference to the console handler so the level can be re-applied at runtime
+# (PATCH /system/config) without a restart.
+_console_handler: logging.Handler | None = None
 
 
 def _configure_root():
@@ -48,6 +51,8 @@ def _configure_root():
     handler.setLevel(_console_level)
     handler.setFormatter(formatter)
     root.addHandler(handler)
+    global _console_handler
+    _console_handler = handler
 
     # Persistent file logging (10 MB per file, 3 rotated files)
     try:
@@ -79,6 +84,23 @@ def _configure_root():
     # INFO level drops every TX/RX before it reaches the buffer and the device
     # log stays empty.
     logging.getLogger("server.transport").setLevel(logging.DEBUG)
+
+
+def set_log_level(level: str) -> bool:
+    """Apply a new console log level at runtime (no restart required).
+
+    Only the console handler tracks the configured ``logging.level``; the file
+    handler stays at INFO, and the in-memory buffer plus transport loggers stay
+    at DEBUG so per-device traffic is always captured. Returns True if the level
+    string was recognized and applied, False otherwise.
+    """
+    _configure_root()
+    resolved = logging.getLevelName(str(level).upper())
+    if not isinstance(resolved, int):
+        return False
+    if _console_handler is not None:
+        _console_handler.setLevel(resolved)
+    return True
 
 
 def get_logger(name: str) -> logging.Logger:
