@@ -283,6 +283,12 @@ class MacroToolsMixin:
         """
         engine = self._get_engine()
         if engine and hasattr(engine, "broadcast_ws"):
+            # Advance the revision before broadcasting so an open IDE's
+            # optimistic-concurrency ETag no longer matches — otherwise its next
+            # full-project PUT silently overwrites this server-side change. These
+            # direct-persist tools bypass reload_project (which normally bumps).
+            if hasattr(engine, "bump_project_revision"):
+                engine.bump_project_revision()
             await engine.broadcast_ws({
                 "type": "project.reloaded",
                 "revision": getattr(engine, "_project_revision", 0),

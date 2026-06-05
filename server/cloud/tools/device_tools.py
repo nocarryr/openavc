@@ -39,12 +39,38 @@ class DeviceToolsMixin:
                 from server.utils.logger import get_logger
                 log = get_logger(__name__)
                 log.warning("update_device: driver '%s' not in registry (may not be loaded yet)", input["driver"])
+
+        # Split an incoming config the same way _add_device and the REST editor
+        # do: connection fields (host/port/...) live in project.connections, not
+        # device.config. Without this the AI's host/port edits land in the wrong
+        # place and the IDE can't edit them consistently (v0.5.0 layout).
+        if "config" in input:
+            from server.core.project_migration import CONNECTION_FIELDS
+            raw_config = input.get("config") or {}
+            protocol_config: dict = {}
+            conn_overrides = dict(engine.project.connections.get(device_id, {}))
+            for key, value in raw_config.items():
+                if key in CONNECTION_FIELDS:
+                    conn_overrides[key] = value
+                else:
+                    protocol_config[key] = value
+            new_config = protocol_config
+            conn_overrides = {k: v for k, v in conn_overrides.items() if v is not None}
+            if conn_overrides:
+                engine.project.connections[device_id] = conn_overrides
+            elif device_id in engine.project.connections:
+                del engine.project.connections[device_id]
+        else:
+            new_config = existing.config
+
         updated = DeviceConfig(
             id=device_id,
             driver=input.get("driver", existing.driver),
             name=input.get("name", existing.name),
-            config=input.get("config", existing.config),
-            enabled=existing.enabled,
+            config=new_config,
+            # Honor an `enabled` toggle from the AI (the schema declares it);
+            # the old code pinned existing.enabled so disable/enable no-op'd.
+            enabled=input.get("enabled", existing.enabled),
             # Preserve queued device settings and child-entity metadata
             # (user labels / per-child config). Rebuilding from the tool
             # input alone would drop them on every edit — both on disk and
@@ -59,6 +85,10 @@ class DeviceToolsMixin:
         # _add_device. Passing model_dump() alone re-adds the device with no
         # host, silently breaking control.
         await engine.devices.update_device(device_id, engine.resolved_device_config(updated))
+        # Bump the project revision and notify the IDE — a device rewrite is a
+        # high-impact mutation; without this a stale IDE reverts it on its next
+        # save with no conflict warning.
+        await self._notify_project_changed()
         return {"status": "updated", "device_id": device_id}
 
     async def _delete_device(self, input: dict) -> Any:
@@ -75,6 +105,10 @@ class DeviceToolsMixin:
         from server.core.project_loader import save_project
         save_project(engine.project_path, engine.project)
         await engine.devices.remove_device(device_id)
+        # Bump the revision + notify the IDE so a stale tab can't resurrect the
+        # deleted device on its next save (highest-impact mutation, no signal
+        # before this fix).
+        await self._notify_project_changed()
         result: dict = {"status": "deleted", "device_id": device_id}
         if impact:
             result["impact"] = impact
@@ -253,7 +287,16 @@ class DeviceToolsMixin:
         else:
             if not host:
                 return {"success": False, "error": "No host configured", "latency_ms": None}
-            tcp_port = int(port) if port else 23
+            # A missing port is a configuration gap, not Telnet — report it
+            # rather than silently probing :23 and returning a misleading result.
+            if port in (None, "", 0):
+                return {"success": False, "error": "No port configured", "latency_ms": None}
+            try:
+                tcp_port = int(port)
+            except (TypeError, ValueError):
+                return {"success": False, "error": f"Invalid port: {port!r}", "latency_ms": None}
+            if not 0 < tcp_port <= 65535:
+                return {"success": False, "error": f"Port out of range: {tcp_port}", "latency_ms": None}
             try:
                 reader, writer = await _asyncio.wait_for(
                     _asyncio.open_connection(host, tcp_port), timeout=5.0
@@ -293,6 +336,12 @@ class DeviceToolsMixin:
 
         if not device_id or not setting_key:
             return {"error": "device_id and setting_key are required"}
+
+        # State holds flat primitives only — reject a list/dict/other before it
+        # reaches the driver (which str()-ifies it into the protocol) or the
+        # state store. bool is an int subclass, so it's covered.
+        if value is not None and not isinstance(value, (str, int, float)):
+            return {"error": "Setting value must be a string, number, boolean, or null"}
 
         try:
             await engine.devices.set_device_setting(device_id, setting_key, value)
@@ -546,15 +595,52 @@ class DeviceToolsMixin:
                 return d
         return {"error": f"Driver definition '{driver_id}' not found"}
 
+    @staticmethod
+    def _platform_too_old(required: str) -> bool:
+        """True when the running OpenAVC is older than ``required`` (semver).
+
+        Non-raising counterpart of the REST ``_enforce_min_platform_version``
+        (which raises HTTPException) for the dict-returning tool layer.
+        """
+        from server.version import __version__
+
+        def _parse(v: str) -> tuple:
+            return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
+
+        try:
+            return _parse(__version__) < _parse(required)
+        except (ValueError, AttributeError):
+            return False
+
     async def _install_community_driver(self, input: dict) -> Any:
+        from urllib.parse import urlparse
+
         from server.core.device_manager import register_driver
         from server.drivers.driver_loader import load_driver_file, load_python_driver_file
         from server.drivers.configurable import create_configurable_driver_class
+        # Reuse the REST install's GitHub allowlist + YAML peek so both install
+        # paths stay on one source of truth.
+        from server.api.routes.drivers import _GITHUB_HOSTS, _peek_min_platform_version
 
         driver_id = input.get("driver_id", "")
         file_url = input.get("file_url", "")
         if not file_url:
             return {"error": "No file_url provided"}
+
+        # SSRF guard: the AI is semi-trusted and fetches from the agent's network
+        # position. Restrict to GitHub hosts (the community repo) so the AI path
+        # can't be steered at intranet or cloud-metadata endpoints — parity with
+        # the REST /api/drivers/install allowlist.
+        parsed_url = urlparse(file_url)
+        if not parsed_url.hostname or parsed_url.hostname not in _GITHUB_HOSTS:
+            return {"error": f"Driver URL must be from GitHub ({', '.join(sorted(_GITHUB_HOSTS))})"}
+
+        # min_platform_version gate (parity with REST): block a driver declaring a
+        # newer platform than we run. Enforced from the request field up front,
+        # then again from the YAML itself after download.
+        req_min = input.get("min_platform_version")
+        if req_min and self._platform_too_old(req_min):
+            return {"error": f"This driver requires OpenAVC {req_min} or later. Update OpenAVC first."}
 
         driver_repo = self._get_driver_repo_dir()
         driver_repo.mkdir(parents=True, exist_ok=True)
@@ -570,9 +656,18 @@ class DeviceToolsMixin:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(file_url)
                 resp.raise_for_status()
-                filepath.write_text(resp.text, encoding="utf-8")
+                text = resp.text
+                filepath.write_text(text, encoding="utf-8")
         except (httpx.HTTPError, OSError) as e:
             return {"error": f"Download failed: {e}"}
+
+        # Authoritative min-version gate from the file itself (independent of the
+        # request field, so a caller can't skip it by omitting the field).
+        if ext == ".avcdriver":
+            yaml_min = _peek_min_platform_version(text)
+            if yaml_min and self._platform_too_old(yaml_min):
+                filepath.unlink(missing_ok=True)
+                return {"error": f"This driver requires OpenAVC {yaml_min} or later. Update OpenAVC first."}
 
         try:
             if ext == ".avcdriver":
@@ -581,13 +676,22 @@ class DeviceToolsMixin:
                     filepath.unlink(missing_ok=True)
                     return {"error": "Invalid driver definition file"}
                 driver_class = create_configurable_driver_class(driver_def)
-                register_driver(driver_class)
             else:
                 driver_class = load_python_driver_file(filepath)
                 if driver_class is None:
                     filepath.unlink(missing_ok=True)
                     return {"error": "No valid driver class found in Python file"}
-                register_driver(driver_class)
+            # The registry keys on the file's own DRIVER_INFO id, but the
+            # filename and the listing/edit/delete tools key on the requested
+            # driver_id. If they diverge, later edit/delete can't find the driver
+            # and a mismatched id can silently overwrite an unrelated registered
+            # driver — require them to agree before registering.
+            info = getattr(driver_class, "DRIVER_INFO", None)
+            internal_id = info.get("id") if isinstance(info, dict) else None
+            if internal_id and internal_id != driver_id:
+                filepath.unlink(missing_ok=True)
+                return {"error": f"Downloaded driver declares id '{internal_id}', not the requested '{driver_id}'. Install it under id '{internal_id}'."}
+            register_driver(driver_class)
         except Exception as e:
             # Catch-all: driver loading can fail with YAML, import, or validation errors
             filepath.unlink(missing_ok=True)
@@ -620,28 +724,53 @@ class DeviceToolsMixin:
         return {"status": "created", "id": definition["id"]}
 
     async def _update_driver_definition(self, input: dict) -> Any:
-        from server.drivers.driver_loader import delete_driver_definition, list_driver_definitions, save_driver_definition, validate_driver_definition
+        from pathlib import Path
+
+        from server.drivers.driver_loader import list_driver_definitions, save_driver_definition, validate_driver_definition
         from server.drivers.configurable import create_configurable_driver_class
         from server.core.device_manager import register_driver
+        from server.system_config import DRIVER_DEFINITIONS_DIR
 
         driver_id = input.get("driver_id", "")
         definition = input.get("definition", {})
+        if not definition.get("id"):
+            return {"error": "Driver definition must have an 'id' field"}
         dirs = self._get_driver_dirs()
 
         existing = list_driver_definitions(dirs)
-        if not any(d.get("id") == driver_id for d in existing):
+        match = next((d for d in existing if d.get("id") == driver_id), None)
+        if match is None:
             return {"error": f"Driver definition '{driver_id}' not found"}
+
+        # Source guard: never modify a shipped built-in (the IDE enforces this
+        # with a read-only gate; the AI path must too). Built-ins live in the
+        # read-only DRIVER_DEFINITIONS_DIR; user drivers live in driver_repo.
+        builtin_root = str(Path(DRIVER_DEFINITIONS_DIR).resolve())
+        src = match.get("_source_file")
+        old_path = Path(src) if src else None
+        if old_path and str(old_path.resolve()).startswith(builtin_root):
+            return {"error": f"Driver '{driver_id}' is a built-in and cannot be modified. Duplicate it under a new id first."}
 
         errors = validate_driver_definition(definition)
         if errors:
             return {"error": "; ".join(errors)}
 
-        delete_driver_definition(driver_id, dirs)
+        # A rename onto an id owned by a DIFFERENT driver would clobber it.
+        new_id = definition["id"]
+        if new_id != driver_id and any(d.get("id") == new_id for d in existing):
+            return {"error": f"A driver definition with id '{new_id}' already exists"}
+
+        # Save the replacement FIRST (save_driver_definition is an atomic
+        # temp-write + os.replace), then drop the old file only when the id
+        # changed (different filename). The previous delete-then-save could leave
+        # the user with no driver file at all if the save failed.
         save_dir = dirs[1] if len(dirs) > 1 else dirs[0]
-        save_driver_definition(definition, save_dir)
+        new_path = save_driver_definition(definition, save_dir)
+        if old_path and old_path.resolve() != new_path.resolve():
+            old_path.unlink(missing_ok=True)
         driver_class = create_configurable_driver_class(definition)
         register_driver(driver_class)
-        return {"status": "updated", "id": definition.get("id", driver_id)}
+        return {"status": "updated", "id": new_id}
 
     async def _test_driver_command(self, input: dict) -> Any:
         import asyncio
@@ -656,7 +785,13 @@ class DeviceToolsMixin:
         if not host or not command_string:
             return {"success": False, "error": "host and command_string are required", "response": None}
 
-        delimiter_bytes = delimiter.encode().decode("unicode_escape").encode()
+        # A delimiter routinely carries backslash escapes (\r\n); a truncated one
+        # like '\x' raises here, outside the connection try/except below — catch
+        # it and return an actionable message instead of an opaque codec crash.
+        try:
+            delimiter_bytes = delimiter.encode().decode("unicode_escape").encode()
+        except (UnicodeDecodeError, UnicodeEncodeError) as e:
+            return {"success": False, "error": f"Invalid delimiter escape sequence {delimiter!r}: {e}", "response": None}
 
         try:
             transport = await TCPTransport.create(
