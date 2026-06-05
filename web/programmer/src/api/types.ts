@@ -274,6 +274,7 @@ export interface UISettings {
   page_transition_duration: number;
   element_entry: string;
   element_stagger_ms: number;
+  element_stagger_style?: string;
 }
 
 export interface MasterElement extends UIElement {

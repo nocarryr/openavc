@@ -333,6 +333,81 @@ export function createDefaultElement(
   }
 }
 
+// --- Grid geometry helpers ---
+
+/**
+ * Clamp an element origin so the element's full span stays inside the grid.
+ * Both the palette-drop and click-to-add paths place an element of a known
+ * span; neither may push col+col_span past `columns` (or row+row_span past
+ * `rows`), which overflows the grid and trips validateProject's "extends
+ * beyond the NxN grid" warning. Mirrors the canvas-move clamp.
+ */
+export function clampOriginToGrid(
+  col: number,
+  row: number,
+  colSpan: number,
+  rowSpan: number,
+  columns: number,
+  rows: number,
+): { col: number; row: number } {
+  return {
+    col: Math.max(1, Math.min(columns - colSpan + 1, col)),
+    row: Math.max(1, Math.min(rows - rowSpan + 1, row)),
+  };
+}
+
+/**
+ * Find the first grid position where an element of the given span fits without
+ * overlapping any existing element. Scans row-major. Falls back to a clamped
+ * (1,1) when nothing fits (element larger than the free area) so the result is
+ * always on-grid. Used by click-to-add so a multi-cell element doesn't overflow
+ * the grid or land on top of a neighbour.
+ */
+export function findFreeGridPosition(
+  elements: { grid_area: GridArea }[],
+  colSpan: number,
+  rowSpan: number,
+  columns: number,
+  rows: number,
+): { col: number; row: number } {
+  const occupied = new Set<string>();
+  for (const el of elements) {
+    const { col, row, col_span, row_span } = el.grid_area;
+    for (let r = row; r < row + row_span; r++)
+      for (let c = col; c < col + col_span; c++) occupied.add(`${c},${r}`);
+  }
+  for (let r = 1; r + rowSpan - 1 <= rows; r++) {
+    for (let c = 1; c + colSpan - 1 <= columns; c++) {
+      let fits = true;
+      for (let rr = r; rr < r + rowSpan && fits; rr++)
+        for (let cc = c; cc < c + colSpan && fits; cc++)
+          if (occupied.has(`${cc},${rr}`)) fits = false;
+      if (fits) return { col: c, row: r };
+    }
+  }
+  return clampOriginToGrid(1, 1, colSpan, rowSpan, columns, rows);
+}
+
+/**
+ * Map a pointer coordinate to a 1-based grid cell index. The canvas grid is
+ * drawn inside a container whose CSS padding (outerGap) renders at `pad` screen
+ * pixels; that padding is NOT part of the cell area, so it must be removed from
+ * both the origin and the length before dividing into cells. Without this the
+ * mapping is biased toward the start by ~one pad-width near the far edge,
+ * landing edge drops one cell off.
+ */
+export function pointerToCell(
+  pointerPx: number,
+  rectStart: number,
+  rectLength: number,
+  pad: number,
+  count: number,
+): number {
+  const inner = Math.max(1, rectLength - 2 * pad);
+  const frac = (pointerPx - (rectStart + pad)) / inner;
+  return Math.floor(frac * count) + 1;
+}
+
 // --- Page mutations (return new pages array) ---
 
 export function addPage(
@@ -516,14 +591,18 @@ export function duplicateElementInPage(
   pages: UIPage[],
   pageId: string,
   elementId: string,
+  reservedIds: string[] = [],
 ): UIPage[] {
   const page = pages.find((p) => p.id === pageId);
   if (!page) return pages;
   const element = page.elements.find((e) => e.id === elementId);
   if (!element) return pages;
 
-  // Collect IDs from ALL pages to avoid cross-page collisions
+  // Collect IDs from ALL pages to avoid cross-page collisions, plus any
+  // reserved IDs (master_elements share the ui.<id> namespace) so a duplicate
+  // can't be auto-named onto a master id.
   const existingIds = new Set(pages.flatMap((p) => p.elements.map((e) => e.id)));
+  for (const id of reservedIds) existingIds.add(id);
   const newId = generateId(element.type, existingIds);
   // Place duplicate adjacent, clamped to grid bounds
   let newCol = element.grid_area.col + element.grid_area.col_span;
@@ -968,6 +1047,21 @@ function rewriteVariable(v: VariableConfig, oldId: string, newId: string): Varia
   return k === v.source_key ? v : { ...v, source_key: k as string };
 }
 
+// Map an array, returning the SAME reference when no item changed. The per-item
+// rewriters already preserve reference equality for untouched items, so this
+// lets renameElement hand back the original macros/variables/masters arrays when
+// a rename didn't touch them — which is exactly what the undo-snapshot guard in
+// UIBuilderView checks (result.macros !== project.macros) to keep the entry small.
+function mapPreserve<T>(arr: T[], fn: (item: T) => T): T[] {
+  let changed = false;
+  const next = arr.map((item) => {
+    const r = fn(item);
+    if (r !== item) changed = true;
+    return r;
+  });
+  return changed ? next : arr;
+}
+
 export interface RenameResult {
   pages: UIPage[];
   master_elements: MasterElement[];
@@ -1018,13 +1112,13 @@ export function renameElement(
   oldId: string,
   newId: string,
 ): RenameResult {
-  const newPages = pages.map((p) => ({
-    ...p,
-    elements: p.elements.map((el) => rewriteElement(el, oldId, newId)),
-  }));
-  const newMasters = masterElements.map((m) => rewriteElement(m as unknown as UIElement, oldId, newId) as MasterElement);
-  const newMacros = macros.map((m) => rewriteMacro(m, oldId, newId));
-  const newVars = variables.map((v) => rewriteVariable(v, oldId, newId));
+  const newPages = mapPreserve(pages, (p) => {
+    const elements = mapPreserve(p.elements, (el) => rewriteElement(el, oldId, newId));
+    return elements === p.elements ? p : { ...p, elements };
+  });
+  const newMasters = mapPreserve(masterElements, (m) => rewriteElement(m as unknown as UIElement, oldId, newId) as MasterElement);
+  const newMacros = mapPreserve(macros, (m) => rewriteMacro(m, oldId, newId));
+  const newVars = mapPreserve(variables, (v) => rewriteVariable(v, oldId, newId));
   // Scripts: just list the ones that mention the old ID — caller warns.
   const scriptsToReview = scripts
     .filter((s) => s.file && s.id)

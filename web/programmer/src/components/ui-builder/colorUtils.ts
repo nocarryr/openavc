@@ -113,6 +113,16 @@ export function adjustHex(hex: string, amount: number): string {
   return `#${adjusted.map((c) => clamp255(c).toString(16).padStart(2, "0")).join("")}`;
 }
 
+// Classify a CSS color as a light or dark surface by WCAG relative luminance.
+// Returns null when the value can't be parsed, so a caller can fall back to a
+// heuristic. Used to derive a theme's light/dark mode from its actual panel
+// background instead of guessing from the theme id.
+export function isLightColor(value: string): boolean | null {
+  const c = parseColor(value);
+  if (!c) return null;
+  return relativeLuminance(c.r, c.g, c.b) > 0.5;
+}
+
 export function deriveSurfaceBorder(surface: string): string {
   const rgb = parseColor(surface);
   if (!rgb) return surface;

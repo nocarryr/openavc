@@ -375,7 +375,7 @@ Add visual polish to your panel with page transitions and element animations. Co
 | `scale` | Elements grow from small to full size |
 | `stagger` | Elements animate in one after another with a delay |
 
-**Transition duration** (in ms) controls the speed of page transitions. **Stagger delay** (in ms) sets the interval between each element when using the stagger animation. Lower values make elements appear faster in sequence.
+**Transition duration** (in ms) controls the speed of page transitions. **Stagger delay** (in ms) sets the interval between each element when using the stagger animation. Lower values make elements appear faster in sequence. **Stagger style** picks how each element animates in as the stagger sweeps across the page: fade, fade up, or scale.
 
 ## Theme Studio
 

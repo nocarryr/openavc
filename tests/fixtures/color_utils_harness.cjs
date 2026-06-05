@@ -91,4 +91,20 @@ results.css_var_fallbacks = {
   detail: C.CSS_VAR_FALLBACKS.panel_bg,
 };
 
+// L-053: isLightColor classifies a theme's panel background by luminance, so the
+// light/dark fallback mode is derived from the actual color, not the theme id.
+results.l053_is_light = {
+  pass:
+    C.isLightColor("#f5f5f5") === true &&   // light-modern panel_bg
+    C.isLightColor("#1a1a2e") === false &&  // dark-default panel_bg
+    C.isLightColor("transparent") === null && // unparseable → caller falls back
+    C.isLightColor("not-a-color") === null,
+  detail: [
+    C.isLightColor("#f5f5f5"),
+    C.isLightColor("#1a1a2e"),
+    C.isLightColor("transparent"),
+    C.isLightColor("not-a-color"),
+  ],
+};
+
 process.stdout.write(JSON.stringify(results));

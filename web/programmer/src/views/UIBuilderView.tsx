@@ -47,8 +47,12 @@ import {
   renameElement,
   validateElementId,
   validateProject,
+  clampOriginToGrid,
+  findFreeGridPosition,
+  pointerToCell,
   type ValidationIssue,
 } from "../components/ui-builder/uiBuilderHelpers";
+import { isLightColor } from "../components/ui-builder/colorUtils";
 import { showSuccess, showInfo } from "../store/toastStore";
 
 export function UIBuilderView() {
@@ -125,6 +129,18 @@ export function UIBuilderView() {
   const dragCellSize = useRef<{ w: number; h: number }>({ w: 60, h: 50 });
   // Grid offset between pointer and element's top-left at drag start (in grid cells)
   const dragGridOffset = useRef<{ col: number; row: number }>({ col: 0, row: 0 });
+  // Pixel offset of the pointer within the palette button at drag start. The
+  // drag overlay is anchored to the button origin, but a palette button is a
+  // fixed size while the ghost footprint is sized to (zoom-scaled) grid cells —
+  // so for palette drags the overlay is re-centred under the pointer using this.
+  const dragGrabPx = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Canvas grid container padding (matches Canvas.tsx outerGap / the panel's
+  // grid gap). The drop math must exclude it from the cell area.
+  const outerGap = useMemo(
+    () => (typeof themeVariables.grid_gap === "number" ? themeVariables.grid_gap : 8),
+    [themeVariables],
+  );
 
   // Auto-select first page if none selected
   useEffect(() => {
@@ -314,13 +330,16 @@ export function UIBuilderView() {
               });
             }
             return result;
-          }, `Nudge ${e.key.replace("Arrow", "").toLowerCase()}`);
+          }, `Nudge ${e.key.replace("Arrow", "").toLowerCase()}`, true);
           return;
         }
       }
 
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedMasterElementId) {
+          // A locked master is protected from accidental keyboard deletion,
+          // matching the nudge guard and the page-element delete guard below.
+          if (lockedElementIds.has(selectedMasterElementId)) return;
           e.preventDefault();
           handleDeleteMasterElement(selectedMasterElementId);
           return;
@@ -346,10 +365,17 @@ export function UIBuilderView() {
       if ((e.ctrlKey || e.metaKey) && !inInput) {
         if (e.key === "z" && !e.shiftKey) {
           e.preventDefault();
+          // End any in-flight property-edit burst so the next edit captures a
+          // fresh undo snapshot (a property-edit undo keeps the selection, so
+          // the selection-change reset effect doesn't fire on its own).
+          propertyUndoPushed.current = false;
+          clearTimeout(propertyUndoTimer.current);
           undo();
         }
         if ((e.key === "z" && e.shiftKey) || e.key === "y") {
           e.preventDefault();
+          propertyUndoPushed.current = false;
+          clearTimeout(propertyUndoTimer.current);
           redo();
         }
         if (e.key === "s" && !e.shiftKey) {
@@ -373,10 +399,11 @@ export function UIBuilderView() {
           if (selectedElementIds.length === 1) {
             handleDuplicateElement(selectedElementIds[0]);
           } else {
+            const masterIds = masterElements.map((m) => m.id);
             applyMutation((pages) => {
               let result = pages;
               for (const eid of selectedElementIds) {
-                result = duplicateElementInPage(result, currentPage.id, eid);
+                result = duplicateElementInPage(result, currentPage.id, eid, masterIds);
               }
               return result;
             }, `Duplicate ${selectedElementIds.length} elements`);
@@ -410,18 +437,32 @@ export function UIBuilderView() {
   const propertyUndoTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // --- Mutation helpers ---
+  // When `coalesce` is set the mutation joins the current property-edit burst:
+  // undo is pushed once and re-armed on an 800ms idle timer, so a held arrow
+  // (one nudge per keypress) collapses into a single undoable gesture instead
+  // of flooding the 50-entry undo stack. Structural mutations leave it false,
+  // which bookends any in-flight burst and starts a fresh entry.
   const applyMutation = useCallback(
-    (mutate: (pages: UIPage[]) => UIPage[], description: string) => {
+    (mutate: (pages: UIPage[]) => UIPage[], description: string, coalesce = false) => {
       if (!project) return;
-      pushUndo({ pages: project.ui.pages }, description);
-      // Structural mutations bookend any in-flight property-edit burst:
-      // reset the burst flag so the next typed edit starts a fresh undo entry
-      // capturing the post-structural pages.
-      propertyUndoPushed.current = false;
+      if (coalesce) {
+        if (!propertyUndoPushed.current) {
+          pushUndo({ pages: project.ui.pages }, description);
+          propertyUndoPushed.current = true;
+        }
+      } else {
+        pushUndo({ pages: project.ui.pages }, description);
+        propertyUndoPushed.current = false;
+      }
       clearTimeout(propertyUndoTimer.current);
       const newPages = mutate(project.ui.pages);
       update({ ui: { ...project.ui, pages: newPages } });
       touchMutation();
+      if (coalesce) {
+        propertyUndoTimer.current = setTimeout(() => {
+          propertyUndoPushed.current = false;
+        }, 800);
+      }
     },
     [project, pushUndo, update, touchMutation],
   );
@@ -438,9 +479,10 @@ export function UIBuilderView() {
   const handleDuplicateElement = useCallback(
     (elementId: string) => {
       if (!currentPage) return;
-      applyMutation((p) => duplicateElementInPage(p, currentPage.id, elementId), "Duplicate element");
+      const masterIds = masterElements.map((m) => m.id);
+      applyMutation((p) => duplicateElementInPage(p, currentPage.id, elementId, masterIds), "Duplicate element");
     },
-    [currentPage, applyMutation],
+    [currentPage, masterElements, applyMutation],
   );
 
   const handleCopyElement = useCallback(
@@ -456,7 +498,12 @@ export function UIBuilderView() {
 
   const handlePasteElement = useCallback(() => {
     if (!clipboard || clipboard.length === 0 || !currentPage) return;
-    const existingIds = new Set(pages.flatMap((p) => p.elements.map((e) => e.id)));
+    // Page element ids and master ids share the ui.<id> runtime namespace, so a
+    // pasted element must avoid colliding with either.
+    const existingIds = new Set([
+      ...pages.flatMap((p) => p.elements.map((e) => e.id)),
+      ...masterElements.map((m) => m.id),
+    ]);
     const newElements: UIElement[] = [];
     for (const src of clipboard) {
       let id = src.id;
@@ -486,7 +533,7 @@ export function UIBuilderView() {
       }
       return result;
     }, `Paste ${newElements.length === 1 ? "element" : `${newElements.length} elements`}`);
-  }, [clipboard, currentPage, pages, applyMutation]);
+  }, [clipboard, currentPage, pages, masterElements, applyMutation]);
 
   const handleBringToFront = useCallback(
     (elementId: string) => {
@@ -650,6 +697,16 @@ export function UIBuilderView() {
       pushUndo({ settings }, "Change theme");
       propertyUndoPushed.current = false;
       clearTimeout(propertyUndoTimer.current);
+      // Derive the light/dark fallback (settings.theme) from the theme's actual
+      // panel background luminance, not its id. settings.theme is only the
+      // fallback used when theme_id can't be resolved; a light theme whose id
+      // lacks "light" must still fall back to a light treatment. Fall back to the
+      // id heuristic only when the background can't be read.
+      const bg = themes.find((t) => t.id === id)?.variables?.panel_bg;
+      const light = typeof bg === "string" ? isLightColor(bg) : null;
+      const mode = light === null
+        ? (id.includes("light") || id === "minimal" ? "light" : "dark")
+        : (light ? "light" : "dark");
       // Clear accent_color / font_family / theme_overrides when switching
       // themes. These are per-project overrides that were tuned for the
       // PREVIOUS theme — carrying them forward makes the new theme look
@@ -660,7 +717,7 @@ export function UIBuilderView() {
           settings: {
             ...settings,
             theme_id: id,
-            theme: id.includes("light") || id === "minimal" ? "light" : "dark",
+            theme: mode,
             accent_color: "",
             font_family: "",
             theme_overrides: {},
@@ -669,7 +726,7 @@ export function UIBuilderView() {
       });
       touchMutation();
     },
-    [project, pushUndo, update, touchMutation],
+    [project, themes, pushUndo, update, touchMutation],
   );
 
   // Live theme variable overrides — burst-undo so dragging a color picker
@@ -801,50 +858,48 @@ export function UIBuilderView() {
         draggedElement.current = null;
       }
 
-      // Measure canvas cell size for overlay dimensions
+      // Measure canvas cell size for overlay dimensions. The grid container's
+      // padding (outerGap, zoom-scaled on screen) isn't part of the cell area,
+      // so exclude it — both here and in pointerToCell below.
       const canvasGrid = document.querySelector("[data-canvas-grid]");
       if (canvasGrid) {
         const rect = canvasGrid.getBoundingClientRect();
         const cols = cp?.grid.columns || 12;
         const rows = cp?.grid.rows || 8;
-        dragCellSize.current = { w: rect.width / cols, h: rect.height / rows };
+        const pad = outerGap * zoom;
+        const innerW = Math.max(1, rect.width - 2 * pad);
+        const innerH = Math.max(1, rect.height - 2 * pad);
+        dragCellSize.current = { w: innerW / cols, h: innerH / rows };
 
         // Calculate grid offset: how far the pointer is from the element's top-left
         if (data?.source === "canvas" && draggedElement.current) {
           // For canvas drags, compute pointer offset within the element (in grid cells)
-          const pointerCol = Math.floor(
-            ((pointerEvent.clientX - rect.left) / rect.width) * cols,
-          ) + 1;
-          const pointerRow = Math.floor(
-            ((pointerEvent.clientY - rect.top) / rect.height) * rows,
-          ) + 1;
+          const pointerCol = pointerToCell(pointerEvent.clientX, rect.left, rect.width, pad, cols);
+          const pointerRow = pointerToCell(pointerEvent.clientY, rect.top, rect.height, pad, rows);
           dragGridOffset.current = {
             col: pointerCol - draggedElement.current.grid_area.col,
             row: pointerRow - draggedElement.current.grid_area.row,
           };
         } else if (draggedElement.current) {
-          // For palette/template drags, the DragOverlay is anchored to the
-          // palette button's top-left. The pointer offset within the overlay
-          // equals the click offset within the palette button. Convert that
-          // pixel offset to grid cells so the element lands where the overlay
-          // appeared.
+          // For palette/template drags, centre the element under the pointer.
+          // This is zoom-independent (the old "pointer-px / scaled-cell" math
+          // ballooned the offset as zoom fell). The DragOverlay is re-centred to
+          // match using dragGrabPx so the ghost and the landing spot agree.
           const activeRect = event.active.rect.current.initial;
-          const cellW = dragCellSize.current.w;
-          const cellH = dragCellSize.current.h;
+          dragGrabPx.current = {
+            x: activeRect ? pointerEvent.clientX - activeRect.left : 0,
+            y: activeRect ? pointerEvent.clientY - activeRect.top : 0,
+          };
           dragGridOffset.current = {
-            col: activeRect && cellW > 0
-              ? Math.floor((pointerEvent.clientX - activeRect.left) / cellW)
-              : 0,
-            row: activeRect && cellH > 0
-              ? Math.floor((pointerEvent.clientY - activeRect.top) / cellH)
-              : 0,
+            col: Math.floor(draggedElement.current.grid_area.col_span / 2),
+            row: Math.floor(draggedElement.current.grid_area.row_span / 2),
           };
         } else {
           dragGridOffset.current = { col: 0, row: 0 };
         }
       }
     },
-    [setActiveDragSource, pages, selectedPageId, panelElements],
+    [setActiveDragSource, pages, selectedPageId, panelElements, outerGap, zoom],
   );
 
   const handleDragEnd = useCallback(
@@ -871,23 +926,23 @@ export function UIBuilderView() {
       const pointerY = dragStartPointer.current.y + delta.y;
 
       const { columns, rows } = currentPage.grid;
-      // Raw grid cell under the pointer
-      const rawCol = Math.floor(
-        ((pointerX - canvasRect.left) / canvasRect.width) * columns,
-      ) + 1;
-      const rawRow = Math.floor(
-        ((pointerY - canvasRect.top) / canvasRect.height) * rows,
-      ) + 1;
-      // Adjust for pointer offset within the element (canvas drags maintain
-      // the click position; palette drags center the element under the pointer)
-      const col = Math.max(1, Math.min(columns, rawCol - dragGridOffset.current.col));
-      const row = Math.max(1, Math.min(rows, rawRow - dragGridOffset.current.row));
+      const pad = outerGap * zoom;
+      // Grid cell under the pointer (padding excluded from the cell area)
+      const rawCol = pointerToCell(pointerX, canvasRect.left, canvasRect.width, pad, columns);
+      const rawRow = pointerToCell(pointerY, canvasRect.top, canvasRect.height, pad, rows);
+      // Element top-left = cell under pointer minus the grab/centre offset
+      // captured at drag start. Span clamping happens per-branch below, since
+      // only there is the element's span known.
+      const col = rawCol - dragGridOffset.current.col;
+      const row = rawRow - dragGridOffset.current.row;
 
       if (data.source === "palette" && data.elementType) {
-        // Create new element — collect IDs from ALL pages to avoid cross-page collisions
-        const existingIds = new Set(
-          pages.flatMap((p) => p.elements.map((e) => e.id)),
-        );
+        // Create new element — collect IDs from ALL pages AND master_elements
+        // (shared ui.<id> namespace) to avoid collisions.
+        const existingIds = new Set([
+          ...pages.flatMap((p) => p.elements.map((e) => e.id)),
+          ...masterElements.map((m) => m.id),
+        ]);
         const newElement = createDefaultElement(
           data.elementType,
           col,
@@ -895,6 +950,15 @@ export function UIBuilderView() {
           existingIds,
           panelElements,
         );
+        // Clamp so the element's full span stays on-grid (origin alone isn't
+        // enough — a wide element dropped near the right/bottom edge overflows).
+        const placed = clampOriginToGrid(
+          col, row,
+          newElement.grid_area.col_span, newElement.grid_area.row_span,
+          columns, rows,
+        );
+        newElement.grid_area.col = placed.col;
+        newElement.grid_area.row = placed.row;
         applyMutation(
           (p) => addElementToPage(p, currentPage.id, newElement),
           `Add ${data.elementType}`,
@@ -927,7 +991,7 @@ export function UIBuilderView() {
 
       dragStartPointer.current = null;
     },
-    [currentPage, pages, project, applyMutation, selectElement, setActiveDragSource, panelElements],
+    [currentPage, pages, masterElements, project, applyMutation, selectElement, setActiveDragSource, panelElements, outerGap, zoom],
   );
 
   const handleDragCancel = useCallback(() => {
@@ -1126,22 +1190,24 @@ export function UIBuilderView() {
                         disabled={previewMode}
                         onAdd={(type) => {
                           if (!currentPage || !project) return;
-                          const existingIds = new Set(pages.flatMap((p) => p.elements.map((e) => e.id)));
+                          // Page + master ids share the ui.<id> namespace.
+                          const existingIds = new Set([
+                            ...pages.flatMap((p) => p.elements.map((e) => e.id)),
+                            ...masterElements.map((m) => m.id),
+                          ]);
                           const { columns, rows: gridRows } = currentPage.grid;
-                          const occupied = new Set<string>();
-                          for (const el of currentPage.elements) {
-                            const { col: ec, row: er, col_span: cs, row_span: rs } = el.grid_area;
-                            for (let r = er; r < er + rs; r++)
-                              for (let c = ec; c < ec + cs; c++)
-                                occupied.add(`${c},${r}`);
-                          }
-                          let col = 1, row = 1;
-                          for (let r = 1; r <= gridRows; r++) {
-                            for (let c = 1; c <= columns; c++) {
-                              if (!occupied.has(`${c},${r}`)) { col = c; row = r; r = gridRows + 1; break; }
-                            }
-                          }
-                          const newElement = createDefaultElement(type, col, row, existingIds, panelElements);
+                          const newElement = createDefaultElement(type, 1, 1, existingIds, panelElements);
+                          // Place at the first spot where the element's full span
+                          // fits without overlapping a neighbour (not just the
+                          // first free single cell), so it can't overflow or overlap.
+                          const placed = findFreeGridPosition(
+                            currentPage.elements,
+                            newElement.grid_area.col_span,
+                            newElement.grid_area.row_span,
+                            columns, gridRows,
+                          );
+                          newElement.grid_area.col = placed.col;
+                          newElement.grid_area.row = placed.row;
                           applyMutation(
                             (p) => addElementToPage(p, currentPage.id, newElement),
                             `Add ${type}`,
@@ -1259,30 +1325,44 @@ export function UIBuilderView() {
 
       {/* Drag overlay — outlined footprint sized to the drop target, with the element type label. */}
       <DragOverlay dropAnimation={null}>
-        {activeDragSource && draggedElement.current ? (
-          <div
-            style={{
-              width: draggedElement.current.grid_area.col_span * dragCellSize.current.w,
-              height: draggedElement.current.grid_area.row_span * dragCellSize.current.h,
-              opacity: 0.85,
-              pointerEvents: "none",
-              filter: "drop-shadow(0 4px 16px rgba(0,0,0,0.5))",
-              borderRadius: 8,
-              outline: "2px solid var(--accent)",
-              outlineOffset: -1,
-              background: "var(--bg-elevated)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--text-primary)",
-              fontSize: "var(--font-size-sm)",
-              fontWeight: 500,
-              textTransform: "capitalize",
-            }}
-          >
-            {draggedElement.current.type.replace(/_/g, " ")}
-          </div>
-        ) : null}
+        {activeDragSource && draggedElement.current ? (() => {
+          const ghost = draggedElement.current;
+          if (!ghost) return null;
+          const ghostW = ghost.grid_area.col_span * dragCellSize.current.w;
+          const ghostH = ghost.grid_area.row_span * dragCellSize.current.h;
+          // dnd-kit anchors the overlay to the palette button's origin. For a
+          // palette drag, shift the (cell-sized) ghost so its centre sits under
+          // the pointer — matching the centred drop placement. Canvas drags keep
+          // the grab point, so no shift.
+          const recenter = activeDragSource === "palette"
+            ? `translate(${dragGrabPx.current.x - ghostW / 2}px, ${dragGrabPx.current.y - ghostH / 2}px)`
+            : undefined;
+          return (
+            <div
+              style={{
+                width: ghostW,
+                height: ghostH,
+                transform: recenter,
+                opacity: 0.85,
+                pointerEvents: "none",
+                filter: "drop-shadow(0 4px 16px rgba(0,0,0,0.5))",
+                borderRadius: 8,
+                outline: "2px solid var(--accent)",
+                outlineOffset: -1,
+                background: "var(--bg-elevated)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-primary)",
+                fontSize: "var(--font-size-sm)",
+                fontWeight: 500,
+                textTransform: "capitalize",
+              }}
+            >
+              {ghost.type.replace(/_/g, " ")}
+            </div>
+          );
+        })() : null}
       </DragOverlay>
 
       {/* Context menu */}
@@ -1310,10 +1390,11 @@ export function UIBuilderView() {
           }}
           onDuplicateAll={() => {
             if (currentPage) {
+              const masterIds = masterElements.map((m) => m.id);
               applyMutation((pages) => {
                 let result = pages;
                 for (const eid of selectedElementIds) {
-                  result = duplicateElementInPage(result, currentPage.id, eid);
+                  result = duplicateElementInPage(result, currentPage.id, eid, masterIds);
                 }
                 return result;
               }, `Duplicate ${selectedElementIds.length} elements`);
@@ -1666,9 +1747,26 @@ function UISettingsDialog({
                 <option value="fade">Fade In</option>
                 <option value="fade-up">Fade Up</option>
                 <option value="scale">Scale In</option>
-                <option value="stagger">Stagger (fade up)</option>
+                <option value="stagger">Stagger</option>
               </select>
             </div>
+            {draft.element_entry === "stagger" && (
+              <div style={fieldStyle}>
+                <label style={labelStyle}>Stagger Style</label>
+                <select
+                  value={draft.element_stagger_style || "fade-up"}
+                  onChange={(e) => patch({ element_stagger_style: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="fade">Fade</option>
+                  <option value="fade-up">Fade Up</option>
+                  <option value="scale">Scale</option>
+                </select>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                  How each element animates in as the stagger sweeps across the page.
+                </div>
+              </div>
+            )}
             {draft.element_entry === "stagger" && (
               <div style={fieldStyle}>
                 <label style={labelStyle}>Stagger Delay</label>
