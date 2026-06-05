@@ -51,10 +51,18 @@ class BaseDriver(ABC):
         self._poll_task: asyncio.Task | None = None
         self._connected = False
         self._last_poll_success: float = 0.0
-        # Registered child entities: {child_type: {local_id: True}}. The inner
-        # mapping is a dict (not a set) so it preserves insertion order, which
-        # makes list_children() output stable for tests and IDE displays.
-        self._children: dict[str, dict[int, bool]] = {}
+        # Strong refs to fire-and-forget tasks (disconnect cleanup) so the GC
+        # can't collect them mid-run — a bare create_task is only weakly held.
+        self._bg_tasks: set[asyncio.Task] = set()
+        # Registered child entities: {child_type: {local_id: register_epoch}}.
+        # The inner mapping is a dict (not a set) so it preserves insertion
+        # order, which makes list_children() output stable for tests and IDE
+        # displays. The value is a monotonic registration epoch (always
+        # truthy) used by poll_children to detect a child that was
+        # deregistered+re-registered mid-poll (its state was reset) so a stale
+        # write doesn't clobber the reset (ABA guard).
+        self._children: dict[str, dict[int, int]] = {}
+        self._child_register_seq = 0
         # Project-side child metadata: {child_type: {local_id_padded: {label, config}}}.
         # Populated by DeviceManager.add_device after construction (via
         # set_project_child_entities) so existing driver subclasses with a
@@ -86,17 +94,40 @@ class BaseDriver(ABC):
             return False
         return getattr(self.transport, "connected", False)
 
+    @staticmethod
+    def _numeric_default(var_def: dict[str, Any], *, as_int: bool) -> int | float:
+        """Default for an integer/number/float state var: its declared ``min``
+        (or 0), coerced to the right numeric type.
+
+        A non-numeric ``min`` (e.g. a hand-edited driver with ``min: "low"``)
+        is an authoring bug; fall back to 0 with a warning rather than crashing
+        driver instantiation with an uncaught ValueError.
+        """
+        raw = var_def.get("min", 0)
+        try:
+            return int(raw) if as_int else float(raw)
+        except (TypeError, ValueError):
+            log.warning(
+                "state variable declares a non-numeric 'min' %r; defaulting to 0",
+                raw,
+            )
+            return 0 if as_int else 0.0
+
     def _init_state_variables(self) -> None:
         """Register all state variables from DRIVER_INFO with default values."""
         state_vars = self.DRIVER_INFO.get("state_variables", {})
         for prop_name, prop_info in state_vars.items():
             var_type = prop_info.get("type", "string")
             if var_type == "boolean":
-                default = False
+                default: Any = False
             elif var_type == "integer":
-                default = prop_info.get("min", 0)
-            elif var_type == "number":
-                default = float(prop_info.get("min", 0))
+                default = self._numeric_default(prop_info, as_int=True)
+            elif var_type in ("number", "float"):
+                # 'float' is an accepted type alias for 'number' (driver loader
+                # + schema). Both must seed a numeric 0.0, not '' — otherwise a
+                # consumer reading the var before the first poll gets a string
+                # where a number is expected.
+                default = self._numeric_default(prop_info, as_int=False)
             elif var_type == "enum":
                 values = prop_info.get("values", [])
                 default = values[0] if values else ""
@@ -153,11 +184,10 @@ class BaseDriver(ABC):
             from server.transport.serial_transport import SerialTransport
 
             serial_port = self.config.get("port", "")
-            baudrate = self.config.get("baudrate", 9600)
             delay = self.config.get("inter_command_delay", 0.0)
-            bytesize = self.config.get("bytesize", 8)
-            parity = self.config.get("parity", "N")
-            stopbits = self.config.get("stopbits", 1)
+            baudrate, bytesize, parity, stopbits = self._coerce_serial_params(
+                self.config
+            )
 
             self.transport = await SerialTransport.create(
                 port=serial_port,
@@ -365,6 +395,61 @@ class BaseDriver(ABC):
         indicate the device is reachable but not in a queryable state.
         """
 
+    @staticmethod
+    def _coerce_serial_params(config: dict[str, Any]) -> tuple[int, int, str, int | float]:
+        """Coerce + validate serial params from untyped project config.
+
+        Project config is untyped JSON, so an integrator / AI tool / hand-edit
+        can store ``bytesize: "8"`` or ``stopbits: "1.5"`` as strings, or a
+        flat-out invalid value. pyserial does exact membership tests and raises
+        a bare ValueError at connect that the device manager then buries under
+        ~120 generic reconnect attempts. Coerce string forms to the right type
+        and raise a clear, actionable error for genuinely invalid values.
+
+        Returns ``(baudrate, bytesize, parity, stopbits)``.
+        """
+        try:
+            baudrate = int(config.get("baudrate", 9600))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid baudrate {config.get('baudrate')!r} (must be an integer)"
+            )
+        try:
+            bytesize = int(config.get("bytesize", 8))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid bytesize {config.get('bytesize')!r} (must be 5, 6, 7, or 8)"
+            )
+        if bytesize not in (5, 6, 7, 8):
+            raise ValueError(f"Invalid bytesize {bytesize} (must be 5, 6, 7, or 8)")
+
+        parity = str(config.get("parity", "N")).upper()
+        if parity not in ("N", "E", "O", "M", "S"):
+            raise ValueError(
+                f"Invalid parity {config.get('parity')!r} (must be one of N, E, O, M, S)"
+            )
+
+        raw_stopbits = config.get("stopbits", 1)
+        try:
+            stopbits_f = float(raw_stopbits)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid stopbits {raw_stopbits!r} (must be 1, 1.5, or 2)"
+            )
+        # pyserial wants ints for 1/2 and the float 1.5 for one-and-a-half.
+        stopbits: int | float
+        if stopbits_f == 1.0:
+            stopbits = 1
+        elif stopbits_f == 2.0:
+            stopbits = 2
+        elif stopbits_f == 1.5:
+            stopbits = 1.5
+        else:
+            raise ValueError(
+                f"Invalid stopbits {raw_stopbits!r} (must be 1, 1.5, or 2)"
+            )
+        return baudrate, bytesize, parity, stopbits
+
     def _required_port(self) -> int:
         """Return ``config['port']`` for TCP/UDP/OSC, or raise a clear error.
 
@@ -459,22 +544,57 @@ class BaseDriver(ABC):
         """
         Standard disconnect handler for transport callbacks.
 
-        Sets connected state to False and emits disconnect event.
-        Override for custom disconnect behavior.
+        Sets connected state to False, then schedules cleanup (stop polling,
+        close the now-dead transport, emit the disconnect event). Override for
+        custom disconnect behavior.
         """
         self._connected = False
         self.set_state("connected", False)
         log.warning(f"[{self.device_id}] Connection lost")
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.stop_polling())
-            loop.create_task(
-                self.events.emit(f"device.disconnected.{self.device_id}")
-            )
         except RuntimeError:
             log.warning(
                 f"[{self.device_id}] No event loop during disconnect — "
-                f"polling may not stop cleanly"
+                f"polling/transport may not be cleaned up"
+            )
+            return
+        # Keep a strong reference until the task finishes — a bare create_task
+        # is only weakly held and can be GC'd before it runs, orphaning the
+        # poll loop or skipping the disconnect event.
+        task = loop.create_task(self._on_disconnect_cleanup())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _on_disconnect_cleanup(self) -> None:
+        """Stop polling, close the dead transport, and emit the disconnect event.
+
+        Closing the transport here (not only on the graceful ``disconnect()``
+        path) releases the socket / bound UDP port / pooled HTTP client
+        immediately instead of holding it for the whole reconnect-backoff
+        window (up to ~1h). The live ref is nulled so auto-reconnect rebuilds
+        it; the disconnect event is emitted last so the reconnect's connect()
+        doesn't race the close. Closing is safe in the watchdog path too — a
+        transport's close() sets its own connected=False before tearing down,
+        so it never re-enters this handler.
+        """
+        await self.stop_polling()
+        transport = self.transport
+        self.transport = None
+        if transport is not None:
+            try:
+                await transport.close()
+            except Exception:
+                log.debug(
+                    f"[{self.device_id}] Error closing transport on disconnect",
+                    exc_info=True,
+                )
+        try:
+            await self.events.emit(f"device.disconnected.{self.device_id}")
+        except Exception:
+            log.debug(
+                f"[{self.device_id}] Failed to emit disconnect event",
+                exc_info=True,
             )
 
     # --- Polling ---
@@ -519,7 +639,14 @@ class BaseDriver(ABC):
         except ImportError:
             httpx_errors = ()
 
-        max_dry_polls = self.config.get("max_missed_polls", 3)
+        # Clamp to >= 1: a config value of 0 (or negative, or non-numeric) would
+        # make `dry_polls >= max_dry_polls` true after the first poll and mark a
+        # healthy device disconnected. The watchdog can't be disabled by setting
+        # 0 — the minimum is one missed poll.
+        try:
+            max_dry_polls = max(int(self.config.get("max_missed_polls", 3)), 1)
+        except (TypeError, ValueError):
+            max_dry_polls = 3
         dry_polls = 0
         # Seed at loop start so we don't false-positive before the first poll.
         self._last_poll_success = time.monotonic()
@@ -592,6 +719,11 @@ class BaseDriver(ABC):
             log.debug(
                 f"[{self.device_id}] State '{prop_label}' declared as "
                 f"integer but got {type(value).__name__}: {value!r}"
+            )
+        elif declared in ("number", "float") and not isinstance(value, (int, float)):
+            log.debug(
+                f"[{self.device_id}] State '{prop_label}' declared as "
+                f"{declared} but got {type(value).__name__}: {value!r}"
             )
         elif declared == "boolean" and not isinstance(value, bool):
             log.debug(
@@ -724,9 +856,9 @@ class BaseDriver(ABC):
         if var_type == "boolean":
             return False
         if var_type == "integer":
-            return var_def.get("min", 0)
-        if var_type == "number":
-            return float(var_def.get("min", 0))
+            return BaseDriver._numeric_default(var_def, as_int=True)
+        if var_type in ("number", "float"):
+            return BaseDriver._numeric_default(var_def, as_int=False)
         if var_type == "enum":
             values = var_def.get("values", [])
             return values[0] if values else ""
@@ -754,7 +886,11 @@ class BaseDriver(ABC):
         bucket = self._children.setdefault(child_type, {})
         if local_id in bucket:
             return  # idempotent — already registered
-        bucket[local_id] = True
+        # Stamp a fresh registration epoch. A deregister+re-register (which
+        # resets the child's state) bumps it, so poll_children can tell a
+        # re-registered child from the one it snapshotted (ABA guard).
+        self._child_register_seq += 1
+        bucket[local_id] = self._child_register_seq
 
         schema = self._effective_child_schema(child_type)
         overrides = dict(initial_state or {})
@@ -956,29 +1092,47 @@ class BaseDriver(ABC):
         """Paginated polling helper.
 
         Splits the currently-registered ``child_type`` IDs into batches of
-        ``batch_size``, awaits ``fetch(batch_ids)`` for each, and applies
-        the per-child state via ``set_children_state_batch`` atomically per
-        batch. Pauses for ``inter_batch_delay`` seconds between batches so
-        polls don't saturate slow controllers.
+        ``batch_size``, awaits ``fetch(batch_ids)`` for each (pausing
+        ``inter_batch_delay`` seconds between batches so polls don't saturate
+        slow controllers), then applies the whole poll's results in ONE atomic
+        ``set_children_state_batch``. Applying per-poll rather than per-batch
+        means a subscriber never observes a half-applied multi-batch snapshot
+        (some children on this poll's values, the rest still on the last
+        poll's). The coalescing delay is bounded by the fetch time and is
+        negligible against typical poll intervals.
 
-        ``fetch`` returns ``{local_id: {prop: value, ...}}``. IDs in the
-        result that aren't currently registered are silently dropped, which
-        lets drivers handle "child was removed mid-poll" without bookkeeping.
+        ``fetch`` returns ``{local_id: {prop: value, ...}}``. A result for a
+        child that isn't registered, or that was deregistered (or
+        deregistered+re-registered, which resets its state) since the poll
+        started, is dropped — so a concurrent ``refresh_children`` can't have
+        its reset clobbered by a stale write (ABA guard).
         """
         ids = self.list_children(child_type)
         if not ids:
             return
-        bucket = self._children.get(child_type, {})
+        # Snapshot each child's registration epoch at poll start. A child whose
+        # live epoch later differs (re-registered) or is gone (deregistered) is
+        # dropped at apply time.
+        start_bucket = self._children.get(child_type, {})
+        epochs = {lid: start_bucket.get(lid) for lid in ids}
+
+        collected: list[tuple[int, dict[str, Any]]] = []
         last_start = (len(ids) - 1) // max(batch_size, 1) * max(batch_size, 1)
         for i in range(0, len(ids), batch_size):
             batch_ids = ids[i:i + batch_size]
             results = await fetch(batch_ids)
-            updates: list[tuple[str, int, dict[str, Any]]] = []
-            for lid, props in results.items():
-                if lid not in bucket:
-                    continue
-                updates.append((child_type, lid, props))
-            if updates:
-                self.set_children_state_batch(updates)
+            collected.extend(results.items())
             if i != last_start and inter_batch_delay > 0:
                 await asyncio.sleep(inter_batch_delay)
+
+        live = self._children.get(child_type, {})
+        updates: list[tuple[str, int, dict[str, Any]]] = []
+        for lid, props in collected:
+            expected = epochs.get(lid)
+            # Keep only children that were in the start snapshot AND whose
+            # registration epoch hasn't changed since (drops ghosts, removed,
+            # and re-registered children).
+            if expected is not None and live.get(lid) == expected:
+                updates.append((child_type, lid, props))
+        if updates:
+            self.set_children_state_batch(updates)
