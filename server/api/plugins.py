@@ -407,7 +407,12 @@ async def install_plugin_endpoint(plugin_id: str, request: Request) -> dict[str,
         result = await install_plugin(plugin_id, file_url)
         return result
     except ValueError as e:
-        raise _api_error(409, f"Plugin '{plugin_id}' is already installed", e)
+        # Validation failures (bad id, non-catalog URL, unsafe dependency) and
+        # the already-installed conflict all raise ValueError; surface the
+        # actual reason rather than a blanket "already installed".
+        if "already installed" in str(e):
+            raise _api_error(409, str(e), e)
+        raise _api_error(400, str(e), e)
     except Exception as e:
         raise _api_error(500, f"Failed to install plugin '{plugin_id}'", e)
 
@@ -445,7 +450,7 @@ async def update_plugin_endpoint(plugin_id: str, request: Request) -> dict[str, 
         result["restarted"] = restarted
         return result
     except ValueError as e:
-        raise _api_error(404, f"Plugin '{plugin_id}' not found", e)
+        raise _api_error(404, str(e), e)
     except Exception as e:
         raise _api_error(500, f"Failed to update plugin '{plugin_id}'", e)
 

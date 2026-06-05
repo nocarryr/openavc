@@ -211,9 +211,14 @@ export async function updatePlugin(
   pluginId: string,
   fileUrl: string,
 ): Promise<{
-  status: "installed" | "load_failed";
+  // "installed" — new version is live.
+  // "load_failed" — files installed but the new class won't register.
+  // "update_failed" — reinstall failed (network/min-version/broken code) and
+  //   the previous working version was restored (rolled_back: true).
+  status: "installed" | "load_failed" | "update_failed";
   plugin_id?: string;
   restarted?: boolean;
+  rolled_back?: boolean;
   error?: string;
 }> {
   return request(`/plugins/${pluginId}/update`, {

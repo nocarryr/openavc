@@ -220,6 +220,13 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     try {
       const result = await api.updatePlugin(pluginId, fileUrl);
       await Promise.all([get().load(), get().loadInstalled()]);
+      if (result.status === "update_failed") {
+        // The reinstall failed and the previous version was restored.
+        const base = result.error || `Plugin '${pluginId}' could not be updated`;
+        throw new Error(
+          result.rolled_back ? `${base} (kept the previous version)` : base,
+        );
+      }
       if (result.status === "load_failed") {
         throw new Error(result.error || `Plugin '${pluginId}' updated but failed to load`);
       }

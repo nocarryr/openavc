@@ -6,11 +6,14 @@ repository, downloads plugin files, manages pip dependencies, handles
 install/uninstall lifecycle.
 """
 
+import asyncio
 import ctypes.util
+import ipaddress
 import os
 import platform as platform_mod
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -19,6 +22,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -60,18 +64,228 @@ def _safe_zip_target(base_dir: Path, relative_path: str) -> Path | None:
     return target
 
 
-_ALLOWED_DOMAINS = {"raw.githubusercontent.com", "github.com", "api.github.com"}
+# Official community plugin catalog. Plugin *code* must come from this exact
+# repo — a hostname-only "is it GitHub?" check gives false assurance: any
+# attacker-controlled GitHub repo passes it, yet plugin code runs in-process.
+_CATALOG_OWNER_REPO = "open-avc/openavc-plugins"
+
+# For a URL to count as "from the official catalog", its host must be one of
+# these and its path must sit under the required prefix for that host.
+_CATALOG_URL_PREFIXES = {
+    "raw.githubusercontent.com": f"/{_CATALOG_OWNER_REPO}/",
+    "github.com": f"/{_CATALOG_OWNER_REPO}/",
+    "api.github.com": f"/repos/{_CATALOG_OWNER_REPO}/",
+}
+
+# Download size guards (DoS defense). Generous ceilings sized for real native
+# deps (a full ffmpeg build is ~100 MB compressed / ~250 MB extracted), not
+# artificial limits — the point is to stop multi-GB downloads and zip bombs.
+_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024        # any single fetched file (compressed)
+_MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024   # total extracted size of an archive
+_MAX_ARCHIVE_MEMBERS = 20_000                  # entries in a zip / wheel
+_MAX_DIRECTORY_FILES = 5_000                   # files in a directory-style install
 
 
-def _validate_url_domain(url: str) -> None:
-    """Reject URLs that don't point to GitHub."""
-    from urllib.parse import urlparse
+def _validate_catalog_url(url: str) -> None:
+    """Reject a plugin URL that isn't under the official community catalog repo.
+
+    A hostname allowlist alone gives false assurance of a trusted source: any
+    attacker-controlled GitHub repo passes a ``*.githubusercontent.com`` check,
+    yet plugin code is executed in-process. So we require the URL to point at
+    the curated, human-reviewed catalog repo (``open-avc/openavc-plugins``),
+    not merely "some GitHub URL". https-only.
+    """
     parsed = urlparse(url)
-    if not parsed.hostname or parsed.hostname not in _ALLOWED_DOMAINS:
+    if parsed.scheme != "https":
+        raise ValueError(f"Plugin URL must use https, got: {parsed.scheme or url!r}")
+    prefix = _CATALOG_URL_PREFIXES.get(parsed.hostname or "")
+    if prefix is None:
         raise ValueError(
-            f"Plugin URL must be from GitHub ({', '.join(sorted(_ALLOWED_DOMAINS))}), "
-            f"got: {parsed.hostname or url}"
+            f"Plugin URL must come from the official catalog "
+            f"({_CATALOG_OWNER_REPO}); host {parsed.hostname or url!r} is not allowed"
         )
+    # Decode %2e%2e / %2f before the prefix + traversal check so an encoded path
+    # can't masquerade as the catalog and then resolve elsewhere on the host.
+    path = unquote(parsed.path)
+    if not path.startswith(prefix) or ".." in path.split("/"):
+        raise ValueError(
+            f"Plugin URL must be a path under {_CATALOG_OWNER_REPO}; "
+            f"path {parsed.path!r} is not"
+        )
+
+
+async def _validate_download_url(url: str) -> None:
+    """SSRF guard for an arbitrary (non-catalog) download URL.
+
+    Native-dependency archives legitimately come from public release hosts
+    (GitHub releases, project mirrors), so they can't be pinned to the catalog
+    repo like plugin code. Instead require https and reject any URL whose host
+    resolves into private, loopback, link-local (cloud-metadata), multicast,
+    reserved, or unspecified address space — closing the SSRF vector (e.g. a
+    plugin pointing the server at 169.254.169.254). Loopback is allowed only on
+    a dev checkout so local tests / mirrors work.
+
+    Mirrors routes/system.py:_validate_cloud_api_url; kept local because the
+    policy differs (private ranges are blocked here) and to avoid a route->core
+    import dependency.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Download URL must use https, got: {parsed.scheme or url!r}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"Download URL is missing a host: {url!r}")
+    port = parsed.port or 443
+    try:
+        infos = await asyncio.get_event_loop().getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        )
+    except (OSError, socket.gaierror) as e:
+        raise ValueError(f"Could not resolve download host {host!r}: {e}")
+
+    from server.api.auth import _deployment_is_dev
+    allow_loopback = _deployment_is_dev()
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_loopback and allow_loopback:
+            continue
+        if (
+            ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"Download URL resolves to a disallowed (non-public) address: {ip}"
+            )
+
+
+async def _download_capped(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_bytes: int = _MAX_DOWNLOAD_BYTES,
+    label: str = "file",
+) -> bytes:
+    """Stream a URL into memory, aborting if it exceeds ``max_bytes``.
+
+    Streamed (not ``client.get``) so a multi-GB or unbounded chunked response
+    can't exhaust RAM before we notice. Honors an upfront Content-Length when
+    present (fast reject) and re-checks the running total as chunks arrive.
+    """
+    buf = bytearray()
+    async with client.stream("GET", url) as resp:
+        resp.raise_for_status()
+        declared = resp.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > max_bytes:
+            raise ValueError(
+                f"{label} is too large: {int(declared)} bytes exceeds the "
+                f"{max_bytes}-byte limit"
+            )
+        async for chunk in resp.aiter_bytes():
+            buf.extend(chunk)
+            if len(buf) > max_bytes:
+                raise ValueError(
+                    f"{label} exceeded the {max_bytes}-byte download limit"
+                )
+    return bytes(buf)
+
+
+def _check_zip_bomb(zf: zipfile.ZipFile, *, label: str = "Archive") -> None:
+    """Reject an archive whose member count or total uncompressed size would
+    make extraction a DoS (zip bomb), using the central-directory sizes."""
+    infos = zf.infolist()
+    if len(infos) > _MAX_ARCHIVE_MEMBERS:
+        raise ValueError(f"{label} has too many entries (max {_MAX_ARCHIVE_MEMBERS}).")
+    total = 0
+    for info in infos:
+        total += info.file_size
+        if total > _MAX_UNCOMPRESSED_BYTES:
+            raise ValueError(
+                f"{label} is too large uncompressed "
+                f"(max {_MAX_UNCOMPRESSED_BYTES // (1024 * 1024)} MB)."
+            )
+
+
+def _is_safe_entry_name(name: str) -> bool:
+    """True if a GitHub Contents API entry name is a plain filename.
+
+    The API returns basenames, so anything with a path separator, a '.'/'..'
+    component, or a NUL is anomalous (a tampered/MITM'd listing) and is skipped
+    before it can redirect a write outside the plugin directory.
+    """
+    return bool(name) and name not in (".", "..") and not (
+        "/" in name or "\\" in name or "\x00" in name
+    )
+
+
+_VCS_PREFIXES = ("git+", "hg+", "svn+", "bzr+")
+
+
+def _is_safe_requirement(req: str) -> bool:
+    """True if ``req`` is a plain name-based pip requirement.
+
+    Rejects exactly the shapes that turn ``pip install <req>`` into something
+    other than "install this named package from the default index":
+      - a leading '-' / '.' / path char -> pip option injection
+        ('--index-url=...', '-r file', '-e .') or a local path install
+      - a URL ('http://...', 'file://...') -> arbitrary download/sdist exec
+      - a VCS spec ('git+https://...') -> clone + setup.py exec
+      - a PEP 508 direct reference ('name @ url')
+    Extras ('pkg[extra]'), version specifiers, and environment markers
+    ('pkg; sys_platform=="win32"') are PEP 508 features that stay one argv
+    element under shell=False, so they're allowed.
+    """
+    s = req.strip()
+    if not s or s[0] in "-./\\":
+        return False
+    low = s.lower()
+    if "://" in low or "@" in s or any(p in low for p in _VCS_PREFIXES):
+        return False
+    # The leading token must be a valid PEP 503 distribution name.
+    return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*", s))
+
+
+class _DownloadBudget:
+    """Cumulative file-count + byte caps for a directory-style install."""
+
+    def __init__(
+        self,
+        max_files: int = _MAX_DIRECTORY_FILES,
+        max_bytes: int = _MAX_UNCOMPRESSED_BYTES,
+    ):
+        self.max_files = max_files
+        self.max_bytes = max_bytes
+        self.files = 0
+        self.bytes = 0
+
+    def add_file(self, size: int) -> None:
+        self.files += 1
+        self.bytes += size
+        if self.files > self.max_files:
+            raise ValueError(f"Plugin has too many files (max {self.max_files}).")
+        if self.bytes > self.max_bytes:
+            raise ValueError("Plugin directory total size exceeds the limit.")
+
+
+# Per-plugin async lock serializing install/update/uninstall of the SAME id so
+# two concurrent requests can't interleave dir creation, dep installs, and the
+# failure-cleanup rmtree (which could otherwise wipe a sibling's in-progress
+# install). Created lazily; the dict get/set is await-free so the event loop
+# can't switch mid-check (no guard lock needed).
+_plugin_op_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_plugin_lock(plugin_id: str) -> asyncio.Lock:
+    lock = _plugin_op_locks.get(plugin_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _plugin_op_locks[plugin_id] = lock
+    return lock
 
 
 # ──── Community Index Cache ────
@@ -142,7 +356,14 @@ async def install_plugin(plugin_id: str, file_url: str) -> dict[str, Any]:
         {"status": "installed", "plugin_id": plugin_id}
     """
     _validate_plugin_id(plugin_id)
-    _validate_url_domain(file_url)
+    async with _get_plugin_lock(plugin_id):
+        return await _do_install(plugin_id, file_url)
+
+
+async def _do_install(plugin_id: str, file_url: str) -> dict[str, Any]:
+    """Install body, run while holding the plugin lock (see install_plugin /
+    update_plugin). Assumes plugin_id is already validated."""
+    _validate_catalog_url(file_url)
     PLUGIN_REPO_DIR.mkdir(parents=True, exist_ok=True)
     plugin_dir = PLUGIN_REPO_DIR / plugin_id
 
@@ -153,19 +374,25 @@ async def install_plugin(plugin_id: str, file_url: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             if file_url.endswith(".py"):
                 # Single file plugin
-                resp = await client.get(file_url)
-                resp.raise_for_status()
+                content = await _download_capped(
+                    client, file_url, label="plugin file"
+                )
                 plugin_dir.mkdir(parents=True, exist_ok=True)
-                filename = _sanitize_filename(Path(file_url).name)
-                (plugin_dir / filename).write_bytes(resp.content)
+                filename = _sanitize_filename(Path(urlparse(file_url).path).name)
+                target = _safe_zip_target(plugin_dir, filename)
+                if target is None:
+                    raise ValueError(f"Unsafe plugin filename: {filename!r}")
+                target.write_bytes(content)
                 log.info(f"Installed plugin '{plugin_id}' from {filename}")
 
             elif file_url.endswith(".zip"):
                 # Zip archive
-                resp = await client.get(file_url)
-                resp.raise_for_status()
+                content = await _download_capped(
+                    client, file_url, label="plugin archive"
+                )
                 plugin_dir.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(BytesIO(resp.content)) as zf:
+                with zipfile.ZipFile(BytesIO(content)) as zf:
+                    _check_zip_bomb(zf, label="Plugin archive")
                     for name in zf.namelist():
                         parts = name.split("/", 1)
                         relative = parts[1] if len(parts) > 1 else name
@@ -235,14 +462,20 @@ async def install_plugin(plugin_id: str, file_url: str) -> dict[str, Any]:
 
 async def _download_github_directory(
     client: httpx.AsyncClient, repo_path: str, dest_dir: Path,
-    *, _depth: int = 0, _max_depth: int = 5,
+    *, budget: "_DownloadBudget | None" = None, _depth: int = 0, _max_depth: int = 5,
 ) -> None:
     """Recursively download a directory from GitHub using the Contents API."""
+    if budget is None:
+        budget = _DownloadBudget()
     if _depth >= _max_depth:
         log.warning(f"Skipping directory at depth {_depth} (max {_max_depth}): {repo_path}")
         return
 
     api_url = f"{COMMUNITY_API_URL}/{repo_path}?ref=main"
+    # Re-validate: repo_path is built from a (now-validated) file_url and from
+    # nested entry names; this catches a '..' that would walk the api path off
+    # the catalog repo (defense in depth against a tampered listing).
+    _validate_catalog_url(api_url)
     resp = await client.get(api_url)
     resp.raise_for_status()
     entries = resp.json()
@@ -253,24 +486,37 @@ async def _download_github_directory(
     for entry in entries:
         name = entry.get("name", "")
         entry_type = entry.get("type", "")
+        if not _is_safe_entry_name(name):
+            log.warning(f"Skipping directory entry with unsafe name: {name!r}")
+            continue
         safe_name = _sanitize_filename(name)
         if not safe_name:
             log.warning(f"Skipping file with unsafe name: {name!r}")
             continue
+        # is_relative_to guard (parity with the zip path) so a sanitized name
+        # can never resolve outside the plugin dir.
+        target = _safe_zip_target(dest_dir, safe_name)
+        if target is None:
+            log.warning(f"Skipping entry that escapes the plugin dir: {name!r}")
+            continue
         if entry_type == "file":
             download_url = entry.get("download_url", "")
             if download_url:
-                file_resp = await client.get(download_url)
-                file_resp.raise_for_status()
-                target = dest_dir / safe_name
+                # The download_url is harvested from a network-controlled JSON
+                # body — re-validate it against the catalog before fetching
+                # (the top-level file_url check doesn't cover nested URLs).
+                _validate_catalog_url(download_url)
+                content = await _download_capped(
+                    client, download_url, label=f"plugin file {safe_name}"
+                )
+                budget.add_file(len(content))
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(file_resp.content)
+                target.write_bytes(content)
         elif entry_type == "dir":
-            sub_dir = dest_dir / safe_name
-            sub_dir.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True)
             await _download_github_directory(
-                client, f"{repo_path}/{name}", sub_dir,
-                _depth=_depth + 1, _max_depth=_max_depth,
+                client, f"{repo_path}/{name}", target,
+                budget=budget, _depth=_depth + 1, _max_depth=_max_depth,
             )
 
 
@@ -300,6 +546,19 @@ async def _install_pip_deps(plugin_id: str, plugin_dir: Path) -> None:
 
     if not deps:
         return
+
+    # A community plugin's dependency strings are untrusted. Reject anything
+    # that isn't a plain PEP 508 requirement BEFORE it reaches pip's argv (dev/
+    # Linux/Docker) or a PyPI query (frozen): a leading '-' (--index-url=...), a
+    # 'git+'/URL install, or a 'name @ url' direct reference would otherwise run
+    # install-time code from an attacker-chosen index/repo. Raising aborts the
+    # install (the caller cleans up the partial dir / rolls back an update).
+    for dep in deps:
+        if not _is_safe_requirement(dep):
+            raise ValueError(
+                f"Unsafe dependency specifier in plugin '{plugin_id}': {dep!r}. "
+                "Dependencies must be plain 'package' or 'package>=x.y' names."
+            )
 
     deps_dir = PLUGIN_REPO_DIR / ".deps"
     deps_dir.mkdir(exist_ok=True)
@@ -362,11 +621,13 @@ async def _install_deps_from_pypi(
                     continue
 
                 log.info(f"[{plugin_id}] Downloading {wheel_name}")
-                resp = await client.get(wheel_url)
-                resp.raise_for_status()
+                wheel_bytes = await _download_capped(
+                    client, wheel_url, label=f"wheel {wheel_name}"
+                )
 
                 # Wheels are zip files — extract into .deps/
-                with zipfile.ZipFile(BytesIO(resp.content)) as whl:
+                with zipfile.ZipFile(BytesIO(wheel_bytes)) as whl:
+                    _check_zip_bomb(whl, label="Wheel")
                     for name in whl.namelist():
                         # Skip .dist-info/RECORD (file hashes) — not needed
                         if name.endswith("/"):
@@ -862,10 +1123,15 @@ async def _install_native_dep_archive(
     if not url or not extract_path:
         raise ValueError(f"Missing url or extract path for '{dep_name}'")
 
+    # SSRF guard: the URL comes from plugin-declared native_dependencies and
+    # points at an arbitrary host (not the catalog), so reject anything that
+    # resolves to internal/metadata address space before fetching.
+    await _validate_download_url(url)
+
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-    data = resp.content
+        data = await _download_capped(
+            client, url, label=f"native dependency {dep_name}"
+        )
 
     target_filename = Path(extract_path).name
     target = deps_dir / target_filename
@@ -874,11 +1140,16 @@ async def _install_native_dep_archive(
     if fmt == "zip":
         with zipfile.ZipFile(BytesIO(data)) as zf:
             try:
-                payload = zf.read(extract_path)
+                info = zf.getinfo(extract_path)
             except KeyError:
                 raise ValueError(
                     f"File '{extract_path}' not found in zip for '{dep_name}'"
                 )
+            if info.file_size > _MAX_UNCOMPRESSED_BYTES:
+                raise ValueError(
+                    f"'{extract_path}' is too large to extract for '{dep_name}'"
+                )
+            payload = zf.read(extract_path)
         target.write_bytes(payload)
     else:
         mode = "r:gz" if fmt == "tar.gz" else "r:xz"
@@ -889,6 +1160,10 @@ async def _install_native_dep_archive(
                 except KeyError:
                     raise ValueError(
                         f"File '{extract_path}' not found in archive for '{dep_name}'"
+                    )
+                if member.size > _MAX_UNCOMPRESSED_BYTES:
+                    raise ValueError(
+                        f"'{extract_path}' is too large to extract for '{dep_name}'"
                     )
                 src = tf.extractfile(member)
                 if src is None:
@@ -1134,40 +1409,41 @@ async def uninstall_plugin(
             the REST endpoint's `?remove_data=true` query parameter.
     """
     _validate_plugin_id(plugin_id)
-    plugin_dir = PLUGIN_REPO_DIR / plugin_id
+    async with _get_plugin_lock(plugin_id):
+        plugin_dir = PLUGIN_REPO_DIR / plugin_id
 
-    if not plugin_dir.exists():
-        raise ValueError(f"Plugin '{plugin_id}' is not installed")
+        if not plugin_dir.exists():
+            raise ValueError(f"Plugin '{plugin_id}' is not installed")
 
-    # Safety check: is the plugin enabled in the current project?
-    if project_plugins and plugin_id in project_plugins:
-        entry = project_plugins[plugin_id]
-        enabled = entry.enabled if hasattr(entry, "enabled") else entry.get("enabled", False)
-        if enabled:
-            raise ValueError(
-                f"Plugin '{plugin_id}' is currently enabled in the project. "
-                f"Disable it before uninstalling."
-            )
+        # Safety check: is the plugin enabled in the current project?
+        if project_plugins and plugin_id in project_plugins:
+            entry = project_plugins[plugin_id]
+            enabled = entry.enabled if hasattr(entry, "enabled") else entry.get("enabled", False)
+            if enabled:
+                raise ValueError(
+                    f"Plugin '{plugin_id}' is currently enabled in the project. "
+                    f"Disable it before uninstalling."
+                )
 
-    # Remove code
-    shutil.rmtree(plugin_dir, ignore_errors=True)
-    unregister_plugin_class(plugin_id)
+        # Remove code
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        unregister_plugin_class(plugin_id)
 
-    # Optionally remove data
-    data_removed = False
-    if remove_data:
-        data_dir = PLUGIN_DATA_DIR / plugin_id
-        if data_dir.exists():
-            shutil.rmtree(data_dir, ignore_errors=True)
-            data_removed = True
+        # Optionally remove data
+        data_removed = False
+        if remove_data:
+            data_dir = PLUGIN_DATA_DIR / plugin_id
+            if data_dir.exists():
+                shutil.rmtree(data_dir, ignore_errors=True)
+                data_removed = True
 
-    log.info(
-        "Uninstalled plugin '%s'%s",
-        plugin_id,
-        " (data discarded)" if data_removed else "",
-    )
+        log.info(
+            "Uninstalled plugin '%s'%s",
+            plugin_id,
+            " (data discarded)" if data_removed else "",
+        )
 
-    return {"status": "uninstalled", "plugin_id": plugin_id, "data_removed": data_removed}
+        return {"status": "uninstalled", "plugin_id": plugin_id, "data_removed": data_removed}
 
 
 def get_plugin_data_info(plugin_id: str) -> dict[str, Any]:
@@ -1197,21 +1473,68 @@ def get_plugin_data_info(plugin_id: str) -> dict[str, Any]:
 
 
 async def update_plugin(plugin_id: str, file_url: str) -> dict[str, Any]:
-    """
-    Update a plugin by removing the old version and installing the new one.
+    """Update a plugin, rolling back to the working version if the reinstall
+    fails.
+
+    Stages the new version: the existing dir is moved aside, the new version is
+    installed fresh, and only on success is the backup dropped. A transient
+    failure (network/GitHub drop, min-version gate) or a new version that won't
+    load restores the old dir and re-registers it instead of leaving the user
+    with no plugin at all. Returns ``{"status": "update_failed",
+    "rolled_back": True, "error": ...}`` on a rolled-back update; the caller
+    (REST endpoint) restarts the restored plugin if it was running.
     """
     _validate_plugin_id(plugin_id)
-    plugin_dir = PLUGIN_REPO_DIR / plugin_id
+    async with _get_plugin_lock(plugin_id):
+        plugin_dir = PLUGIN_REPO_DIR / plugin_id
+        if not plugin_dir.exists():
+            raise ValueError(f"Plugin '{plugin_id}' is not installed")
 
-    if not plugin_dir.exists():
-        raise ValueError(f"Plugin '{plugin_id}' is not installed")
+        # Move the working copy aside (hidden name so list_installed_plugins
+        # skips it). os.replace is an atomic same-dir rename.
+        backup_dir = PLUGIN_REPO_DIR / f".{plugin_id}.update-bak"
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        os.replace(plugin_dir, backup_dir)
+        unregister_plugin_class(plugin_id)
 
-    # Remove old version
-    shutil.rmtree(plugin_dir, ignore_errors=True)
-    unregister_plugin_class(plugin_id)
+        def _rollback() -> None:
+            if plugin_dir.exists():
+                shutil.rmtree(plugin_dir, ignore_errors=True)
+            os.replace(backup_dir, plugin_dir)
+            _register_installed_plugin(plugin_id, plugin_dir)
 
-    # Install new version
-    return await install_plugin(plugin_id, file_url)
+        try:
+            result = await _do_install(plugin_id, file_url)
+        except Exception as e:
+            _rollback()
+            log.warning(f"Plugin '{plugin_id}' update failed, rolled back: {e}")
+            return {
+                "status": "update_failed",
+                "plugin_id": plugin_id,
+                "error": str(e),
+                "rolled_back": True,
+            }
+
+        if result.get("status") != "installed":
+            # New files are on disk but the class won't load — keep the working
+            # version rather than swapping in a broken one.
+            new_error = result.get("error")
+            _rollback()
+            log.warning(
+                f"Plugin '{plugin_id}' new version failed to load, "
+                f"rolled back: {new_error}"
+            )
+            return {
+                "status": "update_failed",
+                "plugin_id": plugin_id,
+                "error": new_error,
+                "rolled_back": True,
+            }
+
+        # Success — drop the staged backup.
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        return result
 
 
 # ──── List Installed ────

@@ -46,6 +46,50 @@ def _make_plugin_zip(plugin_id: str, plugin_source: str) -> bytes:
     return buf.getvalue()
 
 
+def _make_stream_response(content: bytes = b"", *, headers=None, error=None):
+    """Mock an httpx streaming response (the shape _download_capped consumes)."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock(side_effect=error) if error else MagicMock()
+    resp.headers = headers or {}
+
+    async def _aiter_bytes():
+        yield content
+
+    resp.aiter_bytes = _aiter_bytes
+    return resp
+
+
+def _stream_cm(resp):
+    """Wrap a response as the async context manager client.stream() returns."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=resp)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _download_client(*, stream=None, get=None):
+    """Build a mock httpx.AsyncClient for the install paths.
+
+    stream: bytes (or pre-built stream response), or a list of them, for
+        successive client.stream() calls (binary downloads).
+    get:    a response (or list) for client.get() calls (JSON listings).
+    """
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    if stream is not None:
+        items = stream if isinstance(stream, list) else [stream]
+        cms = [
+            _stream_cm(it if not isinstance(it, (bytes, bytearray))
+                       else _make_stream_response(bytes(it)))
+            for it in items
+        ]
+        client.stream = MagicMock(side_effect=cms)
+    if get is not None:
+        client.get = AsyncMock(side_effect=get if isinstance(get, list) else [get])
+    return client
+
+
 SAMPLE_PLUGIN_SOURCE = '''\
 class SamplePlugin:
     PLUGIN_INFO = {
@@ -313,15 +357,7 @@ class TestInstallPlugin:
     async def test_install_zip_plugin(self, plugin_repo):
         """Installing a .zip creates the plugin directory with extracted files."""
         zip_bytes = _make_plugin_zip("sample_community", SAMPLE_PLUGIN_SOURCE)
-
-        mock_response = MagicMock()
-        mock_response.content = zip_bytes
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client = _download_client(stream=zip_bytes)
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             result = await install_plugin(
@@ -342,14 +378,7 @@ class TestInstallPlugin:
         with a mismatched id because registration failure was silently
         ignored (A60).
         """
-        mock_response = MagicMock()
-        mock_response.content = SAMPLE_PLUGIN_SOURCE.encode()
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client = _download_client(stream=SAMPLE_PLUGIN_SOURCE.encode())
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             result = await install_plugin(
@@ -369,14 +398,8 @@ class TestInstallPlugin:
 
     async def test_install_http_failure_cleans_up(self, plugin_repo):
         """If download fails, partial directory is cleaned up."""
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(
-            side_effect=httpx.HTTPStatusError(
-                "404", request=MagicMock(), response=MagicMock()
-            )
-        )
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        err = httpx.HTTPStatusError("404", request=MagicMock(), response=MagicMock())
+        mock_client = _download_client(stream=_make_stream_response(error=err))
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             with pytest.raises(httpx.HTTPStatusError):
@@ -392,15 +415,7 @@ class TestInstallPlugin:
         # Plugin source has a SyntaxError so exec_module raises.
         broken_source = "class Broken(\n  # missing close paren\n"
         zip_bytes = _make_plugin_zip("broken_load", broken_source)
-
-        mock_response = MagicMock()
-        mock_response.content = zip_bytes
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client = _download_client(stream=zip_bytes)
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             result = await install_plugin(
@@ -432,14 +447,7 @@ class TestInstallPlugin:
         shutil.rmtree(plugin_dir)
 
         zip_bytes = _make_plugin_zip("sample_community", SAMPLE_PLUGIN_SOURCE)
-        mock_response = MagicMock()
-        mock_response.content = zip_bytes
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client = _download_client(stream=zip_bytes)
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             result = await install_plugin(
@@ -481,18 +489,12 @@ class GenericPlugin:
     async def start(self, api): pass
     async def stop(self): pass
 '''
-        plugin_response = MagicMock()
-        plugin_response.content = valid_plugin_source.encode()
-        plugin_response.raise_for_status = MagicMock()
-
-        config_response = MagicMock()
-        config_response.content = b'{"some": "config"}'
-        config_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=[api_response, plugin_response, config_response])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        # Directory listing is fetched via client.get (JSON); the per-file
+        # contents are streamed via client.stream (_download_capped).
+        mock_client = _download_client(
+            get=api_response,
+            stream=[valid_plugin_source.encode(), b'{"some": "config"}'],
+        )
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             with patch("server.core.plugin_installer._install_pip_deps", new_callable=AsyncMock):
@@ -917,20 +919,14 @@ class TestInstallDepsFromPyPI:
             },
         }
 
-        async def mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.status_code = 200
-            if "pypi.org" in url:
-                resp.json.return_value = pypi_json
-            else:
-                resp.content = wheel_bytes
-            return resp
+        # PyPI metadata is fetched via client.get (JSON); the wheel itself is
+        # streamed via client.stream (_download_capped).
+        pypi_resp = MagicMock()
+        pypi_resp.raise_for_status = MagicMock()
+        pypi_resp.status_code = 200
+        pypi_resp.json.return_value = pypi_json
 
-        mock_client = AsyncMock()
-        mock_client.get = mock_get
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client = _download_client(get=pypi_resp, stream=wheel_bytes)
 
         with patch("server.core.plugin_installer.httpx.AsyncClient", return_value=mock_client):
             await _install_deps_from_pypi(["fake-pkg"], deps_dir, "test_plugin")
@@ -1004,14 +1000,7 @@ def _make_tar_archive(
 
 
 def _archive_mock_client(archive_bytes: bytes):
-    resp = MagicMock()
-    resp.content = archive_bytes
-    resp.raise_for_status = MagicMock()
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=resp)
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    return client
+    return _download_client(stream=archive_bytes)
 
 
 class TestDetectArchiveFormat:
@@ -1036,6 +1025,16 @@ class TestDetectArchiveFormat:
 
 
 class TestInstallNativeDepArchive:
+
+    @pytest.fixture(autouse=True)
+    def _skip_ssrf_check(self):
+        """The SSRF guard resolves the URL host; these extraction tests use
+        unresolvable example hosts, so stub it out (it has its own tests)."""
+        with patch(
+            "server.core.plugin_installer._validate_download_url",
+            new_callable=AsyncMock,
+        ):
+            yield
 
     async def test_zip_extracts_named_file(self, plugin_repo):
         """Regression: zip extraction still works; file lands as its basename."""
