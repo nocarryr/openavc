@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import {
-  X, Copy, Trash2, Save, Upload, Download, RotateCcw, AlertTriangle, Check, FilePlus,
+  X, Copy, Trash2, Save, Upload, Download, RotateCcw, AlertTriangle, Check, FilePlus, Minus,
 } from "lucide-react";
 import {
   getTheme, createTheme, updateTheme, deleteTheme, importTheme,
@@ -9,6 +9,10 @@ import {
 } from "../../api/restClient";
 import type { ProjectConfig, UIPage, UIElement } from "../../api/types";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import {
+  parseColor, rgbToHex6, contrastRatio, wcagLevel, deriveSurfaceBorder,
+  CSS_VAR_FALLBACKS, type WcagLevel,
+} from "./colorUtils";
 
 // --- Constants ---
 
@@ -58,29 +62,52 @@ interface ElementControl {
 // is determined by where the value canonically lives so there's never a
 // duplicate edit path.
 //
-// Button-derivative types (page_nav, camera_preset, keypad) inherit colors
-// from button_* variables — they're not listed here because exposing the
-// same controls under multiple sections would create the "edit one, change
-// everywhere" confusion. Phase 5 (inheritance UI) will let designers
-// override per-type from the studio; until then per-instance overrides via
-// Properties panel are the way.
+// Button-derivative types (page_nav, camera_preset, keypad) inherit the
+// button_* CSS variables by default, but built-in themes ship per-type
+// element_defaults that override them — so each gets its own section here to
+// author those overrides. Clearing a derivative's color reverts it to the
+// button/CSS default (the element_defaults key is deleted).
 
 const STANDARD_BORDER_CONTROLS: ElementControl[] = [
   { label: "Border Color", type: "color", source: { kind: "default", key: "border_color" } },
   { label: "Border Width (px)", type: "number", source: { kind: "default", key: "border_width" } },
 ];
 
+const BOX_SHADOW_CONTROL: ElementControl = {
+  label: "Box Shadow",
+  type: "text",
+  source: { kind: "default", key: "box_shadow" },
+  hint: "CSS syntax, e.g. '0 2px 4px rgba(0,0,0,0.3)' or 'none'",
+};
+
 const ELEMENT_CONTROLS: Record<string, ElementControl[]> = {
   button: [
-    // Button colors live as CSS variables so they cascade to page_nav,
-    // camera_preset, keypad keys, matrix preset buttons — anything visually
-    // a button picks them up automatically. Active button bg derives from
-    // Accent (no separate token); active text uses Button Text.
-    { label: "Background", type: "color", source: { kind: "var", key: "button_bg" }, hint: "Also applies to page nav, camera presets, keypads" },
-    { label: "Text", type: "color", source: { kind: "var", key: "button_text" }, hint: "Also used as active button text color" },
-    { label: "Border Color", type: "color", source: { kind: "var", key: "button_border" }, hint: "Also applies to page nav, camera presets, keypads" },
+    // Button colors live as CSS variables, so they're the base for camera
+    // presets and keypad keys (which use the same vars) and the border for
+    // page nav — each can override its own in its section below. Active button
+    // bg derives from Accent (no separate token); active text uses Button Text.
+    { label: "Background", type: "color", source: { kind: "var", key: "button_bg" }, hint: "Base for camera presets and keypad keys (override per-type below)" },
+    { label: "Text", type: "color", source: { kind: "var", key: "button_text" }, hint: "Also the active button text, and camera-preset / keypad-key text" },
+    { label: "Border Color", type: "color", source: { kind: "var", key: "button_border" }, hint: "Base border for page nav, camera presets, and keypad keys (override per-type below)" },
     { label: "Border Width (px)", type: "number", source: { kind: "default", key: "border_width" } },
-    { label: "Box Shadow", type: "text", source: { kind: "default", key: "box_shadow" }, hint: "CSS syntax, e.g. '0 2px 4px rgba(0,0,0,0.3)' or 'none'" },
+    BOX_SHADOW_CONTROL,
+  ],
+  page_nav: [
+    { label: "Background", type: "color", source: { kind: "default", key: "bg_color" }, hint: "Page nav is transparent by default; set a color to fill it" },
+    { label: "Text", type: "color", source: { kind: "default", key: "text_color" }, hint: "Defaults to Accent" },
+    ...STANDARD_BORDER_CONTROLS,
+    BOX_SHADOW_CONTROL,
+  ],
+  camera_preset: [
+    { label: "Background", type: "color", source: { kind: "default", key: "bg_color" }, hint: "Defaults to Button Background" },
+    { label: "Text", type: "color", source: { kind: "default", key: "text_color" }, hint: "Defaults to Button Text" },
+    ...STANDARD_BORDER_CONTROLS,
+    BOX_SHADOW_CONTROL,
+  ],
+  keypad: [
+    { label: "Container Background", type: "color", source: { kind: "default", key: "bg_color" }, hint: "The number keys themselves use the Button colors" },
+    { label: "Text Color", type: "color", source: { kind: "default", key: "text_color" }, hint: "Label and entry-display text" },
+    ...STANDARD_BORDER_CONTROLS,
   ],
   label: [
     { label: "Background", type: "color", source: { kind: "default", key: "bg_color" } },
@@ -158,10 +185,12 @@ const ELEMENT_CONTROLS: Record<string, ElementControl[]> = {
   ],
 };
 
-// Order in which element sections render. Buttons first (most common), then
-// other interactive elements, then displays, then layout/utility.
+// Order in which element sections render. Buttons first (most common) with
+// their derivatives grouped right after, then other interactive elements, then
+// displays, then layout/utility.
 const ELEMENT_ORDER = [
-  "button", "label", "slider", "fader", "select", "text_input",
+  "button", "page_nav", "camera_preset", "keypad",
+  "label", "slider", "fader", "select", "text_input",
   "status_led", "gauge", "level_meter",
   "list", "matrix", "group",
   "image", "clock", "spacer",
@@ -188,77 +217,35 @@ const ELEMENT_TYPE_LABELS: Record<string, string> = {
   matrix: "Matrix",
 };
 
-// --- WCAG ---
-
-function hexToRgb(hex: string): [number, number, number] | null {
-  const m = hex.replace("#", "").match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-  if (!m) return null;
-  return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
-}
-
-function relativeLuminance(r: number, g: number, b: number): number {
-  const [rs, gs, bs] = [r, g, b].map((c) => {
-    const s = c / 255;
-    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
-}
-
-function contrastRatio(hex1: string, hex2: string): number | null {
-  const rgb1 = hexToRgb(hex1);
-  const rgb2 = hexToRgb(hex2);
-  if (!rgb1 || !rgb2) return null;
-  const l1 = relativeLuminance(...rgb1);
-  const l2 = relativeLuminance(...rgb2);
-  const lighter = Math.max(l1, l2);
-  const darker = Math.min(l1, l2);
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-type WcagLevel = "AAA" | "AA" | "fail";
-function wcagLevel(ratio: number): WcagLevel {
-  if (ratio >= 7) return "AAA";
-  if (ratio >= 4.5) return "AA";
-  return "fail";
-}
-
-// --- Color utilities for Quick Adjust ---
-
-function adjustHex(hex: string, amount: number): string {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return hex;
-  const adjusted = rgb.map((c) => {
-    if (amount > 0) return Math.round(c + (255 - c) * amount);
-    return Math.round(c * (1 + amount));
-  });
-  return `#${adjusted.map((c) => Math.max(0, Math.min(255, c)).toString(16).padStart(2, "0")).join("")}`;
-}
-
-function deriveSurfaceBorder(surface: string): string {
-  const rgb = hexToRgb(surface);
-  if (!rgb) return surface;
-  const lum = relativeLuminance(...rgb);
-  return adjustHex(surface, lum < 0.5 ? 0.2 : -0.15);
-}
-
 // --- ColorPickerCell ---
 
 interface ColorPickerCellProps {
   value: string;
   onChange: (next: string) => void;
+  /** Effective value shown when `value` is empty (the inherited/fallback color). */
+  fallback?: string;
 }
 
-function ColorPickerCell({ value, onChange }: ColorPickerCellProps) {
-  const isHex = HEX_RE.test(value);
-  const isTransparent = value === "transparent";
+function ColorPickerCell({ value, onChange, fallback }: ColorPickerCellProps) {
+  const raw = value || "";
+  const parsed = parseColor(raw);
+  const fallbackParsed = fallback ? parseColor(fallback) : null;
 
-  // No "T" toggle button — it caused one-click data loss. To set transparent,
-  // type "transparent" into the text field next to the picker.
-  if (isHex) {
+  // The native <input type=color> only speaks 6-digit hex. Use it whenever the
+  // value (or, when unset, the fallback) is a fully-opaque color we can represent
+  // losslessly — including 3-digit hex and named colors, which used to be misread
+  // as "not a color" and reset to #000000 on a single click (silent data loss).
+  const opaque =
+    parsed && parsed.a === 1
+      ? parsed
+      : !raw && fallbackParsed && fallbackParsed.a === 1
+        ? fallbackParsed
+        : null;
+  if (opaque) {
     return (
       <input
         type="color"
-        value={value}
+        value={rgbToHex6(opaque)}
         onChange={(e) => onChange(e.target.value)}
         style={{
           width: 28,
@@ -272,28 +259,51 @@ function ColorPickerCell({ value, onChange }: ColorPickerCellProps) {
       />
     );
   }
+
+  // Transparent, translucent (alpha < 1), or unset: show a swatch that opens the
+  // OS picker via a hidden, seeded color input. Only an explicit pick fires
+  // onChange, so a stray click can never overwrite a deliberate value.
+  const isClear = !raw || raw === "transparent" || (parsed != null && parsed.a === 0);
+  const seed = parsed ? rgbToHex6(parsed) : fallbackParsed ? rgbToHex6(fallbackParsed) : "#888888";
+  const title = !raw
+    ? "Inherits the theme default — pick or type a color to set one"
+    : raw === "transparent"
+      ? "Transparent — pick or type a color to change"
+      : `${raw} — pick or type a color to change`;
   return (
-    <button
-      type="button"
-      onClick={() => onChange("#000000")}
-      title={
-        isTransparent
-          ? "Transparent — click to switch to a hex color"
-          : `${value} — click to switch to a hex color`
-      }
+    <label
+      title={title}
       style={{
+        position: "relative",
         width: 28,
         height: 22,
-        padding: 0,
         border: "1px solid var(--border-color)",
         borderRadius: 3,
         cursor: "pointer",
-        background: isTransparent ? CHECKER_BG : value,
-        backgroundSize: isTransparent ? "8px 8px" : undefined,
-        backgroundPosition: isTransparent ? "0 0, 4px 4px" : undefined,
         flexShrink: 0,
+        display: "block",
+        background: isClear ? CHECKER_BG : raw,
+        backgroundSize: isClear ? "8px 8px" : undefined,
+        backgroundPosition: isClear ? "0 0, 4px 4px" : undefined,
       }}
-    />
+    >
+      <input
+        type="color"
+        aria-label="Pick a color"
+        value={seed}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          opacity: 0,
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+        }}
+      />
+    </label>
   );
 }
 
@@ -575,6 +585,8 @@ function StudioPreview({
 
   const handleLoad = () => {
     if (!pageId) return;
+    // The preview iframe is served from this same origin; target it explicitly
+    // rather than "*" so credential-bearing project config isn't broadcast.
     iframeRef.current?.contentWindow?.postMessage(
       {
         type: "openavc:editor-init",
@@ -584,7 +596,7 @@ function StudioPreview({
         demoState: demoStateRef.current,
         inlineTheme: inlineThemeRef.current,
       },
-      "*",
+      window.location.origin,
     );
   };
 
@@ -600,7 +612,7 @@ function StudioPreview({
           demoState,
           inlineTheme,
         },
-        "*",
+        window.location.origin,
       );
     }, 40);
     return () => clearTimeout(timer);
@@ -754,12 +766,16 @@ export function ThemeStudio({
         newVars[key] = value;
       }
       // border_radius exists in both variables and element_defaults — if only
-      // the variable updates, element_defaults inline styles override it and
-      // the change appears to do nothing. Keep them in sync.
+      // the variable updates, an element_defaults inline radius overrides it and
+      // the change appears to do nothing. Drag along ONLY the elements that were
+      // tracking the old global value; leave intentionally-divergent per-element
+      // radii (e.g. group=12 vs a global 8) untouched.
       if (key === "border_radius") {
+        const prevGlobal = prev.variables?.border_radius;
         const defs = JSON.parse(JSON.stringify(prev.element_defaults || {}));
         for (const elType of Object.keys(defs)) {
-          if (defs[elType]?.border_radius !== undefined) {
+          const cur = defs[elType]?.border_radius;
+          if (cur !== undefined && String(cur) === String(prevGlobal)) {
             defs[elType].border_radius = value;
           }
         }
@@ -773,8 +789,40 @@ export function ThemeStudio({
     setWorking((prev) => {
       if (!prev) return prev;
       const defaults = { ...(prev.element_defaults || {}) };
-      defaults[elType] = { ...(defaults[elType] || {}), [key]: value };
+      const elDefs = { ...(defaults[elType] || {}) };
+      // Clearing a per-element style deletes the key (symmetric with setVar) so
+      // the panel falls back to the theme/CSS default — an empty string would be
+      // persisted into the theme JSON and silently ignored by the renderer.
+      if (value === undefined || value === "") {
+        delete elDefs[key];
+      } else {
+        elDefs[key] = value;
+      }
+      // Drop the element entry entirely once it has no overrides left, keeping
+      // the saved theme clean and the dirty-check honest (no phantom {} diff).
+      if (Object.keys(elDefs).length === 0) {
+        delete defaults[elType];
+      } else {
+        defaults[elType] = elDefs;
+      }
       return { ...prev, element_defaults: defaults };
+    });
+  };
+
+  // Replace the theme's page_defaults wholesale (the Page Background section
+  // computes the next shape). An empty result drops the key so the saved theme
+  // stays clean and the dirty-check has no phantom {} diff. panel.js
+  // (_themePageDefaultsToBackground) reads background_color /
+  // background_image[_size|_position|_opacity] / background_gradient{from,to,angle}.
+  const setPageDefaults = (next: Record<string, unknown>) => {
+    setWorking((prev) => {
+      if (!prev) return prev;
+      if (!next || Object.keys(next).length === 0) {
+        const cleaned = { ...prev };
+        delete cleaned.page_defaults;
+        return cleaned;
+      }
+      return { ...prev, page_defaults: next };
     });
   };
 
@@ -1080,16 +1128,15 @@ export function ThemeStudio({
   useEffect(() => {
     if (!open) return;
     const onMsg = (e: MessageEvent) => {
+      // The preview iframe is served same-origin; ignore anything else so a
+      // stray window can't drive which element section is focused.
+      if (e.origin !== window.location.origin) return;
       if (e.data?.type === "openavc:theme-element-click") {
         const elType = e.data.elementType as string;
+        // Every common type — including the button derivatives page_nav /
+        // camera_preset / keypad — now has its own section, so focus it directly.
         if (elType && ELEMENT_CONTROLS[elType]) {
           setFocusedElement(elType);
-        } else {
-          // Derivative types (page_nav, camera_preset, keypad) map to button
-          const buttonDerivatives = ["page_nav", "camera_preset", "keypad"];
-          if (elType && buttonDerivatives.includes(elType)) {
-            setFocusedElement("button");
-          }
         }
       }
     };
@@ -1111,11 +1158,15 @@ export function ThemeStudio({
       ["Warning on Background", "warning", "panel_bg"],
     ];
     for (const [label, fgKey, bgKey] of pairs) {
-      const fg = v[fgKey];
-      const bg = v[bgKey];
-      if (fg && bg) {
-        const ratio = contrastRatio(fg, bg);
-        checks.push({ label, fg, bg, ratio, level: ratio ? wcagLevel(ratio) : "fail" });
+      // Fall back to the effective CSS value so a cleared token is checked
+      // against what the panel actually renders, not skipped.
+      const fgVal = String(v[fgKey] ?? "") || CSS_VAR_FALLBACKS[fgKey] || "";
+      const bgVal = String(v[bgKey] ?? "") || CSS_VAR_FALLBACKS[bgKey] || "";
+      if (fgVal && bgVal) {
+        const ratio = contrastRatio(fgVal, bgVal);
+        // wcagLevel(null) → "na": a color we can't parse for a ratio (e.g. a
+        // CSS keyword the panel still renders) is reported neutral, not FAIL.
+        checks.push({ label, fg: fgVal, bg: bgVal, ratio, level: wcagLevel(ratio) });
       }
     }
     return checks;
@@ -1280,9 +1331,12 @@ export function ThemeStudio({
                 onSetDesc={setDesc}
                 onSetVar={setVar}
                 onSetElementDefault={setElementDefault}
+                onSetPageDefaults={setPageDefaults}
                 onApplySurfaceStyle={applySurfaceStyle}
                 savedVars={savedTheme?.variables || {}}
                 savedDefaults={savedTheme?.element_defaults || {}}
+                pageDefaults={(working?.page_defaults as Record<string, unknown>) || {}}
+                savedPageDefaults={(savedTheme?.page_defaults as Record<string, unknown>) || {}}
                 focusedElement={focusedElement}
                 onClearFocus={() => setFocusedElement(null)}
                 onSaveChanges={handleSaveChanges}
@@ -1984,6 +2038,248 @@ function QuickAdjustSection({ vars, defaults, savedVars, savedDefaults, onSetVar
   );
 }
 
+// --- Page background (theme page_defaults) ---
+
+interface ThemeGradient { from?: string; to?: string; angle?: number; }
+
+interface PageBackgroundSectionProps {
+  pageDefaults: Record<string, unknown>;
+  savedPageDefaults: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>) => void;
+}
+
+const IMAGE_SIZE_OPTIONS = [
+  { value: "cover", label: "Cover" },
+  { value: "contain", label: "Contain" },
+  { value: "auto", label: "Actual size" },
+  { value: "100% 100%", label: "Stretch" },
+];
+
+// Editor for theme-level page_defaults — the background the panel paints behind
+// every page that doesn't set its own. Writes the exact keys panel.js's
+// _themePageDefaultsToBackground consumes: background_color,
+// background_image[_size|_position|_opacity], background_gradient{from,to,angle}.
+function PageBackgroundSection({ pageDefaults, savedPageDefaults, onChange }: PageBackgroundSectionProps) {
+  const pd = pageDefaults || {};
+
+  // Apply a patch and drop any key cleared to undefined/null/"" so the saved
+  // theme stays minimal and the dirty-check has no phantom keys.
+  const update = (patch: Record<string, unknown>) => {
+    const next: Record<string, unknown> = { ...pd, ...patch };
+    for (const k of Object.keys(next)) {
+      const v = next[k];
+      if (v === undefined || v === null || v === "") delete next[k];
+    }
+    onChange(next);
+  };
+
+  const bgColorRaw = typeof pd.background_color === "string" ? pd.background_color : "";
+  const isTokenBg = bgColorRaw.startsWith("var(");
+  const colorMode: "inherit" | "custom" = bgColorRaw && !isTokenBg ? "custom" : "inherit";
+
+  const gradient: ThemeGradient | null =
+    pd.background_gradient && typeof pd.background_gradient === "object"
+      ? (pd.background_gradient as ThemeGradient)
+      : null;
+
+  const image = typeof pd.background_image === "string" ? pd.background_image : "";
+  const imageSize = typeof pd.background_image_size === "string" ? pd.background_image_size : "cover";
+  const imagePos = typeof pd.background_image_position === "string" ? pd.background_image_position : "center";
+  const imageOpacity = pd.background_image_opacity == null ? 1 : Number(pd.background_image_opacity);
+
+  const isModified = JSON.stringify(pageDefaults || {}) !== JSON.stringify(savedPageDefaults || {});
+
+  const setColorMode = (mode: "inherit" | "custom") => {
+    if (mode === "inherit") update({ background_color: undefined });
+    else update({ background_color: bgColorRaw && !isTokenBg ? bgColorRaw : "#1a1a2e" });
+  };
+
+  const setGradientEnabled = (on: boolean) => {
+    if (!on) update({ background_gradient: undefined });
+    else update({ background_gradient: { from: bgColorRaw && !isTokenBg ? bgColorRaw : "#1a1a2e", to: "#000000", angle: 180 } });
+  };
+  const patchGradient = (patch: ThemeGradient) =>
+    update({
+      background_gradient: {
+        from: gradient?.from ?? "#1a1a2e",
+        to: gradient?.to ?? "#000000",
+        angle: gradient?.angle ?? 180,
+        ...patch,
+      },
+    });
+
+  const setImage = (url: string) => {
+    if (!url) {
+      update({
+        background_image: undefined,
+        background_image_size: undefined,
+        background_image_position: undefined,
+        background_image_opacity: undefined,
+      });
+    } else {
+      update({ background_image: url });
+    }
+  };
+
+  const sectionStyle: React.CSSProperties = {
+    background: "var(--bg-surface)",
+    borderRadius: 6,
+    border: "1px solid var(--border-color)",
+    marginBottom: 10,
+  };
+  const titleStyle: React.CSSProperties = {
+    fontSize: 10,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: "0.5px",
+    color: "var(--text-secondary)",
+    padding: "8px 10px",
+    borderBottom: "1px solid var(--border-color)",
+    display: "flex",
+    alignItems: "center",
+  };
+  const rowLabel: React.CSSProperties = { width: 90, fontSize: 11, color: "var(--text-secondary)", flexShrink: 0 };
+  const hint: React.CSSProperties = { fontSize: 9, color: "var(--text-muted)", lineHeight: 1.3, marginTop: 2 };
+
+  return (
+    <div style={sectionStyle}>
+      <div style={titleStyle}>
+        Page Background
+        {isModified && <span style={{ color: "var(--accent)", marginLeft: 6, fontSize: 9 }}>modified</span>}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 10 }}>
+        <div style={hint}>
+          The background painted behind every page that doesn&apos;t set its own. Color, image,
+          and gradient layer in that order.
+        </div>
+
+        {/* Solid color */}
+        <div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <label style={rowLabel}>Color</label>
+            <select
+              value={colorMode}
+              onChange={(e) => setColorMode(e.target.value as "inherit" | "custom")}
+              style={{ flex: 1, fontSize: 11 }}
+            >
+              <option value="inherit">Theme page background (default)</option>
+              <option value="custom">Custom color</option>
+            </select>
+          </div>
+          {colorMode === "custom" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
+              <span style={rowLabel} />
+              <ColorPickerCell value={bgColorRaw} fallback="#1a1a2e" onChange={(next) => update({ background_color: next })} />
+              <input
+                type="text"
+                value={bgColorRaw}
+                onChange={(e) => update({ background_color: e.target.value })}
+                style={{ flex: 1, fontSize: 11, fontFamily: "monospace" }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Gradient overlay */}
+        <div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, color: "var(--text-secondary)", cursor: "pointer" }}>
+            <input type="checkbox" checked={!!gradient} onChange={(e) => setGradientEnabled(e.target.checked)} />
+            Gradient overlay
+          </label>
+          {gradient && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={rowLabel}>From</label>
+                <ColorPickerCell value={String(gradient.from ?? "")} fallback="#1a1a2e" onChange={(next) => patchGradient({ from: next })} />
+                <input
+                  type="text"
+                  value={String(gradient.from ?? "")}
+                  onChange={(e) => patchGradient({ from: e.target.value })}
+                  style={{ flex: 1, fontSize: 11, fontFamily: "monospace" }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={rowLabel}>To</label>
+                <ColorPickerCell value={String(gradient.to ?? "")} fallback="#000000" onChange={(next) => patchGradient({ to: next })} />
+                <input
+                  type="text"
+                  value={String(gradient.to ?? "")}
+                  onChange={(e) => patchGradient({ to: e.target.value })}
+                  style={{ flex: 1, fontSize: 11, fontFamily: "monospace" }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={rowLabel}>Angle (deg)</label>
+                <input
+                  type="number"
+                  value={gradient.angle ?? 180}
+                  min={0}
+                  max={360}
+                  onChange={(e) => patchGradient({ angle: Number(e.target.value) })}
+                  style={{ flex: 1, fontSize: 11 }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Background image */}
+        <div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <label style={rowLabel}>Image</label>
+            <input
+              type="text"
+              value={image}
+              placeholder="assets://bg.jpg or https://…"
+              onChange={(e) => setImage(e.target.value)}
+              style={{ flex: 1, fontSize: 11, fontFamily: "monospace" }}
+            />
+          </div>
+          <div style={hint}>Upload images in the Assets panel, then reference them as assets://name.</div>
+          {image && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={rowLabel}>Fit</label>
+                <select
+                  value={imageSize}
+                  onChange={(e) => update({ background_image_size: e.target.value })}
+                  style={{ flex: 1, fontSize: 11 }}
+                >
+                  {IMAGE_SIZE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={rowLabel}>Position</label>
+                <input
+                  type="text"
+                  value={imagePos}
+                  placeholder="center"
+                  onChange={(e) => update({ background_image_position: e.target.value })}
+                  style={{ flex: 1, fontSize: 11, fontFamily: "monospace" }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={rowLabel}>Opacity</label>
+                <input
+                  type="number"
+                  value={imageOpacity}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(e) => update({ background_image_opacity: Number(e.target.value) })}
+                  style={{ flex: 1, fontSize: 11 }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- Editor column ---
 
 interface EditorColumnProps {
@@ -1999,9 +2295,12 @@ interface EditorColumnProps {
   onSetDesc: (desc: string) => void;
   onSetVar: (key: string, value: unknown) => void;
   onSetElementDefault: (elType: string, key: string, value: unknown) => void;
+  onSetPageDefaults: (next: Record<string, unknown>) => void;
   onApplySurfaceStyle: (style: "flat" | "layered" | "outlined") => void;
   savedVars: Record<string, unknown>;
   savedDefaults: Record<string, Record<string, unknown>>;
+  pageDefaults: Record<string, unknown>;
+  savedPageDefaults: Record<string, unknown>;
   focusedElement: string | null;
   onClearFocus: () => void;
   onSaveChanges: () => void;
@@ -2025,9 +2324,12 @@ function EditorColumn({
   onSetDesc,
   onSetVar,
   onSetElementDefault,
+  onSetPageDefaults,
   onApplySurfaceStyle,
   savedVars,
   savedDefaults,
+  pageDefaults,
+  savedPageDefaults,
   focusedElement,
   onClearFocus,
   onSaveChanges,
@@ -2040,6 +2342,10 @@ function EditorColumn({
   const elementRefs = useRef<Record<string, HTMLDetailsElement | null>>({});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // The scroll container only mounts once `working` loads (a placeholder renders
+  // until then). Effects that read scrollContainerRef must re-run on this flip,
+  // not just on mount, or they'd permanently no-op on the common first-open path.
+  const hasWorking = working != null;
 
   useEffect(() => {
     if (!focusedElement) return;
@@ -2076,7 +2382,9 @@ function EditorColumn({
     return () => { if (highlightTimer.current) clearTimeout(highlightTimer.current); };
   }, []);
 
-  // Keyboard arrows navigate between element sections
+  // Keyboard arrows navigate between element sections. Depend on hasWorking so
+  // the listener attaches once the scroll container actually mounts (it isn't
+  // rendered behind the loading placeholder on first open).
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -2111,7 +2419,7 @@ function EditorColumn({
     };
     container.addEventListener("keydown", onKey);
     return () => container.removeEventListener("keydown", onKey);
-  }, []);
+  }, [hasWorking]);
 
   if (!working) {
     return (
@@ -2389,6 +2697,11 @@ function EditorColumn({
               const val = vars[tok.key];
               const saved = savedVars[tok.key];
               const isModified = String(val ?? "") !== String(saved ?? "");
+              // When a color token is cleared the panel renders the CSS :root
+              // fallback — show that effective value (swatch + placeholder) rather
+              // than a misleading blank/black field.
+              const fallback = CSS_VAR_FALLBACKS[tok.key];
+              const isInherited = (val == null || val === "") && !!fallback;
               return (
                 <div key={tok.key}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -2407,11 +2720,14 @@ function EditorColumn({
                       <>
                         <ColorPickerCell
                           value={String(val ?? "")}
+                          fallback={fallback}
                           onChange={(next) => onSetVar(tok.key, next)}
                         />
                         <input
                           type="text"
                           value={String(val ?? "")}
+                          placeholder={isInherited ? `${fallback} (inherited)` : ""}
+                          title={isInherited ? `Inherits ${fallback}` : undefined}
                           onChange={(e) => onSetVar(tok.key, e.target.value)}
                           style={{ flex: 1, fontSize: 11, fontFamily: "monospace" }}
                         />
@@ -2466,6 +2782,13 @@ function EditorColumn({
           </div>
         </div>
 
+        {/* Page background — theme-level page_defaults */}
+        <PageBackgroundSection
+          pageDefaults={pageDefaults}
+          savedPageDefaults={savedPageDefaults}
+          onChange={onSetPageDefaults}
+        />
+
         {/* Per-element styling */}
         <div style={sectionStyle}>
           <div style={sectionTitleStyle}>Elements</div>
@@ -2501,6 +2824,13 @@ function EditorColumn({
                           ? savedVars[control.source.key]
                           : savedDefaults[elType]?.[control.source.key];
                       const isModified = String(val ?? "") !== String(savedVal ?? "");
+                      // A cleared var-backed color inherits the CSS :root default;
+                      // a cleared element_defaults color inherits the theme/CSS
+                      // default (no single literal). Show the effective value where
+                      // we know it, else flag it as inherited.
+                      const controlFallback =
+                        control.source.kind === "var" ? CSS_VAR_FALLBACKS[control.source.key] : undefined;
+                      const isInherited = val == null || val === "";
                       const setControl = (next: unknown) => {
                         if (control.source.kind === "var") {
                           onSetVar(control.source.key, next);
@@ -2541,11 +2871,26 @@ function EditorColumn({
                               <>
                                 <ColorPickerCell
                                   value={String(val ?? "")}
+                                  fallback={controlFallback}
                                   onChange={(next) => setControl(next)}
                                 />
                                 <input
                                   type="text"
                                   value={String(val ?? "")}
+                                  placeholder={
+                                    isInherited
+                                      ? controlFallback
+                                        ? `${controlFallback} (inherited)`
+                                        : "inherited"
+                                      : ""
+                                  }
+                                  title={
+                                    isInherited
+                                      ? controlFallback
+                                        ? `Inherits ${controlFallback}`
+                                        : "Inherits the theme default"
+                                      : undefined
+                                  }
                                   onChange={(e) => setControl(e.target.value)}
                                   style={{ flex: 1, fontSize: 10, fontFamily: "monospace" }}
                                 />
@@ -2648,6 +2993,8 @@ function EditorColumn({
               >
                 {c.level === "fail" ? (
                   <AlertTriangle size={12} style={{ color: "#ef5350", flexShrink: 0 }} />
+                ) : c.level === "na" ? (
+                  <Minus size={12} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
                 ) : (
                   <Check size={12} style={{ color: "#66bb6a", flexShrink: 0 }} />
                 )}
@@ -2677,13 +3024,17 @@ function EditorColumn({
                     fontFamily: "monospace",
                     fontSize: 10,
                     fontWeight: 600,
-                    color: c.level === "fail" ? "#ef5350" : c.level === "AAA" ? "#66bb6a" : "#ffa726",
+                    color:
+                      c.level === "fail" ? "#ef5350"
+                      : c.level === "na" ? "var(--text-muted)"
+                      : c.level === "AAA" ? "#66bb6a"
+                      : "#ffa726",
                     width: 56,
                     textAlign: "right",
                   }}
                 >
                   {c.ratio ? `${c.ratio.toFixed(1)}:1` : "—"}{" "}
-                  <span style={{ fontSize: 8 }}>{c.level}</span>
+                  <span style={{ fontSize: 8 }}>{c.level === "na" ? "n/a" : c.level}</span>
                 </span>
               </div>
             ))}

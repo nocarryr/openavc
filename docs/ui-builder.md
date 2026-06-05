@@ -398,9 +398,13 @@ Each control shows a "modified" label when its value differs from the saved them
 
 ### Theme tokens and element defaults
 
-Below Quick Adjust, the **Theme** section exposes every color variable (background, text, accent, surface, status colors, border radius, grid gap, font). The **Elements** section exposes per-element-type styling: button colors, slider track colors, gauge fill, list item backgrounds, matrix crosspoint colors, and more.
+Below Quick Adjust, the **Theme** section exposes every color variable (background, text, accent, surface, status colors, border radius, grid gap, font). The **Elements** section exposes per-element-type styling: button colors, slider track colors, gauge fill, list item backgrounds, matrix crosspoint colors, and more. Page Nav, Camera Preset, and Keypad have their own sections so you can override their colors independently of buttons. Clearing a color reverts that element to the theme or button default it inherits, and the field shows the inherited value so you always see what the panel actually renders.
 
 Modified values turn accent-colored, and a reset icon appears to revert any value to its saved state.
+
+### Page background
+
+The **Page Background** section sets a theme-level background painted behind every page that does not define its own. Choose a solid color (or inherit the theme's page background token), add a gradient overlay (from and to colors plus angle), or set a background image. Reference uploaded assets as `assets://name`, with controls for fit, position, and opacity. A page that sets its own background in the Properties panel overrides this default.
 
 ### Direct manipulation
 
@@ -408,7 +412,7 @@ Click any element in the live preview to jump directly to its editor section. Ho
 
 ### Contrast checker
 
-A built-in WCAG accessibility checker evaluates text-on-background contrast for every color pair in the theme. It flags combinations that do not meet AA or AAA standards.
+A built-in WCAG accessibility checker evaluates text-on-background contrast for every color pair in the theme. It flags combinations that do not meet AA or AAA standards. A pair it cannot evaluate for a numeric ratio (a transparent color, or a value with no fixed RGB) is marked n/a rather than failing.
 
 ### Saving
 
@@ -419,7 +423,7 @@ A built-in WCAG accessibility checker evaluates text-on-background contrast for 
 
 ## Page Backgrounds
 
-Each page can have its own background color, image, and gradient overlay. Configure page backgrounds by clicking on the canvas with no element selected. The Properties panel shows the page-level settings.
+Each page can have its own background color, image, and gradient overlay. Configure page backgrounds by clicking on the canvas with no element selected. The Properties panel shows the page-level settings. To set a default background for the whole theme, use the **Page Background** section in the Theme Studio; a per-page background overrides it.
 
 | Property | Description |
 |----------|-------------|
