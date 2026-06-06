@@ -23,6 +23,24 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# overlap="allow" intentionally permits concurrent runs of the same trigger,
+# but a trigger whose macro re-triggers itself (via a state change / event
+# feedback loop) would otherwise spawn fire tasks without bound. This caps the
+# number of simultaneously-active fires per trigger as a runaway backstop —
+# high enough never to interfere with real concurrent use, low enough to stop
+# an accidental infinite self-trigger from pegging the event loop.
+_MAX_OVERLAP_ALLOW_DEPTH = 25
+
+# Expected cron poll interval. The loop sleeps this long between checks; a gap
+# materially larger than this means the event loop fell behind (load / host
+# suspend) and schedules may need catch-up.
+_CRON_POLL_INTERVAL = 30
+
+# overlap="queue" wait: poll this often for the running macro to finish, and
+# give up after this long so a wedged macro can't pin a queued fire forever.
+_QUEUE_POLL_INTERVAL = 1.0
+_QUEUE_MAX_WAIT_SECONDS = 300.0
+
 
 def _log_task_exception(task: asyncio.Task) -> None:
     """Done-callback to log unhandled exceptions from fire-and-forget tasks."""
@@ -78,8 +96,37 @@ class TriggerEngine:
         self._state_sub_ids: list[str] = []
         self._cron_task: asyncio.Task | None = None
         self._startup_tasks: list[asyncio.Task] = []
-        self._active_trigger_chain: set[str] = set()  # trigger IDs currently firing
+        # trigger_id -> count of fires currently active for it. A counter (not
+        # a membership set) so overlap="allow" can permit bounded concurrent
+        # runs while a true self-trigger loop is still capped.
+        self._active_trigger_depth: dict[str, int] = {}
+        # Strong references to fire-and-forget tasks (macro fires + status
+        # emits) so the GC can't collect a still-pending task — asyncio only
+        # holds a weak ref. Self-pruning via a done-callback.
+        self._bg_tasks: set[asyncio.Task] = set()
+        # Cron duplicate-fire guard, instance-scoped so it survives a hot
+        # reload (stop -> load_triggers -> start) instead of resetting and
+        # double-firing a schedule near its scheduled minute.
+        self._cron_last_fires: dict[str, datetime] = {}
+        # In-process monotonic baseline per trigger for the cooldown check,
+        # immune to wall-clock corrections. Survives a hot reload (same
+        # process); absent only after a full restart, where the persisted
+        # wall-clock timestamp is the fallback.
+        self._last_fired_monotonic: dict[str, float] = {}
         self._running = False
+
+    def _spawn(self, coro: Any) -> asyncio.Task:
+        """Launch a fire-and-forget coroutine with a strong ref + error log.
+
+        Holding the task in ``_bg_tasks`` keeps it alive (asyncio only weakly
+        references tasks, so an unreferenced one can be GC'd before it runs);
+        the done-callback both discards it and logs any unhandled exception.
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        task.add_done_callback(_log_task_exception)
+        return task
 
     def load_triggers(self, macros_data: list[dict[str, Any]]) -> None:
         """Load trigger definitions from all macros."""
@@ -102,6 +149,16 @@ class TriggerEngine:
                         ts.last_fired = float(persisted)
                     self._triggers[trigger_id] = ts
                     count += 1
+        # Drop cron-dedup / cooldown baselines for triggers that no longer
+        # exist (renamed/removed), but keep them for surviving ids so a hot
+        # reload preserves both the no-double-fire and cooldown guarantees.
+        live_ids = set(self._triggers)
+        self._cron_last_fires = {
+            k: v for k, v in self._cron_last_fires.items() if k in live_ids
+        }
+        self._last_fired_monotonic = {
+            k: v for k, v in self._last_fired_monotonic.items() if k in live_ids
+        }
         if count:
             log.info(f"Loaded {count} trigger(s)")
 
@@ -185,6 +242,12 @@ class TriggerEngine:
                     task.cancel()
             ts.pending_queue.clear()
 
+        # Cancel any in-flight fire / status-emit tasks (snapshot first: the
+        # done-callback mutates the set as each task settles).
+        for task in list(self._bg_tasks):
+            if not task.done():
+                task.cancel()
+
         # Unsubscribe state listeners
         for sub_id in self._state_sub_ids:
             self.state.unsubscribe(sub_id)
@@ -195,7 +258,7 @@ class TriggerEngine:
             self.events.off(handler_id)
         self._event_handler_ids.clear()
 
-        self._active_trigger_chain.clear()
+        self._active_trigger_depth.clear()
         log.info("TriggerEngine stopped")
 
     # --- Trigger type handlers ---
@@ -248,12 +311,24 @@ class TriggerEngine:
         await self._execute_trigger(ts, {"trigger_type": "startup"})
 
     async def _cron_loop(self) -> None:
-        """Check schedule triggers every 30 seconds."""
-        # Track last fire time per trigger to prevent duplicate fires
-        last_fires: dict[str, datetime] = {}
+        """Check schedule triggers on a fixed interval, with catch-up.
+
+        ``last_check`` is the wall-clock time of the previous poll. In steady
+        state a schedule fires when its most recent occurrence (``prev``) fell
+        after ``last_check`` — so even if the loop falls behind (heavy load,
+        host suspend) a schedule that came due in the gap still fires once
+        (catch-up), instead of being silently dropped. The cron dedup map is
+        instance state (``self._cron_last_fires``) so it survives a hot reload
+        and won't double-fire a schedule near its scheduled minute.
+        """
+        # last_check is reset per start() on purpose: after a fresh start or
+        # reload we treat it like a cold start (don't replay schedules from
+        # before the engine was running). Cross-reload double-fire is guarded
+        # by the instance-scoped dedup map instead.
+        last_check: datetime | None = None
         try:
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(_CRON_POLL_INTERVAL)
                 if not self._running:
                     return
                 now = datetime.now()
@@ -265,21 +340,46 @@ class TriggerEngine:
                     if not cron_expr:
                         continue
                     try:
-                        cron = croniter(cron_expr, now)
-                        prev = cron.get_prev(datetime)
-                        delta = (now - prev).total_seconds()
-                        if delta > 60:
+                        prev, should_fire = self._schedule_prev_due(
+                            cron_expr, now, last_check
+                        )
+                        if not should_fire:
                             continue
-                        # Prevent duplicate fires
-                        last = last_fires.get(t["id"])
+                        late = (now - prev).total_seconds()
+                        if last_check is not None and late > 60:
+                            log.warning(
+                                f"Cron trigger '{t['id']}' caught up a delayed "
+                                f"schedule ({late:.0f}s late; poll loop fell behind)"
+                            )
+                        # Prevent duplicate fires (cross-reload safety net)
+                        last = self._cron_last_fires.get(t["id"])
                         if last and (last - prev).total_seconds() >= 0:
                             continue
-                        last_fires[t["id"]] = now
+                        self._cron_last_fires[t["id"]] = now
                         self._initiate_fire(ts, {"trigger_type": "schedule", "cron": cron_expr})
                     except Exception:  # Catch-all: isolates individual trigger evaluation errors
                         log.exception(f"Error checking cron trigger '{t['id']}'")
+                last_check = now
         except asyncio.CancelledError:
             return
+
+    def _schedule_prev_due(
+        self, cron_expr: str, now: datetime, last_check: datetime | None
+    ) -> tuple[datetime, bool]:
+        """Decide whether a schedule's most recent occurrence should fire.
+
+        Returns ``(prev_occurrence, should_fire)``. On a cold start
+        (``last_check is None``) only a very recent occurrence fires, so a
+        schedule due before the engine started isn't replayed. In steady
+        state any occurrence that came due since the previous poll fires —
+        including one the loop was too late to see within the nominal poll
+        window (catch-up after falling behind), which the old fixed 60s
+        staleness cutoff would have silently dropped.
+        """
+        prev = croniter(cron_expr, now).get_prev(datetime)
+        if last_check is None:
+            return prev, (now - prev).total_seconds() <= 60
+        return prev, prev > last_check
 
     # --- Execution pipeline ---
 
@@ -295,10 +395,22 @@ class TriggerEngine:
         # 2. Cooldown check
         cooldown = t.get("cooldown_seconds", 0)
         if cooldown > 0:
-            elapsed = time.time() - ts.last_fired
+            mono_base = self._last_fired_monotonic.get(trigger_id)
+            if mono_base is not None:
+                # In-process baseline — immune to wall-clock corrections
+                # (NTP step on a Pi/embedded host after boot).
+                elapsed = time.monotonic() - mono_base
+            else:
+                # Only a persisted wall-clock timestamp (prior session).
+                # A backward clock correction makes last_fired look like the
+                # future (negative elapsed); treat the cooldown as elapsed
+                # rather than suppressing the trigger indefinitely.
+                elapsed = time.time() - ts.last_fired
+                if elapsed < 0:
+                    elapsed = cooldown
             if elapsed < cooldown:
                 log.debug(f"Trigger {trigger_id} skipped — cooldown ({elapsed:.1f}s < {cooldown}s)")
-                asyncio.create_task(self.events.emit(
+                self._spawn(self.events.emit(
                     "trigger.skipped",
                     {"trigger_id": trigger_id, "reason": "cooldown"},
                 ))
@@ -313,7 +425,7 @@ class TriggerEngine:
             ts.debounce_task = asyncio.create_task(
                 self._debounced_fire(ts, debounce, context)
             )
-            asyncio.create_task(self.events.emit(
+            self._spawn(self.events.emit(
                 "trigger.pending",
                 {
                     "trigger_id": trigger_id,
@@ -350,7 +462,7 @@ class TriggerEngine:
             ts.delay_task = asyncio.create_task(
                 self._delayed_fire(ts, delay, context)
             )
-            asyncio.create_task(self.events.emit(
+            self._spawn(self.events.emit(
                 "trigger.pending",
                 {
                     "trigger_id": t["id"],
@@ -360,7 +472,7 @@ class TriggerEngine:
                 },
             ))
         else:
-            asyncio.create_task(self._execute_trigger(ts, context))
+            self._spawn(self._execute_trigger(ts, context))
 
     async def _delayed_fire(
         self, ts: _TriggerState, delay: float, context: dict[str, Any]
@@ -438,10 +550,16 @@ class TriggerEngine:
                 )
                 return
             elif overlap == "queue":
-                # Wait for running macro to finish, then re-check and fire
+                # Wait for running macro to finish, then re-check and fire. The
+                # task removes itself from pending_queue when it settles so the
+                # queue can't grow without bound and queue_position stays the
+                # count of still-pending fires (not an ever-climbing total).
                 task = asyncio.create_task(self._queued_fire(ts, context))
                 ts.pending_queue.append(task)
-                asyncio.create_task(self.events.emit(
+                task.add_done_callback(
+                    lambda tk, _ts=ts: self._on_queued_done(_ts, tk)
+                )
+                self._spawn(self.events.emit(
                     "trigger.queued",
                     {
                         "trigger_id": trigger_id,
@@ -452,9 +570,28 @@ class TriggerEngine:
                 return
             # overlap == "allow" falls through
 
-        # 7. Circular chain detection (per trigger, not per macro — two
-        #    different triggers may legitimately fire the same macro)
-        if trigger_id in self._active_trigger_chain:
+        # 7. Re-entrancy guard. _active_trigger_depth counts the fires
+        #    currently active for this trigger (per trigger, not per macro —
+        #    two different triggers may legitimately fire the same macro).
+        depth = self._active_trigger_depth.get(trigger_id, 0)
+        if overlap == "allow":
+            # The user opted into concurrent runs; permit re-entry but cap the
+            # depth so a macro that re-triggers itself can't recurse forever.
+            if depth >= _MAX_OVERLAP_ALLOW_DEPTH:
+                log.warning(
+                    f"Trigger {trigger_id} blocked — overlap=allow hit the max "
+                    f"concurrent depth ({_MAX_OVERLAP_ALLOW_DEPTH}); likely a "
+                    f"runaway self-trigger on macro '{ts.macro_name}'"
+                )
+                await self.events.emit(
+                    "trigger.skipped",
+                    {"trigger_id": trigger_id, "reason": "max_depth"},
+                )
+                return
+        elif depth > 0:
+            # skip/queue already handled the running-macro case above; a
+            # non-zero depth here means this trigger re-fired itself (a
+            # circular state/event feedback chain).
             log.warning(
                 f"Trigger {trigger_id} blocked — circular chain detected "
                 f"(trigger already active for macro '{ts.macro_name}')"
@@ -468,15 +605,25 @@ class TriggerEngine:
         # 8. Fire
         await self._fire_macro(ts, context)
 
+    def _on_queued_done(self, ts: _TriggerState, task: asyncio.Task) -> None:
+        """Remove a settled queued-fire task from the trigger's queue."""
+        try:
+            ts.pending_queue.remove(task)
+        except ValueError:
+            pass  # already cleared by stop()
+        _log_task_exception(task)
+
     async def _queued_fire(
         self, ts: _TriggerState, context: dict[str, Any]
     ) -> None:
         """Wait for running macro to finish, re-check conditions, then fire."""
         macro_id = ts.macro_id
-        # Poll until macro finishes (max 5 minutes)
+        # Poll until the macro finishes, giving up after _QUEUE_MAX_WAIT_SECONDS
+        # so a wedged macro can't pin the queued fire indefinitely.
         trigger_id = ts.trigger.get("id", "")
-        for _ in range(300):
-            await asyncio.sleep(1)
+        max_polls = max(1, round(_QUEUE_MAX_WAIT_SECONDS / _QUEUE_POLL_INTERVAL))
+        for _ in range(max_polls):
+            await asyncio.sleep(_QUEUE_POLL_INTERVAL)
             if not self._running:
                 return
             if not ts.trigger.get("enabled", True):
@@ -506,11 +653,17 @@ class TriggerEngine:
         trigger_type = t.get("type", "unknown")
 
         ts.last_fired = time.time()
+        # Monotonic baseline for the cooldown check — immune to wall-clock
+        # jumps within this process (incl. across a hot reload). The wall-clock
+        # value below is the cross-restart fallback / display value.
+        self._last_fired_monotonic[trigger_id] = time.monotonic()
         # Stash cooldown timestamp in the in-memory state store so it's
         # picked up by load_triggers on a hot-reload (see paired read).
         # Not durable across server restart — see comment in load_triggers.
         self.state.set(f"system.trigger.{trigger_id}.last_fired", ts.last_fired, source="system")
-        self._active_trigger_chain.add(trigger_id)
+        self._active_trigger_depth[trigger_id] = (
+            self._active_trigger_depth.get(trigger_id, 0) + 1
+        )
 
         log.info(
             f"Trigger {trigger_id} fired macro '{ts.macro_name}' "
@@ -531,7 +684,11 @@ class TriggerEngine:
         except Exception:  # Catch-all: isolates macro execution errors from trigger pipeline
             log.exception(f"Trigger {trigger_id} macro execution failed")
         finally:
-            self._active_trigger_chain.discard(trigger_id)
+            remaining = self._active_trigger_depth.get(trigger_id, 0) - 1
+            if remaining > 0:
+                self._active_trigger_depth[trigger_id] = remaining
+            else:
+                self._active_trigger_depth.pop(trigger_id, None)
 
     # --- Condition evaluation ---
 

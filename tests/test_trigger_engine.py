@@ -1,10 +1,14 @@
 """Tests for TriggerEngine."""
 
 import asyncio
+import logging
+import time
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import pytest
 
+import server.core.trigger_engine as te
 from server.core.device_manager import DeviceManager
 from server.core.event_bus import EventBus
 from server.core.macro_engine import MacroEngine
@@ -741,4 +745,524 @@ async def test_multiple_triggers_same_macro(trigger_engine, macro_engine, core):
     await asyncio.sleep(0.1)
 
     assert fire_count == 2
+    await trigger_engine.stop()
+
+
+# --- Overlap policy: queue ---
+
+
+def _queue_trigger(macro_id="m", trigger_id="trg", **extra):
+    """A single overlap='queue' event trigger spec for a one-macro project."""
+    trig = {
+        "id": trigger_id,
+        "type": "event",
+        "enabled": True,
+        "event_pattern": "go",
+        "overlap": "queue",
+    }
+    trig.update(extra)
+    return [{"id": macro_id, "name": "M", "triggers": [trig]}]
+
+
+async def test_overlap_queue_cleanup_and_position(
+    trigger_engine, macro_engine, core, monkeypatch
+):
+    """Completed queued fires are removed; queue_position doesn't climb forever.
+
+    pending_queue previously accumulated one Task per fire for the life of the
+    project load, and queue_position (len of that list) climbed without bound.
+    The task now self-removes when it settles.
+    """
+    monkeypatch.setattr(te, "_QUEUE_POLL_INTERVAL", 0.05)
+    state, events = core
+
+    running = {"v": True}
+    macro_engine.is_macro_running = lambda mid: running["v"]
+    fire_count = {"n": 0}
+
+    async def counting(mid, context=None):
+        fire_count["n"] += 1
+
+    macro_engine.execute = counting
+
+    positions: list[int] = []
+    events.on("trigger.queued", lambda e, p: positions.append(p["queue_position"]))
+
+    macro_engine.load_macros([{"id": "m", "name": "M", "steps": []}])
+    trigger_engine.load_triggers(_queue_trigger())
+    await trigger_engine.start()
+    ts = trigger_engine._triggers["trg"]
+
+    # Macro "running" -> two fires queue up with positions 1 then 2.
+    await events.emit("go", {})
+    await asyncio.sleep(0.02)
+    await events.emit("go", {})
+    await asyncio.sleep(0.02)
+    assert len(ts.pending_queue) == 2
+    assert positions == [1, 2]
+
+    # Macro finishes -> queued fires run and remove themselves from the queue.
+    running["v"] = False
+    await asyncio.sleep(0.2)
+    assert fire_count["n"] == 2
+    assert len(ts.pending_queue) == 0  # no leaked completed tasks
+
+    # A new fire while running again starts back at position 1, not 3.
+    running["v"] = True
+    await events.emit("go", {})
+    await asyncio.sleep(0.02)
+    assert positions[-1] == 1
+    assert len(ts.pending_queue) == 1
+
+    running["v"] = False
+    await asyncio.sleep(0.2)
+    assert len(ts.pending_queue) == 0
+    await trigger_engine.stop()
+
+
+async def test_overlap_queue_fires_after_macro_finishes(
+    trigger_engine, macro_engine, core, monkeypatch
+):
+    """The happy path: a queued fire runs once the running macro completes."""
+    monkeypatch.setattr(te, "_QUEUE_POLL_INTERVAL", 0.05)
+    state, events = core
+    running = {"v": True}
+    macro_engine.is_macro_running = lambda mid: running["v"]
+    fire_count = {"n": 0}
+
+    async def counting(mid, context=None):
+        fire_count["n"] += 1
+
+    macro_engine.execute = counting
+    macro_engine.load_macros([{"id": "m", "name": "M", "steps": []}])
+    trigger_engine.load_triggers(_queue_trigger())
+    await trigger_engine.start()
+
+    await events.emit("go", {})
+    await asyncio.sleep(0.1)
+    assert fire_count["n"] == 0  # still queued, macro busy
+
+    running["v"] = False
+    await asyncio.sleep(0.2)
+    assert fire_count["n"] == 1  # fired after the wait
+    await trigger_engine.stop()
+
+
+async def test_overlap_queue_timeout(
+    trigger_engine, macro_engine, core, monkeypatch
+):
+    """A wedged macro times the queued fire out instead of pinning it forever.
+
+    This 5-minute timeout path had no coverage. Constants are shrunk so the
+    timeout is reached in milliseconds.
+    """
+    monkeypatch.setattr(te, "_QUEUE_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(te, "_QUEUE_MAX_WAIT_SECONDS", 0.06)
+    state, events = core
+
+    macro_engine.is_macro_running = lambda mid: True  # never finishes
+    fire_count = {"n": 0}
+
+    async def counting(mid, context=None):
+        fire_count["n"] += 1
+
+    macro_engine.execute = counting
+    macro_engine.load_macros([{"id": "m", "name": "M", "steps": []}])
+    trigger_engine.load_triggers(_queue_trigger())
+    await trigger_engine.start()
+    ts = trigger_engine._triggers["trg"]
+
+    await events.emit("go", {})
+    await asyncio.sleep(0.2)  # well past the 0.06s wait budget
+
+    assert fire_count["n"] == 0  # timed out, never fired
+    assert len(ts.pending_queue) == 0  # timed-out task removed itself
+    await trigger_engine.stop()
+
+
+async def test_overlap_queue_aborts_when_disabled(
+    trigger_engine, macro_engine, core, monkeypatch
+):
+    """Disabling a trigger mid-wait aborts its queued fire."""
+    monkeypatch.setattr(te, "_QUEUE_POLL_INTERVAL", 0.02)
+    state, events = core
+    macro_engine.is_macro_running = lambda mid: True  # stays "running"
+    fire_count = {"n": 0}
+
+    async def counting(mid, context=None):
+        fire_count["n"] += 1
+
+    macro_engine.execute = counting
+    macro_engine.load_macros([{"id": "m", "name": "M", "steps": []}])
+    trigger_engine.load_triggers(_queue_trigger())
+    await trigger_engine.start()
+    ts = trigger_engine._triggers["trg"]
+
+    await events.emit("go", {})
+    await asyncio.sleep(0.05)
+    assert len(ts.pending_queue) == 1
+
+    ts.trigger["enabled"] = False  # disabled while waiting
+    await asyncio.sleep(0.1)
+    assert fire_count["n"] == 0  # aborted
+    assert len(ts.pending_queue) == 0
+    await trigger_engine.stop()
+
+
+async def test_overlap_queue_rechecks_conditions_after_wait(
+    trigger_engine, macro_engine, core, monkeypatch
+):
+    """A guard that goes false during the wait suppresses the queued fire."""
+    monkeypatch.setattr(te, "_QUEUE_POLL_INTERVAL", 0.02)
+    state, events = core
+    state.set("var.guard", True, source="test")
+    running = {"v": True}
+    macro_engine.is_macro_running = lambda mid: running["v"]
+    fire_count = {"n": 0}
+
+    async def counting(mid, context=None):
+        fire_count["n"] += 1
+
+    macro_engine.execute = counting
+    macro_engine.load_macros([{"id": "m", "name": "M", "steps": []}])
+    trigger_engine.load_triggers(_queue_trigger(
+        conditions=[{"key": "var.guard", "operator": "eq", "value": True}]
+    ))
+    await trigger_engine.start()
+    ts = trigger_engine._triggers["trg"]
+
+    await events.emit("go", {})  # passes the guard at queue time
+    await asyncio.sleep(0.05)
+    assert len(ts.pending_queue) == 1
+
+    state.set("var.guard", False, source="test")  # guard now fails
+    running["v"] = False  # macro finishes -> re-check runs
+    await asyncio.sleep(0.1)
+
+    assert fire_count["n"] == 0  # re-check failed, did not fire
+    assert len(ts.pending_queue) == 0
+    await trigger_engine.stop()
+
+
+# --- Overlap policy: allow ---
+
+
+async def test_overlap_allow_runs_concurrently(trigger_engine, macro_engine, core):
+    """overlap='allow' fires concurrently instead of being blocked as circular.
+
+    The per-trigger chain guard previously single-flighted overlap=allow and
+    mislabeled the skip as 'circular'.
+    """
+    state, events = core
+    fire_count = 0
+    original_execute = macro_engine.execute
+
+    async def counting_execute(macro_id, context=None):
+        nonlocal fire_count
+        fire_count += 1
+        await original_execute(macro_id, context)
+
+    macro_engine.execute = counting_execute
+
+    skips: list[str] = []
+    events.on("trigger.skipped", lambda e, p: skips.append(p["reason"]))
+
+    macro_engine.load_macros([{
+        "id": "slow_macro",
+        "name": "Slow",
+        "steps": [{"action": "delay", "seconds": 0.4}],
+    }])
+    trigger_engine.load_triggers([{
+        "id": "slow_macro",
+        "name": "Slow",
+        "triggers": [{
+            "id": "trg_allow",
+            "type": "event",
+            "enabled": True,
+            "event_pattern": "custom.go",
+            "overlap": "allow",
+        }],
+    }])
+    await trigger_engine.start()
+
+    await events.emit("custom.go", {})
+    await asyncio.sleep(0.05)
+    await events.emit("custom.go", {})  # first run still in its 0.4s delay
+    await asyncio.sleep(0.1)
+
+    assert fire_count == 2  # both ran concurrently
+    assert "circular" not in skips  # not mislabeled / single-flighted
+
+    await asyncio.sleep(0.5)
+    await trigger_engine.stop()
+
+
+async def test_overlap_allow_depth_cap_blocks_runaway(
+    trigger_engine, macro_engine, core
+):
+    """overlap='allow' is still capped so a self-trigger loop can't run away."""
+    state, events = core
+    skips: list[str] = []
+    events.on("trigger.skipped", lambda e, p: skips.append(p["reason"]))
+    fire_count = {"n": 0}
+
+    async def counting(mid, context=None):
+        fire_count["n"] += 1
+
+    macro_engine.execute = counting
+    macro_engine.is_macro_running = lambda mid: False  # force the depth path
+
+    macro_engine.load_macros([{"id": "m", "name": "M", "steps": []}])
+    trigger_engine.load_triggers([{
+        "id": "m",
+        "name": "M",
+        "triggers": [{
+            "id": "trg",
+            "type": "event",
+            "enabled": True,
+            "event_pattern": "go",
+            "overlap": "allow",
+        }],
+    }])
+    await trigger_engine.start()
+    ts = trigger_engine._triggers["trg"]
+
+    # Simulate a runaway already at the cap, then attempt one more fire.
+    trigger_engine._active_trigger_depth["trg"] = te._MAX_OVERLAP_ALLOW_DEPTH
+    await trigger_engine._execute_trigger(ts, {})
+
+    assert fire_count["n"] == 0  # blocked
+    assert skips == ["max_depth"]  # distinct reason, not 'circular'
+    await trigger_engine.stop()
+
+
+# --- Fire-and-forget task hygiene ---
+
+
+async def test_fire_task_tracked_then_pruned(trigger_engine, macro_engine, core):
+    """The direct-fire task is strongly held while running, pruned when done.
+
+    The fire used to be dispatched with no handle, so the GC could collect a
+    still-pending task. It is now held in _bg_tasks and self-prunes.
+    """
+    state, events = core
+    macro_engine.load_macros([{
+        "id": "m",
+        "name": "M",
+        "steps": [{"action": "delay", "seconds": 0.3}],
+    }])
+    trigger_engine.load_triggers([{
+        "id": "m",
+        "name": "M",
+        "triggers": [{
+            "id": "trg",
+            "type": "event",
+            "enabled": True,
+            "event_pattern": "go",
+        }],
+    }])
+    await trigger_engine.start()
+
+    await events.emit("go", {})
+    await asyncio.sleep(0.05)
+    assert len(trigger_engine._bg_tasks) >= 1  # held while the macro runs
+
+    await asyncio.sleep(0.4)
+    assert len(trigger_engine._bg_tasks) == 0  # self-pruned after completion
+    await trigger_engine.stop()
+
+
+async def test_spawn_logs_unhandled_exception(trigger_engine, caplog):
+    """Spawned tasks surface exceptions via the done-callback."""
+    async def boom():
+        raise RuntimeError("kaboom-in-bg-task")
+
+    with caplog.at_level(logging.ERROR):
+        task = trigger_engine._spawn(boom())
+        await asyncio.sleep(0.05)
+
+    assert task.done()
+    assert task not in trigger_engine._bg_tasks  # self-pruned
+    assert any("kaboom-in-bg-task" in r.getMessage() for r in caplog.records)
+
+
+# --- Cron schedule decision: catch-up + dedup ---
+
+
+def test_schedule_prev_due_cold_start_recent(trigger_engine):
+    pytest.importorskip("croniter")
+    now = datetime(2026, 1, 1, 18, 0, 30)
+    prev, fire = trigger_engine._schedule_prev_due("0 18 * * *", now, None)
+    assert prev == datetime(2026, 1, 1, 18, 0, 0)
+    assert fire is True  # 30s old on cold start -> fire
+
+
+def test_schedule_prev_due_cold_start_stale_skipped(trigger_engine):
+    pytest.importorskip("croniter")
+    now = datetime(2026, 1, 1, 18, 5, 0)  # 5 min past the occurrence
+    _, fire = trigger_engine._schedule_prev_due("0 18 * * *", now, None)
+    assert fire is False  # don't replay a pre-start schedule
+
+
+def test_schedule_prev_due_steady_state_fires_once(trigger_engine):
+    pytest.importorskip("croniter")
+    last = datetime(2026, 1, 1, 17, 59, 30)
+    now = datetime(2026, 1, 1, 18, 0, 20)
+    _, fire = trigger_engine._schedule_prev_due("0 18 * * *", now, last)
+    assert fire is True  # occurrence came due since the previous poll
+
+    # Same occurrence next poll, no new one -> no double fire.
+    _, fire2 = trigger_engine._schedule_prev_due(
+        "0 18 * * *", datetime(2026, 1, 1, 18, 0, 50), now
+    )
+    assert fire2 is False
+
+
+def test_schedule_prev_due_catch_up_after_falling_behind(trigger_engine):
+    """A schedule due during a >60s loop gap still fires (catch-up)."""
+    pytest.importorskip("croniter")
+    last = datetime(2026, 1, 1, 17, 59, 50)
+    now = datetime(2026, 1, 1, 18, 2, 0)  # loop fell ~130s behind
+    prev, fire = trigger_engine._schedule_prev_due("0 18 * * *", now, last)
+    assert prev == datetime(2026, 1, 1, 18, 0, 0)
+    assert (now - prev).total_seconds() > 60  # old code would have dropped it
+    assert fire is True  # caught up
+
+
+async def test_cron_dedup_survives_reload(trigger_engine):
+    """Cron dedup is instance state, kept across a hot reload, pruned when a
+    trigger is removed."""
+    pytest.importorskip("croniter")
+    spec = [{
+        "id": "m",
+        "name": "M",
+        "triggers": [{
+            "id": "sched",
+            "type": "schedule",
+            "enabled": True,
+            "cron": "* * * * *",
+        }],
+    }]
+    trigger_engine.load_triggers(spec)
+    # Record a prior fire, then simulate a hot reload (stop -> load -> start).
+    trigger_engine._cron_last_fires["sched"] = datetime(2026, 1, 1, 12, 0, 0)
+    await trigger_engine.start()
+    await trigger_engine.stop()
+    trigger_engine.load_triggers(spec)
+    assert "sched" in trigger_engine._cron_last_fires  # survived the reload
+
+    # Removing the trigger prunes its dedup entry.
+    trigger_engine.load_triggers([{
+        "id": "m",
+        "name": "M",
+        "triggers": [{
+            "id": "other",
+            "type": "state_change",
+            "enabled": True,
+            "state_key": "var.x",
+        }],
+    }])
+    assert "sched" not in trigger_engine._cron_last_fires
+
+
+# --- Cooldown clock robustness ---
+
+
+async def test_cooldown_monotonic_immune_to_forward_clock_jump(
+    trigger_engine, macro_engine, core, monkeypatch
+):
+    """A forward wall-clock jump doesn't wrongly release the cooldown.
+
+    The in-process baseline is monotonic, so an NTP step can't make a still-in-
+    cooldown trigger fire again.
+    """
+    state, events = core
+    fire_count = 0
+    original_execute = macro_engine.execute
+
+    async def counting(mid, context=None):
+        nonlocal fire_count
+        fire_count += 1
+        await original_execute(mid, context)
+
+    macro_engine.execute = counting
+    macro_engine.load_macros([{
+        "id": "m",
+        "name": "M",
+        "steps": [{"action": "state.set", "key": "var.x", "value": True}],
+    }])
+    trigger_engine.load_triggers([{
+        "id": "m",
+        "name": "M",
+        "triggers": [{
+            "id": "trg",
+            "type": "state_change",
+            "enabled": True,
+            "state_key": "var.count",
+            "state_operator": "any",
+            "cooldown_seconds": 5.0,
+        }],
+    }])
+    await trigger_engine.start()
+
+    state.set("var.count", 1, source="test")
+    await asyncio.sleep(0.1)
+    assert fire_count == 1
+
+    # Wall clock jumps an hour forward. Wall-clock cooldown math would now read
+    # ~3600s elapsed and release; the monotonic baseline still reads ~0.1s.
+    real = time.time()
+    monkeypatch.setattr(te.time, "time", lambda: real + 3600)
+    state.set("var.count", 2, source="test")
+    await asyncio.sleep(0.1)
+    assert fire_count == 1  # still suppressed
+
+    await trigger_engine.stop()
+
+
+async def test_cooldown_backward_clock_after_restart_does_not_wedge(
+    trigger_engine, macro_engine, core
+):
+    """After a restart (only a persisted wall-clock timestamp), a backward clock
+    correction that puts last_fired in the future doesn't suppress forever."""
+    state, events = core
+    # A persisted last_fired from a prior session that is now in the FUTURE
+    # (the clock was corrected backward since it was written).
+    state.set("system.trigger.trg.last_fired", time.time() + 3600, source="system")
+
+    fire_count = 0
+    original_execute = macro_engine.execute
+
+    async def counting(mid, context=None):
+        nonlocal fire_count
+        fire_count += 1
+        await original_execute(mid, context)
+
+    macro_engine.execute = counting
+    macro_engine.load_macros([{
+        "id": "m",
+        "name": "M",
+        "steps": [{"action": "state.set", "key": "var.x", "value": True}],
+    }])
+    # load_triggers restores last_fired from the persisted (future) value and
+    # there is no in-process monotonic baseline -> the wall-clock fallback runs.
+    trigger_engine.load_triggers([{
+        "id": "m",
+        "name": "M",
+        "triggers": [{
+            "id": "trg",
+            "type": "state_change",
+            "enabled": True,
+            "state_key": "var.count",
+            "state_operator": "any",
+            "cooldown_seconds": 5.0,
+        }],
+    }])
+    await trigger_engine.start()
+
+    state.set("var.count", 1, source="test")
+    await asyncio.sleep(0.1)
+    # Old code: elapsed = now - future = negative < 5 -> suppress forever.
+    # New code: negative elapsed is treated as cooldown elapsed -> fires.
+    assert fire_count == 1
     await trigger_engine.stop()

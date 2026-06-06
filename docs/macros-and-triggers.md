@@ -194,7 +194,7 @@ Trigger safety features prevent runaway automation:
 - **Delay + re-check.** Wait, then verify the condition is still true before executing.
 - **Cooldown.** Minimum interval between executions.
 - **Guard conditions.** Additional state conditions that must all be true. Supports the same operators as conditional steps (`eq`, `ne`, `gt`, `lt`, `gte`, `lte`, `truthy`, `falsy`) and their aliases.
-- **Overlap prevention.** Will not start a new execution if the previous one is still running.
+- **Overlap policy.** Choose what happens when a trigger fires while its macro is still running: `skip` (ignore the new fire, the default), `queue` (run it once the current one finishes), or `allow` (run them concurrently).
 - **Stop on error.** Set `stop_on_error: true` on a macro to halt execution if any step fails (default is to continue).
 
 Example: A "projector auto-off" trigger watches `device.projector_main.power` for `"on"`, with a guard condition that `var.room_active` equals `false`. This shuts down a projector that someone turned on manually without using the panel, but only if the room is not in active use.
