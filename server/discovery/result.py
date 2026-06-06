@@ -257,12 +257,21 @@ def merge_device_info(
     existing: DiscoveredDevice,
     new_info: dict[str, Any],
     source: str,  # kept for API compatibility — not stored on the device
+    *,
+    fill_only: bool = False,
 ) -> None:
     """Merge new information into an existing device record.
 
     Rules:
       - Never overwrite with None (only enrich)
       - More specific info wins (longer strings)
+      - ``fill_only=True`` (driver-probe / companion sources): only set an
+        identity field that is still empty; never overwrite a value an
+        earlier, higher-trust source already provided. Driver-declared
+        ``tcp_probe``/``udp_probe`` text and community Python companions run
+        *after* passive collection (mDNS/SSDP/AMX/SNMP), so the length-only
+        rule would otherwise let their text clobber authoritative passive
+        identity. They still enrich fields nothing else populated.
     """
     del source  # legacy parameter, retained so call sites keep their breadcrumb
 
@@ -274,6 +283,9 @@ def merge_device_info(
         old_val = getattr(existing, key, None)
         if old_val is None:
             setattr(existing, key, new_val)
+        elif fill_only:
+            # Lower-trust source: keep the existing authoritative value.
+            continue
         elif isinstance(new_val, str) and isinstance(old_val, str):
             # More specific (longer) string wins
             if len(new_val) > len(old_val):

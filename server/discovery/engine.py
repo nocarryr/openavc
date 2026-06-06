@@ -90,6 +90,14 @@ PHASE_WEIGHTS: dict[str, dict[str, float]] = {
     },
 }
 
+# Passive-collect heartbeat window. The listeners run in the background the
+# whole scan; phase 7 waits this long for late mDNS/SSDP/AMX answers (and the
+# SSDP XML fetches) before cancelling them. Module-level so tests can shrink
+# the otherwise-untestable 5–30s wait.
+_PASSIVE_COLLECT_TICK_SECONDS: float = 1.0
+_PASSIVE_COLLECT_WAIT_BY_DEPTH: dict[str, float] = {"quick": 5.0, "thorough": 30.0}
+_PASSIVE_COLLECT_DEFAULT_WAIT_SECONDS: float = 15.0
+
 
 async def _resolve_hostnames(
     ips: list[str],
@@ -157,6 +165,27 @@ class ScanStatus:
             "total_hosts_scanned": self.total_hosts_scanned,
             "active_adapter": self.active_adapter,
         }
+
+
+def _ip_in_subnets(ip: str, subnets: list[str]) -> bool:
+    """True if ``ip`` parses as an address inside one of ``subnets``.
+
+    Keeps community Python discovery companions from fabricating device
+    records for IPs outside the scanned ranges (see ``_run_custom_probes``).
+    A malformed ``ip`` or CIDR is treated as "not in range" — the parse is
+    guarded so one bad value can't raise into the probe path.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for cidr in subnets:
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _broadcast_addresses_for(subnets: list[str]) -> list[str]:
@@ -420,8 +449,20 @@ class DiscoveryEngine:
             # end of the scan if not re-discovered.  This gives the full pipeline
             # (ping, port scan, probes, SSDP, mDNS) a chance to re-find them
             # before we clean up.
+            #
+            # Reset each device's per-scan observations too. The evidence_log,
+            # open ports, and banners are re-derived from scratch every scan;
+            # without this they accumulate across re-scans — the evidence_log
+            # grows unbounded (memory, plus an O(n) match() cost that climbs
+            # every scan) and finalize re-appends an identical open-port
+            # enrichment record per scan, piling up duplicate rows in the
+            # "Why?" reveal. Identity fields stay (they're re-merged from the
+            # fresh evidence) so the card doesn't blank mid-scan.
             for device in self.results.values():
                 device.alive = False
+                device.evidence_log.clear()
+                device.open_ports.clear()
+                device.banners.clear()
 
             self._scan_task = asyncio.create_task(
                 self._run_scan(targets, timeout)
@@ -521,15 +562,20 @@ class DiscoveryEngine:
         # Passive listeners run throughout all active scan phases and are
         # stopped explicitly in phase 7 when we're ready to collect.
         # The 600s cap is a safety net; they'll be stopped much sooner.
-        mdns_task = asyncio.create_task(mdns_scanner.start(duration=600.0))
-        ssdp_task = asyncio.create_task(ssdp_scanner.scan(
-            timeout=600.0, fetch_descriptions=True,
-        ))
-        amx_ddp_task = asyncio.create_task(amx_ddp_scanner.start(duration=600.0))
-
+        # Created inside the try so the finally cleans them up on EVERY exit
+        # path — see _cancel_background_tasks for why that matters.
+        mdns_task: asyncio.Task | None = None
+        ssdp_task: asyncio.Task | None = None
+        amx_ddp_task: asyncio.Task | None = None
         snmp_task: asyncio.Task | None = None
 
         try:
+            mdns_task = asyncio.create_task(mdns_scanner.start(duration=600.0))
+            ssdp_task = asyncio.create_task(ssdp_scanner.scan(
+                timeout=600.0, fetch_descriptions=True,
+            ))
+            amx_ddp_task = asyncio.create_task(amx_ddp_scanner.start(duration=600.0))
+
             # --- Phase 3: Ping Sweep ---
             await self._set_phase(3, "ping_sweep", "Scanning for live hosts...")
 
@@ -538,11 +584,23 @@ class DiscoveryEngine:
                 device.alive = True
                 await self._emit_device_update(device, "ping_sweep")
 
-            # Track per-host ping progress for smooth progress bar
-            ping_total = sum(
-                max(0, ipaddress.IPv4Network(s, strict=False).num_addresses - 2)
-                for s in subnets
-            )
+            # Track per-host ping progress for smooth progress bar. Count only
+            # the hosts ping_sweep will actually probe: skip malformed CIDRs
+            # (one bad subnet must not abort the whole scan — every other
+            # subnet-parse site is guarded) and skip subnets larger than the
+            # configured limit (ping_sweep skips those via min_prefix too), so
+            # total_hosts_scanned matches what was scanned instead of
+            # over-counting skipped ranges.
+            min_prefix = self.config.get("max_subnet_size", 20)
+            ping_total = 0
+            for s in subnets:
+                try:
+                    net = ipaddress.IPv4Network(s, strict=False)
+                except ValueError:
+                    continue
+                if net.prefixlen < min_prefix:
+                    continue
+                ping_total += max(0, net.num_addresses - 2)
             ping_done = 0
 
             async def on_ping_progress(completed: int, total: int) -> None:
@@ -556,7 +614,7 @@ class DiscoveryEngine:
                 concurrency=ping_concurrency,
                 on_found=on_ping_found,
                 on_progress=on_ping_progress,
-                min_prefix=self.config.get("max_subnet_size", 20),
+                min_prefix=min_prefix,
                 source_ip=control_ip,
             )
             self.scan_status.total_hosts_scanned = ping_total
@@ -805,17 +863,40 @@ class DiscoveryEngine:
 
             self.scan_status.devices_found = len(self.results)
 
-        except asyncio.CancelledError:
-            # Clean up background tasks on cancellation
-            mdns_task.cancel()
-            ssdp_task.cancel()
-            amx_ddp_task.cancel()
-            tasks_to_cancel = [mdns_task, ssdp_task, amx_ddp_task]
-            if snmp_task:
-                snmp_task.cancel()
-                tasks_to_cancel.append(snmp_task)
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-            raise
+        finally:
+            # Release the passive listeners (each holds a bound UDP socket on
+            # 5353/1900/9131 plus a blocked recvfrom executor thread) and the
+            # SNMP scanner on EVERY exit path. On the success path phase 7
+            # already collected them (done -> no-op); on a timeout, a cancel,
+            # or ANY pipeline error this finally is the only thing that stops
+            # their 600s loops, so the sockets/threads don't leak into the next
+            # scan that binds the same SO_REUSEADDR ports.
+            await self._cancel_background_tasks(
+                mdns_task, ssdp_task, amx_ddp_task, snmp_task,
+            )
+
+    async def _cancel_background_tasks(
+        self, *tasks: asyncio.Task | None,
+    ) -> None:
+        """Cancel and await any still-running background scan tasks.
+
+        Idempotent and safe on every exit path: a ``None`` or already-finished
+        task is skipped, so this is a cheap no-op on the success path (phase 7
+        already collected the passive listeners + SNMP scanner) and the
+        guaranteed cleanup on timeout / cancellation / pipeline error —
+        releasing each listener's bound UDP socket and blocked recvfrom
+        executor thread instead of leaking them into the next scan.
+
+        ``gather(return_exceptions=True)`` swallows each child's own
+        CancelledError but still propagates a cancellation aimed at the
+        awaiting coroutine, so calling this from a ``finally`` preserves
+        cooperative cancellation.
+        """
+        pending = [t for t in tasks if t is not None and not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _collect_passive_results(
         self,
@@ -829,10 +910,12 @@ class DiscoveryEngine:
         instead of appearing stuck while waiting for SSDP XML fetches.
         """
         depth = self.config.get("scan_depth", "standard")
-        total_wait = {"quick": 5.0, "thorough": 30.0}.get(depth, 15.0)
+        total_wait = _PASSIVE_COLLECT_WAIT_BY_DEPTH.get(
+            depth, _PASSIVE_COLLECT_DEFAULT_WAIT_SECONDS
+        )
         remaining_tasks = {mdns_task, ssdp_task, amx_ddp_task}
         elapsed = 0.0
-        tick = 1.0
+        tick = _PASSIVE_COLLECT_TICK_SECONDS
 
         while elapsed < total_wait and remaining_tasks:
             _, pending = await asyncio.wait(remaining_tasks, timeout=tick)
@@ -846,12 +929,15 @@ class DiscoveryEngine:
                 f"Collecting passive results... ({secs_left}s remaining)",
             )
 
-        for task in remaining_tasks:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Cancel any listeners still running past the collect window. gather()
+        # with return_exceptions swallows each task's own CancelledError but
+        # still propagates a cancellation aimed at THIS coroutine — so a
+        # stop_scan()/timeout cancellation isn't silently eaten here (which
+        # would let the collect loop run on instead of aborting promptly).
+        if remaining_tasks:
+            for task in remaining_tasks:
+                task.cancel()
+            await asyncio.gather(*remaining_tasks, return_exceptions=True)
 
         mdns_results = self._task_result(mdns_task, "mDNS")
         for ip, mdns_result in mdns_results.items():
@@ -898,13 +984,13 @@ class DiscoveryEngine:
         # Wait with timeout
         done, pending = await asyncio.wait([snmp_task], timeout=5.0)
 
-        # Cancel if still running
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Cancel if still running. gather() with return_exceptions swallows the
+        # SNMP task's own CancelledError but still propagates a cancellation
+        # aimed at THIS coroutine, preserving cooperative cancellation.
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
         snmp_results = {}
         if snmp_task.done() and not snmp_task.cancelled():
@@ -997,9 +1083,14 @@ class DiscoveryEngine:
                         # Lift extracted hostname/model/firmware/etc. onto the
                         # device record so the card and the export report show
                         # them. Passive listeners do this; probes need to too.
+                        # fill_only: a probe runs after passive collection, so
+                        # it enriches empty fields but never clobbers an
+                        # authoritative passive/SNMP identity by being longer.
                         info = device_info_from_evidence(ev)
                         if info:
-                            merge_device_info(device, info, "broadcast_probe")
+                            merge_device_info(
+                                device, info, "broadcast_probe", fill_only=True,
+                            )
                         await self._emit_device_update(device, "broadcast_probe")
 
         if tcp_specs:
@@ -1038,17 +1129,33 @@ class DiscoveryEngine:
                     device.evidence_log.append(ev)
                     info = device_info_from_evidence(ev)
                     if info:
-                        merge_device_info(device, info, "protocol_probe")
+                        merge_device_info(
+                            device, info, "protocol_probe", fill_only=True,
+                        )
                     await self._emit_device_update(device, "protocol_probe")
 
         if self._discovery_companions:
             async def _emit_for_host(host: str, ev) -> None:
+                # Companion code is community-trust (same tier as a Python
+                # driver) and passes the host string verbatim. Enforce the
+                # engine-wide invariant that every result is a host on a
+                # scanned subnet: without this a buggy or hostile companion
+                # could fabricate a record — even an IDENTIFIED one — for an IP
+                # that was never scanned. Built-in probes are already
+                # constrained (UDP keys off the recorded sender; TCP only
+                # targets hosts already in results).
+                if not _ip_in_subnets(host, subnets):
+                    log.warning(
+                        "Discovery companion emitted host %r outside the "
+                        "scanned subnets; ignoring", host,
+                    )
+                    return
                 device = self._get_or_create(host)
                 device.alive = True
                 device.evidence_log.append(ev)
                 info = device_info_from_evidence(ev)
                 if info:
-                    merge_device_info(device, info, "companion")
+                    merge_device_info(device, info, "companion", fill_only=True)
                 await self._emit_device_update(device, "broadcast_probe")
 
             # Build the port -> hosts map once and share it across
