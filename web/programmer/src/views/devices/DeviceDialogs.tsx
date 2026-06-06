@@ -3,6 +3,7 @@ import { useProjectStore } from "../../store/projectStore";
 import * as api from "../../api/restClient";
 import type { DeviceConfig, DriverInfo } from "../../api/types";
 import { DeviceSettingsSetupDialog, hasDriverSetupSettings } from "../../components/shared/DeviceSettingsSetupDialog";
+import { coerceConfigValue } from "./deviceConfigCoerce";
 
 // --- Typed Config Fields ---
 
@@ -28,8 +29,13 @@ function ConfigFieldInputs({
         const values = schema.values as string[] | undefined;
         const isRequired = schema.required === true;
         const defaultVal = schema.default;
+        const isObjectField = fieldType === "object" || fieldType === "json";
         // Build helpful placeholder from key name conventions
-        const placeholder = key === "host" ? "192.168.1.100"
+        const placeholder = isObjectField
+          ? (defaultVal && typeof defaultVal === "object" && Object.keys(defaultVal).length > 0
+              ? JSON.stringify(defaultVal)
+              : '{"key": "value"}')
+          : key === "host" ? "192.168.1.100"
           : key === "port" ? "1-65535"
           : key === "username" ? "admin"
           : key === "password" ? "password"
@@ -110,7 +116,7 @@ function ConfigFieldInputs({
                 placeholder={placeholder}
                 style={{ width: "100%" }}
               />
-            ) : fieldType === "text" ? (
+            ) : fieldType === "text" || isObjectField ? (
               <textarea
                 value={configValues[key] ?? ""}
                 onChange={(e) =>
@@ -118,6 +124,7 @@ function ConfigFieldInputs({
                 }
                 placeholder={placeholder}
                 rows={6}
+                spellCheck={false}
                 style={{
                   width: "100%",
                   fontFamily: "var(--font-mono, monospace)",
@@ -327,7 +334,9 @@ export function AddDeviceDialog({
     const vals: Record<string, string> = {};
     for (const [k, v] of Object.entries(merged)) {
       if (v != null && typeof v === "object") {
-        vals[k] = JSON.stringify(v);
+        // Pretty-print so object fields (e.g. a command map) are editable as
+        // readable JSON in the multi-line textarea.
+        vals[k] = JSON.stringify(v, null, 2);
       } else {
         vals[k] = String(v ?? "");
       }
@@ -359,11 +368,16 @@ export function AddDeviceDialog({
     }
 
     const config: Record<string, unknown> = {};
+    const schema = (driverInfo?.config_schema ?? {}) as Record<string, Record<string, unknown>>;
     for (const [key, val] of Object.entries(configValues)) {
       if (val === "") continue;
-      // Only coerce simple decimal numbers (not hex 0x1A, scientific 1e5, etc.)
-      const isSimpleNumber = /^-?\d+(\.\d+)?$/.test(val);
-      config[key] = isSimpleNumber ? Number(val) : val;
+      const fieldType = String(schema[key]?.type || "");
+      const result = coerceConfigValue(val, fieldType);
+      if (!result.ok) {
+        setError(`${String(schema[key]?.label || key)}: ${result.error}`);
+        return;
+      }
+      config[key] = result.value;
     }
 
     const newDevice: DeviceConfig = {
@@ -633,7 +647,9 @@ export function EditDeviceDialog({
     const vals: Record<string, string> = {};
     for (const [k, v] of Object.entries(merged)) {
       if (v != null && typeof v === "object") {
-        vals[k] = JSON.stringify(v);
+        // Pretty-print so object fields (e.g. a command map) are editable as
+        // readable JSON in the multi-line textarea.
+        vals[k] = JSON.stringify(v, null, 2);
       } else {
         vals[k] = String(v ?? "");
       }
@@ -681,29 +697,13 @@ export function EditDeviceDialog({
       for (const [key, val] of Object.entries(configValues)) {
         if (val === "") continue;
         const fieldType = String(schema[key]?.type || "");
-        if (fieldType === "boolean") {
-          config[key] = val === "true";
-        } else if (fieldType === "integer" || fieldType === "number" || fieldType === "float") {
-          const isSimpleNumber = /^-?\d+(\.\d+)?$/.test(val);
-          config[key] = isSimpleNumber ? Number(val) : val;
-        } else if (fieldType === "text") {
-          // Multi-line text — preserve the raw string, no JSON / number coercion
-          config[key] = val;
-        } else {
-          // Try parsing as JSON for object-type values (command_map, etc.)
-          try {
-            const parsed = JSON.parse(val);
-            if (typeof parsed === "object" && parsed !== null) {
-              config[key] = parsed;
-            } else {
-              const isSimpleNumber = /^-?\d+(\.\d+)?$/.test(val);
-              config[key] = isSimpleNumber ? Number(val) : val;
-            }
-          } catch (_) {
-            const isSimpleNumber = /^-?\d+(\.\d+)?$/.test(val);
-            config[key] = isSimpleNumber ? Number(val) : val;
-          }
+        const result = coerceConfigValue(val, fieldType);
+        if (!result.ok) {
+          setError(`${String(schema[key]?.label || key)}: ${result.error}`);
+          setSaving(false);
+          return;
         }
+        config[key] = result.value;
       }
 
       const updateData: Record<string, unknown> = {
