@@ -3,6 +3,7 @@
 import asyncio
 import sys
 import textwrap
+import threading
 
 import pytest
 
@@ -283,3 +284,279 @@ def test_get_callable_functions(engine, script_dir):
 def test_get_callable_functions_empty(engine):
     """No scripts loaded returns empty list."""
     assert engine.get_callable_functions() == []
+
+
+# ===== H-069: scripts-dir path containment =====
+
+
+async def test_script_path_traversal_is_refused(engine, subsystems, script_dir):
+    """A scripts[].file that escapes the scripts dir is refused, not exec'd."""
+    state, events, devices = subsystems
+
+    # Plant a file OUTSIDE scripts/ that would set state if it were exec'd.
+    evil = script_dir / "evil.py"
+    evil.write_text(
+        "from openavc import state\nstate.set('var.pwned', 'yes')\n", encoding="utf-8"
+    )
+
+    count = engine.load_scripts(
+        [{"id": "evil", "file": "../evil.py", "enabled": True}]
+    )
+    assert count == 0
+    assert state.get("var.pwned") is None  # never executed
+    assert "evil" in engine.get_load_errors()
+    assert "escape" in engine.get_load_errors()["evil"].lower()
+
+
+async def test_script_absolute_path_is_refused(engine, subsystems, script_dir, tmp_path):
+    """An absolute scripts[].file path is refused."""
+    state, events, devices = subsystems
+    outside = tmp_path / "outside.py"
+    outside.write_text(
+        "from openavc import state\nstate.set('var.pwned2', 'yes')\n", encoding="utf-8"
+    )
+    count = engine.load_scripts(
+        [{"id": "abs", "file": str(outside), "enabled": True}]
+    )
+    assert count == 0
+    assert state.get("var.pwned2") is None
+    assert "abs" in engine.get_load_errors()
+
+
+# ===== H-068: bounded state-change cascade =====
+
+
+async def test_state_cascade_depth_is_bounded(engine, subsystems, script_dir):
+    """A self-feeding async @on_state_change loop is capped, not unbounded."""
+    state, events, devices = subsystems
+
+    _write_script(script_dir, "loop.py", """\
+        from openavc import on_state_change, state
+
+        @on_state_change("var.counter")
+        async def bump(key, old_value, new_value):
+            state.set("var.counter", (new_value or 0) + 1)
+    """)
+    engine.load_scripts([{"id": "loop", "file": "loop.py", "enabled": True}])
+
+    state.set("var.counter", 0, source="test")
+    # Let the cascade run to its bound.
+    await asyncio.sleep(0.2)
+
+    capped = state.get("var.counter")
+    # Each of the MAX nested hops increments once; the loop then stops.
+    assert capped == engine.MAX_STATE_HANDLER_DEPTH
+
+    # Confirm it has truly stopped (not merely slow): value is stable.
+    await asyncio.sleep(0.1)
+    assert state.get("var.counter") == engine.MAX_STATE_HANDLER_DEPTH
+
+
+# ===== M-118: async state handlers get a timeout + surface errors =====
+
+
+async def test_async_state_handler_error_surfaces(engine, subsystems, script_dir):
+    """An exception inside an async @on_state_change body emits script.error."""
+    state, events, devices = subsystems
+
+    seen: list[dict] = []
+    events.on("script.error", lambda e, p: seen.append(p))
+
+    _write_script(script_dir, "raiser.py", """\
+        from openavc import on_state_change
+
+        @on_state_change("var.trigger")
+        async def boom(key, old_value, new_value):
+            raise RuntimeError("kaboom")
+    """)
+    engine.load_scripts([{"id": "raiser", "file": "raiser.py", "enabled": True}])
+
+    state.set("var.trigger", "go")
+    await asyncio.sleep(0.05)
+
+    assert any("kaboom" in (p.get("error") or "") for p in seen), seen
+    assert any(p.get("script_id") == "raiser" for p in seen)
+
+
+async def test_async_state_handler_timeout_surfaces(engine, subsystems, script_dir):
+    """An async @on_state_change body that hangs times out and emits script.error."""
+    state, events, devices = subsystems
+    engine.HANDLER_TIMEOUT = 0.05  # keep the test fast
+
+    seen: list[dict] = []
+    events.on("script.error", lambda e, p: seen.append(p))
+
+    _write_script(script_dir, "hang.py", """\
+        from openavc import on_state_change, delay
+
+        @on_state_change("var.trigger")
+        async def slow(key, old_value, new_value):
+            await delay(5)
+    """)
+    engine.load_scripts([{"id": "hang", "file": "hang.py", "enabled": True}])
+
+    state.set("var.trigger", "go")
+    await asyncio.sleep(0.2)
+
+    assert any("timed out" in (p.get("error") or "") for p in seen), seen
+
+
+# ===== M-119: timed-out load thread is a daemon (won't block shutdown) =====
+
+
+async def test_load_timeout_thread_is_daemon(engine, subsystems, script_dir):
+    """A script that blocks at import times out and leaves only a daemon thread."""
+    engine.SCRIPT_LOAD_TIMEOUT = 0.1
+
+    _write_script(script_dir, "slow_load.py", """\
+        import time
+        time.sleep(1)
+    """)
+    count = engine.load_scripts(
+        [{"id": "slow_load", "file": "slow_load.py", "enabled": True}]
+    )
+    assert count == 0
+    assert "slow_load" in engine.get_load_errors()
+    assert "timed out" in engine.get_load_errors()["slow_load"]
+
+    # The abandoned load thread must be a daemon so it can't block interpreter
+    # shutdown (the bug: ThreadPoolExecutor workers are non-daemon and joined
+    # at exit).
+    load_threads = [
+        t for t in threading.enumerate() if t.name.startswith("script-load-slow_load")
+    ]
+    assert load_threads, "expected an abandoned load thread"
+    assert all(t.daemon for t in load_threads)
+
+
+# ===== Top-level timers (defer-and-drain): documented pattern works =====
+
+
+async def test_top_level_timer_materializes(engine, subsystems, script_dir):
+    """A top-level after() call (run off-loop during import) still fires."""
+    state, events, devices = subsystems
+
+    _write_script(script_dir, "timed.py", """\
+        from openavc import after, state
+
+        def fire():
+            state.set("var.fired", "yes")
+
+        after(0.05, fire)
+    """)
+    engine.load_scripts([{"id": "timed", "file": "timed.py", "enabled": True}])
+    assert engine.get_load_errors() == {}  # no RuntimeError at load
+
+    await asyncio.sleep(0.2)
+    assert state.get("var.fired") == "yes"
+
+
+# ===== M-120: per-script reload isolation + preserve-on-failure =====
+
+
+async def test_reload_script_leaves_peers_running(engine, subsystems, script_dir):
+    """Reloading one script doesn't tear down another script's handlers."""
+    state, events, devices = subsystems
+
+    _write_script(script_dir, "a.py", """\
+        from openavc import on_state_change, state
+
+        @on_state_change("var.a")
+        async def ha(key, old, new):
+            state.set("var.a_out", f"v1:{new}")
+    """)
+    _write_script(script_dir, "b.py", """\
+        from openavc import on_state_change, state
+
+        @on_state_change("var.b")
+        async def hb(key, old, new):
+            state.set("var.b_out", f"b:{new}")
+    """)
+    cfg_a = {"id": "a", "file": "a.py", "enabled": True}
+    cfg_b = {"id": "b", "file": "b.py", "enabled": True}
+    engine.load_scripts([cfg_a, cfg_b])
+
+    state.set("var.b", "1")
+    await asyncio.sleep(0.05)
+    assert state.get("var.b_out") == "b:1"
+
+    # Rewrite + reload ONLY script a.
+    _write_script(script_dir, "a.py", """\
+        from openavc import on_state_change, state
+
+        @on_state_change("var.a")
+        async def ha(key, old, new):
+            state.set("var.a_out", f"v2:{new}")
+    """)
+    result = engine.reload_script(cfg_a)
+    assert result["status"] == "reloaded"
+
+    # a's new behavior is live...
+    state.set("var.a", "x")
+    await asyncio.sleep(0.05)
+    assert state.get("var.a_out") == "v2:x"
+
+    # ...and b's handler still fires (it was never torn down).
+    state.set("var.b", "2")
+    await asyncio.sleep(0.05)
+    assert state.get("var.b_out") == "b:2"
+    # b kept its single subscription; a was swapped, not duplicated.
+    assert len(engine._state_sub_ids["b"]) == 1
+    assert len(engine._state_sub_ids["a"]) == 1
+
+
+async def test_reload_script_preserves_old_on_failure(engine, subsystems, script_dir):
+    """If the new version fails to import, the old version stays active."""
+    state, events, devices = subsystems
+
+    _write_script(script_dir, "p.py", """\
+        from openavc import on_state_change, state
+
+        @on_state_change("var.in")
+        async def h(key, old, new):
+            state.set("var.out", f"good:{new}")
+    """)
+    cfg = {"id": "p", "file": "p.py", "enabled": True}
+    engine.load_scripts([cfg])
+
+    state.set("var.in", "1")
+    await asyncio.sleep(0.05)
+    assert state.get("var.out") == "good:1"
+
+    # Break the source and reload — import must fail.
+    _write_script(script_dir, "p.py", """\
+        from openavc import on_state_change, state
+        raise RuntimeError("broken on import")
+    """)
+    result = engine.reload_script(cfg)
+    assert result["status"] == "error"
+    assert result["old_script_preserved"] is True
+    assert "broken on import" in result["error"]
+
+    # The previously loaded handler is still serving.
+    state.set("var.in", "2")
+    await asyncio.sleep(0.05)
+    assert state.get("var.out") == "good:2"
+
+
+# ===== M-120: per-script timer ownership =====
+
+
+async def test_cancel_script_timers_is_scoped():
+    """cancel_script_timers only cancels the owning script's timers."""
+    script_api.cancel_all_timers()  # clean slate
+
+    with script_api.current_script_context("alpha"):
+        t_alpha = script_api.every(100, lambda: None)
+    with script_api.current_script_context("beta"):
+        t_beta = script_api.every(100, lambda: None)
+
+    assert script_api._timer_owners.get(t_alpha) == "alpha"
+    assert script_api._timer_owners.get(t_beta) == "beta"
+
+    cancelled = script_api.cancel_script_timers("alpha")
+    assert cancelled == 1
+    assert t_alpha not in script_api._active_timers
+    assert t_beta in script_api._active_timers  # beta untouched
+
+    script_api.cancel_all_timers()

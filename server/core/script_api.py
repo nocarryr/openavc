@@ -12,7 +12,9 @@ then injects this module into sys.modules["openavc"].
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
+from contextvars import ContextVar
 from typing import Any, Callable, TYPE_CHECKING
 
 from server.utils.logger import get_logger
@@ -346,9 +348,34 @@ log = _LogProxy()
 isc = _ISCProxy()
 plugins = _PluginsProxy()
 
+# --- Current-script context ---
+
+# Set by ScriptEngine around each handler invocation (and during load) so the
+# timer functions below can attribute a timer to the script that created it.
+# This is what lets a single script be hot-reloaded without disturbing every
+# other script's timers.
+_current_script: ContextVar[str | None] = ContextVar("openavc_current_script", default=None)
+
+
+@contextlib.contextmanager
+def current_script_context(script_id: str | None):
+    """Bind the current script id for the duration of a handler/timer call."""
+    token = _current_script.set(script_id)
+    try:
+        yield
+    finally:
+        _current_script.reset(token)
+
+
 # --- Timer functions ---
 
 _active_timers: dict[str, asyncio.Task] = {}
+# Timers created during a script's top-level load run in a worker thread with no
+# running event loop, so they can't be scheduled immediately. They're parked
+# here and materialized onto the loop by ScriptEngine once load completes.
+_pending_timers: dict[str, Callable[[], Any]] = {}
+# timer_id -> owning script_id (for per-script cancellation on reload).
+_timer_owners: dict[str, str | None] = {}
 _timer_counter = 0
 
 
@@ -356,6 +383,57 @@ def _next_timer_id() -> str:
     global _timer_counter
     _timer_counter += 1
     return f"timer_{_timer_counter}"
+
+
+def _forget_timer(timer_id: str) -> None:
+    """Drop a timer's bookkeeping from both the active and ownership maps."""
+    _active_timers.pop(timer_id, None)
+    _timer_owners.pop(timer_id, None)
+
+
+def _register_timer(timer_id: str, coro_factory: Callable[[], Any]) -> None:
+    """Schedule a timer now if a loop is running, else defer it to load-drain.
+
+    Handlers run on the event loop thread, so their ``after``/``every`` calls
+    schedule immediately and are attributed to the current script. Top-level
+    ``after``/``every`` calls run in the load worker thread (no running loop),
+    so they're parked in ``_pending_timers`` for ``materialize_pending_timers``
+    to schedule on the loop after the script finishes importing.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _pending_timers[timer_id] = coro_factory
+        return
+    _active_timers[timer_id] = asyncio.ensure_future(coro_factory())
+    _timer_owners[timer_id] = _current_script.get()
+
+
+def materialize_pending_timers(script_id: str | None) -> int:
+    """Schedule timers deferred during a script's load onto the running loop.
+
+    Called by ScriptEngine on the loop thread right after a script imports, so
+    the documented top-level ``every()``/``after()`` pattern works even though
+    top-level code executes off the loop. Returns the number materialized.
+    """
+    if not _pending_timers:
+        return 0
+    count = 0
+    for timer_id, factory in list(_pending_timers.items()):
+        _pending_timers.pop(timer_id, None)
+        try:
+            _active_timers[timer_id] = asyncio.ensure_future(factory())
+        except RuntimeError:
+            # No running loop (sync test harness) — nothing to schedule on.
+            continue
+        _timer_owners[timer_id] = script_id
+        count += 1
+    return count
+
+
+def discard_pending_timers() -> None:
+    """Drop any timers parked during a load that failed (so they never run)."""
+    _pending_timers.clear()
 
 
 async def delay(seconds: float) -> None:
@@ -378,9 +456,9 @@ def after(seconds: float, callback: Callable, *args: Any) -> str:
         except Exception:  # Catch-all: isolates user callback errors from timer
             _log.exception(f"Error in after() timer {timer_id}")
         finally:
-            _active_timers.pop(timer_id, None)
+            _forget_timer(timer_id)
 
-    _active_timers[timer_id] = asyncio.ensure_future(_run())
+    _register_timer(timer_id, _run)
     return timer_id
 
 
@@ -401,15 +479,21 @@ def every(seconds: float, callback: Callable, *args: Any) -> str:
         except asyncio.CancelledError:
             pass
         finally:
-            _active_timers.pop(timer_id, None)
+            _forget_timer(timer_id)
 
-    _active_timers[timer_id] = asyncio.ensure_future(_run())
+    _register_timer(timer_id, _run)
     return timer_id
 
 
 def cancel_timer(timer_id: str) -> bool:
     """Cancel a timer by ID. Returns True if cancelled, False if not found."""
+    # A timer parked at load time but not yet materialized: drop it so it
+    # never starts.
+    if _pending_timers.pop(timer_id, None) is not None:
+        _timer_owners.pop(timer_id, None)
+        return True
     task = _active_timers.pop(timer_id, None)
+    _timer_owners.pop(timer_id, None)
     if task and not task.done():
         task.cancel()
         return True
@@ -417,10 +501,26 @@ def cancel_timer(timer_id: str) -> bool:
 
 
 def cancel_all_timers() -> int:
-    """Cancel all active timers. Returns count cancelled."""
+    """Cancel all active and pending timers. Returns count cancelled."""
     count = 0
+    for timer_id in list(_pending_timers):
+        if cancel_timer(timer_id):
+            count += 1
     for timer_id in list(_active_timers):
         if cancel_timer(timer_id):
+            count += 1
+    return count
+
+
+def cancel_script_timers(script_id: str) -> int:
+    """Cancel only the timers owned by *script_id*. Returns count cancelled.
+
+    Used by per-script hot-reload so reloading one script leaves every other
+    script's timers (and their ``every()`` phase) running untouched.
+    """
+    count = 0
+    for timer_id, owner in list(_timer_owners.items()):
+        if owner == script_id and cancel_timer(timer_id):
             count += 1
     return count
 

@@ -96,6 +96,16 @@ export async function reloadScripts(): Promise<{
   return request("/scripts/reload", { method: "POST" });
 }
 
+export async function reloadScript(id: string): Promise<{
+  status: string;
+  handlers?: number;
+  error?: string;
+  old_script_preserved?: boolean;
+  errors?: Record<string, string>;
+}> {
+  return request(`/scripts/${id}/reload`, { method: "POST" });
+}
+
 export async function getScriptErrors(): Promise<Record<string, string>> {
   return request("/scripts/errors");
 }

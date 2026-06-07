@@ -1695,9 +1695,7 @@ class Engine:
             "device_count": len(self.devices.list_devices()),
             "macro_count": len(self.macros._macros),
             "script_handlers": (
-                len(self.scripts._event_handler_ids) + len(self.scripts._state_sub_ids)
-                if self.scripts
-                else 0
+                self.scripts.handler_count() if self.scripts else 0
             ),
             "ws_clients": len(self._ws_clients),
             "isc_enabled": self.isc is not None,

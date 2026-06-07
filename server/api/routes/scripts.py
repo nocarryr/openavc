@@ -191,6 +191,25 @@ async def reload_scripts() -> dict[str, Any]:
     return {"status": "reloaded", "handlers": count, "errors": errors}
 
 
+@router.post("/scripts/{script_id}/reload", dependencies=[Depends(require_claimed_auth)])
+async def reload_single_script(script_id: str) -> dict[str, Any]:
+    """Hot-reload a single script in isolation.
+
+    Other scripts' handlers and timers keep running (their ``every()`` loops
+    don't reset), and if the new version fails to import the previously loaded
+    version stays active. Mirrors the Python-driver reload contract.
+    """
+    engine = _get_engine()
+    if not engine.scripts:
+        raise HTTPException(status_code=503, detail="Script engine not initialized")
+    cfg = _find_script_config(script_id)
+    if not cfg:
+        raise HTTPException(status_code=404, detail=f"Script '{script_id}' not found")
+    result = engine.scripts.reload_script(cfg)
+    result["errors"] = engine.scripts.get_load_errors()
+    return result
+
+
 @router.get("/scripts/errors")
 async def get_script_errors() -> dict[str, str]:
     """Return load errors for scripts that failed to load."""

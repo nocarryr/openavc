@@ -51,6 +51,26 @@ async def handle_system_on(event, payload):
 
 The engine detects the handler's parameter count automatically. No configuration needed.
 
+#### Synchronous vs. asynchronous handlers
+
+A handler can be a plain `def` (synchronous) or an `async def`. Prefer `async def` for anything that talks to a device, waits, or does real work — async handlers run as independent tasks, so a slow one never holds up other events or state changes, and they get a built-in timeout.
+
+A synchronous handler runs **inline on the control loop**: nothing else (device commands, the touch panel, other handlers) runs until it returns. Keep sync handlers to quick, in-memory work like `state.set(...)` or `log.info(...)`. Never call `time.sleep()`, a blocking network request, or any long loop in a sync handler — it will freeze the whole system until it finishes. If you need to wait, use an async handler with `await delay(seconds)`.
+
+```python
+# Fine: quick, synchronous reaction
+@on_state_change("var.room_active")
+def on_room_active(key, old, new):
+    state.set("var.status_text", "Active" if new else "Idle")
+
+# Do this for anything slow — async, with await
+@on_event("ui.press.start")
+async def on_start(event):
+    await devices.send("projector_main", "power_on")
+    await delay(2)
+    await devices.send("projector_main", "set_input", {"input": "hdmi1"})
+```
+
 Supports glob wildcards:
 
 ```python
@@ -101,7 +121,8 @@ A few practical consequences:
 
 - `state.get(key)` at the start of your handler returns `new_value` (or possibly an even newer value, if more changes have happened since your handler was scheduled).
 - Multiple matching handlers run concurrently. Don't depend on a specific order between sibling `@on_state_change` handlers.
-- Long-running handlers don't block other state changes. The system schedules each handler as an independent task.
+- An `async` handler is scheduled as an independent task, so a long-running one doesn't block other state changes. A synchronous (`def`) handler runs inline — keep it quick (see [Synchronous vs. asynchronous handlers](#synchronous-vs-asynchronous-handlers) above).
+- If one state change leads your handler to set another, which triggers another handler, and so on, the system caps that cascade depth as a safety net against accidental feedback loops (for example a handler that toggles the very value it reacts to). Keep reactions acyclic.
 - `@on_state_change("device.x.power")` and `@on_event("state.changed.device.x.power")` have effectively the same timing — both fire as async tasks after the change. Prefer `@on_state_change` for clearer intent.
 
 ## Proxy Objects

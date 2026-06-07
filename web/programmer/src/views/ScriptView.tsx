@@ -168,9 +168,11 @@ export function ScriptView() {
 
   // --- Reload handlers ---
 
-  const handleReloadScripts = useCallback(async () => {
+  const handleReloadScript = useCallback(async () => {
+    if (!selectedId || selectedType !== "script") return;
+
     // Save first if dirty
-    if (isDirty && selectedId) {
+    if (isDirty) {
       setSaving(true);
       try {
         await api.saveScriptSource(selectedId, source);
@@ -183,21 +185,36 @@ export function ScriptView() {
       setSaving(false);
     }
 
-    // Reload scripts
+    // Reload just this script — peers' handlers and timers keep running, and
+    // the previously loaded version stays active if the new one fails.
+    setReloading(true);
     try {
-      const result = await api.reloadScripts();
+      const result = await api.reloadScript(selectedId);
       setScriptLoadErrors(result.errors ?? {});
-      const errorCount = Object.keys(result.errors ?? {}).length;
-      useLogStore.getState().addLogEntry({
-        timestamp: Date.now() / 1000,
-        level: errorCount > 0 ? "WARNING" : "INFO",
-        source: "openavc.programmer",
-        category: "script",
-        message: errorCount > 0
-          ? `Scripts reloaded: ${result.handlers} handler(s), ${errorCount} script(s) failed to load`
-          : `Scripts reloaded: ${result.handlers} handler(s) registered`,
-      });
+      if (result.status === "error") {
+        const preserved = result.old_script_preserved
+          ? " The previously loaded version is still active."
+          : "";
+        showError(`Script reload failed: ${result.error}${preserved}`);
+        useLogStore.getState().addLogEntry({
+          timestamp: Date.now() / 1000,
+          level: "ERROR",
+          source: "openavc.programmer",
+          category: "script",
+          message: `Script '${selectedId}' reload failed: ${result.error}${preserved}`,
+        });
+      } else {
+        showSuccess(`Script reloaded — ${result.handlers ?? 0} handler(s)`);
+        useLogStore.getState().addLogEntry({
+          timestamp: Date.now() / 1000,
+          level: "INFO",
+          source: "openavc.programmer",
+          category: "script",
+          message: `Script '${selectedId}' reloaded — ${result.handlers ?? 0} handler(s) registered`,
+        });
+      }
     } catch (e) {
+      showError(`Script reload failed: ${e}`);
       useLogStore.getState().addLogEntry({
         timestamp: Date.now() / 1000,
         level: "ERROR",
@@ -205,8 +222,10 @@ export function ScriptView() {
         category: "script",
         message: `Script reload failed: ${e}`,
       });
+    } finally {
+      setReloading(false);
     }
-  }, [selectedId, source, isDirty]);
+  }, [selectedId, selectedType, source, isDirty]);
 
   const handleReloadDriver = useCallback(async () => {
     if (!selectedId || selectedType !== "driver") return;
@@ -281,8 +300,8 @@ export function ScriptView() {
   }, [selectedId, selectedType, source, isDirty, loadPythonDrivers]);
 
   // Keyboard shortcut: Ctrl+Shift+R to save & reload
-  const handleReloadRef = useRef(selectedType === "driver" ? handleReloadDriver : handleReloadScripts);
-  handleReloadRef.current = selectedType === "driver" ? handleReloadDriver : handleReloadScripts;
+  const handleReloadRef = useRef(selectedType === "driver" ? handleReloadDriver : handleReloadScript);
+  handleReloadRef.current = selectedType === "driver" ? handleReloadDriver : handleReloadScript;
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.shiftKey && e.key === "R") {
@@ -551,8 +570,9 @@ export function ScriptView() {
               </button>
             ) : (
               <button
-                onClick={handleReloadScripts}
-                title="Save the current script and reload all script handlers (Ctrl+Shift+R)"
+                onClick={handleReloadScript}
+                disabled={reloading}
+                title="Save and hot-reload this script. Other scripts keep running (Ctrl+Shift+R)"
                 style={{
                   ...actionBtnStyle,
                   background: "var(--accent-bg)",
@@ -560,7 +580,7 @@ export function ScriptView() {
                 }}
               >
                 <Play size={14} />
-                Save &amp; Reload
+                {reloading ? "Reloading..." : "Save & Reload Script"}
               </button>
             )}
           </div>
