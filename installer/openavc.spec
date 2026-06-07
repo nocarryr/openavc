@@ -104,6 +104,7 @@ hiddenimports = [
     'server.transport.http_client',
     'server.transport.osc',
     'server.transport.osc_codec',
+    'server.transport.ssh',
     'server.transport.frame_parsers',
     'server.transport.binary_helpers',
     'server.drivers.base',

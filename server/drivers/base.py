@@ -154,7 +154,13 @@ class BaseDriver(ABC):
                 pass
             self.transport = None
 
-        transport_type = self.DRIVER_INFO.get("transport", "tcp")
+        # A device's config may override the driver's default transport (e.g. a
+        # CLI driver that defaults to "ssh" in production but connects over raw
+        # "tcp" to a CLI simulator). Falls back to the driver default when unset,
+        # so existing devices are unaffected.
+        transport_type = self.config.get("transport") or self.DRIVER_INFO.get(
+            "transport", "tcp"
+        )
         frame_parser = self._create_frame_parser()
         delimiter = self._resolve_delimiter()
 
@@ -279,6 +285,33 @@ class BaseDriver(ABC):
                 local_address=control_ip or None,
             )
             await self.transport.open()
+        elif transport_type == "ssh":
+            from server.transport.ssh import SSHTransport
+
+            host = self.config.get("host", "")
+            port = int(self.config.get("port", 22) or 22)
+            username = self.config.get("username", "")
+            auth_method = self.config.get("ssh_auth_method", "key")
+            known_hosts = self.config.get("known_hosts_path")
+            if not known_hosts:
+                from server.system_config import get_data_dir
+                known_hosts = str(get_data_dir() / "ssh" / "known_hosts")
+
+            self.transport = await SSHTransport.create(
+                host=host,
+                port=port,
+                username=username,
+                on_data=self.on_data_received,
+                on_disconnect=self._handle_transport_disconnect,
+                auth_method=auth_method,
+                password=self.config.get("password") or None,
+                key_path=self.config.get("key_path") or None,
+                known_hosts_path=known_hosts,
+                host_key_policy=self.config.get("host_key_policy", "accept-new"),
+                connect_timeout=float(self.config.get("connect_timeout", 15.0)),
+                inter_command_delay=self.config.get("inter_command_delay", 0.0),
+                name=self.device_id,
+            )
         else:
             raise ValueError(f"Unsupported transport type: {transport_type}")
 
@@ -302,6 +335,11 @@ class BaseDriver(ABC):
                 )
 
         try:
+            # Device-specific session setup (e.g. an SSH/CLI driver entering
+            # privileged mode and disabling output paging) runs before we
+            # report connected so the first poll sees a ready session. A raise
+            # here aborts the connection and the transport is cleaned up below.
+            await self._post_connect()
             self._connected = True
             self.set_state("connected", True)
             await self.events.emit(f"device.connected.{self.device_id}")
@@ -393,6 +431,15 @@ class BaseDriver(ABC):
         Protocol-level errors (unexpected response shape, expected device
         states like "in standby") may be handled inside poll() — those
         indicate the device is reachable but not in a queryable state.
+        """
+
+    async def _post_connect(self) -> None:
+        """Hook for device-specific session setup after the transport opens and
+        before the device is marked connected.
+
+        CLI-over-SSH/telnet drivers override this to read the login banner,
+        enter privileged mode, and disable output paging. Raising aborts the
+        connection (the caller closes the transport). Default: no-op.
         """
 
     @staticmethod
