@@ -181,3 +181,82 @@ class TestRoundTrip:
 
         assert result.state == DeviceState.POSSIBLE
         assert result.candidates == ["qsc_core"]
+
+
+# ===== SSDP/UPnP rootDesc manufacturer -> vendor_string enrichment =====
+
+
+class TestSSDPManufacturerVendorString:
+    """SSDP puts the rootDesc.xml <manufacturer> at the top level of its
+    evidence data, and its device type is frequently the generic
+    InternetGatewayDevice URN (no usable strong fingerprint). The vendor
+    string is then the only identity signal, so ``extract_vendor_strings``
+    must mine the top-level manufacturer for the manufacturer_alias path.
+    Invented device throughout (acme_widget / AcmeAV).
+    """
+
+    def _ssdp_evidence(self):
+        from server.discovery.ssdp_scanner import SSDPResult
+
+        return SSDPResult(
+            ip="192.0.2.10",
+            # Generic UPnP device type — every gateway advertises it, so it is
+            # not (and must not be) a strong fingerprint on its own.
+            st="urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+            server="Acme_Switch UPnP/1.1 AW9000/1.0",
+            manufacturer="AcmeAV",
+            model_name="AW-9000",
+        ).to_evidence()
+
+    def test_extract_mines_top_level_manufacturer(self):
+        from server.discovery.tier_matcher import (
+            KIND_VENDOR_STRING,
+            extract_vendor_strings,
+        )
+
+        ev = self._ssdp_evidence()
+        assert ev is not None
+        assert ev.data["manufacturer"] == "AcmeAV"  # top-level, not under response/txt
+
+        mined = extract_vendor_strings([ev])
+        values = {e.data["value"] for e in mined if e.data["kind"] == KIND_VENDOR_STRING}
+        assert "acmeav" in values
+
+    def test_generic_device_type_alone_does_not_identify(self):
+        # Without mining the manufacturer, the generic device type yields no
+        # strong match — proving the vendor string is what produces a result.
+        from server.discovery.result import DeviceState
+        from server.discovery.tier_matcher import (
+            SignalIndex,
+            SignalRule,
+            TierMatcher,
+        )
+
+        idx = SignalIndex()
+        idx.add_rule(SignalRule.for_vendor_string("acme_widget", "acmeav"))
+        matcher = TierMatcher(idx)
+
+        result = matcher.match([self._ssdp_evidence()])  # no vendor mining yet
+        assert result.state == DeviceState.UNKNOWN
+
+    def test_ssdp_manufacturer_round_trip_to_possible(self):
+        # Mirrors discovery engine phase 8: append mined vendor strings to the
+        # evidence log, then match. The manufacturer_alias rule fires.
+        from server.discovery.result import DeviceState
+        from server.discovery.tier_matcher import (
+            SignalIndex,
+            SignalRule,
+            TierMatcher,
+            extract_vendor_strings,
+        )
+
+        idx = SignalIndex()
+        idx.add_rule(SignalRule.for_vendor_string("acme_widget", "acmeav"))
+        matcher = TierMatcher(idx)
+
+        ev = self._ssdp_evidence()
+        evidence_log = [ev, *extract_vendor_strings([ev])]
+        result = matcher.match(evidence_log)
+
+        assert result.state == DeviceState.POSSIBLE
+        assert result.candidates == ["acme_widget"]

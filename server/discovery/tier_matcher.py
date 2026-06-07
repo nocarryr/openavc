@@ -995,7 +995,8 @@ def extract_vendor_strings(evidence_log: list[Evidence]) -> list[Evidence]:
     Looks at:
     - ``data["response"]["manufacturer"]`` and ``["make"]`` (broadcast / active probes)
     - ``data["txt"]["manufacturer"]`` and ``["make"]`` (mDNS, broadcast probes)
-    - ``data["make"]`` (AMX DDP, top-level)
+    - ``data["manufacturer"]`` and ``data["make"]`` (top-level: SSDP/UPnP
+      rootDesc manufacturer, AMX DDP make)
 
     De-duplicates by ``(value, source_probe_id)`` so the same string from
     one probe doesn't get emitted twice.
@@ -1033,10 +1034,13 @@ def extract_vendor_strings(evidence_log: list[Evidence]) -> list[Evidence]:
             _record(txt.get("manufacturer"), probe_label)
             _record(txt.get("make"), probe_label)
 
-        # AMX DDP carries the make at the top level of data, not inside
-        # a response dict.
-        if kind == KIND_AMX_DDP:
-            _record(ev.data.get("make"), probe_label)
+        # Top-level manufacturer/make. SSDP/UPnP puts the rootDesc.xml
+        # <manufacturer> here — and a UPnP switch/AP often advertises only
+        # the generic InternetGatewayDevice device type, so the vendor
+        # string is its one usable identity signal. AMX DDP carries its
+        # make here too.
+        _record(ev.data.get("manufacturer"), probe_label)
+        _record(ev.data.get("make"), probe_label)
 
     return extracted
 
