@@ -431,6 +431,8 @@ The tables below document each field in detail.
 | `state_variables` | No | State properties this driver exposes. |
 | `child_entity_types` | No | Sub-units this device manages (encoders, decoders, zones, presets). See below. |
 | `commands` | No | Commands this driver can send. |
+| `quick_actions` | No | Command ids promoted to one-click buttons at the top of the device view. See below. |
+| `actions` | No | Full-form promoted buttons (icon, confirm, visibility). See below. |
 | `responses` | No | Regex patterns for parsing device replies. |
 | `auth` | No | Login handshake performed between TCP connect and `on_connect`. See `auth` section below. |
 | `on_connect` | No | List of raw commands sent immediately after connecting. Use for enabling verbose/feedback mode or requesting initial state. |
@@ -612,6 +614,47 @@ route_decoder:
     decoder_id: { type: child_id, child_type: decoder, required: true }
     encoder_id: { type: child_id, child_type: encoder, required: true }
 ```
+
+#### `quick_actions` and `actions` (Quick Action buttons)
+
+Every command appears in the device view's "Send Command" list. For a device
+with many commands, promote the few an operator reaches for to prominent
+one-click buttons at the top of the view. The Send Command list still shows
+everything — the strip is additive.
+
+`quick_actions` is the simple form: a flat list of command ids. Each becomes a
+button labelled by the command, firing it on click (commands with parameters
+open an input dialog first).
+
+```yaml
+quick_actions: [power_on, power_off, recall_preset_1]
+```
+
+`actions` is the full form, with per-button icon, confirmation, and visibility:
+
+```yaml
+actions:
+  - id: power_on            # required, unique
+    kind: command           # promotes a command (the default kind)
+    icon: power             # optional lucide icon name
+  - id: reboot
+    kind: command
+    command: reboot_device  # command to send (defaults to the action id)
+    icon: rotate-ccw
+    confirm: "Reboot now? The device drops offline until it restarts."
+  - id: recall_preset
+    kind: command
+    label: Recall Preset
+    params:                 # same shape as command params; opens a dialog
+      preset: { type: integer, required: true, min: 1, max: 8 }
+```
+
+- `icon`: a [lucide](https://lucide.dev/icons/) icon name in kebab-case (e.g. `power`, `search`, `rotate-ccw`).
+- `confirm`: `true` for a generic prompt, or a message string. Use it for anything disruptive.
+- `availability`: `online` (default) hides the button while the device is offline; `offline` shows it only while offline; `always` ignores connection state.
+- `visible_when`: show the button only when a device state condition holds — `{ key: "device.$id.alarm", operator: truthy }`, or an `{any: [...]}` / `{all: [...]}` group. `$id` resolves to the device's id. Operators: `eq, ne, gt, lt, gte, lte, truthy, falsy`.
+
+Each promoted command id must name a declared command. If an id appears in both `quick_actions` and `actions`, the `actions` entry wins.
 
 #### `responses` entry
 

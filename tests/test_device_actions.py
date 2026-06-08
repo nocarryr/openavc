@@ -1,0 +1,334 @@
+"""Tests for the Quick Action strip platform feature.
+
+Exercises the generic action resolver and validator (server/drivers/actions.py)
+and their wiring into the YAML loader and ConfigurableDriver — using an invented
+device (Acme), never a real product. The mechanism is what's under test, not any
+specific driver's action set.
+"""
+
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+from server.api import rest, ws
+from server.core.device_manager import DeviceManager
+from server.core.event_bus import EventBus
+from server.core.state_store import StateStore
+from server.drivers.actions import resolve_device_actions, validate_actions
+from server.drivers.base import BaseDriver
+from server.drivers.configurable import create_configurable_driver_class
+from server.drivers.driver_loader import validate_driver_definition
+from server.main import app
+
+
+def _driver_info_with(**extra):
+    """A minimal DRIVER_INFO carrying a couple of commands plus extra keys."""
+    base = {
+        "id": "acme_widget",
+        "commands": {
+            "power_on": {"label": "Power On", "params": {}},
+            "power_off": {"label": "Power Off", "params": {}},
+            "set_input": {
+                "label": "Set Input",
+                "params": {"input": {"type": "integer", "required": True}},
+            },
+        },
+    }
+    base.update(extra)
+    return base
+
+
+# --- resolve_device_actions ------------------------------------------------
+
+
+def test_resolve_quick_actions_sugar_expands_to_command_actions():
+    info = _driver_info_with(quick_actions=["power_on", "power_off"])
+    actions = resolve_device_actions(info)
+    assert [a["id"] for a in actions] == ["power_on", "power_off"]
+    assert all(a["kind"] == "command" for a in actions)
+    # Sugar inherits the command's label + params and targets the same command.
+    assert actions[0]["label"] == "Power On"
+    assert actions[0]["command"] == "power_on"
+    assert actions[0]["availability"] == "online"
+    assert actions[0]["icon"] is None
+
+
+def test_resolve_quick_action_for_unknown_command_is_skipped():
+    info = _driver_info_with(quick_actions=["power_on", "does_not_exist"])
+    actions = resolve_device_actions(info)
+    assert [a["id"] for a in actions] == ["power_on"]
+
+
+def test_resolve_explicit_command_action_inherits_command_label_and_params():
+    info = _driver_info_with(actions=[{"id": "set_input", "kind": "command", "icon": "tv"}])
+    actions = resolve_device_actions(info)
+    assert len(actions) == 1
+    a = actions[0]
+    assert a["label"] == "Set Input"  # inherited
+    assert a["icon"] == "tv"
+    assert a["params"] == {"input": {"type": "integer", "required": True}}
+
+
+def test_resolve_action_command_field_overrides_id():
+    info = _driver_info_with(
+        actions=[{"id": "enroll", "kind": "command", "command": "power_on"}]
+    )
+    actions = resolve_device_actions(info)
+    assert actions[0]["id"] == "enroll"
+    assert actions[0]["command"] == "power_on"
+    assert actions[0]["label"] == "Power On"
+
+
+def test_resolve_explicit_actions_come_before_quick_actions():
+    info = _driver_info_with(
+        actions=[{"id": "set_input", "kind": "command"}],
+        quick_actions=["power_on"],
+    )
+    actions = resolve_device_actions(info)
+    assert [a["id"] for a in actions] == ["set_input", "power_on"]
+
+
+def test_resolve_explicit_action_wins_over_quick_action_collision():
+    info = _driver_info_with(
+        actions=[{"id": "power_on", "kind": "command", "icon": "power", "confirm": True}],
+        quick_actions=["power_on"],
+    )
+    actions = resolve_device_actions(info)
+    assert len(actions) == 1  # de-duped by id
+    assert actions[0]["icon"] == "power"
+    assert actions[0]["confirm"] is True
+
+
+def test_resolve_setup_action_keeps_params_and_availability():
+    info = _driver_info_with(
+        actions=[{
+            "id": "enable_remote",
+            "kind": "setup",
+            "label": "Enable Remote",
+            "availability": "offline",
+            "params": {"password": {"type": "password"}},
+        }]
+    )
+    actions = resolve_device_actions(info)
+    a = actions[0]
+    assert a["kind"] == "setup"
+    assert a["availability"] == "offline"
+    assert a["params"] == {"password": {"type": "password"}}
+    assert "command" not in a
+
+
+def test_resolve_passes_through_visible_when():
+    vw = {"any": [{"key": "device.$id.offline_reason", "operator": "eq", "value": "connection_refused"}]}
+    info = _driver_info_with(actions=[{"id": "x", "kind": "setup", "visible_when": vw}])
+    actions = resolve_device_actions(info)
+    assert actions[0]["visible_when"] == vw
+
+
+def test_resolve_is_defensive_against_malformed_entries():
+    info = _driver_info_with(
+        actions=[
+            "not a dict",
+            {"no_id": True},
+            {"id": "ok", "kind": "command", "command": "power_on"},
+            {"id": "bad_kind", "kind": "nonsense"},
+        ],
+        quick_actions=["power_on", 123, ""],
+    )
+    actions = resolve_device_actions(info)
+    # Only the well-formed explicit action and the valid sugar entry survive.
+    assert [a["id"] for a in actions] == ["ok", "power_on"]
+
+
+def test_resolve_no_actions_returns_empty():
+    assert resolve_device_actions(_driver_info_with()) == []
+
+
+# --- validate_actions ------------------------------------------------------
+
+
+def test_validate_accepts_well_formed_blocks():
+    driver_def = _driver_info_with(
+        quick_actions=["power_on"],
+        actions=[
+            {"id": "set_input", "kind": "command", "icon": "tv"},
+            {
+                "id": "enable_remote",
+                "kind": "setup",
+                "availability": "offline",
+                "confirm": "Sure?",
+                "visible_when": {"key": "device.$id.connected", "operator": "falsy"},
+            },
+        ],
+    )
+    assert validate_actions(driver_def) == []
+
+
+def test_validate_rejects_quick_action_for_unknown_command():
+    errors = validate_actions(_driver_info_with(quick_actions=["nope"]))
+    assert any("not a declared command" in e for e in errors)
+
+
+def test_validate_rejects_command_action_with_dangling_command():
+    errors = validate_actions(
+        _driver_info_with(actions=[{"id": "x", "kind": "command", "command": "ghost"}])
+    )
+    assert any("'ghost' is not a declared command" in e for e in errors)
+
+
+def test_validate_rejects_duplicate_ids_and_bad_kind():
+    errors = validate_actions(_driver_info_with(actions=[
+        {"id": "power_on", "kind": "command"},
+        {"id": "power_on", "kind": "command"},
+        {"id": "weird", "kind": "bogus"},
+    ]))
+    assert any("duplicate action id" in e for e in errors)
+    assert any("unknown kind" in e for e in errors)
+
+
+def test_validate_rejects_bad_availability_and_visible_when():
+    errors = validate_actions(_driver_info_with(actions=[
+        {"id": "a", "kind": "setup", "availability": "whenever"},
+        {"id": "b", "kind": "setup", "visible_when": {"operator": "eq", "value": 1}},
+        {"id": "c", "kind": "setup", "visible_when": {"key": "k", "operator": "??"}},
+    ]))
+    assert any("availability" in e for e in errors)
+    assert any("missing 'key'" in e for e in errors)
+    assert any("unknown operator" in e for e in errors)
+
+
+def test_validate_rejects_non_list_blocks():
+    assert any("must be a list" in e for e in validate_actions({"quick_actions": "power_on"}))
+    assert any("must be a list" in e for e in validate_actions({"actions": {}}))
+
+
+# --- loader + ConfigurableDriver integration -------------------------------
+
+
+def _yaml_driver(**extra):
+    base = {
+        "id": "acme_yaml",
+        "name": "Acme YAML Widget",
+        "transport": "tcp",
+        "commands": {"power_on": {"label": "Power On", "send": "PWR ON\\r"}},
+    }
+    base.update(extra)
+    return base
+
+
+def test_loader_validates_actions_block():
+    bad = _yaml_driver(quick_actions=["ghost"])
+    errors = validate_driver_definition(bad)
+    assert any("not a declared command" in e for e in errors)
+
+    good = _yaml_driver(quick_actions=["power_on"])
+    assert validate_driver_definition(good) == []
+
+
+def test_configurable_driver_carries_actions_into_driver_info():
+    driver_def = _yaml_driver(
+        actions=[{"id": "power_on", "kind": "command", "icon": "power"}],
+        quick_actions=["power_on"],
+    )
+    cls = create_configurable_driver_class(driver_def)
+    assert cls.DRIVER_INFO.get("actions") == driver_def["actions"]
+    assert cls.DRIVER_INFO.get("quick_actions") == ["power_on"]
+    # And they resolve (explicit wins over the sugar collision).
+    resolved = resolve_device_actions(cls.DRIVER_INFO)
+    assert [a["id"] for a in resolved] == ["power_on"]
+    assert resolved[0]["icon"] == "power"
+
+
+def test_get_device_info_includes_resolved_actions():
+    state = StateStore()
+    events = EventBus()
+    state.set_event_bus(events)
+    dm = DeviceManager(state, events)
+
+    cls = create_configurable_driver_class(
+        _yaml_driver(actions=[{"id": "power_on", "kind": "command", "icon": "power"}])
+    )
+    driver = cls("dev1", {"host": "h", "port": 1}, state, events)
+    # White-box inject a live driver so get_device_info reads the active path
+    # without opening a real transport.
+    dm._devices["dev1"] = driver
+    dm._device_configs["dev1"] = {"name": "Dev 1", "driver": "acme_yaml"}
+
+    info = dm.get_device_info("dev1")
+    assert [a["id"] for a in info["actions"]] == ["power_on"]
+    assert info["actions"][0]["icon"] == "power"
+
+
+# --- Invoke endpoint -------------------------------------------------------
+
+
+class _ActionDriver(BaseDriver):
+    DRIVER_INFO: dict[str, Any] = {
+        "id": "acme_act",
+        "name": "Acme Action Widget",
+        "transport": "tcp",
+        "state_variables": {},
+        "commands": {"power_on": {"label": "Power On", "params": {}}},
+        "actions": [
+            {"id": "power_on", "kind": "command", "icon": "power"},
+            {"id": "enable_remote", "kind": "setup", "availability": "offline"},
+        ],
+    }
+
+    async def send_command(self, command: str, params: dict | None = None) -> Any:
+        return True
+
+
+@pytest.fixture
+def actions_client():
+    state = StateStore()
+    events = EventBus()
+    state.set_event_bus(events)
+    driver = _ActionDriver("dev1", {}, state, events)
+    driver.set_state("connected", True)
+
+    engine = MagicMock()
+    engine.state = state
+    engine.events = events
+    engine._running = True
+    engine._ws_clients = []
+    engine.devices = MagicMock()
+    engine.devices.get_driver = MagicMock(return_value=driver)
+    engine.devices.send_command = AsyncMock(return_value=True)
+
+    rest.set_engine(engine)
+    ws.set_engine(engine)
+    try:
+        yield TestClient(app), engine
+    finally:
+        rest.set_engine(None)
+        ws.set_engine(None)
+
+
+def test_invoke_command_action_routes_to_send_command(actions_client):
+    c, engine = actions_client
+    resp = c.post("/api/devices/dev1/actions/power_on", json={"params": {}})
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    engine.devices.send_command.assert_awaited_once_with("dev1", "power_on", {})
+
+
+def test_invoke_unknown_action_returns_404(actions_client):
+    c, _engine = actions_client
+    resp = c.post("/api/devices/dev1/actions/nope", json={"params": {}})
+    assert resp.status_code == 404
+
+
+def test_invoke_setup_action_not_yet_supported(actions_client):
+    c, engine = actions_client
+    resp = c.post("/api/devices/dev1/actions/enable_remote", json={"params": {}})
+    assert resp.status_code == 501
+    engine.devices.send_command.assert_not_awaited()
+
+
+def test_invoke_action_on_device_without_driver_returns_404(actions_client):
+    c, engine = actions_client
+    engine.devices.get_driver = MagicMock(return_value=None)
+    resp = c.post("/api/devices/dev1/actions/power_on", json={"params": {}})
+    assert resp.status_code == 404

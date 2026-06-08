@@ -29,6 +29,17 @@ export async function sendCommand(
   });
 }
 
+export async function invokeDeviceAction(
+  deviceId: string,
+  actionId: string,
+  params: Record<string, unknown> = {}
+): Promise<{ success: boolean; result: unknown; action_id: string }> {
+  return request(`/devices/${deviceId}/actions/${actionId}`, {
+    method: "POST",
+    body: JSON.stringify({ params }),
+  });
+}
+
 export async function updateDevice(
   deviceId: string,
   data: { name?: string; driver?: string; config?: Record<string, unknown> }

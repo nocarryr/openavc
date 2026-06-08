@@ -13,6 +13,16 @@ class CommandRequest(BaseModel):
     params: dict[str, Any] = {}
 
 
+class ActionInvokeRequest(BaseModel):
+    """Body for ``POST /api/devices/{id}/actions/{action_id}``.
+
+    ``params`` are collected from the action's input dialog (keyed by the
+    action's declared param names). A no-param action sends an empty dict.
+    """
+
+    params: dict[str, Any] = {}
+
+
 class StateSetRequest(BaseModel):
     value: Any
 
@@ -105,6 +115,12 @@ class DriverDefinitionRequest(BaseModel):
     responses: list[dict[str, Any]] = []
     polling: dict[str, Any] = {}
     frame_parser: dict[str, Any] | None = None
+    # Quick Action strip declarations. Declared explicitly (the model is also
+    # extra='allow') so the Driver Builder round-trips them to disk: actions is
+    # the full form (kind:"command" promotes a command, kind:"setup" is a
+    # provisioning wizard), quick_actions is the flat promote-these-commands sugar.
+    actions: list[dict[str, Any]] = []
+    quick_actions: list[str] = []
 
 
 class TestCommandRequest(BaseModel):

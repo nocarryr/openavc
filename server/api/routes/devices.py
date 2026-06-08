@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from server.api._engine import _get_engine, _rate_limit_test
 from server.api.errors import api_error as _api_error
 from server.api.models import (
+    ActionInvokeRequest,
     ChildEntityPatchRequest,
     CommandRequest,
     DeviceSettingRequest,
@@ -430,6 +431,64 @@ async def send_command(device_id: str, body: CommandRequest) -> dict[str, Any]:
         raise _api_error(503, f"Device '{device_id}' is not connected", e)
     except Exception as e:
         raise _api_error(500, f"Failed to send command '{body.command}' to device '{device_id}'", e)
+
+
+# --- Device Actions (Quick Action strip) ---
+
+
+@router.post("/devices/{device_id}/actions/{action_id}")
+async def invoke_device_action(
+    device_id: str, action_id: str, body: ActionInvokeRequest
+) -> dict[str, Any]:
+    """Invoke a driver-declared action by id.
+
+    ``kind:"command"`` actions route to the device's command path (which
+    requires the device to be connected). ``kind:"setup"`` actions are the
+    offline-capable provisioning wizards — not yet wired (returns 501).
+    The action's *meaning* lives entirely in the driver; this endpoint only
+    dispatches by kind.
+    """
+    from server.drivers.actions import resolve_device_actions
+
+    engine = _get_engine()
+    driver = engine.devices.get_driver(device_id)
+    if driver is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Device '{device_id}' not found or has no live driver "
+                   f"(orphaned or disabled)",
+        )
+
+    action = next(
+        (a for a in resolve_device_actions(driver.DRIVER_INFO) if a["id"] == action_id),
+        None,
+    )
+    if action is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found on device '{device_id}'",
+        )
+
+    if action["kind"] == "command":
+        try:
+            result = await engine.devices.send_command(
+                device_id, action["command"], body.params
+            )
+            return {"success": True, "result": result, "action_id": action_id}
+        except ValueError as e:
+            raise _api_error(404, f"Device '{device_id}' not found", e)
+        except ConnectionError as e:
+            raise _api_error(503, f"Device '{device_id}' is not connected", e)
+        except Exception as e:
+            raise _api_error(
+                500, f"Failed to run action '{action_id}' on device '{device_id}'", e
+            )
+
+    # kind == "setup": the provisioning-wizard mechanism (Phase 2).
+    raise HTTPException(
+        status_code=501,
+        detail=f"Setup action '{action_id}' is not yet supported",
+    )
 
 
 # --- Device Settings ---

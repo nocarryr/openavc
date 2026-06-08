@@ -10,6 +10,7 @@ import type { DeviceConfig, DeviceInfo, DeviceSettingValue } from "../../api/typ
 import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins/PluginExtensions";
 import { findDeviceReferences } from "./deviceUtils";
 import { ChildEntities } from "./ChildEntities";
+import { QuickActions } from "./QuickActions";
 
 export function DeviceDetail({
   deviceId,
@@ -43,9 +44,13 @@ export function DeviceDetail({
   const [reconnecting, setReconnecting] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
 
-  useEffect(() => {
+  const refetchDeviceInfo = useCallback(() => {
     api.getDevice(deviceId).then(setDeviceInfo).catch(console.error);
   }, [deviceId]);
+
+  useEffect(() => {
+    refetchDeviceInfo();
+  }, [refetchDeviceInfo]);
 
   const deviceConfig = project?.devices.find((d) => d.id === deviceId);
   const isEnabled = deviceConfig?.enabled !== false;
@@ -404,6 +409,16 @@ export function DeviceDetail({
             : `Connection failed: ${testResult.error}`}
         </div>
       )}
+
+      {/* Quick Actions — driver-promoted one-click buttons. Additive: the full
+          Send Command list below stays complete. */}
+      <QuickActions
+        deviceId={deviceId}
+        actions={deviceInfo?.actions ?? []}
+        connected={connected}
+        liveState={liveState}
+        onInvoked={refetchDeviceInfo}
+      />
 
       {/* Unified filter — one box narrows both the child-entity rows (across
           every value in each row, not just the summary columns) and the Live

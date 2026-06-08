@@ -1172,6 +1172,15 @@ def create_configurable_driver_class(
         commands_meta[cmd_name] = cmd_meta
     driver_info["commands"] = commands_meta
 
+    # Copy the Quick Action declarations (promoted-command buttons + setup
+    # wizards). Stored raw on DRIVER_INFO; resolve_device_actions folds
+    # quick_actions sugar into the unified list at get_device_info time, so
+    # YAML and Python drivers share one resolution path.
+    if "actions" in driver_def:
+        driver_info["actions"] = driver_def["actions"]
+    if "quick_actions" in driver_def:
+        driver_info["quick_actions"] = driver_def["quick_actions"]
+
     # Add delimiter if specified
     if "delimiter" in driver_def:
         driver_info["delimiter"] = driver_def["delimiter"]

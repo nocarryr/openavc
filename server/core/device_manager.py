@@ -307,6 +307,8 @@ class DeviceManager:
                 }
             raise ValueError(f"Device '{device_id}' not found")
 
+        from server.drivers.actions import resolve_device_actions
+
         config = self._device_configs.get(device_id, {})
         return {
             "id": device_id,
@@ -315,6 +317,9 @@ class DeviceManager:
             "connected": driver.get_state("connected"),
             "state": self.state.get_namespace(f"device.{device_id}"),
             "commands": driver.DRIVER_INFO.get("commands", {}),
+            # Quick Actions strip: driver-declared actions resolved (quick_actions
+            # sugar folded in). The IDE filters by visible_when + availability.
+            "actions": resolve_device_actions(driver.DRIVER_INFO),
             "driver_info": driver.DRIVER_INFO,
         }
 

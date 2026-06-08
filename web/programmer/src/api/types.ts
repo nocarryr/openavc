@@ -737,6 +737,50 @@ export interface DriverInfo {
   help?: { overview?: string; setup?: string };
 }
 
+// --- Device Actions (Quick Action strip) ---
+
+/** One leaf condition in an action's visible_when. Same shape the panel and
+ *  Stream Deck (§38) use. `key` may contain `$id`, replaced with the device id. */
+export interface ActionCondition {
+  key: string;
+  operator?: string; // eq, ne, gt, lt, gte, lte, truthy, falsy
+  value?: unknown;
+}
+
+/** A single condition, or an any/all group of them. */
+export type ActionVisibleWhen =
+  | ActionCondition
+  | { all: ActionCondition[] }
+  | { any: ActionCondition[] };
+
+/** A param field for an action's input dialog (subset of the command/config
+ *  schema field shape the Send Command form already renders). */
+export interface ActionParam {
+  type?: string; // string, integer, number, boolean, enum, password
+  label?: string;
+  help?: string;
+  required?: boolean;
+  values?: string[];
+  min?: number;
+  max?: number;
+  default?: unknown;
+  secret?: boolean;
+}
+
+/** A driver-declared action, resolved by the backend (quick_actions sugar
+ *  folded into the unified list). */
+export interface DeviceAction {
+  id: string;
+  kind: "command" | "setup";
+  label: string;
+  icon?: string | null; // lucide icon name
+  confirm?: boolean | string | null; // string = custom confirmation message
+  visible_when?: ActionVisibleWhen | null;
+  availability: "online" | "offline" | "always";
+  params: Record<string, ActionParam>;
+  command?: string; // kind === "command": the command id invoked
+}
+
 export interface DeviceInfo {
   id: string;
   name: string;
@@ -747,6 +791,7 @@ export interface DeviceInfo {
   enabled?: boolean;
   state: Record<string, unknown>;
   commands: Record<string, unknown>;
+  actions?: DeviceAction[];
   driver_info: Record<string, unknown>;
   config?: Record<string, unknown>;
 }

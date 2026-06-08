@@ -35,6 +35,12 @@ After adding a device, click it in the device list to open the detail panel:
 
 Always test commands here before using them in macros. This confirms the device is responding and the driver is parsing responses correctly.
 
+## Quick Actions
+
+Some drivers promote the commands you reach for most to a row of **Quick Action** buttons at the top of the device detail panel, so you don't have to hunt through the full Send Command list. A button either fires its command immediately, opens a short dialog when the command needs values, or asks you to confirm first (for anything disruptive, like a reboot). The full Send Command list below still contains everything.
+
+Which buttons appear is up to the driver. A button may also be hidden until it's relevant — for example, only showing while the device is offline. If a driver doesn't declare any, there's simply no strip. Driver authors add them with `quick_actions` / `actions` (see [Creating Drivers](creating-drivers.md)).
+
 ## Device State
 
 Every device exposes state variables at `device.<id>.<property>`. Examples:

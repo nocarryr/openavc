@@ -183,6 +183,12 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                     if err:
                         errors.append(err)
 
+    # Validate the optional actions / quick_actions blocks (Quick Action strip).
+    # quick_actions promote command ids to buttons; actions is the full form
+    # (kind:"command" promotes a command, kind:"setup" is a provisioning wizard).
+    from server.drivers.actions import validate_actions
+    errors.extend(validate_actions(driver_def))
+
     # Validate state_variables structure
     valid_types = {"string", "integer", "number", "boolean", "enum", "float"}
     state_variables = driver_def.get("state_variables", {})
