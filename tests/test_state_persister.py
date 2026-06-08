@@ -149,3 +149,128 @@ def test_persist_not_in_export(tmp_state_file, store, persister):
     # Verify it's not a .avc file — it's instance-specific runtime state
     assert tmp_state_file.suffix == ".json"
     assert "state" in tmp_state_file.stem
+
+
+def test_persist_explicit_none_survives(tmp_state_file, store, persister):
+    """A persistent variable explicitly set to None persists as null (not
+    dropped), so it survives a restart instead of reverting to its default —
+    and a sibling write doesn't wipe it either."""
+    store.set("var.source", "hdmi1", source="system")
+    persister.start({"var.source", "var.label"})
+
+    # Clear the selection to None, and write a sibling so a single flush
+    # captures both keys together.
+    store.set("var.source", None, source="ui")
+    store.set("var.label", "Main", source="ui")
+    persister.flush()
+
+    data = json.loads(tmp_state_file.read_text())
+    assert "var.source" in data         # present...
+    assert data["var.source"] is None   # ...and null, not silently dropped
+    assert data["var.label"] == "Main"  # the None didn't wipe the sibling
+
+    # And it reloads as None (present key wins over the default fallback).
+    assert persister.load()["var.source"] is None
+
+
+def test_write_does_not_raise_on_non_serializable(tmp_state_file, store, persister):
+    """A non-serializable value in the store is caught and logged inside
+    _write(), not raised out into shutdown or the debounced flush task."""
+    store.set("var.ok", "fine", source="system")
+    store.set("var.bad", {1, 2, 3}, source="system")  # a set is not JSON-serializable
+    persister.start({"var.ok", "var.bad"})
+
+    persister._write()  # must not raise (json.dumps is now inside the try)
+
+    # The dump of the whole dict failed, so nothing was committed.
+    assert not tmp_state_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_flush_task_failure_is_surfaced(persister, caplog):
+    """A failure inside the fire-and-forget flush task is logged via the done
+    callback, not silently swallowed."""
+    import logging
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    task = asyncio.create_task(boom())
+    try:
+        await task
+    except RuntimeError:
+        pass
+
+    with caplog.at_level(logging.ERROR):
+        persister._on_flush_done(task)  # retrieves + logs the exception
+
+    assert "flush task failed" in caplog.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_update_keys_flushes_pending_before_swap(tmp_state_file, store):
+    """A reload (update_keys) that races a recent change flushes the pending
+    write under the OLD key set before swapping, so the change isn't lost to a
+    debounce that would otherwise fire against the new set."""
+    persister = StatePersister(tmp_state_file, store)
+    store.set("var.a", "old", source="system")
+    persister.start({"var.a"})
+
+    # A change schedules a 1s debounced flush that hasn't fired yet.
+    store.set("var.a", "new", source="ui")
+    assert persister._dirty
+    assert not tmp_state_file.exists()
+
+    # Reload swaps the watched set within the debounce window.
+    persister.update_keys({"var.a"})
+
+    # The pending change is already on disk, flushed before the swap.
+    data = json.loads(tmp_state_file.read_text())
+    assert data["var.a"] == "new"
+    persister.stop()
+
+
+def test_load_drops_non_primitive_values(tmp_state_file, store, persister):
+    """load() keeps only flat primitives; nested objects/arrays are dropped so
+    they can't violate the store's primitives-only invariant on the load path."""
+    tmp_state_file.write_text(json.dumps({
+        "var.ok": "x",
+        "var.num": 7,
+        "var.flag": True,
+        "var.nothing": None,
+        "var.obj": {"nested": 1},
+        "var.list": [1, 2, 3],
+    }))
+
+    loaded = persister.load()
+
+    assert loaded == {
+        "var.ok": "x",
+        "var.num": 7,
+        "var.flag": True,
+        "var.nothing": None,
+    }
+    assert "var.obj" not in loaded
+    assert "var.list" not in loaded
+
+
+def test_load_quarantines_corrupt_file(tmp_state_file, store, persister):
+    """A corrupt state.json is moved aside (not silently overwritten) so it can
+    be recovered, and load() starts fresh."""
+    tmp_state_file.write_text("{ this is not valid json")
+
+    assert persister.load() == {}
+
+    quarantine = tmp_state_file.parent / "state.json.corrupt"
+    assert quarantine.exists()
+    assert not tmp_state_file.exists()
+
+
+def test_load_quarantines_non_dict_file(tmp_state_file, store, persister):
+    """A valid-JSON-but-non-dict state.json is also quarantined."""
+    tmp_state_file.write_text(json.dumps([1, 2, 3]))
+
+    assert persister.load() == {}
+
+    quarantine = tmp_state_file.parent / "state.json.corrupt"
+    assert quarantine.exists()
