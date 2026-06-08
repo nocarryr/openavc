@@ -198,12 +198,16 @@ async def test_connection_refused():
 
 async def test_last_error_captured_and_classified_on_connect_failure():
     """A failed connect records a non-empty last_error, and the shared
-    classifier turns that real OS string into an actionable (non-generic) code.
+    classifier turns that failure into an actionable (non-generic) code.
 
-    The exact failure mode for a closed localhost port is OS-dependent (refused
-    on Linux, sometimes a connect timeout on Windows), so this asserts only the
-    transport contract — capture *something* the classifier can act on. The
-    precise string->code mapping is covered in test_connection_fault.py.
+    The classifier is fed the same inputs the device manager gives it —
+    last_error *and* the connect exception (device_manager passes both). That
+    matters: asyncio renders a refused connect as "...actively refused it" on
+    Windows (string-matchable) but as "Connect call failed (...)" on Linux,
+    where the errno lives only in the text — so string-only matching is
+    OS-fragile, while the ConnectionRefusedError / errno in the exception chain
+    is not. The precise string->code mapping is covered in
+    test_connection_fault.py.
     """
     from server.core.connection_fault import (
         TRANSPORT_DISCONNECTED,
@@ -218,12 +222,12 @@ async def test_last_error_captured_and_classified_on_connect_failure():
         timeout=1.0,
         inter_command_delay=0.0,
     )
-    with pytest.raises(ConnectionError):
+    with pytest.raises(ConnectionError) as exc_info:
         await transport._connect()
 
     assert transport.last_error  # non-empty regardless of OS
     fault = classify_connection_fault(
-        last_error=transport.last_error, exc=None,
+        last_error=transport.last_error, exc=exc_info.value,
         host="127.0.0.1", port=19999, transport="tcp",
     )
     assert fault.code != TRANSPORT_DISCONNECTED  # an actionable reason, not the fallback
