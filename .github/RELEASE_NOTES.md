@@ -1,20 +1,55 @@
-# OpenAVC v0.14.0
+# OpenAVC v0.15.0
 
-Better device discovery and a secure-by-default first run.
+v0.15.0 adds per-device quick actions and setup wizards, SSH device control, and
+clearer offline diagnostics, on top of a broad reliability pass across the
+platform.
 
-This release makes network scans identify more controllers without any setup, and changes the first-run experience so a new instance is protected from the moment it starts.
+## Quick actions and setup wizards
 
-## Highlights
+Quick Actions are handy per-device shortcuts in the device view: one-click
+buttons for the commands you run while commissioning or troubleshooting a
+device. And a driver can now define a setup wizard for its device, walking you
+step by step through tasks like provisioning so first-time configuration is
+guided rather than manual.
 
-- **Controllers identify during a scan, even before their driver is installed.** Some telnet controllers send a Telnet negotiation in one network packet and their identifying banner in the next. Discovery now reads across packets, so devices like the TurtleAV Chazy and Darwin controllers are recognized during a network scan without installing the driver first. AMX device discovery also matches more reliably.
-- **Secure by default with a first-run claim.** A brand new instance now prompts you to claim it and set a password before anything else. There is no unprotected window on first boot, and no default password to remember to change. Existing instances keep their current settings.
-- **Hardened against the network.** The rate limiter no longer trusts forwarded-for headers by default, system updates verify their download and refuse to apply anything that fails the check, and several internal file-path and archive handling paths were tightened. On the Raspberry Pi image, the OS login is locked down with SSH off and a single password shared with the web login.
+## Control devices over SSH
 
-## Improvements
+OpenAVC can now drive equipment that exposes a command-line interface over SSH,
+using the system's OpenSSH client. Authenticate with a password or an installed
+key. This covers network switches, servers, and appliances that speak CLI
+instead of a binary control protocol.
 
-- **Device command parameters render by type.** Running a command from a device page now shows proper controls (dropdowns, number fields, toggles) instead of plain text boxes, so the right values are easier to enter.
-- **Editing a device keeps its child entities.** Saving a change to a device no longer drops its sub-devices or any settings queued for an offline device.
-- **Surface Configurator** gains visible-when and auto-page editors for control surfaces.
-- **Per-device logs** always capture what was sent to and received from the device, and the console log honors the level you configured.
-- **Video sources** send a codec hint from the discovery probe so downstream playback starts correctly.
-- Driver authors can validate `.avcdriver` files live in their editor against the published schema, now linked from the docs.
+## Know why a device went offline
+
+When a device drops, OpenAVC tells you what happened instead of showing a
+generic "disconnected." The device card reports an actionable reason such as
+authentication failed, connection refused, unreachable, or a changed SSH host
+key, each with a plain-language next step. Drivers can attach their own hint to
+the banner for device-specific guidance.
+
+## Touch panel theming
+
+ThemeStudio adds per-type styling and page background editors. Style buttons,
+sliders, and labels independently, and set a background image or color per page.
+This release also fixes several color and contrast issues.
+
+## Sharper device discovery
+
+Discovery identifies more equipment, including HTTPS-only devices that
+previously came back unrecognized. It reads additional vendor signals from
+devices already on the network and keeps results current as a scan runs.
+
+## Driver authoring
+
+Import and export driver bundles straight from the Code view. Companion files
+for simulation and discovery come along on install and are cleaned up on
+uninstall. The general-purpose TCP driver and the Add Device dialog also pick up
+authoring improvements.
+
+## Reliability and hardening
+
+This release includes a wide reliability pass across the platform. The scripting
+runtime, plugin system, device simulator, driver loader, cloud connection,
+inter-system links, scheduling and triggers, backups, and saved variable state
+are all more resilient to malformed input, network failures, and edge cases.
+Update and rollback handling is more dependable.
