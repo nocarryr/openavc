@@ -31,6 +31,25 @@ from server.utils.logger import get_logger
 log = get_logger(__name__)
 
 
+# fnmatch metacharacters. An id carrying one of these becomes part of a state
+# key (var.<id>, ui.<id>.<prop>, device.<id>.*) and then a per-key
+# `state.changed.<key>` event name; fnmatch-based subscription dispatch
+# (event_bus, state_store) would mis-route or drop notifications for it
+# (e.g. a key `var.a[1]` never matches an exact subscription to itself, and
+# `var.a1` wrongly matches a subscription to `var.a[1]`).
+_GLOB_METACHARS = "*?["
+
+
+def _reject_glob_metachars(value: str, label: str) -> None:
+    """Raise if ``value`` contains an fnmatch metacharacter."""
+    bad = [c for c in _GLOB_METACHARS if c in value]
+    if bad:
+        raise ValueError(
+            f"{label} '{value}' must not contain glob metacharacters "
+            f"({', '.join(bad)}) — they break state-change event dispatch"
+        )
+
+
 # --- Pydantic Models ---
 
 
@@ -76,6 +95,7 @@ class DeviceConfig(_ForwardCompatModel):
     def id_no_dots(cls, v: str) -> str:
         if "." in v:
             raise ValueError(f"Device ID '{v}' must not contain dots (used as state key separator)")
+        _reject_glob_metachars(v, "Device ID")
         return v
 
 
@@ -108,6 +128,7 @@ class VariableConfig(_ForwardCompatModel):
     def id_no_dots(cls, v: str) -> str:
         if "." in v:
             raise ValueError(f"Variable ID '{v}' must not contain dots (used as state key separator)")
+        _reject_glob_metachars(v, "Variable ID")
         return v
     default: Any = None
     label: str = ""
@@ -273,6 +294,14 @@ class UIElement(_ForwardCompatModel):
     grid_area: GridArea = Field(default_factory=GridArea)
     style: dict[str, Any] = Field(default_factory=dict)
     bindings: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def id_no_glob(cls, v: str) -> str:
+        # The element id forms ui.<id>.<property> state keys and their
+        # per-key state.changed events; a glob metachar breaks fnmatch dispatch.
+        _reject_glob_metachars(v, "UI element ID")
+        return v
 
 
 class GridConfig(_ForwardCompatModel):

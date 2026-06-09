@@ -81,7 +81,14 @@ class LogBuffer:
         self._subscribers.pop(sub_id, None)
 
     def get_recent(self, count: int = 100) -> list[dict[str, Any]]:
-        """Get the most recent entries as dicts."""
+        """Get the ``count`` most recent entries as dicts.
+
+        A count of 0 (or negative) returns an empty list — the ``[-count:]``
+        slice would otherwise turn 0 into the whole buffer and a negative
+        count into a wrong window (same trap as StateStore.get_history).
+        """
+        if count <= 0:
+            return []
         entries = list(self._entries)
         if count < len(entries):
             entries = entries[-count:]

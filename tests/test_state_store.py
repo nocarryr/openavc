@@ -285,3 +285,111 @@ def test_state_binding_no_loop(state):
 
     assert call_count == 1
     assert state.get(var_key) == "on"
+
+
+# --- Flat-primitive invariant (H-080) ---
+
+
+def test_set_rejects_nested_dict(state):
+    """A nested dict never enters the store and fires no notification."""
+    calls = []
+    state.subscribe("var.*", lambda k, o, n, s: calls.append(n))
+    state.set("var.bad", {"nested": 1}, source="macro")
+    assert state.get("var.bad") is None
+    assert "var.bad" not in state.snapshot()
+    assert calls == []
+
+
+def test_set_rejects_list(state):
+    state.set("var.bad", [1, 2, 3], source="script")
+    assert state.get("var.bad") is None
+    assert "var.bad" not in state.snapshot()
+
+
+def test_set_accepts_bool_and_none(state):
+    """bool (an int subclass) and None are valid primitives, not rejected."""
+    state.set("var.flag", True)
+    assert state.get("var.flag") is True
+    state.set("var.v", "x")
+    state.set("var.v", None)  # clearing to None is a valid primitive write
+    assert state.get("var.v") is None
+    assert "var.v" in state.snapshot()  # present-with-None, not rejected
+
+
+def test_set_non_primitive_cannot_corrupt_change_detection(state):
+    """The core H-080 harm: a mutable value mutated in place defeats the
+    equality+identity change guard and silently drops notifications. Rejecting
+    non-primitives at the store boundary removes that class entirely — and a
+    later legitimate primitive write still notifies normally."""
+    state.set("var.x", {"v": 1}, source="macro")  # rejected, never stored
+    assert state.get("var.x") is None
+    calls = []
+    state.subscribe("var.x", lambda k, o, n, s: calls.append(n))
+    state.set("var.x", 5)
+    assert state.get("var.x") == 5
+    assert calls == [5]
+
+
+def test_set_batch_skips_non_primitive_keeps_valid(state):
+    """set_batch drops the bad entries but applies every valid one."""
+    state.set_batch({"var.ok": 1, "var.bad": {"a": 1}, "var.ok2": "y"})
+    assert state.get("var.ok") == 1
+    assert state.get("var.ok2") == "y"
+    assert "var.bad" not in state.snapshot()
+
+
+# --- get_history count clamp (M-138) ---
+
+
+def test_get_history_count_zero_returns_empty(state):
+    """count=0 returns nothing — not the whole 1000-entry buffer ([-0:] trap)."""
+    state.set("var.a", 1)
+    state.set("var.a", 2)
+    assert state.get_history(0) == []
+
+
+def test_get_history_negative_count_returns_empty(state):
+    """A negative count returns nothing, not a wrong window."""
+    state.set("var.a", 1)
+    state.set("var.a", 2)
+    state.set("var.a", 3)
+    assert state.get_history(-5) == []
+
+
+def test_get_history_positive_count_unchanged(state):
+    """The normal path still returns the N most-recent entries."""
+    state.set("var.a", 1)
+    state.set("var.b", 2)
+    recent = state.get_history(1)
+    assert len(recent) == 1
+    assert recent[0]["key"] == "var.b"
+
+
+# --- Event emission coalescing (M-139) ---
+
+
+async def test_emit_events_coalesces_into_one_task_per_batch(wired):
+    """A bulk set_batch schedules ONE dispatch task, not two per key, while
+    still delivering every change's generic state.changed event."""
+    state, events = wired
+    received = []
+    events.on("state.changed", lambda e, p: received.append(p["key"]))
+
+    updates = {f"var.k{i}": i for i in range(50)}
+    state.set_batch(updates)
+    # Old per-key fan-out would have scheduled 2*50 = 100 tasks here.
+    assert len(state._pending_event_tasks) == 1
+
+    await state.flush_pending_events()
+    assert sorted(received) == sorted(updates.keys())
+    assert state._pending_event_tasks == set()
+
+
+async def test_emit_events_per_key_event_still_delivered(wired):
+    """The per-key state.changed.<key> event reaches an exact subscriber."""
+    state, events = wired
+    hits = []
+    events.on("state.changed.var.target", lambda e, p: hits.append(p["new_value"]))
+    state.set("var.target", 7)
+    await state.flush_pending_events()
+    assert hits == [7]

@@ -341,6 +341,41 @@ def test_validate_non_string_pattern():
     assert any("must be a string" in e for e in errors)
 
 
+def test_validate_child_entity_type_glob_metachar_rejected():
+    """A child type name carrying a glob metachar (* ? [) becomes a
+    device.<id>.<child_type>.* key segment and breaks fnmatch dispatch."""
+    defn = {
+        **VALID_DEFINITION,
+        "child_entity_types": {"enc[oder]": {"state_variables": {}}},
+    }
+    errors = validate_driver_definition(defn)
+    assert any("glob metacharacters" in e and "enc[oder]" in e for e in errors)
+
+
+def test_validate_child_entity_type_dot_rejected():
+    """A dotted child type name corrupts the state-key structure."""
+    defn = {
+        **VALID_DEFINITION,
+        "child_entity_types": {"a.b": {"state_variables": {}}},
+    }
+    errors = validate_driver_definition(defn)
+    assert any("must not contain dots" in e for e in errors)
+
+
+def test_validate_child_entity_type_normal_name_ok():
+    defn = {
+        **VALID_DEFINITION,
+        "child_entity_types": {"encoder": {"state_variables": {}}},
+    }
+    assert validate_driver_definition(defn) == []
+
+
+def test_validate_child_entity_types_non_mapping():
+    defn = {**VALID_DEFINITION, "child_entity_types": ["encoder"]}
+    errors = validate_driver_definition(defn)
+    assert any("child_entity_types: must be a mapping" in e for e in errors)
+
+
 def test_bad_driver_file_does_not_abort_the_pass(tmp_path):
     """A single malformed .avcdriver must not stop other drivers loading.
 

@@ -592,3 +592,44 @@ def test_list_element():
     assert el.type == "list"
     assert el.list_style == "selectable"
     assert len(el.items) == 2
+
+
+# --- Glob-metachar rejection in ids (L-083 / L-084) ---
+#
+# An id carrying an fnmatch metacharacter (* ? [) becomes part of a state key
+# and its per-key state.changed event; the fnmatch-based subscription dispatch
+# then mis-routes or drops notifications for it. Reject these at authoring time.
+
+
+@pytest.mark.parametrize("bad_id", ["enc[oder]", "dev*", "q?", "a[1]"])
+def test_device_id_rejects_glob_metachars(bad_id):
+    from server.core.project_loader import DeviceConfig
+
+    with pytest.raises(ValidationError):
+        DeviceConfig(id=bad_id, driver="x", name="X")
+
+
+@pytest.mark.parametrize("bad_id", ["a[1]", "v*", "q?"])
+def test_variable_id_rejects_glob_metachars(bad_id):
+    from server.core.project_loader import VariableConfig
+
+    with pytest.raises(ValidationError):
+        VariableConfig(id=bad_id, type="string")
+
+
+@pytest.mark.parametrize("bad_id", ["btn[1]", "slider*", "x?"])
+def test_ui_element_id_rejects_glob_metachars(bad_id):
+    from server.core.project_loader import UIElement
+
+    with pytest.raises(ValidationError):
+        UIElement(id=bad_id, type="button")
+
+
+def test_ids_accept_normal_names():
+    """Ordinary identifiers (incl. the numeric/underscore child-style names)
+    still validate — the guard only rejects glob metachars."""
+    from server.core.project_loader import DeviceConfig, UIElement, VariableConfig
+
+    DeviceConfig(id="encoder_5", driver="x", name="X")
+    VariableConfig(id="room_active", type="boolean")
+    UIElement(id="vol_slider", type="slider")

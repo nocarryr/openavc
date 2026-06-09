@@ -296,6 +296,30 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             else:
                 errors.append("frame_parser: missing 'type'")
 
+    # Validate child_entity_types keys. The child type name becomes a key
+    # segment — device.<id>.<child_type>.<local_id>.<prop> — and feeds
+    # subscribe_children's "device.<id>.<child_type>.*" pattern. A dot would
+    # corrupt the key structure; a glob metachar (* ? [) breaks the fnmatch
+    # dispatch the platform uses to route per-child state changes.
+    child_types = driver_def.get("child_entity_types", {})
+    if child_types and not isinstance(child_types, dict):
+        errors.append("child_entity_types: must be a mapping")
+    elif isinstance(child_types, dict):
+        for child_type in child_types:
+            if not isinstance(child_type, str) or not child_type:
+                errors.append(f"child_entity_types: type name {child_type!r} must be a non-empty string")
+                continue
+            if "." in child_type:
+                errors.append(
+                    f"child_entity_types: type name '{child_type}' must not contain dots (used as state key separator)"
+                )
+            bad = [c for c in "*?[" if c in child_type]
+            if bad:
+                errors.append(
+                    f"child_entity_types: type name '{child_type}' must not contain "
+                    f"glob metacharacters ({', '.join(bad)}) — they break state-change dispatch"
+                )
+
     return errors
 
 

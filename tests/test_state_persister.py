@@ -175,9 +175,14 @@ def test_persist_explicit_none_survives(tmp_state_file, store, persister):
 
 def test_write_does_not_raise_on_non_serializable(tmp_state_file, store, persister):
     """A non-serializable value in the store is caught and logged inside
-    _write(), not raised out into shutdown or the debounced flush task."""
+    _write(), not raised out into shutdown or the debounced flush task.
+
+    StateStore.set() now rejects non-primitives, so the bad value is injected
+    straight into the backing dict — this still exercises the persister's own
+    json.dumps try/except (defense-in-depth for any value that reaches the
+    store by another path)."""
     store.set("var.ok", "fine", source="system")
-    store.set("var.bad", {1, 2, 3}, source="system")  # a set is not JSON-serializable
+    store._store["var.bad"] = {1, 2, 3}  # bypass the flat-primitive guard; a set is not JSON-serializable
     persister.start({"var.ok", "var.bad"})
 
     persister._write()  # must not raise (json.dumps is now inside the try)

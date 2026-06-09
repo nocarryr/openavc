@@ -73,6 +73,19 @@ class _Sub:
 _GLOB_CHARS = "*?["
 
 
+def _is_flat_primitive(value: Any) -> bool:
+    """True if ``value`` satisfies the store's flat-primitive invariant.
+
+    The store holds only ``str``/``int``/``float``/``bool``/``None``. A nested
+    ``dict``/``list`` (or any other object) breaks every downstream consumer:
+    change detection (``old == value and type matches`` passes when the same
+    mutable object is mutated in place, silently dropping the notification),
+    condition evaluation, persistence, and ISC re-propagation all assume
+    scalars. ``bool`` is intentionally accepted (it's an ``int`` subclass).
+    """
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
 class StateStore:
     """Centralized reactive key-value state store with change notification."""
 
@@ -126,7 +139,15 @@ class StateStore:
         return dict(self._store)
 
     def get_history(self, count: int = 50) -> list[dict]:
-        """Return recent state change history."""
+        """Return the ``count`` most recent state changes.
+
+        A count of 0 (or negative) returns an empty list. The naive
+        ``[-count:]`` slice turns 0 into "everything" (``[-0:]`` is the whole
+        list) and a negative count into a wrong window, so a caller asking
+        for none would otherwise get the entire 1000-entry buffer.
+        """
+        if count <= 0:
+            return []
         entries = list(self._history)[-count:]
         return [
             {
@@ -150,7 +171,22 @@ class StateStore:
         2. Record in history
         3. Notify matching listeners
         4. Emit events on the EventBus
+
+        Values must be flat primitives (str, int, float, bool, None). A
+        non-primitive is rejected here — the central enforcement point for
+        the invariant — so automation write paths (macro/script state.set,
+        driver polls) can't smuggle a nested object past the caller-side
+        guards and corrupt change detection. It's dropped, not coerced: we
+        never persist an arbitrary blob, even stringified.
         """
+        if not _is_flat_primitive(value):
+            log.warning(
+                "Rejected non-primitive state write to '%s' (%s) from source=%s — "
+                "state values must be flat primitives (str, int, float, bool, None)",
+                key, type(value).__name__, source,
+            )
+            return
+
         if not any(key.startswith(p) for p in self._VALID_PREFIXES):
             log.debug("State key '%s' has unknown namespace prefix (source=%s)", key, source)
 
@@ -179,6 +215,13 @@ class StateStore:
         store = self._store
         history = self._history
         for key, value in updates.items():
+            if not _is_flat_primitive(value):
+                log.warning(
+                    "Rejected non-primitive state write to '%s' (%s) from source=%s — "
+                    "state values must be flat primitives (str, int, float, bool, None)",
+                    key, type(value).__name__, source,
+                )
+                continue
             old_value = store.get(key)
             if old_value == value and type(old_value) is type(value):
                 continue
@@ -493,10 +536,22 @@ class StateStore:
             log.exception(f"Error in state bulk listener for pattern '{sub.pattern}'")
 
     def _emit_events(self, changes: list[tuple[str, Any, Any, str]]) -> None:
-        """Emit ``state.changed`` events for each change.
+        """Emit ``state.changed`` events for a whole transaction.
 
-        Schedules emission as asyncio tasks; if there's no running loop
-        (sync tests), the events are silently skipped.
+        Schedules emission as a single asyncio task; if there's no running
+        loop (sync tests), the events are silently skipped.
+
+        The whole transaction is dispatched by ONE task that awaits the
+        per-key emits in sequence, rather than fanning out two tasks per key.
+        A bulk ``set_batch`` (device/child poll, project reload) can carry
+        tens of thousands of changes; the old per-key fan-out scheduled 2N
+        tasks at once and pinned a strong reference to every one of them in
+        ``_pending_event_tasks`` until they completed — a memory/scheduler
+        spike on a common path. Collapsing to one task bounds that to a
+        single live reference per transaction. Each ``emit`` still dispatches
+        its own matching handlers concurrently, and ordering the emits by
+        change order is deterministic (a minor improvement over the old
+        racy fan-out).
         """
         if self._event_bus is None or not changes:
             return
@@ -505,6 +560,17 @@ class StateStore:
         except RuntimeError:
             return  # No event loop — skip async events (sync tests)
 
+        task = loop.create_task(self._dispatch_change_events(changes))
+        self._pending_event_tasks.add(task)
+        task.add_done_callback(self._pending_event_tasks.discard)
+
+    async def _dispatch_change_events(
+        self, changes: list[tuple[str, Any, Any, str]]
+    ) -> None:
+        """Emit the generic and per-key ``state.changed`` events for a batch."""
+        bus = self._event_bus
+        if bus is None:
+            return
         for key, old_value, new_value, source in changes:
             payload = {
                 "key": key,
@@ -512,7 +578,5 @@ class StateStore:
                 "new_value": new_value,
                 "source": source,
             }
-            for event_name in ("state.changed", f"state.changed.{key}"):
-                task = loop.create_task(self._event_bus.emit(event_name, payload))
-                self._pending_event_tasks.add(task)
-                task.add_done_callback(self._pending_event_tasks.discard)
+            await bus.emit("state.changed", payload)
+            await bus.emit(f"state.changed.{key}", payload)

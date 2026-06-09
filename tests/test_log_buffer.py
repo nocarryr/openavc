@@ -99,6 +99,29 @@ def test_buffer_get_recent_empty():
     assert buf.get_recent() == []
 
 
+def test_buffer_get_recent_count_zero_returns_empty():
+    """count=0 must return nothing, not the whole buffer (the [-0:] slice
+    trap: [-0:] is [0:], i.e. everything)."""
+    buf = LogBuffer(maxlen=10)
+    for i in range(5):
+        buf.append(LogEntry(
+            timestamp=float(i), level="INFO", source="test",
+            category="system", message=f"msg {i}",
+        ))
+    assert buf.get_recent(0) == []
+
+
+def test_buffer_get_recent_negative_count_returns_empty():
+    """A negative count must return nothing, not a wrong window ([-(-3):] = [3:])."""
+    buf = LogBuffer(maxlen=10)
+    for i in range(5):
+        buf.append(LogEntry(
+            timestamp=float(i), level="INFO", source="test",
+            category="system", message=f"msg {i}",
+        ))
+    assert buf.get_recent(-3) == []
+
+
 @pytest.mark.asyncio
 async def test_buffer_subscribe_receives_entries():
     buf = LogBuffer()
