@@ -17,6 +17,7 @@ import sys
 from contextvars import ContextVar
 from typing import Any, Callable, TYPE_CHECKING
 
+from server.core.condition_eval import eval_operator
 from server.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -96,6 +97,21 @@ def drain_pending() -> tuple[list[tuple[str, Callable]], list[tuple[str, Callabl
     _pending_event_handlers.clear()
     _pending_state_handlers.clear()
     return event_handlers, state_handlers
+
+
+# --- Shared comparison ---
+
+
+def compare(actual: Any, operator: str, target: Any = None) -> bool:
+    """Compare two values with the same operator semantics macros and
+    triggers use: operator aliases (``==``, ``>=``, ``equals``, ...) plus
+    boolean/numeric type coercion, so ``compare("75", "gte", 50)`` is True
+    and a type mismatch yields False instead of raising TypeError.
+
+    Operators: eq, ne, gt, lt, gte, lte, truthy, falsy (plus aliases).
+    For truthy/falsy the *target* argument is ignored.
+    """
+    return eval_operator(operator, actual, target)
 
 
 # --- Proxy objects ---

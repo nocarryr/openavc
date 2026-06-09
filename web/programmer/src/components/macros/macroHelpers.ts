@@ -150,8 +150,87 @@ export function macroToScript(
   const hasEvent = triggers.some((t) => t.type === "event" && t.enabled);
   const hasSchedule = triggers.some((t) => t.type === "schedule" && t.enabled);
 
+  // Generate the body first; the import list depends on what it uses.
+  const body: string[] = [];
+
+  // Generate decorator-based handlers for triggers
+  if (hasTriggers) {
+    for (const trigger of triggers) {
+      if (!trigger.enabled) continue;
+      body.push("");
+      if (trigger.type === "state_change" && trigger.state_key) {
+        body.push(`@on_state_change("${_pyEscape(trigger.state_key)}")`);
+        body.push("async def on_trigger(key, old_value, new_value):");
+        // State operator check (compare() mirrors the trigger engine's coercion)
+        if (trigger.state_operator && trigger.state_operator !== "any") {
+          const op = trigger.state_operator;
+          if (op === "truthy") body.push("    if not new_value:");
+          else if (op === "falsy") body.push("    if new_value:");
+          else {
+            body.push(
+              `    if not compare(new_value, "${_pyEscape(op)}", ${_pyValue(trigger.state_value ?? "", false)}):`
+            );
+          }
+          body.push("        return");
+        }
+        // Guard conditions
+        for (const cond of trigger.conditions ?? []) {
+          body.push(_conditionToGuard(cond, "    "));
+          body.push("        return");
+        }
+        // Delay + re-check
+        if ((trigger.delay_seconds ?? 0) > 0) {
+          body.push(`    await asyncio.sleep(${trigger.delay_seconds})  # delay re-check`);
+          if (trigger.state_operator && trigger.state_operator !== "any") {
+            // Re-check using same operator (inverted for guard return)
+            body.push(_conditionToGuard({
+              key: trigger.state_key ?? "",
+              operator: trigger.state_operator,
+              value: trigger.state_value,
+            }, "    "));
+            body.push("        return");
+          }
+        }
+        // Steps
+        _generateStepLines(body, macro.steps, "    ", groups);
+      } else if (trigger.type === "event" && trigger.event_pattern) {
+        body.push(`@on_event("${_pyEscape(trigger.event_pattern)}")`);
+        body.push("async def on_trigger(event, payload):");
+        for (const cond of trigger.conditions ?? []) {
+          body.push(_conditionToGuard(cond, "    "));
+          body.push("        return");
+        }
+        _generateStepLines(body, macro.steps, "    ", groups);
+      } else if (trigger.type === "schedule" && trigger.cron) {
+        body.push(`# Schedule: ${_pyComment(trigger.cron)}`);
+        body.push(`@on_event("schedule.macro_${_pyEscape(macro.id)}")`);
+        body.push("async def on_trigger(event, payload):");
+        _generateStepLines(body, macro.steps, "    ", groups);
+      } else if (trigger.type === "startup") {
+        body.push("@on_event(\"system.started\")");
+        body.push("async def on_startup(event, payload):");
+        if ((trigger.delay_seconds ?? 0) > 0) {
+          body.push(`    await asyncio.sleep(${trigger.delay_seconds})`);
+        }
+        _generateStepLines(body, macro.steps, "    ", groups);
+      }
+    }
+  }
+
+  // Always include a manual run() function
+  body.push("");
+  body.push("");
+  body.push("async def run():");
+  if (macro.steps.length === 0) {
+    body.push("    pass");
+  } else {
+    _generateStepLines(body, macro.steps, "    ", groups);
+  }
+
   // Build import list based on what the script needs
+  const bodyText = body.join("\n");
   const imports = ["devices", "state", "events", "macros", "log"];
+  if (/\bcompare\(/.test(bodyText)) imports.push("compare");
   if (hasStateChange) imports.push("on_state_change");
   if (hasEvent) imports.push("on_event");
   // Startup triggers use on_event("system.started"), so add on_event if needed
@@ -163,98 +242,82 @@ export function macroToScript(
     imports.push("on_event");
   }
 
-  const escapedName = macro.name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   const needsTimeImport = _macroUsesWaitUntilWithTimeout(macro.steps);
   const lines: string[] = [
-    `"""Auto-generated from macro '${escapedName}'."""`,
+    `"""Auto-generated from macro '${_pyEscape(macro.name)}'."""`,
     `from openavc import ${imports.join(", ")}`,
     "import asyncio",
     ...(needsTimeImport ? ["import time as _t"] : []),
     "",
+    ...body,
   ];
-
-  // Generate decorator-based handlers for triggers
-  if (hasTriggers) {
-    for (const trigger of triggers) {
-      if (!trigger.enabled) continue;
-      lines.push("");
-      if (trigger.type === "state_change" && trigger.state_key) {
-        lines.push(`@on_state_change("${trigger.state_key}")`);
-        lines.push("async def on_trigger(key, old_value, new_value):");
-        // State operator check
-        if (trigger.state_operator && trigger.state_operator !== "any") {
-          const op = trigger.state_operator;
-          const val = JSON.stringify(trigger.state_value ?? "");
-          if (op === "eq") lines.push(`    if new_value != ${val}:`);
-          else if (op === "ne") lines.push(`    if new_value == ${val}:`);
-          else if (op === "truthy") lines.push("    if not new_value:");
-          else if (op === "falsy") lines.push("    if new_value:");
-          else if (op === "gt") lines.push(`    if new_value is None or new_value <= ${val}:`);
-          else if (op === "lt") lines.push(`    if new_value is None or new_value >= ${val}:`);
-          else if (op === "gte") lines.push(`    if new_value is None or new_value < ${val}:`);
-          else if (op === "lte") lines.push(`    if new_value is None or new_value > ${val}:`);
-          lines.push("        return");
-        }
-        // Guard conditions
-        for (const cond of trigger.conditions ?? []) {
-          lines.push(_conditionToGuard(cond, "    "));
-          lines.push("        return");
-        }
-        // Delay + re-check
-        if ((trigger.delay_seconds ?? 0) > 0) {
-          lines.push(`    await asyncio.sleep(${trigger.delay_seconds})  # delay re-check`);
-          if (trigger.state_operator && trigger.state_operator !== "any") {
-            // Re-check using same operator (inverted for guard return)
-            lines.push(_conditionToGuard({
-              key: trigger.state_key ?? "",
-              operator: trigger.state_operator,
-              value: trigger.state_value,
-            }, "    "));
-            lines.push("        return");
-          }
-        }
-        // Steps
-        _generateStepLines(lines, macro.steps, "    ", groups);
-      } else if (trigger.type === "event" && trigger.event_pattern) {
-        lines.push(`@on_event("${trigger.event_pattern}")`);
-        lines.push("async def on_trigger(event, payload):");
-        for (const cond of trigger.conditions ?? []) {
-          lines.push(_conditionToGuard(cond, "    "));
-          lines.push("        return");
-        }
-        _generateStepLines(lines, macro.steps, "    ", groups);
-      } else if (trigger.type === "schedule" && trigger.cron) {
-        lines.push(`# Schedule: ${trigger.cron}`);
-        lines.push(`@on_event("schedule.macro_${macro.id}")`);
-        lines.push("async def on_trigger(event, payload):");
-        _generateStepLines(lines, macro.steps, "    ", groups);
-      } else if (trigger.type === "startup") {
-        lines.push("@on_event(\"system.started\")");
-        lines.push("async def on_startup(event, payload):");
-        if ((trigger.delay_seconds ?? 0) > 0) {
-          lines.push(`    await asyncio.sleep(${trigger.delay_seconds})`);
-        }
-        _generateStepLines(lines, macro.steps, "    ", groups);
-      }
-    }
-  }
-
-  // Always include a manual run() function
-  lines.push("");
-  lines.push("");
-  lines.push("async def run():");
-  if (macro.steps.length === 0) {
-    lines.push("    pass");
-  } else {
-    _generateStepLines(lines, macro.steps, "    ");
-  }
 
   return lines.join("\n") + "\n";
 }
 
-/** Escape a string for use inside a Python string literal. */
+/** Escape a string for use inside a Python string literal (quotes, backslashes,
+ * and control characters such as newlines, so a value can never break out of
+ * the literal or out of a docstring). */
 function _pyEscape(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/'/g, "\\'");
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/'/g, "\\'")
+    .replace(/[\x00-\x1f\x7f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+/** Sanitize free text for use inside a Python comment: control characters
+ * (especially newlines, which would end the comment) collapse to a space. */
+function _pyComment(s: string): string {
+  return s.replace(/[\x00-\x1f\x7f]+/g, " ");
+}
+
+/** Render a JS value as a Python literal expression.
+ *
+ * When `resolveDollar` is true, a top-level string starting with `$` becomes a
+ * `state.get(...)` lookup — mirroring the macro engine, which resolves
+ * `$state.key` references in command params and state.set values at runtime
+ * (top level only, so nested values recurse with resolution off). */
+function _pyValue(v: unknown, resolveDollar: boolean): string {
+  if (v === null || v === undefined) return "None";
+  if (typeof v === "boolean") return v ? "True" : "False";
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "None";
+  if (typeof v === "string") {
+    if (resolveDollar && v.startsWith("$")) {
+      return `state.get("${_pyEscape(v.slice(1))}")`;
+    }
+    return `"${_pyEscape(v)}"`;
+  }
+  if (Array.isArray(v)) {
+    return `[${v.map((item) => _pyValue(item, false)).join(", ")}]`;
+  }
+  if (typeof v === "object") {
+    const entries = Object.entries(v as Record<string, unknown>).map(
+      ([k, item]) => `"${_pyEscape(k)}": ${_pyValue(item, false)}`
+    );
+    return `{${entries.join(", ")}}`;
+  }
+  return `"${_pyEscape(String(v))}"`;
+}
+
+/** Render a params dict as a Python dict literal, resolving top-level `$state.key`
+ * string values to `state.get(...)` like the macro engine's _resolve_params. */
+function _pyParamsDict(params: Record<string, unknown>): string {
+  const entries = Object.entries(params).map(
+    ([k, v]) => `"${_pyEscape(k)}": ${_pyValue(v, true)}`
+  );
+  return `{${entries.join(", ")}}`;
+}
+
+/** Positive-sense condition expression (true when the condition matches).
+ * Comparison operators go through compare(), which applies the same alias
+ * normalization and type coercion as the macro/trigger engines. */
+function _conditionExpr(cond: { key?: string; operator?: string; value?: unknown }): string {
+  const key = _pyEscape(cond.key ?? "");
+  const op = cond.operator ?? "eq";
+  if (op === "truthy") return `state.get("${key}")`;
+  if (op === "falsy") return `not state.get("${key}")`;
+  return `compare(state.get("${key}"), "${_pyEscape(op)}", ${_pyValue(cond.value ?? "", false)})`;
 }
 
 /** Generate a guard condition (if ... return) line for a trigger condition/operator. */
@@ -263,41 +326,10 @@ function _conditionToGuard(
   indent: string
 ): string {
   const key = _pyEscape(cond.key ?? "");
-  const val = JSON.stringify(cond.value ?? "");
   const op = cond.operator ?? "eq";
-
-  switch (op) {
-    case "eq":
-    case "equals":
-    case "==":
-      return `${indent}if state.get("${key}") != ${val}:`;
-    case "ne":
-    case "not_equals":
-    case "!=":
-      return `${indent}if state.get("${key}") == ${val}:`;
-    case "gt":
-    case "greater_than":
-    case ">":
-      return `${indent}if state.get("${key}") is None or state.get("${key}") <= ${val}:`;
-    case "lt":
-    case "less_than":
-    case "<":
-      return `${indent}if state.get("${key}") is None or state.get("${key}") >= ${val}:`;
-    case "gte":
-    case "greater_or_equal":
-    case ">=":
-      return `${indent}if state.get("${key}") is None or state.get("${key}") < ${val}:`;
-    case "lte":
-    case "less_or_equal":
-    case "<=":
-      return `${indent}if state.get("${key}") is None or state.get("${key}") > ${val}:`;
-    case "truthy":
-      return `${indent}if not state.get("${key}"):`;
-    case "falsy":
-      return `${indent}if state.get("${key}"):`;
-    default:
-      return `${indent}if state.get("${key}") != ${val}:`;
-  }
+  if (op === "truthy") return `${indent}if not state.get("${key}"):`;
+  if (op === "falsy") return `${indent}if state.get("${key}"):`;
+  return `${indent}if not compare(state.get("${key}"), "${_pyEscape(op)}", ${_pyValue(cond.value ?? "", false)}):`;
 }
 
 function _generateStepLines(
@@ -311,49 +343,45 @@ function _generateStepLines(
     return;
   }
   for (const step of steps) {
-    // skip_if guard
+    // skip_if guard — if the condition matches, skip the step (mirrors the
+    // macro engine, including compare()'s operator aliases + type coercion)
     if (step.skip_if) {
-      const guardLine = _conditionToGuard(step.skip_if, indent);
-      if (guardLine) {
-        // _conditionToGuard generates "if <inverse-condition>:" — we want skip logic
-        // so: if condition matches, skip (continue)
-        const key = _pyEscape(step.skip_if.key ?? "");
-        const val = JSON.stringify(step.skip_if.value ?? "");
-        const op = step.skip_if.operator ?? "eq";
-        const opMap: Record<string, string> = { eq: "==", ne: "!=", gt: ">", lt: "<", gte: ">=", lte: "<=" };
-        const pyOp = opMap[op] ?? "==";
-        if (op === "truthy") {
-          lines.push(`${indent}if state.get("${key}"):  # skip_if`);
-        } else if (op === "falsy") {
-          lines.push(`${indent}if not state.get("${key}"):  # skip_if`);
-        } else {
-          lines.push(`${indent}if state.get("${key}") ${pyOp} ${val}:  # skip_if`);
-        }
-        lines.push(`${indent}    pass  # skipped`);
-        // Wrap the actual step in else
-        lines.push(`${indent}else:`);
-        // Re-enter with extra indent
-        _generateStepLines(lines, [{ ...step, skip_if: undefined }], indent + "    ", groups);
-        continue;
-      }
+      lines.push(`${indent}if ${_conditionExpr(step.skip_if)}:  # skip_if`);
+      lines.push(`${indent}    pass  # skipped`);
+      // Wrap the actual step in else
+      lines.push(`${indent}else:`);
+      // Re-enter with extra indent
+      _generateStepLines(lines, [{ ...step, skip_if: undefined }], indent + "    ", groups);
+      continue;
     }
     switch (step.action) {
       case "device.command": {
-        const params = step.params ? `, ${JSON.stringify(step.params)}` : "";
-        lines.push(
-          `${indent}await devices.send("${_pyEscape(step.device ?? "")}", "${_pyEscape(step.command ?? "")}"${params})`
-        );
+        const device = _pyEscape(step.device ?? "");
+        const params = step.params ? `, ${_pyParamsDict(step.params)}` : "";
+        const sendLine = `await devices.send("${device}", "${_pyEscape(step.command ?? "")}"${params})`;
+        if (step.skip_if_offline) {
+          lines.push(`${indent}if state.get("device.${device}.connected"):  # skip_if_offline`);
+          lines.push(`${indent}    ${sendLine}`);
+        } else {
+          lines.push(`${indent}${sendLine}`);
+        }
         break;
       }
       case "group.command": {
-        const params = step.params ? `, ${JSON.stringify(step.params)}` : "";
+        const params = step.params ? `, ${_pyParamsDict(step.params)}` : "";
         const group = groups?.find((g) => g.id === step.group);
         const deviceIds = group?.device_ids ?? [];
         lines.push(
-          `${indent}# Group command: ${_pyEscape(step.group ?? "")} -> ${_pyEscape(step.command ?? "")}`
+          `${indent}# Group command: ${_pyComment(`${step.group ?? ""} -> ${step.command ?? ""}`)}`
         );
         lines.push(
-          `${indent}for device_id in ${JSON.stringify(deviceIds)}:`
+          `${indent}for device_id in ${_pyValue(deviceIds, false)}:`
+        );
+        lines.push(
+          `${indent}    if not state.get(f"device.{device_id}.connected"):`
+        );
+        lines.push(
+          `${indent}        continue  # offline devices are skipped, matching the macro engine`
         );
         lines.push(
           `${indent}    await devices.send(device_id, "${_pyEscape(step.command ?? "")}"${params})`
@@ -365,11 +393,13 @@ function _generateStepLines(
         break;
       case "state.set":
         lines.push(
-          `${indent}state.set("${_pyEscape(step.key ?? "")}", ${JSON.stringify(step.value ?? "")})`
+          `${indent}state.set("${_pyEscape(step.key ?? "")}", ${_pyValue(step.value, true)})`
         );
         break;
       case "event.emit": {
-        const payload = step.payload ? `, ${JSON.stringify(step.payload)}` : "";
+        // Payload values are passed through verbatim — the macro engine does
+        // not resolve $-references in event payloads.
+        const payload = step.payload ? `, ${_pyValue(step.payload, false)}` : "";
         lines.push(`${indent}await events.emit("${_pyEscape(step.event ?? "")}"${payload})`);
         break;
       }
@@ -378,7 +408,7 @@ function _generateStepLines(
         break;
       case "ui.navigate":
         lines.push(
-          `${indent}# Navigate panels to '${_pyEscape(step.page ?? "")}'`
+          `${indent}# Navigate panels to '${_pyComment(step.page ?? "")}'`
         );
         lines.push(
           `${indent}# (no script API for ui.navigate yet — call from a macro step instead)`
@@ -387,18 +417,7 @@ function _generateStepLines(
       case "conditional": {
         const cond = step.condition;
         if (cond) {
-          const key = _pyEscape(cond.key ?? "");
-          const val = JSON.stringify(cond.value ?? "");
-          const op = cond.operator ?? "eq";
-          const opMap: Record<string, string> = { eq: "==", ne: "!=", gt: ">", lt: "<", gte: ">=", lte: "<=" };
-          const pyOp = opMap[op] ?? "==";
-          if (op === "truthy") {
-            lines.push(`${indent}if state.get("${key}"):`);
-          } else if (op === "falsy") {
-            lines.push(`${indent}if not state.get("${key}"):`);
-          } else {
-            lines.push(`${indent}if state.get("${key}") ${pyOp} ${val}:`);
-          }
+          lines.push(`${indent}if ${_conditionExpr(cond)}:`);
           const thenSteps = (step as any).then_steps ?? [];
           const elseSteps = (step as any).else_steps ?? [];
           _generateStepLines(lines, thenSteps, indent + "    ", groups);
@@ -420,14 +439,8 @@ function _generateStepLines(
           break;
         }
         const key = _pyEscape(cond.key ?? "");
-        const val = JSON.stringify(cond.value ?? "");
         const op = cond.operator ?? "eq";
-        const opMap: Record<string, string> = { eq: "==", ne: "!=", gt: ">", lt: "<", gte: ">=", lte: "<=" };
-        const pyOp = opMap[op] ?? "==";
-        let checkExpr: string;
-        if (op === "truthy") checkExpr = `state.get("${key}")`;
-        else if (op === "falsy") checkExpr = `not state.get("${key}")`;
-        else checkExpr = `state.get("${key}") ${pyOp} ${val}`;
+        const checkExpr = _conditionExpr(cond);
         const timeout = step.timeout;
         const onTimeout = step.on_timeout ?? "fail";
         if (timeout == null) {
@@ -435,7 +448,10 @@ function _generateStepLines(
           lines.push(`${indent}while not (${checkExpr}):`);
           lines.push(`${indent}    await asyncio.sleep(0.5)`);
         } else {
-          lines.push(`${indent}# wait_until: ${cond.key} ${op} ${val} (timeout ${timeout}s, ${onTimeout})`);
+          const condDesc = _pyComment(
+            `${cond.key ?? ""} ${op} ${JSON.stringify(cond.value ?? "")}`
+          );
+          lines.push(`${indent}# wait_until: ${condDesc} (timeout ${timeout}s, ${onTimeout})`);
           lines.push(`${indent}_deadline = _t.monotonic() + ${timeout}`);
           lines.push(`${indent}while not (${checkExpr}):`);
           lines.push(`${indent}    if _t.monotonic() >= _deadline:`);
@@ -455,11 +471,11 @@ function _generateStepLines(
           // provides the call.
           const params = step.params ? JSON.stringify(step.params) : "{}";
           lines.push(
-            `${indent}# Plugin action '${step.action}' — call the plugin's script API directly`
+            `${indent}# Plugin action '${_pyComment(step.action)}' — call the plugin's script API directly`
           );
-          lines.push(`${indent}# Params: ${params}`);
+          lines.push(`${indent}# Params: ${_pyComment(params)}`);
         } else {
-          lines.push(`${indent}# Unsupported step type: ${step.action}`);
+          lines.push(`${indent}# Unsupported step type: ${_pyComment(step.action)}`);
         }
         break;
     }

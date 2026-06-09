@@ -19,6 +19,7 @@ from openavc import (
     on_event, on_state_change,                          # Decorators
     devices, state, events, macros, log, isc, plugins,  # Proxy objects
     delay, after, every, cancel_timer, cancel_all_timers,  # Timer functions
+    compare,                                            # Condition helper
     Event,                                              # Event class (for type hints)
 )
 ```
@@ -195,6 +196,21 @@ state.set("ui.btn_power.label", None)
 ```
 
 Available override keys for any element: `label`, `bg_color`, `text_color`, `opacity`, `visible`. The element ID is the same ID shown in the UI Builder properties panel.
+
+#### Comparing State Values
+
+Device state often arrives as strings (a projector reporting `"75"` for lamp hours, `"on"` for power). A plain Python comparison like `state.get("device.proj.lamp_hours") > 1000` raises `TypeError` on a string, and `"75" == 75` is simply `False`. The `compare()` helper applies the same type coercion macros and triggers use, so scripts behave like the rest of the system:
+
+```python
+from openavc import compare
+
+if compare(state.get("device.proj.lamp_hours"), "gte", 1000):
+    log.warning("Lamp needs replacement soon")
+
+# Operators: eq, ne, gt, lt, gte, lte, truthy, falsy (aliases like ">=" work too)
+```
+
+Scripts created with **Convert to Script** in the Macros view use `compare()` for every condition automatically.
 
 ### events (Event Bus)
 

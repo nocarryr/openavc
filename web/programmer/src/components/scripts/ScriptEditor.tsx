@@ -78,6 +78,7 @@ export function ScriptEditor({ source, onChange, onEditorReady, runtimeErrors, e
             "on_event", "on_state_change", "devices", "state",
             "events", "macros", "log", "isc", "plugins",
             "after", "every", "cancel_timer", "delay", "Event",
+            "compare",
           ];
           for (const item of imports) {
             suggestions.push({
