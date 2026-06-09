@@ -26,6 +26,7 @@ import { IconPicker } from "../ui-builder/IconPicker";
 import { ElementIcon } from "../ui-builder/ElementIcon";
 import type { ProjectConfig } from "../../api/types";
 import * as api from "../../api/restClient";
+import { BASE } from "../../api/base";
 
 // ──── Types ────
 
@@ -300,6 +301,8 @@ export function SurfaceConfigurator({
               onConfigChange={onConfigChange}
             />
           )}
+          {/* Virtual decks — work on layouts with no hardware attached */}
+          <VirtualDeckManager config={config} onConfigChange={onConfigChange} />
           {/* Per-deck overrides for the global scalar settings (customized decks only) */}
           {isCustomized && (
             <DeckScalarSettings viewConfig={viewConfig} onViewChange={onViewChange} />
@@ -378,6 +381,14 @@ export function SurfaceConfigurator({
               />
             )}
           </div>
+          {/* Live View — the deck's actual rendering, clickable to press */}
+          {deckConnected && activeSerial && (
+            <LiveViewSection
+              pluginId={pluginId}
+              serial={activeSerial}
+              statePrefix={statePrefix}
+            />
+          )}
           {liveHasTouchscreen && (
             <TouchscreenZonesEditor
               config={viewConfig}
@@ -1322,6 +1333,413 @@ function ControlAssignmentPanel({
   );
 }
 
+// ──── Virtual Deck Manager ────
+//
+// Virtual decks are software decks the plugin runs exactly like attached
+// hardware — build and test layouts with nothing plugged in, then watch and
+// click them in the Live View. Stored as config.virtual_decks.
+
+const VIRTUAL_DECK_MODELS = [
+  "Stream Deck Neo",
+  "Stream Deck Mini",
+  "Stream Deck MK.2",
+  "Stream Deck XL",
+  "Stream Deck +",
+  "Stream Deck Pedal",
+];
+
+function VirtualDeckManager({
+  config,
+  onConfigChange,
+}: {
+  config: Record<string, unknown>;
+  onConfigChange: (config: Record<string, unknown>) => void;
+}) {
+  const entries =
+    (config.virtual_decks as { model?: string; serial?: string }[] | undefined) ?? [];
+  const [adding, setAdding] = useState(false);
+  const [model, setModel] = useState("Stream Deck +");
+
+  const addDeck = () => {
+    const serial = `VIRT-${Date.now().toString(36).toUpperCase()}`;
+    onConfigChange({
+      ...config,
+      virtual_decks: [...entries, { model, serial }],
+    });
+    setAdding(false);
+  };
+
+  const removeDeck = (serial?: string) => {
+    onConfigChange({
+      ...config,
+      virtual_decks: entries.filter((e) => e.serial !== serial),
+    });
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", flexWrap: "wrap" }}>
+      {entries.map((entry) => (
+        <span
+          key={entry.serial}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: "var(--space-xs)",
+            padding: "2px var(--space-sm)", borderRadius: "var(--border-radius)",
+            border: "1px dashed var(--border-color)", fontSize: 11,
+            color: "var(--text-secondary)",
+          }}
+        >
+          {entry.model} <span style={{ color: "var(--text-muted)" }}>({entry.serial} · virtual)</span>
+          <button
+            onClick={() => removeDeck(entry.serial)}
+            title="Remove this virtual deck"
+            style={{ color: "var(--color-error)", cursor: "pointer", fontSize: 12, lineHeight: 1 }}
+          >
+            &times;
+          </button>
+        </span>
+      ))}
+      {!adding && (
+        <button
+          onClick={() => setAdding(true)}
+          style={{
+            padding: "2px var(--space-sm)", borderRadius: "var(--border-radius)",
+            border: "1px dashed var(--border-color)", background: "transparent",
+            color: "var(--text-muted)", fontSize: 11, cursor: "pointer",
+          }}
+          title="Add a software deck to build and test layouts with no hardware attached"
+        >
+          + Add virtual deck
+        </button>
+      )}
+      {adding && (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xs)" }}>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            style={{
+              padding: "2px 6px", borderRadius: "var(--border-radius)",
+              border: "1px solid var(--border-color)", background: "var(--bg-surface)",
+              color: "var(--text-primary)", fontSize: 11,
+            }}
+          >
+            {VIRTUAL_DECK_MODELS.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <button
+            onClick={addDeck}
+            style={{
+              padding: "2px 8px", borderRadius: "var(--border-radius)",
+              background: "var(--accent-bg)", color: "white", fontSize: 11, cursor: "pointer",
+            }}
+          >
+            Add
+          </button>
+          <button
+            onClick={() => setAdding(false)}
+            style={{
+              padding: "2px 8px", borderRadius: "var(--border-radius)",
+              background: "var(--bg-hover)", fontSize: 11, cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+        </span>
+      )}
+      {entries.length > 0 && (
+        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+          Virtual decks connect a moment after saving.
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ──── Live View (mirrored deck rendering, clickable) ────
+
+function LiveViewSection({
+  pluginId,
+  serial,
+  statePrefix,
+}: {
+  pluginId: string;
+  serial: string;
+  statePrefix: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          display: "flex", alignItems: "center", gap: "var(--space-xs)",
+          padding: "var(--space-xs) var(--space-sm)",
+          borderRadius: "var(--border-radius)", background: "var(--bg-hover)",
+          fontSize: "var(--font-size-sm)", cursor: "pointer",
+        }}
+        title="Show what's actually rendered on the deck right now; click keys to press them"
+      >
+        {open ? "Hide live view" : "Show live view"}
+      </button>
+      {open && (
+        <div style={{ marginTop: "var(--space-sm)" }}>
+          <SurfaceLiveView pluginId={pluginId} serial={serial} statePrefix={statePrefix} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SurfaceLiveView({
+  pluginId,
+  serial,
+  statePrefix,
+}: {
+  pluginId: string;
+  serial: string;
+  statePrefix: string;
+}) {
+  const liveState = useConnectionStore((s) => s.liveState);
+  const sp = `${statePrefix}${serial}.`;
+  const rows = Number(liveState[`${sp}rows`] ?? 0) || 1;
+  const columns = Number(liveState[`${sp}columns`] ?? 0) || 1;
+  const keyCount = Number(liveState[`${sp}key_count`] ?? 0);
+  const touchKeyCount = Number(liveState[`${sp}touch_key_count`] ?? 0);
+  const dialCount = Number(liveState[`${sp}dial_count`] ?? 0);
+  const hasTouchscreen = Boolean(liveState[`${sp}has_touchscreen`]);
+  const hasInfoScreen = Boolean(liveState[`${sp}has_info_screen`]);
+  const isVirtual = Boolean(liveState[`${sp}virtual`]);
+  const renderVersion = Number(liveState[`${sp}render_version`] ?? 0);
+
+  const [images, setImages] = useState<Record<string, string>>({});
+  const imagesRef = useRef<Record<string, string>>({});
+  imagesRef.current = images;
+
+  // Physical decks only mirror while a live view is open.
+  useEffect(() => {
+    if (isVirtual) return;
+    api.emitContextAction(pluginId, "set_live_mirror", { on: true }).catch(() => {});
+    return () => {
+      api.emitContextAction(pluginId, "set_live_mirror", { on: false }).catch(() => {});
+    };
+  }, [pluginId, isVirtual]);
+
+  // (Re)fetch the mirrored images whenever the deck re-renders.
+  useEffect(() => {
+    let cancelled = false;
+    const items: string[] = [];
+    for (let i = 0; i < keyCount; i++) items.push(`key_${i}`);
+    if (hasTouchscreen) items.push("touchscreen");
+    if (hasInfoScreen) items.push("screen");
+
+    (async () => {
+      const next: Record<string, string> = {};
+      await Promise.all(
+        items.map(async (item) => {
+          try {
+            const res = await fetch(
+              `${BASE}/plugins/${pluginId}/ext/live/${serial}/${item}?v=${renderVersion}`
+            );
+            if (!res.ok) return;
+            next[item] = URL.createObjectURL(await res.blob());
+          } catch {
+            /* mirror not populated yet */
+          }
+        })
+      );
+      if (cancelled) {
+        Object.values(next).forEach((url) => URL.revokeObjectURL(url));
+        return;
+      }
+      setImages((prev) => {
+        Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pluginId, serial, renderVersion, keyCount, hasTouchscreen, hasInfoScreen]);
+
+  // Revoke object URLs on unmount.
+  useEffect(
+    () => () => {
+      Object.values(imagesRef.current).forEach((url) => URL.revokeObjectURL(url));
+    },
+    []
+  );
+
+  const simulate = (payload: Record<string, unknown>) => {
+    api.emitContextAction(pluginId, "simulate_input", { serial, ...payload }).catch(() => {});
+  };
+
+  const keyPx = 64;
+  const gap = 6;
+  const gridWidth = columns * keyPx + (columns - 1) * gap;
+
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        flexDirection: "column",
+        gap,
+        padding: "var(--space-md)",
+        background: "#0c0c14",
+        borderRadius: "var(--border-radius)",
+        border: "1px solid var(--border-color)",
+      }}
+    >
+      {/* LCD keys */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${columns}, ${keyPx}px)`,
+          gridTemplateRows: `repeat(${rows}, ${keyPx}px)`,
+          gap,
+        }}
+      >
+        {Array.from({ length: keyCount }, (_, i) => (
+          <button
+            key={i}
+            onMouseDown={() => simulate({ type: "key", index: i, pressed: true })}
+            onMouseUp={() => simulate({ type: "key", index: i, pressed: false })}
+            onMouseLeave={(e) => {
+              if (e.buttons & 1) simulate({ type: "key", index: i, pressed: false });
+            }}
+            title={`Press key ${i + 1}`}
+            style={{
+              width: keyPx, height: keyPx, padding: 0, borderRadius: 8,
+              overflow: "hidden", border: "1px solid #2a2a3a",
+              background: "#000", cursor: "pointer",
+            }}
+          >
+            {images[`key_${i}`] ? (
+              <img
+                src={images[`key_${i}`]}
+                draggable={false}
+                style={{ width: "100%", height: "100%", display: "block" }}
+                alt=""
+              />
+            ) : (
+              <span style={{ fontSize: 10, color: "#444" }}>{i + 1}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Info screen + touch keys (Neo) */}
+      {(hasInfoScreen || touchKeyCount > 0) && (
+        <div style={{ display: "flex", alignItems: "center", gap }}>
+          {touchKeyCount > 0 && (
+            <TouchKeyPill
+              color={String(liveState[`${sp}touch_key.${keyCount}`] ?? "#000000")}
+              onTap={() => simulate({ type: "key", index: keyCount })}
+            />
+          )}
+          {hasInfoScreen && (
+            <div
+              style={{
+                flex: 1, height: Math.round((gridWidth * 0.6 * 58) / 248),
+                borderRadius: 4, overflow: "hidden", background: "#000",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+            >
+              {images["screen"] && (
+                <img
+                  src={images["screen"]}
+                  draggable={false}
+                  style={{ height: "100%", display: "block" }}
+                  alt=""
+                />
+              )}
+            </div>
+          )}
+          {touchKeyCount > 1 && (
+            <TouchKeyPill
+              color={String(liveState[`${sp}touch_key.${keyCount + 1}`] ?? "#000000")}
+              onTap={() => simulate({ type: "key", index: keyCount + 1 })}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Touchscreen strip (Plus) */}
+      {hasTouchscreen && (
+        <div
+          onClick={(e) => {
+            const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+            const x = Math.round(((e.clientX - rect.left) / rect.width) * 800);
+            simulate({ type: "touch", x });
+          }}
+          title="Tap the touchscreen"
+          style={{
+            width: gridWidth, height: Math.round(gridWidth / 8),
+            borderRadius: 4, overflow: "hidden", background: "#000", cursor: "pointer",
+          }}
+        >
+          {images["touchscreen"] && (
+            <img
+              src={images["touchscreen"]}
+              draggable={false}
+              style={{ width: "100%", height: "100%", display: "block" }}
+              alt=""
+            />
+          )}
+        </div>
+      )}
+
+      {/* Dials (Plus) */}
+      {dialCount > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-around" }}>
+          {Array.from({ length: dialCount }, (_, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <button
+                onClick={() => simulate({ type: "dial_turn", index: i, amount: -1 })}
+                title={`Turn dial ${i + 1} counter-clockwise`}
+                style={{ color: "#888", cursor: "pointer", fontSize: 14, padding: 2 }}
+              >
+                &#8634;
+              </button>
+              <button
+                onClick={() => simulate({ type: "dial_push", index: i })}
+                title={`Press dial ${i + 1}`}
+                style={{
+                  width: 26, height: 26, borderRadius: "50%",
+                  border: "1px solid #2a2a3a", background: "#16161f",
+                  cursor: "pointer",
+                }}
+              />
+              <button
+                onClick={() => simulate({ type: "dial_turn", index: i, amount: 1 })}
+                title={`Turn dial ${i + 1} clockwise`}
+                style={{ color: "#888", cursor: "pointer", fontSize: 14, padding: 2 }}
+              >
+                &#8635;
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TouchKeyPill({ color, onTap }: { color: string; onTap: () => void }) {
+  return (
+    <button
+      onClick={onTap}
+      title="Tap touch key"
+      style={{
+        width: 22, height: 44, borderRadius: 11,
+        border: "1px solid #2a2a3a",
+        background: color || "#000000",
+        cursor: "pointer",
+      }}
+    />
+  );
+}
+
 // ──── Deck Picker (multiple decks attached) ────
 
 function DeckPicker({
@@ -1386,6 +1804,7 @@ function DeckPicker({
       {serials.map((serial) => {
         const model = String(liveState[`${statePrefix}${serial}.model`] ?? "Deck");
         const custom = decksMap[serial] !== undefined;
+        const virtual = Boolean(liveState[`${statePrefix}${serial}.virtual`]);
         const isActive = serial === activeSerial;
         return (
           <button
@@ -1411,7 +1830,7 @@ function DeckPicker({
               {model}
             </span>
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-              {serial} — {custom ? "custom layout" : "mirrors main config"}
+              {serial}{virtual ? " · virtual" : ""} — {custom ? "custom layout" : "mirrors main config"}
             </span>
           </button>
         );
