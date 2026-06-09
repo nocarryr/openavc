@@ -1,14 +1,17 @@
 """Tests for SNMP scanner + hostname resolution + engine integration (Chunk 5)."""
 
 import asyncio
+import contextlib
 import pytest
 from unittest.mock import patch, AsyncMock
 
 from server.discovery.snmp_scanner import (
     SNMPScanner,
     SNMPInfo,
+    _SNMPQueryProtocol,
     build_snmp_get,
     parse_snmp_response,
+    parse_snmp_request_id,
     extract_pen,
     ber_encode_integer,
     ber_encode_string,
@@ -24,10 +27,15 @@ from server.discovery.snmp_scanner import (
     ber_decode_any_value,
     ber_skip_tlv,
     OIDS,
+    ENTITY_COLUMNS,
+    ENT_PHYSICAL_CONTAINED_IN,
+    ENTITY_WALK_LIMIT,
     ASN1_INTEGER,
     ASN1_OCTET_STRING,
     ASN1_OID,
     ASN1_SEQUENCE,
+    SNMP_GET_REQUEST,
+    SNMP_GETNEXT_REQUEST,
     SNMP_GET_RESPONSE,
     SNMP_VERSION_2C,
 )
@@ -205,6 +213,31 @@ class TestBerDecodeOid:
             encoded = ber_encode_oid(oid_str)
             decoded, _ = ber_decode_oid(encoded, 0)
             assert decoded == oid_str, f"Failed for {name}: {oid_str}"
+
+
+class TestBerOidFirstSubidentifier:
+    """The first OID subidentifier is (40*arc0)+arc1 and is itself base-128
+    encoded — under arc 2 it can be >= 128 (multi-byte) per X.690 8.19."""
+
+    def test_x690_worked_example_encode(self):
+        # X.690 8.19.5: OID 2.999.3 encodes to 88 37 03
+        assert ber_encode_oid("2.999.3") == bytes([ASN1_OID, 3, 0x88, 0x37, 0x03])
+
+    def test_x690_worked_example_decode(self):
+        decoded, offset = ber_decode_oid(bytes([ASN1_OID, 3, 0x88, 0x37, 0x03]), 0)
+        assert decoded == "2.999.3"
+        assert offset == 5
+
+    def test_arc2_single_byte_above_120(self):
+        # 40*2+40 = 120: single byte, but a naive //40 split reads it as 3.0
+        decoded, _ = ber_decode_oid(ber_encode_oid("2.40"), 0)
+        assert decoded == "2.40"
+
+    def test_roundtrip_all_arcs(self):
+        for oid_str in ["0.39", "1.39.7", "2.16.840.1.101.3", "2.40.17", "2.999.3", "2.999.1234567"]:
+            encoded = ber_encode_oid(oid_str)
+            decoded, _ = ber_decode_oid(encoded, 0)
+            assert decoded == oid_str, f"Roundtrip failed for {oid_str}"
 
 
 class TestBerDecodeAnyValue:
@@ -531,7 +564,7 @@ class TestSNMPScanner:
             "192.168.1.72": make_response("NEC PA1004UL Projector", "Projector-1"),
         }
 
-        async def mock_udp(ip, packet, loop):
+        async def mock_udp(ip, packet, timeout, expected_request_id):
             return responses.get(ip)
 
         with patch.object(scanner, "_udp_query", side_effect=mock_udp):
@@ -717,3 +750,299 @@ class TestSNMPMerge:
         assert device.device_name == "Main-Switcher"
         assert "CrossPoint" in device.model
         assert device.firmware == "V1.07.0000"
+
+
+# ============================================================
+# Transport security + Entity MIB index discovery
+# ============================================================
+
+# SNMP v2c exception values (context-specific tags, RFC 3416)
+NO_SUCH_INSTANCE = bytes([0x81, 0x00])
+END_OF_MIB_VIEW = bytes([0x82, 0x00])
+
+
+def _parse_request(data: bytes):
+    """Decode (pdu_type, request_id, oids) from an SNMP request packet."""
+    offset = 1  # outer SEQUENCE tag
+    _msg_len, offset = ber_decode_length(data, offset)
+    _version, offset = ber_decode_integer(data, offset)
+    _community, offset = ber_decode_string(data, offset)
+    pdu_type = data[offset]
+    offset += 1
+    _pdu_len, offset = ber_decode_length(data, offset)
+    request_id, offset = ber_decode_integer(data, offset)
+    _error_status, offset = ber_decode_integer(data, offset)
+    _error_index, offset = ber_decode_integer(data, offset)
+    offset += 1  # varbind list SEQUENCE tag
+    vbl_len, offset = ber_decode_length(data, offset)
+    end = offset + vbl_len
+    oids = []
+    while offset < end:
+        offset += 1  # varbind SEQUENCE tag
+        _vb_len, offset = ber_decode_length(data, offset)
+        oid_str, offset = ber_decode_oid(data, offset)
+        offset = ber_skip_tlv(data, offset)  # NULL value
+        oids.append(oid_str)
+    return pdu_type, request_id, oids
+
+
+def _build_raw_response(request_id: int, varbinds: list[tuple[str, bytes]]) -> bytes:
+    """Build a GET-RESPONSE whose varbind values are pre-encoded bytes."""
+    vb_items = [
+        ber_encode_sequence([ber_encode_oid(oid_str), value])
+        for oid_str, value in varbinds
+    ]
+    pdu = ber_encode_tagged(SNMP_GET_RESPONSE, [
+        ber_encode_integer(request_id),
+        ber_encode_integer(0),
+        ber_encode_integer(0),
+        ber_encode_sequence(vb_items),
+    ])
+    return ber_encode_sequence([
+        ber_encode_integer(SNMP_VERSION_2C),
+        ber_encode_string("public"),
+        pdu,
+    ])
+
+
+class _FakeSnmpAgent(asyncio.DatagramProtocol):
+    """Minimal in-test SNMP agent: MIB-II scalars + an entPhysicalTable.
+
+    entity_rows maps entPhysicalIndex -> {column_prefix: encoded_value}.
+    """
+
+    def __init__(self, scalars=None, entity_rows=None, reply_delay=0.0,
+                 wrong_id_first=False, silent=False):
+        self.scalars = scalars or {}
+        self.entity_rows = entity_rows or {}
+        self.reply_delay = reply_delay
+        self.wrong_id_first = wrong_id_first
+        self.silent = silent
+        self.requests: list[tuple[int, list[str]]] = []
+        self.transport = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        pdu_type, request_id, oids = _parse_request(data)
+        self.requests.append((pdu_type, oids))
+        if self.silent:
+            return
+        if pdu_type == SNMP_GET_REQUEST:
+            varbinds = [(oid, self._get_exact(oid)) for oid in oids]
+        else:  # GETNEXT
+            varbinds = [self._get_next(oid) for oid in oids]
+        response = _build_raw_response(request_id, varbinds)
+        if self.wrong_id_first:
+            evil = _build_raw_response(request_id ^ 0x7FFF, [
+                (OIDS["sysDescr"], ber_encode_string("EVIL Device")),
+                (OIDS["sysName"], ber_encode_string("EVIL")),
+            ])
+            self.transport.sendto(evil, addr)
+        if self.reply_delay:
+            asyncio.get_running_loop().call_later(
+                self.reply_delay, self.transport.sendto, response, addr)
+        else:
+            self.transport.sendto(response, addr)
+
+    def _all_instances(self) -> list[tuple[list[int], str, bytes]]:
+        instances = []
+        for index, row in self.entity_rows.items():
+            for prefix, value in row.items():
+                oid_str = f"{prefix}.{index}"
+                instances.append(([int(p) for p in oid_str.split(".")], oid_str, value))
+        instances.sort(key=lambda item: item[0])
+        return instances
+
+    def _get_exact(self, oid_str: str) -> bytes:
+        if oid_str in self.scalars:
+            return self.scalars[oid_str]
+        for _key, inst_oid, value in self._all_instances():
+            if inst_oid == oid_str:
+                return value
+        return NO_SUCH_INSTANCE
+
+    def _get_next(self, oid_str: str) -> tuple[str, bytes]:
+        target = [int(p) for p in oid_str.split(".")]
+        for key, inst_oid, value in self._all_instances():
+            if key > target:
+                return inst_oid, value
+        return oid_str, END_OF_MIB_VIEW
+
+
+@contextlib.asynccontextmanager
+async def _run_agent(agent: _FakeSnmpAgent):
+    """Serve the fake agent on an ephemeral loopback port; yield the port."""
+    loop = asyncio.get_running_loop()
+    transport, _protocol = await loop.create_datagram_endpoint(
+        lambda: agent, local_addr=("127.0.0.1", 0))
+    port = transport.get_extra_info("sockname")[1]
+    try:
+        yield port
+    finally:
+        transport.close()
+
+
+_MIB2_SCALARS = {
+    OIDS["sysDescr"]: ber_encode_string("Acme Widget 9000, V2.0"),
+    OIDS["sysName"]: ber_encode_string("Widget-Lab"),
+}
+
+
+class TestParseSnmpRequestId:
+    def test_extracts_id(self):
+        response = _build_raw_response(424242, [
+            (OIDS["sysDescr"], ber_encode_string("x")),
+        ])
+        assert parse_snmp_request_id(response) == 424242
+
+    def test_rejects_garbage(self):
+        assert parse_snmp_request_id(b"") is None
+        assert parse_snmp_request_id(b"\x00\x01\x02") is None
+
+    def test_rejects_request_pdu(self):
+        packet = build_snmp_get("public", [OIDS["sysDescr"]], 99)
+        assert parse_snmp_request_id(packet) is None
+
+
+class TestSnmpQueryProtocol:
+    @pytest.mark.asyncio
+    async def test_mismatched_request_id_keeps_waiting(self):
+        loop = asyncio.get_running_loop()
+        proto = _SNMPQueryProtocol(b"req", 42, loop)
+        wrong = _build_raw_response(7, [(OIDS["sysName"], ber_encode_string("EVIL"))])
+        proto.datagram_received(wrong, ("10.0.0.9", 161))
+        assert not proto.response.done()
+
+        good = _build_raw_response(42, [(OIDS["sysName"], ber_encode_string("Real"))])
+        proto.datagram_received(good, ("10.0.0.9", 161))
+        assert proto.response.result() == good
+
+
+class TestSnmpTransportSecurity:
+    @pytest.mark.asyncio
+    async def test_query_device_end_to_end(self):
+        """Full round trip over real UDP through the datagram endpoint."""
+        agent = _FakeSnmpAgent(scalars=dict(_MIB2_SCALARS))
+        async with _run_agent(agent) as port:
+            with patch("server.discovery.snmp_scanner.SNMP_PORT", port):
+                result = await SNMPScanner().query_device("127.0.0.1", timeout=2.0)
+        assert result is not None
+        assert result.sys_descr == "Acme Widget 9000, V2.0"
+        assert result.sys_name == "Widget-Lab"
+
+    @pytest.mark.asyncio
+    async def test_wrong_request_id_datagram_ignored(self):
+        """A datagram with a non-matching request-id must not be attributed
+        to the query — the scanner keeps waiting for the real response."""
+        agent = _FakeSnmpAgent(scalars=dict(_MIB2_SCALARS), wrong_id_first=True)
+        async with _run_agent(agent) as port:
+            with patch("server.discovery.snmp_scanner.SNMP_PORT", port):
+                result = await SNMPScanner().query_device("127.0.0.1", timeout=2.0)
+        assert result is not None
+        assert result.sys_name == "Widget-Lab"
+        assert "EVIL" not in result.sys_descr
+
+    @pytest.mark.asyncio
+    async def test_caller_timeout_honored(self):
+        """The caller's timeout governs the wait — a reply after 2s (the old
+        hard-coded socket timeout) still lands when the caller allows it."""
+        agent = _FakeSnmpAgent(scalars=dict(_MIB2_SCALARS), reply_delay=2.6)
+        async with _run_agent(agent) as port:
+            with patch("server.discovery.snmp_scanner.SNMP_PORT", port):
+                result = await SNMPScanner().query_device("127.0.0.1", timeout=4.0)
+        assert result is not None
+        assert result.sys_name == "Widget-Lab"
+
+    @pytest.mark.asyncio
+    async def test_silent_agent_times_out(self):
+        agent = _FakeSnmpAgent(silent=True)
+        async with _run_agent(agent) as port:
+            with patch("server.discovery.snmp_scanner.SNMP_PORT", port):
+                result = await SNMPScanner().query_device("127.0.0.1", timeout=0.3)
+        assert result is None
+
+
+class TestEntityMibIndexDiscovery:
+    def _row(self, contained_in, mfg=None, model=None, serial=None):
+        row = {ENT_PHYSICAL_CONTAINED_IN: ber_encode_integer(contained_in)}
+        if mfg is not None:
+            row[ENTITY_COLUMNS["entPhysicalMfgName"]] = ber_encode_string(mfg)
+        if model is not None:
+            row[ENTITY_COLUMNS["entPhysicalModelName"]] = ber_encode_string(model)
+        if serial is not None:
+            row[ENTITY_COLUMNS["entPhysicalSerialNum"]] = ber_encode_string(serial)
+        return row
+
+    async def _query(self, agent: _FakeSnmpAgent) -> SNMPInfo | None:
+        async with _run_agent(agent) as port:
+            with patch("server.discovery.snmp_scanner.SNMP_PORT", port):
+                return await SNMPScanner().query_device(
+                    "127.0.0.1", timeout=2.0, entity_mib=True)
+
+    @pytest.mark.asyncio
+    async def test_chassis_at_nonstandard_index(self):
+        """Devices whose chassis entPhysicalIndex isn't 1 still yield
+        manufacturer/model/serial."""
+        agent = _FakeSnmpAgent(
+            scalars=dict(_MIB2_SCALARS),
+            entity_rows={1001: self._row(0, mfg="Acme Co", model="Widget 9000",
+                                         serial="SN-99")},
+        )
+        result = await self._query(agent)
+        assert result is not None
+        assert result.entity_manufacturer == "Acme Co"
+        assert result.entity_model == "Widget 9000"
+        assert result.entity_serial == "SN-99"
+
+    @pytest.mark.asyncio
+    async def test_chassis_at_index_one(self):
+        agent = _FakeSnmpAgent(
+            scalars=dict(_MIB2_SCALARS),
+            entity_rows={1: self._row(0, mfg="Acme Co", model="Widget 1")},
+        )
+        result = await self._query(agent)
+        assert result is not None
+        assert result.entity_model == "Widget 1"
+
+    @pytest.mark.asyncio
+    async def test_walks_past_contained_rows(self):
+        """The chassis is the row with entPhysicalContainedIn == 0, not the
+        first table row."""
+        agent = _FakeSnmpAgent(
+            scalars=dict(_MIB2_SCALARS),
+            entity_rows={
+                3: self._row(8, model="Module-X"),   # a module inside the chassis
+                8: self._row(0, model="Chassis-Y"),  # the chassis itself
+            },
+        )
+        result = await self._query(agent)
+        assert result is not None
+        assert result.entity_model == "Chassis-Y"
+
+    @pytest.mark.asyncio
+    async def test_no_entity_mib_graceful(self):
+        """Agents without the Entity MIB still return MIB-II info; the
+        scanner falls back to a single GET at index 1."""
+        agent = _FakeSnmpAgent(scalars=dict(_MIB2_SCALARS))
+        result = await self._query(agent)
+        assert result is not None
+        assert result.sys_name == "Widget-Lab"
+        assert result.entity_model == ""
+        # Fallback GET at index 1 was attempted
+        get_oids = [oids for pdu, oids in agent.requests if pdu == SNMP_GET_REQUEST]
+        assert any(f"{ENTITY_COLUMNS['entPhysicalModelName']}.1" in oids
+                   for oids in get_oids)
+
+    @pytest.mark.asyncio
+    async def test_walk_is_bounded(self):
+        """A huge entity table with no top-level row can't stall the scan."""
+        rows = {i: self._row(1) for i in range(2, 102)}  # 100 rows, none top-level
+        agent = _FakeSnmpAgent(scalars=dict(_MIB2_SCALARS), entity_rows=rows)
+        result = await self._query(agent)
+        assert result is not None
+        assert result.entity_model == ""
+        getnext_count = sum(1 for pdu, _ in agent.requests
+                            if pdu == SNMP_GETNEXT_REQUEST)
+        assert getnext_count <= ENTITY_WALK_LIMIT

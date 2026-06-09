@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import socket
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,14 +39,24 @@ OIDS = {
     "sysLocation": "1.3.6.1.2.1.1.6.0",
 }
 
-# Entity MIB OIDs (for Standard/Thorough depth — more detailed hardware info)
-ENTITY_OIDS = {
-    "entPhysicalMfgName": "1.3.6.1.2.1.47.1.1.1.1.12.1",
-    "entPhysicalModelName": "1.3.6.1.2.1.47.1.1.1.1.13.1",
-    "entPhysicalSerialNum": "1.3.6.1.2.1.47.1.1.1.1.11.1",
-    "entPhysicalHardwareRev": "1.3.6.1.2.1.47.1.1.1.1.8.1",
-    "entPhysicalFirmwareRev": "1.3.6.1.2.1.47.1.1.1.1.9.1",
+# Entity MIB column prefixes (for Standard/Thorough depth — detailed hardware
+# info). The instance OID is ``<column>.<entPhysicalIndex>``; the index of the
+# top-level entity (chassis) is agent-assigned and NOT necessarily 1, so it's
+# located at query time by walking entPhysicalContainedIn (RFC 6933: the
+# top-most entity is the row whose entPhysicalContainedIn is 0).
+ENTITY_COLUMNS = {
+    "entPhysicalMfgName": "1.3.6.1.2.1.47.1.1.1.1.12",
+    "entPhysicalModelName": "1.3.6.1.2.1.47.1.1.1.1.13",
+    "entPhysicalSerialNum": "1.3.6.1.2.1.47.1.1.1.1.11",
+    "entPhysicalHardwareRev": "1.3.6.1.2.1.47.1.1.1.1.8",
+    "entPhysicalFirmwareRev": "1.3.6.1.2.1.47.1.1.1.1.9",
 }
+ENT_PHYSICAL_CONTAINED_IN = "1.3.6.1.2.1.47.1.1.1.1.4"
+
+# Upper bound on entPhysicalContainedIn walk steps. The top-level entity is
+# almost always among the first table rows (indexes ascend from the chassis),
+# so this only guards against pathological agents with huge entity tables.
+ENTITY_WALK_LIMIT = 64
 
 # BER/ASN.1 tag constants
 ASN1_INTEGER = 0x02
@@ -57,6 +66,7 @@ ASN1_OID = 0x06
 ASN1_SEQUENCE = 0x30
 # SNMP-specific tags
 SNMP_GET_REQUEST = 0xA0
+SNMP_GETNEXT_REQUEST = 0xA1
 SNMP_GET_RESPONSE = 0xA2
 
 
@@ -106,6 +116,19 @@ def ber_encode_null() -> bytes:
     return bytes([ASN1_NULL, 0x00])
 
 
+def _encode_base128(value: int) -> list[int]:
+    """Encode one OID subidentifier in base-128 with continuation bits."""
+    if value < 0x80:
+        return [value]
+    encoded = [value & 0x7F]
+    value >>= 7
+    while value > 0:
+        encoded.append(0x80 | (value & 0x7F))
+        value >>= 7
+    encoded.reverse()
+    return encoded
+
+
 def ber_encode_oid(oid_str: str) -> bytes:
     """Encode an OID string as BER OBJECT IDENTIFIER.
 
@@ -115,24 +138,14 @@ def ber_encode_oid(oid_str: str) -> bytes:
     if len(parts) < 2:
         return bytes([ASN1_OID, 0x00])
 
-    # First two components are encoded as (40 * first) + second
-    payload = [40 * parts[0] + parts[1]]
+    # First two components combine into one subidentifier, (40 * first) +
+    # second (X.690 8.19.4). Like every subidentifier it is base-128
+    # encoded — under arc 2 the combined value can be >= 128.
+    payload = _encode_base128(40 * parts[0] + parts[1])
 
     # Remaining components use base-128 encoding
     for p in parts[2:]:
-        if p < 0x80:
-            payload.append(p)
-        else:
-            # Multi-byte encoding
-            encoded: list[int] = []
-            val = p
-            encoded.append(val & 0x7F)
-            val >>= 7
-            while val > 0:
-                encoded.append(0x80 | (val & 0x7F))
-                val >>= 7
-            encoded.reverse()
-            payload.extend(encoded)
+        payload.extend(_encode_base128(p))
 
     data = bytes(payload)
     return bytes([ASN1_OID]) + ber_encode_length(len(data)) + data
@@ -214,11 +227,9 @@ def ber_decode_oid(data: bytes, offset: int) -> tuple[str, int]:
     oid_bytes = data[offset:offset + length]
     end_offset = offset + length
 
-    # First byte encodes first two OID components
-    parts = [oid_bytes[0] // 40, oid_bytes[0] % 40]
-
-    # Decode remaining components (base-128)
-    i = 1
+    # Decode base-128 subidentifiers (the first one may be multi-byte too)
+    subids: list[int] = []
+    i = 0
     while i < len(oid_bytes):
         value = 0
         while i < len(oid_bytes):
@@ -227,7 +238,19 @@ def ber_decode_oid(data: bytes, offset: int) -> tuple[str, int]:
             i += 1
             if byte & 0x80 == 0:
                 break
-        parts.append(value)
+        subids.append(value)
+
+    # First subidentifier encodes the first two OID components as
+    # (40 * first) + second; only arc 2 allows a second component >= 40
+    # (X.690 8.19.4).
+    first = subids[0]
+    if first < 40:
+        parts = [0, first]
+    elif first < 80:
+        parts = [1, first - 40]
+    else:
+        parts = [2, first - 80]
+    parts.extend(subids[1:])
 
     return ".".join(str(p) for p in parts), end_offset
 
@@ -274,17 +297,10 @@ def ber_decode_any_value(data: bytes, offset: int) -> tuple[str, int]:
 # --- SNMP Packet Building ---
 
 
-def build_snmp_get(community: str, oid_strs: list[str], request_id: int) -> bytes:
-    """Build an SNMP v2c GET-REQUEST packet.
-
-    Args:
-        community: SNMP community string (e.g., 'public')
-        oid_strs: List of OID strings to query
-        request_id: Unique request identifier
-
-    Returns:
-        Complete SNMP packet bytes.
-    """
+def _build_snmp_request(
+    pdu_type: int, community: str, oid_strs: list[str], request_id: int,
+) -> bytes:
+    """Build an SNMP v2c request packet with the given PDU type."""
     # Build variable bindings: list of (OID, NULL) pairs
     varbinds = []
     for oid_str in oid_strs:
@@ -296,8 +312,7 @@ def build_snmp_get(community: str, oid_strs: list[str], request_id: int) -> byte
 
     varbind_list = ber_encode_sequence(varbinds)
 
-    # Build PDU: GetRequest-PDU
-    pdu = ber_encode_tagged(SNMP_GET_REQUEST, [
+    pdu = ber_encode_tagged(pdu_type, [
         ber_encode_integer(request_id),
         ber_encode_integer(0),   # error-status
         ber_encode_integer(0),   # error-index
@@ -312,6 +327,25 @@ def build_snmp_get(community: str, oid_strs: list[str], request_id: int) -> byte
     ])
 
     return message
+
+
+def build_snmp_get(community: str, oid_strs: list[str], request_id: int) -> bytes:
+    """Build an SNMP v2c GET-REQUEST packet.
+
+    Args:
+        community: SNMP community string (e.g., 'public')
+        oid_strs: List of OID strings to query
+        request_id: Unique request identifier
+
+    Returns:
+        Complete SNMP packet bytes.
+    """
+    return _build_snmp_request(SNMP_GET_REQUEST, community, oid_strs, request_id)
+
+
+def build_snmp_getnext(community: str, oid_strs: list[str], request_id: int) -> bytes:
+    """Build an SNMP v2c GETNEXT-REQUEST packet (one step of a walk)."""
+    return _build_snmp_request(SNMP_GETNEXT_REQUEST, community, oid_strs, request_id)
 
 
 def parse_snmp_response(data: bytes) -> dict[str, str]:
@@ -380,6 +414,33 @@ def parse_snmp_response(data: bytes) -> dict[str, str]:
         log.debug("Failed to parse SNMP response", exc_info=True)
 
     return result
+
+
+def parse_snmp_request_id(data: bytes) -> int | None:
+    """Extract the request-id from an SNMP GET-RESPONSE packet.
+
+    Returns None if the packet isn't a parseable GET-RESPONSE. Used to
+    match responses to in-flight requests so stale, duplicated, or
+    spoofed datagrams can't be attributed to the wrong query.
+    """
+    try:
+        offset = 0
+        if offset >= len(data) or data[offset] != ASN1_SEQUENCE:
+            return None
+        offset += 1
+        _msg_len, offset = ber_decode_length(data, offset)
+        _version, offset = ber_decode_integer(data, offset)
+        _community, offset = ber_decode_string(data, offset)
+        if offset >= len(data) or data[offset] != SNMP_GET_RESPONSE:
+            return None
+        offset += 1
+        _pdu_len, offset = ber_decode_length(data, offset)
+        if offset >= len(data) or data[offset] != ASN1_INTEGER:
+            return None
+        request_id, _ = ber_decode_integer(data, offset)
+        return request_id
+    except (ValueError, IndexError):
+        return None
 
 
 # --- IANA Private Enterprise Number extraction ---
@@ -497,6 +558,49 @@ class SNMPInfo:
 # --- SNMP Scanner ---
 
 
+class _SNMPQueryProtocol(asyncio.DatagramProtocol):
+    """One-shot SNMP request/response exchange.
+
+    The datagram endpoint is created with ``remote_addr`` so the socket is
+    connected — the OS only delivers datagrams from the queried device's
+    IP and port. On top of that, the response future only resolves for a
+    datagram whose request-id matches the request; anything else (stale
+    duplicates, spoofed datagrams that beat the source check) is dropped
+    and the wait continues until the caller's timeout.
+    """
+
+    def __init__(
+        self,
+        packet: bytes,
+        expected_request_id: int,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._packet = packet
+        self._expected_request_id = expected_request_id
+        self.response: asyncio.Future[bytes] = loop.create_future()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        transport.sendto(self._packet)  # type: ignore[attr-defined]
+
+    def datagram_received(self, data: bytes, addr: tuple) -> None:
+        if self.response.done():
+            return
+        if parse_snmp_request_id(data) != self._expected_request_id:
+            log.debug("Dropping SNMP datagram with unexpected request-id from %s", addr)
+            return
+        self.response.set_result(data)
+
+    def error_received(self, exc: Exception) -> None:
+        # ICMP errors (port unreachable etc.) — fail fast instead of
+        # waiting out the timeout.
+        if not self.response.done():
+            self.response.set_exception(exc)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if exc is not None and not self.response.done():
+            self.response.set_exception(exc)
+
+
 class SNMPScanner:
     """SNMP v2c device scanner.
 
@@ -532,16 +636,7 @@ class SNMPScanner:
         oid_list = list(OIDS.values())
 
         packet = build_snmp_get(community, oid_list, request_id)
-
-        try:
-            loop = asyncio.get_event_loop()
-            response = await asyncio.wait_for(
-                self._udp_query(ip, packet, loop),
-                timeout=timeout,
-            )
-        except (asyncio.TimeoutError, OSError):
-            return None
-
+        response = await self._udp_query(ip, packet, timeout, request_id)
         if not response:
             return None
 
@@ -578,20 +673,22 @@ class SNMPScanner:
     async def _query_entity_mib(
         self, ip: str, community: str, timeout: float, info: SNMPInfo,
     ) -> None:
-        """Query Entity MIB OIDs and populate entity fields on info."""
+        """Query Entity MIB OIDs and populate entity fields on info.
+
+        The entPhysicalIndex of the top-level entity is agent-assigned
+        (RFC 6933), so it's located by walking entPhysicalContainedIn for
+        the row whose value is 0. Falls back to index 1 (the most common
+        assignment) when the walk finds nothing.
+        """
+        index = await self._find_chassis_index(ip, community, timeout)
+        if index is None:
+            index = 1
+
+        oid_map = {name: f"{prefix}.{index}" for name, prefix in ENTITY_COLUMNS.items()}
         request_id = random.randint(1, 2**31 - 1)
-        oid_list = list(ENTITY_OIDS.values())
-        packet = build_snmp_get(community, oid_list, request_id)
+        packet = build_snmp_get(community, list(oid_map.values()), request_id)
 
-        try:
-            loop = asyncio.get_event_loop()
-            response = await asyncio.wait_for(
-                self._udp_query(ip, packet, loop),
-                timeout=timeout,
-            )
-        except (asyncio.TimeoutError, OSError):
-            return
-
+        response = await self._udp_query(ip, packet, timeout, request_id)
         if not response:
             return
 
@@ -599,7 +696,7 @@ class SNMPScanner:
         if not values:
             return
 
-        for name, oid_str in ENTITY_OIDS.items():
+        for name, oid_str in oid_map.items():
             val = values.get(oid_str, "")
             if val:
                 if name == "entPhysicalMfgName":
@@ -612,6 +709,43 @@ class SNMPScanner:
                     info.entity_hardware_rev = val
                 elif name == "entPhysicalFirmwareRev":
                     info.entity_firmware_rev = val
+
+    async def _find_chassis_index(
+        self, ip: str, community: str, timeout: float,
+    ) -> int | None:
+        """Walk entPhysicalContainedIn to find the top-level entity's index.
+
+        The top-most physical entity (the chassis) is the row whose
+        entPhysicalContainedIn is 0. Returns its entPhysicalIndex, or None
+        when the agent doesn't expose the column (no Entity MIB, walk left
+        the column, or the bounded walk found no top-level row).
+        """
+        prefix = ENT_PHYSICAL_CONTAINED_IN + "."
+        current_oid = ENT_PHYSICAL_CONTAINED_IN
+
+        for _ in range(ENTITY_WALK_LIMIT):
+            request_id = random.randint(1, 2**31 - 1)
+            packet = build_snmp_getnext(community, [current_oid], request_id)
+            response = await self._udp_query(ip, packet, timeout, request_id)
+            if not response:
+                return None
+
+            values = parse_snmp_response(response)
+            if not values:
+                return None
+
+            oid_str, value = next(iter(values.items()))
+            if not oid_str.startswith(prefix):
+                # Walked past the entPhysicalContainedIn column
+                return None
+            if value == "0":
+                try:
+                    return int(oid_str[len(prefix):])
+                except ValueError:
+                    return None
+            current_oid = oid_str
+
+        return None
 
     async def scan_devices(
         self,
@@ -626,7 +760,8 @@ class SNMPScanner:
         Args:
             ips: List of IP addresses to query.
             community: SNMP community string.
-            timeout: Per-device timeout in seconds.
+            timeout: Per-request timeout in seconds (each SNMP exchange
+                with a device gets this long to respond).
             concurrency: Max concurrent queries.
             entity_mib: If True, also query ENTITY-MIB for detailed hardware info.
 
@@ -654,21 +789,30 @@ class SNMPScanner:
         self,
         ip: str,
         packet: bytes,
-        loop: asyncio.AbstractEventLoop,
+        timeout: float,
+        expected_request_id: int,
     ) -> bytes | None:
-        """Send a UDP packet and receive the response."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(2.0)
+        """Send one SNMP request and wait for the matching response.
+
+        Uses a connected UDP socket (RFC-compliant agents reply from
+        port 161) so the OS rejects datagrams from other sources, and
+        only accepts a response whose request-id matches. Runs entirely
+        on the event loop — no worker threads, so cancellation and
+        timeout cleanly close the socket. Returns the raw response
+        bytes, or None on timeout/error.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: _SNMPQueryProtocol(packet, expected_request_id, loop),
+                remote_addr=(ip, SNMP_PORT),
+            )
+        except OSError:
+            return None
 
         try:
-            await loop.run_in_executor(
-                None, lambda: sock.sendto(packet, (ip, SNMP_PORT))
-            )
-            data = await loop.run_in_executor(
-                None, lambda: sock.recv(4096)
-            )
-            return data
-        except (socket.timeout, OSError):
+            return await asyncio.wait_for(protocol.response, timeout=timeout)
+        except (asyncio.TimeoutError, OSError):
             return None
         finally:
-            sock.close()
+            transport.close()
