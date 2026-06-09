@@ -11,6 +11,7 @@ interface CanvasElementProps {
   columns: number;
   rows: number;
   hasOverlap?: boolean;
+  outOfBounds?: boolean;
   locked?: boolean;
   onSelect: (id: string, shiftKey?: boolean) => void;
   onCommitResize: (elementId: string, gridArea: GridArea) => void;
@@ -94,6 +95,7 @@ export function CanvasElement({
   columns,
   rows,
   hasOverlap,
+  outOfBounds,
   locked,
   onSelect,
   onCommitResize,
@@ -237,7 +239,7 @@ export function CanvasElement({
           ? multiSelected
             ? "2px dashed var(--accent)"
             : "2px solid var(--accent)"
-          : hasOverlap && !previewMode
+          : (hasOverlap || outOfBounds) && !previewMode
           ? "1px dashed var(--color-warning)"
           : "none",
         outlineOffset: "1px",
@@ -267,10 +269,16 @@ export function CanvasElement({
           ))}
         </>
       )}
-      {/* Overlap warning indicator */}
-      {hasOverlap && !previewMode && (
+      {/* Overlap / out-of-bounds warning indicator */}
+      {(hasOverlap || outOfBounds) && !previewMode && (
         <div
-          title="This element overlaps with another element"
+          title={
+            outOfBounds && hasOverlap
+              ? "This element extends beyond the page grid and overlaps with another element"
+              : outOfBounds
+              ? "This element extends beyond the page grid and will not be visible on panels"
+              : "This element overlaps with another element"
+          }
           style={{
             position: "absolute",
             top: 2,

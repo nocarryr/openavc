@@ -83,6 +83,21 @@ SCENARIOS = [
     "h039_dup_reserved_skips_master",
     "l052_rename_preserves_untouched",
     "l052_rename_rewrites_referencing",
+    "h086_validate_array_device",
+    "h086_validate_array_navigate",
+    "h086_validate_array_change_macro",
+    "h086_validate_legacy_object",
+    "h086_validate_valid_refs_pass",
+    "h086_removepage_scrubs_arrays",
+    "m143_duplicate_rewrites_self_ref",
+    "m143_duplicate_page_rewrites_sibling_refs",
+    "m143_duplicate_page_respects_reserved",
+    "m144_demote_collision_renamed",
+    "m144_demote_no_collision_keeps_id",
+    "m144_promote_collision_renamed",
+    "m144_promote_no_collision_keeps_id",
+    "l087_value_map_recursion",
+    "l088_out_of_bounds_ids",
 ]
 
 

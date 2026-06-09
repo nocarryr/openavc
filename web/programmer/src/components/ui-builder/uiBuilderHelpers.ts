@@ -464,6 +464,58 @@ export function addPage(
   return [...pages, newPage];
 }
 
+/** The binding slots that hold action lists (press-class slots). Authored as
+ *  arrays of action objects; legacy projects may carry a single object. */
+const ACTION_SLOTS = ["press", "release", "hold", "change", "submit"] as const;
+
+/**
+ * Normalize an action-list binding slot to an array of action objects.
+ * Slots are authored as arrays (multiple actions per press); legacy projects
+ * may still carry a single action object — the panel runtime accepts both.
+ */
+export function slotActions(
+  bindings: Record<string, unknown> | undefined,
+  slot: string,
+): Record<string, unknown>[] {
+  const raw = bindings?.[slot];
+  if (!raw || typeof raw !== "object") return [];
+  if (Array.isArray(raw)) {
+    return raw.filter((a) => a && typeof a === "object") as Record<string, unknown>[];
+  }
+  const obj = raw as Record<string, unknown>;
+  return Object.keys(obj).length > 0 ? [obj] : [];
+}
+
+/** Remove navigate actions targeting a deleted page from every action slot. */
+function scrubNavigateActions(el: UIElement, pageId: string): UIElement {
+  const bindings = el.bindings as Record<string, unknown> | undefined;
+  if (!bindings) return el;
+  const isDeadNavigate = (a: unknown) =>
+    !!a && typeof a === "object" &&
+    (a as Record<string, unknown>).action === "navigate" &&
+    (a as Record<string, unknown>).page === pageId;
+
+  let changed = false;
+  const next: Record<string, unknown> = { ...bindings };
+  for (const slot of ACTION_SLOTS) {
+    const raw = next[slot];
+    if (!raw || typeof raw !== "object") continue;
+    if (Array.isArray(raw)) {
+      const filtered = raw.filter((a) => !isDeadNavigate(a));
+      if (filtered.length !== raw.length) {
+        changed = true;
+        if (filtered.length > 0) next[slot] = filtered;
+        else delete next[slot];
+      }
+    } else if (isDeadNavigate(raw)) {
+      // Legacy single-object binding
+      changed = true;
+      delete next[slot];
+    }
+  }
+  return changed ? { ...el, bindings: next as UIElement["bindings"] } : el;
+}
+
 export function removePage(pages: UIPage[], pageId: string): UIPage[] {
   // Filter out the page, then clean up dangling references to it
   return pages
@@ -476,10 +528,10 @@ export function removePage(pages: UIPage[], pageId: string): UIPage[] {
         if (el.type === "page_nav" && el.target_page === pageId) {
           updated = { ...updated, target_page: "" };
         }
-        // Clear press bindings with navigate action pointing to deleted page
-        if (el.bindings?.press && (el.bindings.press as any).action === "navigate" && (el.bindings.press as any).page === pageId) {
-          updated = { ...updated, bindings: { ...updated.bindings, press: {} } };
-        }
+        // Drop navigate actions pointing at the deleted page from every
+        // action slot (press/release/hold/change/submit), array or legacy
+        // single-object shape alike
+        updated = scrubNavigateActions(updated, pageId);
         return updated;
       }),
     }));
@@ -616,9 +668,13 @@ export function duplicateElementInPage(
   newCol = Math.max(1, Math.min(page.grid.columns - element.grid_area.col_span + 1, newCol));
   newRow = Math.max(1, Math.min(page.grid.rows - element.grid_area.row_span + 1, newRow));
 
+  // Rewrite self-referencing ui.<oldId>.* state keys (bindings, visibility)
+  // to the duplicate's id — same machinery the rename path uses — so the
+  // copy is wired to its own state, not the original's.
+  const clone = JSON.parse(JSON.stringify(element)) as UIElement;
+  const rewritten = rewriteElement(clone, element.id, newId);
   const newElement: UIElement = {
-    ...JSON.parse(JSON.stringify(element)),
-    id: newId,
+    ...rewritten,
     grid_area: {
       ...element.grid_area,
       col: newCol,
@@ -688,6 +744,7 @@ export function reorderPage(
 export function duplicatePage(
   pages: UIPage[],
   pageId: string,
+  reservedIds: string[] = [],
 ): UIPage[] {
   const page = pages.find((p) => p.id === pageId);
   if (!page) return pages;
@@ -711,11 +768,16 @@ export function duplicatePage(
     newName = `${page.name} (Copy ${nameCounter})`;
   }
 
-  // Deep clone elements with new IDs
+  // Element ids must be unique across all pages AND the reserved ids
+  // (master_elements share the ui.<id> namespace)
   const existingElementIds = new Set(
     pages.flatMap((p) => p.elements.map((e) => e.id)),
   );
-  const newElements = page.elements.map((el) => {
+  for (const id of reservedIds) existingElementIds.add(id);
+
+  // First pass: assign every copied element its new id
+  const idMap = new Map<string, string>();
+  for (const el of page.elements) {
     let elId = `${el.type}_${newId}_1`;
     let c = 1;
     while (existingElementIds.has(elId)) {
@@ -723,7 +785,18 @@ export function duplicatePage(
       elId = `${el.type}_${newId}_${c}`;
     }
     existingElementIds.add(elId);
-    return { ...JSON.parse(JSON.stringify(el)), id: elId };
+    idMap.set(el.id, elId);
+  }
+
+  // Second pass: clone and rewrite ui.<id>.* references for EVERY old->new
+  // pair, so both self-references and references to sibling elements on the
+  // same page follow the copy instead of pointing back at the originals.
+  const newElements = page.elements.map((el) => {
+    let cloned = JSON.parse(JSON.stringify(el)) as UIElement;
+    for (const [oldElId, newElId] of idMap) {
+      cloned = rewriteElement(cloned, oldElId, newElId);
+    }
+    return cloned;
   });
 
   const newPage: UIPage = {
@@ -837,8 +910,21 @@ export function promoteToMaster(
       : p
   );
 
+  // Masters and page elements share the ui.<id> namespace. If the promoted
+  // id is already taken (possible in imported/hand-edited projects), rename
+  // the promoted copy and rewrite its self-references.
+  const taken = new Set<string>([
+    ...masterElements.map((m) => m.id),
+    ...newPages.flatMap((p) => p.elements.map((e) => e.id)),
+  ]);
+  let promoted: UIElement = element;
+  if (taken.has(promoted.id)) {
+    const newId = generateId(promoted.type, taken);
+    promoted = rewriteElement(promoted, promoted.id, newId);
+  }
+
   // Add to master elements with pages: "*"
-  const masterEl: MasterElement = { ...element, pages: "*" };
+  const masterEl: MasterElement = { ...promoted, pages: "*" };
   return { pages: newPages, masterElements: [...masterElements, masterEl] };
 }
 
@@ -854,11 +940,27 @@ export function demoteFromMaster(
   // Remove from masters
   const newMasters = masterElements.filter(m => m.id !== masterElementId);
 
-  // Add to target page (strip the pages field)
+  // Strip the pages field
   const { pages: _pagesField, ...elementFields } = masterEl;
+  let demoted = elementFields as UIElement;
+
+  // The destination shares the ui.<id> namespace with every page element and
+  // the remaining masters. On collision (e.g. a page element was created with
+  // this id while it lived as a master in an imported project), rename the
+  // demoted copy and rewrite its self-references — two same-id elements would
+  // break ui.<id> resolution at runtime.
+  const taken = new Set<string>([
+    ...newMasters.map((m) => m.id),
+    ...pages.flatMap((p) => p.elements.map((e) => e.id)),
+  ]);
+  if (taken.has(demoted.id)) {
+    const newId = generateId(demoted.type, taken);
+    demoted = rewriteElement(demoted, demoted.id, newId);
+  }
+
   const newPages = pages.map(p =>
     p.id === targetPageId
-      ? { ...p, elements: [...p.elements, elementFields as UIElement] }
+      ? { ...p, elements: [...p.elements, demoted] }
       : p
   );
 
@@ -1137,6 +1239,32 @@ export function renameElement(
 
 // --- Project validation ---
 
+/** True when an element's grid span extends beyond the page grid. */
+export function isOutOfBounds(
+  area: GridArea,
+  grid: { columns: number; rows: number },
+): boolean {
+  return (
+    area.col < 1 || area.row < 1 ||
+    area.col + area.col_span - 1 > grid.columns ||
+    area.row + area.row_span - 1 > grid.rows
+  );
+}
+
+/** IDs of elements whose grid span extends beyond the page grid. Used by the
+ *  canvas to badge orphaned elements live (e.g. right after a grid shrink),
+ *  not just when Validate is pressed. */
+export function findOutOfBoundsIds(
+  elements: UIElement[],
+  grid: { columns: number; rows: number },
+): Set<string> {
+  const ids = new Set<string>();
+  for (const el of elements) {
+    if (isOutOfBounds(el.grid_area, grid)) ids.add(el.id);
+  }
+  return ids;
+}
+
 export interface ValidationIssue {
   severity: "error" | "warning";
   message: string;
@@ -1152,37 +1280,39 @@ export function validateProject(project: ProjectConfig): ValidationIssue[] {
   const macroIds = new Set(project.macros.map((m) => m.id));
   const checkElement = (el: UIElement, pageId: string, pageName: string) => {
     const loc = `${pageName} > ${el.id}`;
-    const bindings = el.bindings || {};
+    const bindings = (el.bindings || {}) as Record<string, unknown>;
 
     // page_nav target
     if (el.type === "page_nav" && el.target_page && !pageIds.has(el.target_page)) {
       issues.push({ severity: "error", message: `Target page "${el.target_page}" does not exist`, location: loc, pageId, elementId: el.id });
     }
 
-    // press/release/hold bindings
-    for (const slot of ["press", "release", "hold"]) {
-      const b = bindings[slot] as Record<string, unknown> | undefined;
-      if (!b) continue;
+    // One action checker for every action slot. Recurses into value_map
+    // per-option actions the same way the engine executes them.
+    const checkAction = (b: Record<string, unknown>, slotLoc: string) => {
       if (b.action === "navigate" && b.page && !pageIds.has(b.page as string)) {
-        issues.push({ severity: "error", message: `Navigate to deleted page "${b.page}"`, location: `${loc} > ${slot}`, pageId, elementId: el.id });
+        issues.push({ severity: "error", message: `Navigate to deleted page "${b.page}"`, location: slotLoc, pageId, elementId: el.id });
       }
       if (b.action === "device.command" && b.device && !deviceIds.has(b.device as string)) {
-        issues.push({ severity: "error", message: `Device "${b.device}" not found`, location: `${loc} > ${slot}`, pageId, elementId: el.id });
+        issues.push({ severity: "error", message: `Device "${b.device}" not found`, location: slotLoc, pageId, elementId: el.id });
       }
       if (b.action === "macro" && b.macro && !macroIds.has(b.macro as string)) {
-        issues.push({ severity: "error", message: `Macro "${b.macro}" not found`, location: `${loc} > ${slot}`, pageId, elementId: el.id });
+        issues.push({ severity: "error", message: `Macro "${b.macro}" not found`, location: slotLoc, pageId, elementId: el.id });
       }
-    }
+      if (b.action === "value_map" && b.map && typeof b.map === "object" && !Array.isArray(b.map)) {
+        for (const [optValue, mapped] of Object.entries(b.map as Record<string, unknown>)) {
+          if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
+            checkAction(mapped as Record<string, unknown>, `${slotLoc} > "${optValue}"`);
+          }
+        }
+      }
+    };
 
-    // change/submit bindings
-    for (const slot of ["change", "submit"]) {
-      const b = bindings[slot] as Record<string, unknown> | undefined;
-      if (!b) continue;
-      if (b.action === "device.command" && b.device && !deviceIds.has(b.device as string)) {
-        issues.push({ severity: "error", message: `Device "${b.device}" not found`, location: `${loc} > ${slot}`, pageId, elementId: el.id });
-      }
-      if (b.action === "macro" && b.macro && !macroIds.has(b.macro as string)) {
-        issues.push({ severity: "error", message: `Macro "${b.macro}" not found`, location: `${loc} > ${slot}`, pageId, elementId: el.id });
+    // Action slots hold ARRAYS of actions (legacy single objects are
+    // normalized by slotActions) — check every action in each slot.
+    for (const slot of ACTION_SLOTS) {
+      for (const b of slotActions(bindings, slot)) {
+        checkAction(b, `${loc} > ${slot}`);
       }
     }
 
@@ -1229,8 +1359,7 @@ export function validateProject(project: ProjectConfig): ValidationIssue[] {
   for (const page of project.ui.pages) {
     for (const el of page.elements) {
       checkElement(el, page.id, page.name);
-      const a = el.grid_area;
-      if (a.col + a.col_span - 1 > page.grid.columns || a.row + a.row_span - 1 > page.grid.rows) {
+      if (isOutOfBounds(el.grid_area, page.grid)) {
         issues.push({ severity: "warning", message: `Element extends beyond the ${page.grid.columns}\u00d7${page.grid.rows} grid`, location: `${page.name} > ${el.id}`, pageId: page.id, elementId: el.id });
       }
     }

@@ -4,7 +4,7 @@ import type { UIPage, UIElement, MasterElement, GridArea } from "../../api/types
 import { useUIBuilderStore } from "../../store/uiBuilderStore";
 import { useProjectStore } from "../../store/projectStore";
 import { CanvasElement } from "./CanvasElement";
-import { moveElementInPage } from "./uiBuilderHelpers";
+import { moveElementInPage, findOutOfBoundsIds } from "./uiBuilderHelpers";
 
 /** Check if two grid areas overlap. */
 function areasOverlap(a: GridArea, b: GridArea): boolean {
@@ -122,6 +122,13 @@ export function Canvas({
   const overlappingIds = useMemo(
     () => (previewMode ? new Set<string>() : findOverlappingIds(page.elements)),
     [page.elements, previewMode],
+  );
+
+  // Elements whose span extends beyond the page grid render off-panel — flag
+  // them live (e.g. immediately after a grid shrink), not just on Validate.
+  const outOfBoundsIds = useMemo(
+    () => (previewMode ? new Set<string>() : findOutOfBoundsIds(page.elements, page.grid)),
+    [page.elements, page.grid, previewMode],
   );
 
   const handleCanvasClick = useCallback(() => {
@@ -341,6 +348,7 @@ export function Canvas({
                   columns={page.grid.columns}
                   rows={page.grid.rows}
                   hasOverlap={overlappingIds.has(el.id)}
+                  outOfBounds={outOfBoundsIds.has(el.id)}
                   locked={lockedElementIds.has(el.id)}
                   onSelect={(id, shiftKey) => (shiftKey ? toggleSelectElement(id) : selectElement(id))}
                   onCommitResize={handleCommitResize}

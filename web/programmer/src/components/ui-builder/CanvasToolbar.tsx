@@ -182,7 +182,9 @@ export function CanvasToolbar({ pages, selectedPageId, onValidate }: CanvasToolb
   const handleDuplicatePage = (pageId: string) => {
     if (!project) return;
     const idx = project.ui.pages.findIndex((p) => p.id === pageId);
-    const newPages = duplicatePage(project.ui.pages, pageId);
+    // Master ids share the ui.<id> namespace with page element ids
+    const masterIds = (project.ui.master_elements || []).map((m) => m.id);
+    const newPages = duplicatePage(project.ui.pages, pageId, masterIds);
     const newPageId = newPages[idx + 1]?.id;
     applyPageMutation(() => newPages, "Duplicate page");
     if (newPageId) selectPage(newPageId);

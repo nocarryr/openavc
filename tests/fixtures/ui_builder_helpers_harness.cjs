@@ -158,4 +158,262 @@ function makeProject(macroKey) {
   };
 }
 
+// --- H-086: validateProject handles action-LIST binding slots ---
+function makeValidationProject(elements) {
+  return {
+    ui: {
+      pages: [{ id: "p1", name: "Page 1", grid: { columns: 12, rows: 8 }, elements }],
+      master_elements: [],
+      settings: {},
+    },
+    devices: [{ id: "real_dev" }],
+    macros: [{ id: "real_macro", name: "M", steps: [] }],
+  };
+}
+const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
+{
+  // Array-shaped press binding to a deleted device must be flagged.
+  const proj = makeValidationProject([
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: [{ action: "device.command", device: "ghost_dev", command: "go" }] } },
+  ]);
+  const issues = H.validateProject(proj).filter((i) => i.severity === "error");
+  results.h086_validate_array_device = {
+    pass: issues.length === 1 && /ghost_dev/.test(issues[0].message),
+    detail: issues,
+  };
+}
+{
+  // Second action in the array is checked too (navigate to deleted page).
+  const proj = makeValidationProject([
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: [{ action: "device.command", device: "real_dev", command: "go" }, { action: "navigate", page: "gone_page" }] } },
+  ]);
+  const issues = H.validateProject(proj).filter((i) => i.severity === "error");
+  results.h086_validate_array_navigate = {
+    pass: issues.length === 1 && /gone_page/.test(issues[0].message),
+    detail: issues,
+  };
+}
+{
+  // change slot: array-shaped macro action to a deleted macro.
+  const proj = makeValidationProject([
+    { id: "s1", type: "select", grid_area: AREA, style: {}, bindings: { change: [{ action: "macro", macro: "ghost_macro" }] } },
+  ]);
+  const issues = H.validateProject(proj).filter((i) => i.severity === "error");
+  results.h086_validate_array_change_macro = {
+    pass: issues.length === 1 && /ghost_macro/.test(issues[0].message),
+    detail: issues,
+  };
+}
+{
+  // Legacy single-object binding is still validated.
+  const proj = makeValidationProject([
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: { action: "device.command", device: "ghost_dev", command: "go" } } },
+  ]);
+  const issues = H.validateProject(proj).filter((i) => i.severity === "error");
+  results.h086_validate_legacy_object = {
+    pass: issues.length === 1 && /ghost_dev/.test(issues[0].message),
+    detail: issues,
+  };
+}
+{
+  // Valid references in arrays produce NO false positives.
+  const proj = makeValidationProject([
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: [{ action: "device.command", device: "real_dev", command: "go" }, { action: "macro", macro: "real_macro" }] } },
+  ]);
+  const issues = H.validateProject(proj).filter((i) => i.severity === "error");
+  results.h086_validate_valid_refs_pass = { pass: issues.length === 0, detail: issues };
+}
+
+// --- H-086: removePage scrubs navigate actions in array slots ---
+{
+  const pages = [
+    {
+      id: "p1", name: "P1", grid: { columns: 12, rows: 8 },
+      elements: [
+        {
+          id: "b1", type: "button", grid_area: AREA, style: {},
+          bindings: {
+            press: [{ action: "navigate", page: "p2" }, { action: "device.command", device: "d1", command: "go" }],
+            release: [{ action: "navigate", page: "p2" }],
+            hold: { action: "navigate", page: "p2" },  // legacy object shape
+          },
+        },
+      ],
+    },
+    { id: "p2", name: "P2", grid: { columns: 12, rows: 8 }, elements: [] },
+  ];
+  const after = H.removePage(pages, "p2");
+  const b = after[0].elements[0].bindings;
+  results.h086_removepage_scrubs_arrays = {
+    pass:
+      Array.isArray(b.press) && b.press.length === 1 && b.press[0].action === "device.command" &&
+      !("release" in b) && !("hold" in b),
+    detail: b,
+  };
+}
+
+// --- M-143: duplicate rewrites self-referencing ui.<id> bindings ---
+{
+  const pages = [
+    {
+      id: "p1", name: "P1", grid: { columns: 12, rows: 8 },
+      elements: [
+        {
+          id: "btn_x", type: "button", grid_area: AREA, style: {},
+          bindings: { feedback: { source: "state", key: "ui.btn_x.value", condition: { equals: true }, style_active: {}, style_inactive: {} } },
+        },
+      ],
+    },
+  ];
+  const after = H.duplicateElementInPage(pages, "p1", "btn_x");
+  const dup = after[0].elements[1];
+  const orig = after[0].elements[0];
+  results.m143_duplicate_rewrites_self_ref = {
+    pass: dup.id !== "btn_x" && dup.bindings.feedback.key === `ui.${dup.id}.value` &&
+      orig.bindings.feedback.key === "ui.btn_x.value",
+    detail: { dupId: dup.id, dupKey: dup.bindings.feedback.key, origKey: orig.bindings.feedback.key },
+  };
+}
+{
+  // duplicatePage rewrites self-refs AND sibling refs to the copied siblings.
+  const pages = [
+    {
+      id: "p1", name: "P1", grid: { columns: 12, rows: 8 },
+      elements: [
+        { id: "btn_a", type: "button", grid_area: AREA, style: {}, bindings: { feedback: { source: "state", key: "ui.btn_a.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
+        { id: "lbl_b", type: "label", grid_area: { ...AREA, row: 2 }, style: {}, bindings: { text: { source: "state", key: "ui.btn_a.value" } } },
+      ],
+    },
+  ];
+  const after = H.duplicatePage(pages, "p1");
+  const copy = after[1];
+  const aCopy = copy.elements[0];
+  const bCopy = copy.elements[1];
+  results.m143_duplicate_page_rewrites_sibling_refs = {
+    pass: aCopy.bindings.feedback.key === `ui.${aCopy.id}.value` &&
+      bCopy.bindings.text.key === `ui.${aCopy.id}.value` &&
+      pages[0].elements[1].bindings.text.key === "ui.btn_a.value",
+    detail: { aCopyId: aCopy.id, aKey: aCopy.bindings.feedback.key, bKey: bCopy.bindings.text.key },
+  };
+}
+{
+  // duplicatePage respects reserved (master) ids when naming copies.
+  const pages = [
+    { id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [
+      { id: "btn_a", type: "button", grid_area: AREA, style: {}, bindings: {} },
+    ] },
+  ];
+  const after = H.duplicatePage(pages, "p1", ["button_p1_copy_1"]);
+  const copyEl = after[1].elements[0];
+  results.m143_duplicate_page_respects_reserved = {
+    pass: copyEl.id === "button_p1_copy_2",
+    detail: copyEl.id,
+  };
+}
+
+// --- M-144: promote/demote rename on ui.<id> namespace collision ---
+{
+  // Demote onto a page that already has an element with the master's id.
+  const masters = [
+    { id: "shared_btn", type: "button", pages: "*", grid_area: AREA, style: {}, bindings: { feedback: { source: "state", key: "ui.shared_btn.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
+  ];
+  const pages = [
+    { id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [
+      { id: "shared_btn", type: "button", grid_area: AREA, style: {}, bindings: {} },
+    ] },
+  ];
+  const r = H.demoteFromMaster(pages, masters, "shared_btn", "p1");
+  const els = r.pages[0].elements;
+  const demoted = els[1];
+  results.m144_demote_collision_renamed = {
+    pass: els.length === 2 && demoted.id !== "shared_btn" &&
+      demoted.bindings.feedback.key === `ui.${demoted.id}.value` &&
+      r.masterElements.length === 0,
+    detail: { ids: els.map((e) => e.id), key: demoted.bindings.feedback.key },
+  };
+}
+{
+  // No collision -> id is kept.
+  const masters = [{ id: "solo_btn", type: "button", pages: "*", grid_area: AREA, style: {}, bindings: {} }];
+  const pages = [{ id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [] }];
+  const r = H.demoteFromMaster(pages, masters, "solo_btn", "p1");
+  results.m144_demote_no_collision_keeps_id = {
+    pass: r.pages[0].elements.length === 1 && r.pages[0].elements[0].id === "solo_btn",
+    detail: r.pages[0].elements.map((e) => e.id),
+  };
+}
+{
+  // Promote when a master already holds the id -> promoted copy renamed.
+  const masters = [{ id: "dup_btn", type: "button", pages: "*", grid_area: AREA, style: {}, bindings: {} }];
+  const pages = [
+    { id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [
+      { id: "dup_btn", type: "button", grid_area: AREA, style: {}, bindings: { feedback: { source: "state", key: "ui.dup_btn.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
+    ] },
+  ];
+  const r = H.promoteToMaster(pages, masters, "p1", "dup_btn");
+  const promoted = r.masterElements[1];
+  results.m144_promote_collision_renamed = {
+    pass: r.masterElements.length === 2 && promoted.id !== "dup_btn" &&
+      promoted.bindings.feedback.key === `ui.${promoted.id}.value`,
+    detail: { ids: r.masterElements.map((m) => m.id), key: promoted.bindings.feedback.key },
+  };
+}
+{
+  // Promote without collision keeps the id.
+  const pages = [
+    { id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [
+      { id: "lone_btn", type: "button", grid_area: AREA, style: {}, bindings: {} },
+    ] },
+  ];
+  const r = H.promoteToMaster(pages, [], "p1", "lone_btn");
+  results.m144_promote_no_collision_keeps_id = {
+    pass: r.masterElements.length === 1 && r.masterElements[0].id === "lone_btn",
+    detail: r.masterElements.map((m) => m.id),
+  };
+}
+
+// --- L-087: validateProject recurses into value_map per-option actions ---
+{
+  const proj = makeValidationProject([
+    {
+      id: "s1", type: "select", grid_area: AREA, style: {},
+      bindings: {
+        change: [{
+          action: "value_map",
+          map: {
+            a: { action: "device.command", device: "ghost_dev", command: "go" },
+            b: { action: "macro", macro: "ghost_macro" },
+            c: { action: "value_map", map: { d: { action: "macro", macro: "ghost_nested" } } },
+            e: { action: "device.command", device: "real_dev", command: "ok" },
+          },
+        }],
+      },
+    },
+  ]);
+  const issues = H.validateProject(proj).filter((i) => i.severity === "error");
+  results.l087_value_map_recursion = {
+    pass: issues.length === 3 &&
+      issues.some((i) => /ghost_dev/.test(i.message)) &&
+      issues.some((i) => /ghost_macro/.test(i.message)) &&
+      issues.some((i) => /ghost_nested/.test(i.message)),
+    detail: issues,
+  };
+}
+
+// --- L-088: findOutOfBoundsIds flags spans beyond the grid ---
+{
+  const grid = { columns: 12, rows: 8 };
+  const els = [
+    { id: "ok", type: "button", grid_area: { col: 1, row: 1, col_span: 3, row_span: 2 } },
+    { id: "off_right", type: "button", grid_area: { col: 11, row: 1, col_span: 3, row_span: 1 } },
+    { id: "off_bottom", type: "button", grid_area: { col: 1, row: 8, col_span: 1, row_span: 2 } },
+    { id: "edge_fit", type: "button", grid_area: { col: 10, row: 7, col_span: 3, row_span: 2 } },
+  ];
+  const flagged = [...H.findOutOfBoundsIds(els, grid)].sort();
+  results.l088_out_of_bounds_ids = {
+    pass: eq(flagged, ["off_bottom", "off_right"]),
+    detail: flagged,
+  };
+}
+
 process.stdout.write(JSON.stringify(results));
