@@ -35,6 +35,11 @@ export function DeviceSettingsSetupDialog({
     const initial: Record<string, string> = {};
     for (const key of setupKeys) {
       const def = deviceSettings[key];
+      // Never pre-fill a password/secret setting — it must start blank.
+      if (def?.secret || def?.type === "password") {
+        initial[key] = "";
+        continue;
+      }
       let defaultVal = String(def?.default ?? "");
 
       // Generate unique value if needed
@@ -210,7 +215,13 @@ export function DeviceSettingsSetupDialog({
                 <input
                   value={values[key] ?? ""}
                   onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
-                  type={fieldType === "integer" || fieldType === "number" ? "number" : "text"}
+                  type={
+                    def?.secret || fieldType === "password"
+                      ? "password"
+                      : fieldType === "integer" || fieldType === "number"
+                        ? "number"
+                        : "text"
+                  }
                   style={{ width: "100%" }}
                 />
               )}

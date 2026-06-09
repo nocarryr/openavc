@@ -2,6 +2,8 @@ import type { ActionParam } from "../../api/types";
 
 /** Default string value to seed a param field with. */
 export function defaultFor(def: ActionParam): string {
+  // Never pre-fill a password/secret field — it must always start blank.
+  if (def.secret || def.type === "password") return "";
   if (def.default !== undefined && def.default !== null) return String(def.default);
   if (def.type === "enum" && def.values && def.values.length > 0 && def.required) {
     return def.values[0];

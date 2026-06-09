@@ -5,6 +5,16 @@ import type { DeviceConfig, DriverInfo } from "../../api/types";
 import { DeviceSettingsSetupDialog, hasDriverSetupSettings } from "../../components/shared/DeviceSettingsSetupDialog";
 import { coerceConfigValue } from "./deviceConfigCoerce";
 
+// A password/secret config field must never be pre-filled — render it blank so
+// a masked default (or stored value) can't be re-saved by accident.
+function isSecretConfigField(
+  schema: Record<string, unknown> | undefined,
+  key: string,
+): boolean {
+  const f = schema?.[key] as { type?: string; secret?: boolean } | undefined;
+  return f?.type === "password" || f?.secret === true;
+}
+
 // --- Typed Config Fields ---
 
 function ConfigFieldInputs({
@@ -469,6 +479,9 @@ export function AddDeviceDialog({
               const defaults = newDriver?.default_config ?? {};
               const prefilled: Record<string, string> = {};
               for (const [k, v] of Object.entries(defaults)) {
+                // Never pre-fill a password/secret field — a masked default is
+                // an easy way to save a password by accident.
+                if (isSecretConfigField(newDriver?.config_schema, k)) continue;
                 if (v !== "" && v != null) prefilled[k] = String(v);
               }
               setConfigValues(prefilled);
@@ -677,6 +690,7 @@ export function EditDeviceDialog({
       const defaults = newDriverInfo?.default_config ?? {};
       const prefilled: Record<string, string> = {};
       for (const [k, v] of Object.entries(defaults)) {
+        if (isSecretConfigField(newDriverInfo?.config_schema, k)) continue;
         if (v !== "" && v != null) prefilled[k] = String(v);
       }
       setConfigValues(prefilled);

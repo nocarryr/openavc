@@ -711,6 +711,7 @@ export interface DeviceSettingDef {
   default?: unknown;
   setup?: boolean;
   unique?: boolean;
+  secret?: boolean;
   values?: string[];
   min?: number;
   max?: number;
