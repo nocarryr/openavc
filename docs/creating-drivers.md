@@ -119,7 +119,7 @@ The other Connection sub-sections are optional:
 
 Order matters here. Build them in the order they appear:
 
-**State Variables** — the read-only properties the driver reports. Each entry has a type (string, integer, number, boolean, enum), an optional label and help text, and for numerics optional min/max/step (used by the simulator and panel UI to auto-generate sliders).
+**State Variables** — the read-only properties the driver reports. Each entry has a type (string, integer, number, boolean, enum), a required label, optional help text, and for numerics optional min/max/step (used by the simulator and panel UI to auto-generate sliders).
 
 | Variable ID | Label | Type | Notes |
 |-------------|-------|------|-------|
@@ -131,7 +131,7 @@ Order matters here. Build them in the order they appear:
 
 - **TCP / serial / UDP**: a single **Send** field. `{param_name}` placeholders substitute parameter values; `{config_key}` placeholders substitute device config (e.g., `{set_id}`).
 - **HTTP**: method, path, body, headers, query params. Every field supports `{placeholders}`.
-- **OSC**: address + a typed argument list (`f`/`i`/`s`/`h`/`d`/`b`/`T`/`F`/`N`).
+- **OSC**: address + a typed argument list (`f`/`i`/`s`/`h`/`d`/`T`/`F`/`N`).
 
 **Parameters** for each command let users fill in what to send. Each parameter has a type, optional required flag, label, help, default, and (numeric) min/max bounds or (enum) allowed values.
 
@@ -156,7 +156,7 @@ Example for an Extron switcher:
 
 The **set:** shorthand is also supported (`set: {mute: "$1"}` for capture-group references, `set: {signal: true}` for static literals). The builder preserves whichever form was loaded so byte-equal round-trips stay byte-equal.
 
-**Polling** — periodic queries that keep state fresh on devices that don't push updates. Set the interval (seconds) and list the command names (or raw query strings) to send each cycle.
+**Polling** — periodic queries that keep state fresh on devices that don't push updates. List the command names (or raw query strings) to send each cycle. The cadence (seconds) is the **Poll Interval** field, stored as `default_config.poll_interval`.
 
 **Device Settings** — writable values stored on the device hardware (labels, IDs, lock codes). Pending writes queue while the device is offline and replay on reconnect. Less common than state variables — most drivers don't need this.
 
@@ -387,7 +387,7 @@ responses:
     set: { mute: "$1" }
 
 polling:
-  interval: 15
+  # Cadence comes from default_config.poll_interval (15s above), not here.
   queries:
     - "!\r\n"                        # Query current input
     - "V\r\n"                        # Query current volume
@@ -540,7 +540,7 @@ async def set_device_setting(self, key: str, value: Any) -> Any:
 
 Types: `string`, `integer`, `number`, `float`, `boolean`, `enum`.
 
-The optional `help` field provides a description shown in the Driver Builder UI and available to the AI assistant.
+The `label` field is required — it's the human-readable name shown wherever the variable appears (device card, properties panel, simulator), and a state variable without one fails validation so the whole driver won't load. The optional `help` field provides a description shown in the Driver Builder UI and available to the AI assistant.
 
 #### `child_entity_types` entry
 
@@ -745,13 +745,13 @@ If the device's auth scheme isn't a prompt-and-response Telnet login (for exampl
 
 ```json
 "polling": {
-  "interval": 15,
   "queries": ["!\\r\\n", "V\\r\\n"]
 }
 ```
 
-- `interval`: Seconds between poll cycles. Also set via `poll_interval` in device config.
 - `queries`: Command strings sent each cycle.
+
+The poll cadence is **not** set in the `polling` block — it comes from `default_config.poll_interval` (in seconds), which device config can override per-instance. Set `poll_interval: 0` to disable polling. A top-level `polling.interval` is inert (the runtime never reads it) and is rejected by the community-catalog build, so don't add one.
 
 #### `frame_parser` (advanced)
 
@@ -834,6 +834,8 @@ discovery:
     expect_regex: "NovaStar"
     cross_vendor: false
     extract_manufacturer: "NovaStar"
+    timeout_ms: 2000                    # optional, default 2000 for UDP
+                                        # (tcp_probe defaults to 3000), max 10000
 
   python:
     file: ./pjlink_class1_discovery.py
@@ -857,7 +859,7 @@ discovery:
 | `ssdp` | Fingerprint | UPnP device-type URN announced in SSDP `ST` / `NT` headers. Bare string or list. |
 | `amx_ddp` | Fingerprint | AMX Device Discovery Protocol beacon match. Provide `make` (required) and optional `model_pattern` glob. |
 | `tcp_probe` | Fingerprint | Connect to `port`, optionally send `send_ascii` / `send_hex`, match exactly one of `expect` / `expect_regex` / `expect_hex`. Optional `tls` (TLS-wrap the connection, no cert verification, for an HTTPS-only device), `cross_vendor`, `extract_manufacturer`, `extract` rules, `timeout_ms` (≤ 10000). |
-| `udp_probe` | Fingerprint | Broadcast on `port`, match the response. Same sub-fields as `tcp_probe`. |
+| `udp_probe` | Fingerprint | Broadcast on `port`, match the response. Same sub-fields as `tcp_probe`, except `timeout_ms` defaults to 2000 (vs 3000 for `tcp_probe`). |
 | `python` | Fingerprint | Sibling `<driver_id>_discovery.py` with `async def probe(ctx) -> None`. Use when the wire format needs Python (multi-step handshakes, binary parsers, broadcast-then-per-host TCP follow-ups). Sub-fields: `file` (path relative to the driver) and optional `cross_vendor`. |
 | `oui` | Hint | MAC OUI prefixes (e.g. `["00:05:a6"]`). Drives the *possible* state and the "Unknown device, vendor: …" display. |
 | `hostname` | Hint | Regex patterns matched against reverse-DNS / NetBIOS name. |
@@ -998,7 +1000,7 @@ responses:
     set: { power: "off" }
 
 polling:
-  interval: 5
+  # Cadence comes from default_config.poll_interval (5s above), not here.
   queries:
     - "/cgi-bin/aw_ptz?cmd=%23O&res=1"
 ```
@@ -1119,7 +1121,7 @@ commands:
     # No args — sends address only (query)
 ```
 
-Argument types: `f` (float32), `i` (int32), `s` (string), `h` (int64), `d` (float64), `b` (blob/bytes), `T` (true), `F` (false), `N` (nil).
+Argument types: `f` (float32), `i` (int32), `s` (string), `h` (int64), `d` (float64), `T` (true), `F` (false), `N` (nil).
 
 #### OSC Response Format
 
@@ -1152,8 +1154,8 @@ on_connect:
   - "/info"
 
 # Polling: command names or bare OSC addresses
+# (cadence is default_config.poll_interval, not an interval key here)
 polling:
-  interval: 9
   queries:
     - "renew_subscription"
 ```

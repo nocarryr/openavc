@@ -466,3 +466,104 @@ def test_validator_accepts_valid_auth_block():
         "success_pattern": "GNET> ",
     }))
     assert errs == []
+
+
+# ===========================================================================
+# H-073 — {name:spec} placeholders honor the Python format-spec mini-language
+# ===========================================================================
+
+
+def test_substitute_plain_placeholder_unchanged():
+    """A spec-less {name} behaves exactly as before (str of the value)."""
+    assert ConfigurableDriver._safe_substitute("v={vol}", {"vol": 5}) == "v=5"
+
+
+def test_substitute_zero_pads_integer_value():
+    """{preset:02d} on an int zero-pads — the documented Panasonic example."""
+    assert ConfigurableDriver._safe_substitute("R{preset:02d}", {"preset": 5}) == "R05"
+
+
+def test_substitute_zero_pads_numeric_string_value():
+    """A param that arrives as a string still pads via numeric coercion."""
+    assert ConfigurableDriver._safe_substitute("R{preset:02d}", {"preset": "5"}) == "R05"
+
+
+def test_substitute_hex_format_spec():
+    """Hex specs work too (common for address bytes)."""
+    assert ConfigurableDriver._safe_substitute("{addr:04X}", {"addr": 255}) == "00FF"
+
+
+def test_substitute_preserves_json_braces():
+    """Literal JSON braces are untouched; only the {level} token resolves."""
+    out = ConfigurableDriver._safe_substitute('{"level": {level}}', {"level": 75})
+    assert out == '{"level": 75}'
+
+
+def test_substitute_unknown_key_with_spec_left_literal():
+    """A spec on a key that isn't a param leaves the placeholder verbatim."""
+    assert ConfigurableDriver._safe_substitute("{nope:02d}", {}) == "{nope:02d}"
+
+
+def test_substitute_invalid_spec_left_literal_not_raised():
+    """A numeric spec on a non-numeric string can't crash the send — the
+    placeholder is left verbatim instead."""
+    assert ConfigurableDriver._safe_substitute("{name:02d}", {"name": "abc"}) == "{name:02d}"
+
+
+@pytest.mark.asyncio
+async def test_command_send_applies_format_spec_end_to_end():
+    """The full send path substitutes a format spec, so the doc's
+    `%23R{preset:02d}` example puts the zero-padded value on the wire."""
+    definition = {
+        "id": "acme_fmt",
+        "name": "Acme Fmt",
+        "transport": "tcp",
+        "commands": {"recall": {"send": "PR{preset:02d}"}},
+        "responses": [],
+        "state_variables": {},
+    }
+    drv = _make_driver(definition)
+    spy = _SpySend()
+    drv.transport = spy
+    await drv.send_command("recall", {"preset": 5})
+    assert spy.sent == [b"PR05"]
+
+
+# ===========================================================================
+# H-074 — OSC arg type tags are validated at load (blob/typos fail loudly)
+# ===========================================================================
+
+
+def test_validator_rejects_unknown_osc_command_arg_type():
+    """A command OSC arg with an unsupported tag (e.g. 'b'/blob) is rejected at
+    load instead of being silently dropped when the message is built."""
+    errs = validate_driver_definition(_base_def(transport="osc", commands={
+        "fade": {"address": "/fader/1", "args": [{"type": "b", "value": "x"}]},
+    }))
+    assert any("unknown OSC type 'b'" in e for e in errs), errs
+
+
+def test_validator_accepts_known_osc_command_arg_types():
+    """The eight supported tags pass."""
+    args = [{"type": t, "value": "0"} for t in ("f", "i", "s", "h", "d", "T", "F", "N")]
+    errs = validate_driver_definition(_base_def(transport="osc", commands={
+        "go": {"address": "/go", "args": args},
+    }))
+    assert errs == []
+
+
+def test_validator_rejects_unknown_osc_device_setting_arg_type():
+    """OSC device-setting writes get the same arg-type check."""
+    errs = validate_driver_definition(_base_def(transport="osc", device_settings={
+        "gain": {
+            "label": "Gain",
+            "write": {"address": "/gain", "args": [{"type": "b", "value": "{value}"}]},
+        },
+    }))
+    assert any("unknown OSC type 'b'" in e for e in errs), errs
+
+
+def test_build_osc_args_drops_unsupported_tag():
+    """Runtime defense: an unsupported tag yields no arg (no crash) rather than
+    a wrongly-typed one — the loader is the primary guard, this is backstop."""
+    assert ConfigurableDriver._build_osc_args([{"type": "b", "value": "x"}], {}) == []

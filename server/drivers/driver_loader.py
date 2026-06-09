@@ -30,6 +30,34 @@ from server.utils.regex_safety import regex_safety_error as _regex_redos_error
 
 log = get_logger(__name__)
 
+# OSC argument type tags the ConfigurableDriver runtime can encode from a YAML
+# value. 'b' (blob/bytes) is intentionally excluded — there's no unambiguous way
+# to express raw bytes in a YAML arg value, so it isn't a declarative type (the
+# Driver Builder UI and avcdriver.schema.json omit it too). An unsupported tag
+# is dropped silently at send time, yielding a malformed OSC message — catch it
+# at load instead.
+_OSC_ARG_TYPES = frozenset({"f", "i", "s", "h", "d", "T", "F", "N"})
+
+
+def _validate_osc_args(where: str, arg_defs: Any, errors: list[str]) -> None:
+    """Validate OSC arg `type` tags so an unsupported tag or typo fails at load
+    rather than being silently dropped when the message is built."""
+    if arg_defs is None:
+        return
+    if not isinstance(arg_defs, list):
+        errors.append(f"{where}: args must be a list")
+        return
+    for j, arg in enumerate(arg_defs):
+        if not isinstance(arg, dict):
+            errors.append(f"{where}: args[{j}] must be a mapping")
+            continue
+        arg_type = arg.get("type", "f")
+        if arg_type not in _OSC_ARG_TYPES:
+            errors.append(
+                f"{where}: args[{j}] unknown OSC type '{arg_type}' "
+                f"(expected one of f/i/s/h/d/T/F/N)"
+            )
+
 # Required top-level fields in a driver definition
 REQUIRED_FIELDS = {"id", "name", "transport"}
 
@@ -126,6 +154,22 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                 f"Command '{cmd_name}': must have 'send' (TCP/serial), "
                 f"'path'/'method' (HTTP), or 'address' (OSC)"
             )
+        if has_osc:
+            _validate_osc_args(f"Command '{cmd_name}'", cmd_def.get("args"), errors)
+
+    # OSC device-setting writes share the same arg encoder — validate their arg
+    # types too so a bad tag fails at load, not at write time.
+    device_settings = driver_def.get("device_settings")
+    if isinstance(device_settings, dict):
+        for setting_name, setting_def in device_settings.items():
+            if not isinstance(setting_def, dict):
+                continue
+            write = setting_def.get("write")
+            if isinstance(write, dict) and write.get("address") is not None:
+                _validate_osc_args(
+                    f"Device setting '{setting_name}' write",
+                    write.get("args"), errors,
+                )
 
     # Validate the Phase 6 ``discovery:`` block. Templates (generic_*)
     # are exempt — they don't participate in discovery. Phase 8 dropped

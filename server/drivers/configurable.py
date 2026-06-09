@@ -581,6 +581,16 @@ class ConfigurableDriver(BaseDriver):
                 args.append(("F", False))
             elif tag == "N":
                 args.append(("N", None))
+            else:
+                # Unsupported tag (e.g. 'b'/blob, or a typo). The loader rejects
+                # these at load time; warn rather than silently drop the arg and
+                # emit a malformed (short-by-one) OSC message on any path that
+                # bypasses the loader.
+                log.warning(
+                    "OSC arg type %r is not supported (expected one of "
+                    "f/i/s/h/d/T/F/N); arg dropped",
+                    tag,
+                )
         return args
 
     def _is_http_command(self, cmd_def: dict[str, Any]) -> bool:
@@ -679,19 +689,43 @@ class ConfigurableDriver(BaseDriver):
     @staticmethod
     def _safe_substitute(template: str, params: dict[str, Any]) -> str:
         """
-        Substitute {name} placeholders in template with values from params.
+        Substitute {name} and {name:spec} placeholders with values from params.
 
-        Only replaces {name} where name is a key in params. Literal JSON
-        braces and unknown placeholders are left untouched. This avoids
-        the problem with Python's str.format() choking on JSON body strings.
+        Only replaces {name} where name is a key in params. An optional
+        ``:format_spec`` (Python format-spec mini-language) formats the value —
+        e.g. ``{preset:02d}`` zero-pads and ``{addr:04X}`` hex-formats, both
+        common in device protocols. A numeric spec applied to a numeric string
+        coerces it first, so a param that arrives as ``"5"`` still pads to
+        ``"05"``. Literal JSON braces and unknown placeholders are left
+        untouched, and an invalid spec leaves the placeholder verbatim rather
+        than raising — this avoids the problem with Python's str.format()
+        choking on JSON body strings.
         """
         def replacer(match: re.Match) -> str:
             key = match.group(1)
-            if key in params:
-                return str(params[key])
-            return match.group(0)  # Leave unmatched {name} as-is
+            if key not in params:
+                return match.group(0)  # Leave unmatched {name} as-is
+            spec = match.group(2)
+            value = params[key]
+            if not spec:
+                return str(value)
+            try:
+                return format(value, spec)
+            except (ValueError, TypeError):
+                # A numeric spec ('d'/'x'/'f'/...) applied to a numeric string:
+                # coerce, then format. int first so '02d' works on "5".
+                if isinstance(value, str):
+                    for conv in (int, float):
+                        try:
+                            return format(conv(value), spec)
+                        except (ValueError, TypeError):
+                            continue
+                # Unformattable — leave the placeholder verbatim so a bad spec
+                # is visible to the author instead of crashing the send.
+                return match.group(0)
 
-        return re.sub(r"\{(\w+)\}", replacer, template)
+        # {name} or {name:spec}; the spec excludes braces so it can't span tokens.
+        return re.sub(r"\{(\w+)(?::([^{}]*))?\}", replacer, template)
 
     async def _process_http_response(
         self, command: str, response: Any
