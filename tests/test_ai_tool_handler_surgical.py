@@ -187,7 +187,7 @@ async def test_get_project_summary_no_project(handler, mock_agent):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
-    assert payload["success"] is True
+    assert payload["success"] is False
     assert "error" in payload["result"]
 
 
@@ -215,7 +215,7 @@ async def test_get_macro_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
-    assert payload["success"] is True
+    assert payload["success"] is False
     assert "error" in payload["result"]
 
 
@@ -243,7 +243,7 @@ async def test_get_ui_page_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
-    assert payload["success"] is True
+    assert payload["success"] is False
     assert "error" in payload["result"]
 
 
@@ -287,7 +287,7 @@ async def test_add_device_duplicate(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
-    assert payload["success"] is True
+    assert payload["success"] is False
     assert "already exists" in payload["result"]["error"]
 
 
@@ -327,6 +327,7 @@ async def test_add_variable_duplicate(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "already exists" in payload["result"]["error"]
 
 
@@ -362,6 +363,7 @@ async def test_update_variable_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -387,6 +389,7 @@ async def test_delete_variable_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -444,6 +447,31 @@ async def test_add_macro_with_cancel_group(handler, mock_agent, mock_engine):
 
 
 @pytest.mark.asyncio
+async def test_add_macro_with_ui_navigate_step(handler, mock_agent, mock_engine):
+    """M-133: the AI can author a macro containing a ui.navigate step (the
+    runtime supports it; the validator used to reject it)."""
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        with patch("server.core.project_loader.save_project"):
+            msg = _make_tool_call_msg("add_macro", {
+                "id": "go_controls",
+                "name": "Go To Controls",
+                "steps": [
+                    {"action": "device.command", "device": "projector1", "command": "power_on"},
+                    {"action": "ui.navigate", "page": "controls"},
+                ],
+            })
+            await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    assert payload["result"]["status"] == "created"
+    macro = next(m for m in mock_engine.project.macros if m.id == "go_controls")
+    assert macro.steps[1].action == "ui.navigate"
+    assert macro.steps[1].page == "controls"
+
+
+@pytest.mark.asyncio
 async def test_add_macro_duplicate(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("add_macro", {"id": "all_off", "name": "Duplicate"})
@@ -451,6 +479,7 @@ async def test_add_macro_duplicate(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "already exists" in payload["result"]["error"]
 
 
@@ -528,6 +557,7 @@ async def test_update_macro_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -553,6 +583,7 @@ async def test_delete_macro_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -588,6 +619,7 @@ async def test_add_ui_page_duplicate(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "already exists" in payload["result"]["error"]
 
 
@@ -613,6 +645,7 @@ async def test_delete_ui_page_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -658,6 +691,7 @@ async def test_add_ui_elements_duplicate(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "already exists" in payload["result"]["error"]
 
 
@@ -672,6 +706,7 @@ async def test_add_ui_elements_page_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -732,6 +767,7 @@ async def test_update_ui_element_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "not found" in payload["result"]["error"]
 
 
@@ -766,6 +802,7 @@ async def test_delete_ui_elements_not_found(handler, mock_agent, mock_engine):
         await asyncio.sleep(0)
 
     payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
     assert "No matching elements" in payload["result"]["error"]
 
 

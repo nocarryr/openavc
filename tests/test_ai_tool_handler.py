@@ -426,3 +426,229 @@ class TestVisibleWhenBindingValidation:
         b = {"visible_when": {"operator": "eq", "value": "on"}}
         err = _validate_bindings(b)
         assert err and "visible_when" in err
+
+
+# ===========================================================================
+# H-078 — A tool that returns an {"error": ...} / {"success": False} dict has
+# failed even though it didn't raise. It must be reported with success=False
+# so the cloud sets is_error on the Anthropic tool_result, instead of handing
+# Claude a "successful" result with the error buried in the body.
+# ===========================================================================
+
+
+class TestToolResultErrorSignaling:
+    def test_classifier_pure_error_dict_is_error(self):
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error({"error": "boom"}) is True
+
+    def test_classifier_data_dict_is_not_error(self):
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error({"devices": [], "total": 0}) is False
+
+    def test_classifier_explicit_success_true_with_null_error(self):
+        # {"success": True, "error": None, ...} — the explicit flag wins.
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error({"success": True, "error": None, "latency_ms": 5}) is False
+
+    def test_classifier_explicit_success_false(self):
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error({"success": False, "error": "nope", "response": None}) is True
+
+    def test_classifier_non_dict_is_not_error(self):
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error([1, 2, 3]) is False
+        assert _tool_result_is_error("ok") is False
+        assert _tool_result_is_error(None) is False
+
+    def test_classifier_data_with_truthy_error_is_error(self):
+        # Partial result: data plus a soft error (e.g. stale catalog + fetch failure).
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error({"plugins": [{"id": "x"}], "error": "fetch failed"}) is True
+
+    def test_classifier_data_with_null_error_is_not_error(self):
+        from server.cloud.ai_tool_handler import _tool_result_is_error
+        assert _tool_result_is_error({"plugins": [{"id": "x"}], "error": None}) is False
+
+    @pytest.mark.asyncio
+    async def test_error_dict_return_reported_as_failure(self, handler, mock_agent):
+        """A non-raising tool that returns an error dict must dispatch
+        success=False, lift the message into the error field, and still carry
+        the body so the model sees the structured detail."""
+        async def _err_tool(_input):
+            return {"error": "Device 'x' not found"}
+
+        await handler._execute_tool("req-err", "add_device", _err_tool, {})
+
+        payload = mock_agent.send_message.call_args[0][1]
+        assert payload["success"] is False
+        assert payload["error"] == "Device 'x' not found"
+        assert payload["result"] == {"error": "Device 'x' not found"}
+
+    @pytest.mark.asyncio
+    async def test_success_dict_return_reported_as_success(self, handler, mock_agent):
+        async def _ok_tool(_input):
+            return {"status": "created", "id": "d1"}
+
+        await handler._execute_tool("req-ok", "add_device", _ok_tool, {})
+
+        payload = mock_agent.send_message.call_args[0][1]
+        assert payload["success"] is True
+        assert payload["error"] is None
+        assert payload["result"]["status"] == "created"
+
+    @pytest.mark.asyncio
+    async def test_list_return_reported_as_success(self, handler, mock_agent):
+        async def _list_tool(_input):
+            return [{"id": "a"}, {"id": "b"}]
+
+        await handler._execute_tool("req-list", "list_devices", _list_tool, {})
+
+        payload = mock_agent.send_message.call_args[0][1]
+        assert payload["success"] is True
+        assert len(payload["result"]) == 2
+
+
+# ===========================================================================
+# M-132 — A failed pre-AI backup must NOT latch the "backup created" flag,
+# otherwise the safety net is silently disabled for the rest of the session.
+# ===========================================================================
+
+
+class TestPreAIBackupSafetyNet:
+    @pytest.mark.asyncio
+    async def test_backup_failure_not_latched_and_retried(
+        self, mock_agent, mock_devices, mock_events
+    ):
+        handler = AIToolHandler(
+            mock_agent, mock_devices, mock_events,
+            project_path="/tmp/proj/project.avc",
+        )
+        calls = {"n": 0}
+
+        def _failing(*_a, **_k):
+            calls["n"] += 1
+            raise OSError("disk full")
+
+        with patch("server.core.backup_manager.create_backup", _failing):
+            await handler._maybe_create_pre_ai_backup()
+        # Failure must leave the flag unset so the next change retries.
+        assert handler._ai_backup_created is False
+        assert calls["n"] == 1
+
+        def _ok(*_a, **_k):
+            calls["n"] += 1
+
+        with patch("server.core.backup_manager.create_backup", _ok):
+            await handler._maybe_create_pre_ai_backup()
+        # The retry happened (proves the net wasn't disabled) and succeeded.
+        assert handler._ai_backup_created is True
+        assert calls["n"] == 2
+
+        # Now that a backup exists, no further attempts are made this session.
+        with patch("server.core.backup_manager.create_backup", _ok):
+            await handler._maybe_create_pre_ai_backup()
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_backup_success_latches_once(
+        self, mock_agent, mock_devices, mock_events
+    ):
+        handler = AIToolHandler(
+            mock_agent, mock_devices, mock_events,
+            project_path="/tmp/proj/project.avc",
+        )
+        calls = {"n": 0}
+
+        def _ok(*_a, **_k):
+            calls["n"] += 1
+
+        with patch("server.core.backup_manager.create_backup", _ok):
+            await handler._maybe_create_pre_ai_backup()
+            await handler._maybe_create_pre_ai_backup()
+        assert handler._ai_backup_created is True
+        assert calls["n"] == 1
+
+
+# ===========================================================================
+# M-133 — The runtime supports ui.navigate macro steps; the AI validator must
+# accept them so AI tools can author/edit macros that contain one.
+# ===========================================================================
+
+
+class TestUINavigateMacroStep:
+    def test_ui_navigate_in_valid_step_actions(self):
+        from server.cloud.ai_tool_handler import _VALID_STEP_ACTIONS
+        assert "ui.navigate" in _VALID_STEP_ACTIONS
+
+    def test_ui_navigate_with_page_valid(self):
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        errs = _validate_macro_step({"action": "ui.navigate", "page": "home"}, "steps[0]")
+        assert errs == []
+
+    def test_ui_navigate_overlay_controls_valid(self):
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        for page in ("$back", "$dismiss"):
+            errs = _validate_macro_step({"action": "ui.navigate", "page": page}, "steps[0]")
+            assert errs == [], f"'{page}' rejected: {errs}"
+
+    def test_ui_navigate_missing_page_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_macro_step
+        errs = _validate_macro_step({"action": "ui.navigate"}, "steps[0]")
+        assert errs and any("page" in e for e in errs)
+
+    def test_macro_with_ui_navigate_step_validates(self):
+        from server.cloud.ai_tool_handler import _validate_macro
+        steps = [
+            {"action": "device.command", "device": "proj1", "command": "power_on"},
+            {"action": "ui.navigate", "page": "controls"},
+        ]
+        assert _validate_macro(steps, []) is None
+
+
+# ===========================================================================
+# L-081 — The state store accepts isc. keys; the AI state-key validator must
+# accept them too (parity with StateStore._VALID_PREFIXES).
+# ===========================================================================
+
+
+class TestStateKeyISCPrefix:
+    def test_isc_prefix_accepted(self):
+        from server.cloud.ai_tool_handler import _validate_state_key
+        assert _validate_state_key("isc.room1.scene") is None
+
+    def test_isc_listed_in_error_message(self):
+        from server.cloud.ai_tool_handler import _validate_state_key
+        err = _validate_state_key("bogus.key")
+        assert err and "isc." in err
+
+    def test_unknown_prefix_still_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_state_key
+        assert _validate_state_key("bogus.key") is not None
+
+    def test_validator_matches_state_store_prefixes(self):
+        from server.cloud.ai_tool_handler import _VALID_STATE_PREFIXES
+        from server.core.state_store import StateStore
+        assert set(_VALID_STATE_PREFIXES) == set(StateStore._VALID_PREFIXES)
+
+
+# ===========================================================================
+# L-082 — Raw str(exception) must not leave the local trust boundary. The
+# handler maps tool exceptions through friendly_error before forwarding to the
+# cloud (where they're persisted in chat history).
+# ===========================================================================
+
+
+class TestToolExceptionFriendlyError:
+    @pytest.mark.asyncio
+    async def test_exception_mapped_to_friendly_message(self, handler, mock_agent):
+        async def _raise_tool(_input):
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        await handler._execute_tool("req-x", "send_device_command", _raise_tool, {})
+
+        payload = mock_agent.send_message.call_args[0][1]
+        assert payload["success"] is False
+        # Friendly mapping applied — no raw errno / OS repr leaks through.
+        assert "Could not connect" in payload["error"]
+        assert "Errno" not in payload["error"]
+        assert "111" not in payload["error"]

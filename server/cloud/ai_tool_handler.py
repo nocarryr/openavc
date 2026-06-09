@@ -346,7 +346,7 @@ def _validate_bindings(bindings: dict, project: Any = None) -> str | None:
 
 _VALID_STEP_ACTIONS = frozenset((
     "device.command", "group.command", "delay", "state.set",
-    "macro", "event.emit", "conditional", "wait_until",
+    "macro", "event.emit", "conditional", "wait_until", "ui.navigate",
 ))
 _STEP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "device.command": ("device", "command"),
@@ -360,6 +360,10 @@ _STEP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     # (null is allowed to mean "never time out") so we enforce it below rather
     # than as a plain non-empty required field.
     "wait_until": ("condition",),
+    # ui.navigate: 'page' is a page id, or the overlay-stack controls
+    # '$back' / '$dismiss' (all non-empty strings, so the required-field
+    # check below matches the runtime's "page is required" rule).
+    "ui.navigate": ("page",),
 }
 _VALID_TRIGGER_TYPES = frozenset(("schedule", "state_change", "event", "startup"))
 # Accept both canonical operator names and the user-facing aliases that
@@ -384,7 +388,8 @@ def _validate_macro_step(step: dict, path: str) -> list[str]:
     if action not in _VALID_STEP_ACTIONS:
         errors.append(
             f"{path}: step action '{action}' is not valid. "
-            f"Use: device.command, group.command, delay, state.set, macro, event.emit, conditional, wait_until"
+            f"Use: device.command, group.command, delay, state.set, macro, "
+            f"event.emit, conditional, wait_until, ui.navigate"
         )
         return errors
 
@@ -642,7 +647,10 @@ def _validate_plugin_config(config: dict, schema: dict) -> str | None:
 
 # --- State key validation ---
 
-_VALID_STATE_PREFIXES = ("device.", "var.", "ui.", "system.", "plugin.")
+# Mirror StateStore._VALID_PREFIXES — isc. keys are accepted by the runtime
+# state store, so the AI tool layer must allow them too (e.g. set_state_value
+# targeting an isc.<instance>.<key>).
+_VALID_STATE_PREFIXES = ("device.", "var.", "ui.", "system.", "isc.", "plugin.")
 
 
 def _validate_state_key(key: str) -> str | None:
@@ -652,9 +660,32 @@ def _validate_state_key(key: str) -> str | None:
     if not any(key.startswith(p) for p in _VALID_STATE_PREFIXES):
         return (
             f"State key '{key}' has an invalid prefix. "
-            f"Must start with: device., var., ui., system., plugin."
+            f"Must start with: device., var., ui., system., isc., plugin."
         )
     return None
+
+
+# --- Tool result classification ---
+
+def _tool_result_is_error(result: Any) -> bool:
+    """Decide whether a tool's return value represents a failure.
+
+    The tool mixins signal failure in two ways: an explicit ``success: False``
+    in the returned dict, or (the common convention) a dict whose only failure
+    signal is a truthy ``error`` key. Both must be reported back to the model
+    with ``success=False`` so a failed mutation isn't delivered as a success
+    with the error buried in the result body (the cloud sets ``is_error`` on
+    the Anthropic tool_result from this flag).
+
+    An explicit ``success`` key always wins, so a tool that returns
+    ``{"success": True, "error": None, ...}`` is never misread as a failure.
+    Non-dict returns (lists, scalars) are always treated as success.
+    """
+    if not isinstance(result, dict):
+        return False
+    if "success" in result:
+        return not result["success"]
+    return bool(result.get("error"))
 
 
 from server.cloud.tools.device_tools import DeviceToolsMixin
@@ -868,10 +899,26 @@ class AIToolHandler(
                 async with self._project_lock:
                     await self._maybe_create_pre_ai_backup()
                     result = await handler(tool_input)
-            await self._send_result(request_id, True, result=result)
+            # A tool that returns an {"error": ...} / {"success": False} dict
+            # has failed even though it didn't raise — report it as a failure
+            # (carrying the body) so the model gets a structured error signal
+            # instead of a success with the error hidden in the result.
+            if _tool_result_is_error(result):
+                err = result.get("error") if isinstance(result, dict) else None
+                await self._send_result(
+                    request_id, False, result=result,
+                    error=str(err) if err else "The tool reported an error.",
+                )
+            else:
+                await self._send_result(request_id, True, result=result)
         except Exception as e:
             log.exception(f"AI tool handler: error executing {tool_name}")
-            await self._send_result(request_id, False, error=str(e))
+            # Map to a user-facing message before it leaves the local trust
+            # boundary — raw str(e) can carry local paths / network topology
+            # and is persisted in cloud chat history. Full detail stays in the
+            # local log above.
+            from server.api.error_messages import friendly_error
+            await self._send_result(request_id, False, error=friendly_error(e))
 
     async def _maybe_create_pre_ai_backup(self) -> None:
         """Create one backup before the first project-mutating tool in an AI
@@ -888,8 +935,15 @@ class AIToolHandler(
                 from server.core.backup_manager import create_backup
                 await asyncio.to_thread(create_backup, Path(self._project_path).parent, "Before AI changes")
             except Exception:
-                log.debug("Could not create pre-AI backup", exc_info=True)
-            self._ai_backup_created = True
+                # Leave the flag unset so the next mutating tool retries the
+                # backup. Latching it True on failure would silently disable
+                # the safety net for the rest of the AI editing session.
+                log.warning(
+                    "Could not create pre-AI backup; will retry before the next change",
+                    exc_info=True,
+                )
+            else:
+                self._ai_backup_created = True
 
         self._ai_last_write_time = time.monotonic()
 
