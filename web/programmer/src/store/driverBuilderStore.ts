@@ -3,6 +3,7 @@ import yaml from "js-yaml";
 import type { DriverDefinition, DriverInfo, CommunityDriver, InstalledDriver } from "../api/types";
 import * as api from "../api/restClient";
 import { parseApiError } from "../api/errors";
+import { reconcileAfterSave, makeLatestWins, importBlockers } from "./driverBuilderStore.helpers";
 
 const EMPTY_DEFINITION: DriverDefinition = {
   id: "",
@@ -22,6 +23,25 @@ const EMPTY_DEFINITION: DriverDefinition = {
   polling: {},
   frame_parser: null,
 };
+
+// Latest-wins guards for the async list loaders. Overlapping refreshes (e.g. an
+// install and an uninstall fired in quick succession) each take a token; only
+// the newest-started load applies its result, so the cached lists can't settle
+// on a stale snapshot just because an earlier GET happened to resolve last.
+const defGuard = makeLatestWins();
+const regGuard = makeLatestWins();
+const instGuard = makeLatestWins();
+const communityGuard = makeLatestWins();
+
+/** Ask before throwing away an unsaved draft. Returns true when it's safe to
+ *  proceed (nothing dirty, or the user confirmed the discard). */
+function confirmDiscardDraft(dirty: boolean): boolean {
+  if (!dirty) return true;
+  if (typeof window === "undefined" || typeof window.confirm !== "function") {
+    return true;
+  }
+  return window.confirm("You have unsaved driver changes. Discard them?");
+}
 
 interface DriverBuilderState {
   definitions: DriverDefinition[];
@@ -64,35 +84,13 @@ interface DriverBuilderState {
   updateDriver: (driverId: string, fileUrl: string, minPlatformVersion?: string) => Promise<void>;
 }
 
-export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => ({
-  definitions: [],
-  selectedId: null,
-  installedDriverId: null,
-  draft: { ...EMPTY_DEFINITION },
-  dirty: false,
-  saving: false,
-  loading: false,
-  error: null,
-
-  registeredDrivers: [],
-  communityDrivers: [],
-  installedDrivers: [],
-  communityLoading: false,
-  communityError: null,
-
-  loadDefinitions: async () => {
-    set({ loading: true, error: null });
-    try {
-      const defs = await api.listDriverDefinitions();
-      set({ definitions: defs, loading: false });
-    } catch (e) {
-      set({ error: parseApiError(e), loading: false });
-    }
-  },
-
-  setInstalledDriverId: (id) => set({ installedDriverId: id }),
-
-  selectDriver: (id) => {
+export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => {
+  // Raw selection — clones the definition into the editor draft with no dirty
+  // guard. Used by the public selectDriver (which guards first) and by the
+  // post-success internal selects in importDriver/duplicateDriver, where the
+  // prior draft was already intentionally consumed and re-prompting would be a
+  // spurious second confirm.
+  const applySelection = (id: string | null) => {
     const { definitions } = get();
     if (id === null) {
       set({ selectedId: null, draft: { ...EMPTY_DEFINITION }, dirty: false });
@@ -102,193 +100,263 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => ({
     if (found) {
       set({ selectedId: id, draft: structuredClone(found), dirty: false, error: null });
     }
-  },
+  };
 
-  newDriver: () => {
-    set({
-      selectedId: null,
-      draft: { ...EMPTY_DEFINITION },
-      dirty: true,
-      error: null,
-    });
-  },
+  return {
+    definitions: [],
+    selectedId: null,
+    installedDriverId: null,
+    draft: { ...EMPTY_DEFINITION },
+    dirty: false,
+    saving: false,
+    loading: false,
+    error: null,
 
-  updateDraft: (partial) => {
-    const { draft } = get();
-    set({ draft: { ...draft, ...partial }, dirty: true });
-  },
+    registeredDrivers: [],
+    communityDrivers: [],
+    installedDrivers: [],
+    communityLoading: false,
+    communityError: null,
 
-  save: async () => {
-    const { draft, selectedId } = get();
-    if (!draft.id || !draft.name) {
-      set({ error: "ID and Name are required" });
-      return;
-    }
-    set({ saving: true, error: null });
-    try {
-      if (selectedId) {
-        await api.updateDriverDefinition(selectedId, draft);
-      } else {
-        await api.createDriverDefinition(draft);
+    loadDefinitions: async () => {
+      const token = defGuard.next();
+      set({ loading: true, error: null });
+      try {
+        const defs = await api.listDriverDefinitions();
+        if (!defGuard.isCurrent(token)) return;
+        set({ definitions: defs, loading: false });
+      } catch (e) {
+        if (!defGuard.isCurrent(token)) return;
+        set({ error: parseApiError(e), loading: false });
       }
-      set({ saving: false, dirty: false, selectedId: draft.id });
-      await get().loadDefinitions();
-    } catch (e) {
-      set({ saving: false, error: parseApiError(e) });
-    }
-  },
+    },
 
-  deleteDriver: async (id) => {
-    try {
-      await api.deleteDriverDefinition(id);
-      const { selectedId } = get();
-      if (selectedId === id) {
-        set({ selectedId: null, draft: { ...EMPTY_DEFINITION }, dirty: false });
+    setInstalledDriverId: (id) => set({ installedDriverId: id }),
+
+    selectDriver: (id) => {
+      if (!confirmDiscardDraft(get().dirty)) return;
+      applySelection(id);
+    },
+
+    newDriver: () => {
+      if (!confirmDiscardDraft(get().dirty)) return;
+      set({
+        selectedId: null,
+        draft: { ...EMPTY_DEFINITION },
+        dirty: true,
+        error: null,
+      });
+    },
+
+    updateDraft: (partial) => {
+      const { draft } = get();
+      set({ draft: { ...draft, ...partial }, dirty: true });
+    },
+
+    save: async () => {
+      // Snapshot the draft + selection at save start. The editor inputs stay
+      // live during the network await, so we compare identity afterwards to
+      // tell "kept typing" from "left it alone" and reconcile without losing
+      // edits (see reconcileAfterSave).
+      const capturedDraft = get().draft;
+      const selectionAtStart = get().selectedId;
+      if (!capturedDraft.id || !capturedDraft.name) {
+        set({ error: "ID and Name are required" });
+        return;
       }
-      await get().loadDefinitions();
-    } catch (e) {
-      set({ error: parseApiError(e) });
-    }
-  },
+      const savedId = capturedDraft.id;
+      set({ saving: true, error: null });
+      try {
+        if (selectionAtStart) {
+          await api.updateDriverDefinition(selectionAtStart, capturedDraft);
+        } else {
+          await api.createDriverDefinition(capturedDraft);
+        }
+        set(
+          reconcileAfterSave({
+            savedId,
+            draftUnchanged: get().draft === capturedDraft,
+            selectionUnchanged: get().selectedId === selectionAtStart,
+          }),
+        );
+        await get().loadDefinitions();
+      } catch (e) {
+        set({ saving: false, error: parseApiError(e) });
+      }
+    },
 
-  importDriver: async (definition) => {
-    if (!definition.id || !definition.name || !definition.transport) {
-      set({ error: "Invalid driver definition: missing id, name, or transport" });
-      return;
-    }
-    set({ saving: true, error: null });
-    try {
-      await api.createDriverDefinition(definition);
-      set({ saving: false, selectedId: definition.id });
-      await get().loadDefinitions();
-      get().selectDriver(definition.id);
-    } catch (e) {
-      set({ saving: false, error: parseApiError(e) });
-    }
-  },
+    deleteDriver: async (id) => {
+      try {
+        await api.deleteDriverDefinition(id);
+        const { selectedId } = get();
+        if (selectedId === id) {
+          set({ selectedId: null, draft: { ...EMPTY_DEFINITION }, dirty: false });
+        }
+        await get().loadDefinitions();
+      } catch (e) {
+        set({ error: parseApiError(e) });
+      }
+    },
 
-  exportDriver: (id) => {
-    const { definitions } = get();
-    const def = definitions.find((d) => d.id === id);
-    if (!def) return;
-    // Export as YAML to match community driver format
-    const content = yaml.dump(def, {
-      lineWidth: 120,
-      noCompatMode: true,
-      quotingType: '"',
-    });
-    const blob = new Blob([content], { type: "application/x-avcdriver" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${def.id}.avcdriver`;
-    a.click();
-    URL.revokeObjectURL(url);
-  },
+    importDriver: async (definition) => {
+      if (!confirmDiscardDraft(get().dirty)) return;
+      // Validate before POSTing. A driver with blocking problems loads into the
+      // editor as a dirty draft so the user fixes it against the same inline
+      // IssueList the form editor shows, instead of getting a terse backend 422.
+      const blockers = importBlockers(definition, get().definitions);
+      if (blockers.length > 0) {
+        set({
+          selectedId: null,
+          draft: structuredClone(definition),
+          dirty: true,
+          saving: false,
+          error: `This driver needs fixes before it can be saved: ${blockers.join(" ")}`,
+        });
+        return;
+      }
+      set({ saving: true, error: null });
+      try {
+        await api.createDriverDefinition(definition);
+        set({ saving: false });
+        await get().loadDefinitions();
+        applySelection(definition.id);
+      } catch (e) {
+        set({ saving: false, error: parseApiError(e) });
+      }
+    },
 
-  duplicateDriver: async (id) => {
-    const { definitions } = get();
-    const original = definitions.find((d) => d.id === id);
-    if (!original) return;
+    exportDriver: (id) => {
+      const { definitions } = get();
+      const def = definitions.find((d) => d.id === id);
+      if (!def) return;
+      // Export as YAML to match community driver format
+      const content = yaml.dump(def, {
+        lineWidth: 120,
+        noCompatMode: true,
+        quotingType: '"',
+      });
+      const blob = new Blob([content], { type: "application/x-avcdriver" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${def.id}.avcdriver`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
 
-    // Pick a unique id and name for the copy. `<id>_copy`, `<id>_copy2`, …
-    const existingIds = new Set(definitions.map((d) => d.id));
-    let suffix = "_copy";
-    let counter = 1;
-    while (existingIds.has(`${original.id}${suffix}`)) {
-      counter += 1;
-      suffix = `_copy${counter}`;
-    }
-    const newId = `${original.id}${suffix}`;
-    const newName = original.name
-      ? `${original.name} (Copy${counter > 1 ? ` ${counter}` : ""})`
-      : newId;
+    duplicateDriver: async (id) => {
+      const { definitions } = get();
+      const original = definitions.find((d) => d.id === id);
+      if (!original) return;
+      if (!confirmDiscardDraft(get().dirty)) return;
 
-    // Deep-clone so we don't mutate the original. Drop the verified flag —
-    // verification is server-controlled and the copy hasn't been validated.
-    const copy: DriverDefinition = {
-      ...structuredClone(original),
-      id: newId,
-      name: newName,
-      verified: undefined,
-    };
+      // Pick a unique id and name for the copy. `<id>_copy`, `<id>_copy2`, …
+      const existingIds = new Set(definitions.map((d) => d.id));
+      let suffix = "_copy";
+      let counter = 1;
+      while (existingIds.has(`${original.id}${suffix}`)) {
+        counter += 1;
+        suffix = `_copy${counter}`;
+      }
+      const newId = `${original.id}${suffix}`;
+      const newName = original.name
+        ? `${original.name} (Copy${counter > 1 ? ` ${counter}` : ""})`
+        : newId;
 
-    set({ saving: true, error: null });
-    try {
-      await api.createDriverDefinition(copy);
-      await get().loadDefinitions();
-      get().selectDriver(newId);
-      set({ saving: false });
-    } catch (e) {
-      set({ saving: false, error: parseApiError(e) });
-    }
-  },
+      // Deep-clone so we don't mutate the original. Drop the verified flag —
+      // verification is server-controlled and the copy hasn't been validated.
+      const copy: DriverDefinition = {
+        ...structuredClone(original),
+        id: newId,
+        name: newName,
+        verified: undefined,
+      };
 
-  loadRegisteredDrivers: async () => {
-    try {
-      const drivers = await api.listDrivers();
-      set({ registeredDrivers: drivers });
-    } catch (e) {
-      console.error("Failed to load registered drivers:", e);
-    }
-  },
+      set({ saving: true, error: null });
+      try {
+        await api.createDriverDefinition(copy);
+        await get().loadDefinitions();
+        applySelection(newId);
+        set({ saving: false });
+      } catch (e) {
+        set({ saving: false, error: parseApiError(e) });
+      }
+    },
 
-  loadCommunityDrivers: async () => {
-    set({ communityLoading: true, communityError: null });
-    try {
-      const drivers = await api.fetchCommunityDrivers();
-      set({ communityDrivers: drivers, communityLoading: false });
-    } catch (e) {
-      set({ communityError: parseApiError(e), communityLoading: false });
-    }
-  },
+    loadRegisteredDrivers: async () => {
+      const token = regGuard.next();
+      try {
+        const drivers = await api.listDrivers();
+        if (!regGuard.isCurrent(token)) return;
+        set({ registeredDrivers: drivers });
+      } catch (e) {
+        if (regGuard.isCurrent(token)) {
+          console.error("Failed to load registered drivers:", e);
+        }
+      }
+    },
 
-  loadInstalledDrivers: async () => {
-    try {
-      const drivers = await api.listInstalledDrivers();
-      set({ installedDrivers: drivers });
-    } catch (e) {
-      console.error("Failed to load installed drivers:", e);
-    }
-  },
+    loadCommunityDrivers: async () => {
+      const token = communityGuard.next();
+      set({ communityLoading: true, communityError: null });
+      try {
+        const drivers = await api.fetchCommunityDrivers();
+        if (!communityGuard.isCurrent(token)) return;
+        set({ communityDrivers: drivers, communityLoading: false });
+      } catch (e) {
+        if (!communityGuard.isCurrent(token)) return;
+        set({ communityError: parseApiError(e), communityLoading: false });
+      }
+    },
 
-  installDriver: async (driverId, fileUrl, minPlatformVersion) => {
-    try {
+    loadInstalledDrivers: async () => {
+      const token = instGuard.next();
+      try {
+        const drivers = await api.listInstalledDrivers();
+        if (!instGuard.isCurrent(token)) return;
+        set({ installedDrivers: drivers });
+      } catch (e) {
+        if (instGuard.isCurrent(token)) {
+          console.error("Failed to load installed drivers:", e);
+        }
+      }
+    },
+
+    installDriver: async (driverId, fileUrl, minPlatformVersion) => {
       await api.installCommunityDriver(driverId, fileUrl, minPlatformVersion);
-      // Refresh all lists
+      // Refresh all lists. The loaders are latest-wins guarded, so an
+      // overlapping action's refreshes can't clobber these with a stale read.
       await Promise.all([
         get().loadRegisteredDrivers(),
         get().loadInstalledDrivers(),
         get().loadDefinitions(),
       ]);
-    } catch (e) {
-      throw e;
-    }
-  },
+    },
 
-  uninstallDriver: async (driverId) => {
-    try {
-      await api.uninstallDriver(driverId);
-    } catch (e) {
-      throw new Error(parseApiError(e));
-    }
-    // Refresh all lists
-    await Promise.all([
-      get().loadRegisteredDrivers(),
-      get().loadInstalledDrivers(),
-    ]);
-  },
+    uninstallDriver: async (driverId) => {
+      try {
+        await api.uninstallDriver(driverId);
+      } catch (e) {
+        throw new Error(parseApiError(e));
+      }
+      // Refresh all lists
+      await Promise.all([
+        get().loadRegisteredDrivers(),
+        get().loadInstalledDrivers(),
+      ]);
+    },
 
-  updateDriver: async (driverId, fileUrl, minPlatformVersion) => {
-    try {
-      await api.updateCommunityDriver(driverId, fileUrl, minPlatformVersion);
-    } catch (e) {
-      throw new Error(parseApiError(e));
-    }
-    await Promise.all([
-      get().loadRegisteredDrivers(),
-      get().loadInstalledDrivers(),
-      get().loadDefinitions(),
-    ]);
-  },
-}));
+    updateDriver: async (driverId, fileUrl, minPlatformVersion) => {
+      try {
+        await api.updateCommunityDriver(driverId, fileUrl, minPlatformVersion);
+      } catch (e) {
+        throw new Error(parseApiError(e));
+      }
+      await Promise.all([
+        get().loadRegisteredDrivers(),
+        get().loadInstalledDrivers(),
+        get().loadDefinitions(),
+      ]);
+    },
+  };
+});
