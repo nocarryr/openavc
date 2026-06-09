@@ -68,10 +68,7 @@ interface ButtonAssignment {
   icon?: string;
   bg_color?: string;
   text_color?: string;
-  // Legacy fields (backward compat)
-  macro_id?: string;
-  feedback_key?: string;
-  // New: same binding format as web UI buttons
+  // Same binding format as web UI buttons
   bindings?: ButtonBindings;
 }
 
@@ -271,7 +268,7 @@ function GridSurface({
       {Array.from({ length: rows * cols }, (_, i) => {
         const assignment = getAssignment(i, currentPage);
         const isSelected = selectedControl === String(i);
-        const hasAssignment = !!assignment?.macro_id || !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press;
+        const hasAssignment = !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press;
         const bgColor = assignment?.bg_color;
 
         return (
@@ -301,7 +298,7 @@ function GridSurface({
             }}
             title={
               hasAssignment
-                ? `Button ${i + 1}: ${assignment?.label || (Array.isArray(assignment?.bindings?.press) && assignment?.bindings?.press[0]?.action) || assignment?.macro_id || "configured"}`
+                ? `Button ${i + 1}: ${assignment?.label || (Array.isArray(assignment?.bindings?.press) && assignment?.bindings?.press[0]?.action) || "configured"}`
                 : `Button ${i + 1} (unassigned)`
             }
           >
@@ -462,7 +459,7 @@ function FaderControl({
             left: -4,
             width: 16,
             height: 12,
-            background: assignment?.feedback_key ? "var(--accent-bg)" : "var(--text-muted)",
+            background: assignment?.bindings?.feedback ? "var(--accent-bg)" : "var(--text-muted)",
             borderRadius: 2,
           }}
         />
@@ -956,19 +953,7 @@ function ControlAssignmentPanel({
 }) {
   const project = useProjectStore((s) => s.project);
 
-  // Read bindings (with backward compat for old macro_id/feedback_key)
   const currentBindings: ButtonBindings = assignment?.bindings ?? {};
-  if (!currentBindings.press && assignment?.macro_id) {
-    currentBindings.press = [{ action: "macro", macro: assignment.macro_id }];
-  }
-  if (!currentBindings.feedback && assignment?.feedback_key) {
-    currentBindings.feedback = {
-      source: "state", key: assignment.feedback_key,
-      condition: { equals: true },
-      style_active: { bg_color: "#0f3460" },
-      style_inactive: {},
-    };
-  }
 
   return (
     <div
@@ -1036,7 +1021,7 @@ function ControlAssignmentPanel({
           label={assignment?.label ?? ""}
           project={project}
           onBindingsChange={(newBindings) =>
-            onUpdate({ bindings: newBindings, macro_id: undefined, feedback_key: undefined })
+            onUpdate({ bindings: newBindings })
           }
           onLabelChange={(label) => onUpdate({ label: label || undefined })}
           showLabel={true}
@@ -1054,8 +1039,6 @@ function ControlAssignmentPanel({
           onChange={(patch) =>
             onUpdate({
               bindings: patch.bindings as unknown as ButtonBindings,
-              macro_id: undefined,
-              feedback_key: undefined,
             })
           }
         />
