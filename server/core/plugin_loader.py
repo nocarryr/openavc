@@ -57,6 +57,10 @@ MAX_CALLBACK_FAILURES = 10
 PLUGIN_START_TIMEOUT = 30.0
 PLUGIN_STOP_TIMEOUT = 10.0
 PLUGIN_HEALTH_TIMEOUT = 5.0
+# Bound for a plugin's on_config_changed hook. apply_config runs under the
+# per-plugin lifecycle lock (via restart_or_apply), so a hung hook would
+# otherwise wedge every future stop/start of that plugin.
+PLUGIN_APPLY_TIMEOUT = 10.0
 
 # Cap on in-flight plugin-log → event tasks. A plugin logging in a tight loop
 # can't spawn unbounded one-shot tasks on the shared event loop; past the cap
@@ -1023,7 +1027,15 @@ class PluginLoader:
             return False
         try:
             api._update_config(new_config)
-            handled = await hook(dict(new_config))
+            handled = await asyncio.wait_for(
+                hook(dict(new_config)), timeout=PLUGIN_APPLY_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                f"Plugin '{plugin_id}' on_config_changed timed out after "
+                f"{PLUGIN_APPLY_TIMEOUT}s; falling back to restart"
+            )
+            return False
         except Exception as e:  # Catch-all: hook runs arbitrary plugin code
             log.warning(
                 f"Plugin '{plugin_id}' on_config_changed failed ({e}); "
@@ -1039,14 +1051,23 @@ class PluginLoader:
         """Apply new config to a running plugin: hot when the plugin opts in
         via ``on_config_changed``, otherwise stop/start. Every config-write
         path (REST, cloud AI) routes through here so behavior is identical.
+
+        Holds the per-plugin lock across the whole check → hot-apply →
+        stop → start sequence. The cloud AI layer fans tool calls out as
+        tasks, so two overlapping updates (or an update racing a disable)
+        could otherwise interleave in the not-running window mid-restart —
+        one returning "nothing to do" while the other restarts with a config
+        the project file no longer holds.
+
         Returns False when the plugin wasn't running (nothing to do)."""
-        if not self.is_running(plugin_id):
-            return False
-        if await self.apply_config(plugin_id, new_config):
+        async with self._get_lock(plugin_id):
+            if not self.is_running(plugin_id):
+                return False
+            if await self.apply_config(plugin_id, new_config):
+                return True
+            await self._stop_plugin_locked(plugin_id)
+            await self._start_plugin_locked(plugin_id, new_config)
             return True
-        await self.stop_plugin(plugin_id)
-        await self.start_plugin(plugin_id, new_config)
-        return True
 
     def clear_missing(self, plugin_id: str) -> None:
         """Remove a plugin from the missing-plugins tracker."""

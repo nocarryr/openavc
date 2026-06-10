@@ -16,13 +16,30 @@ from server.core.state_store import StateStore
 
 
 class MockMacroEngine:
-    """Minimal macro engine for testing — records execute calls."""
+    """Minimal macro engine for testing — records execute calls.
+
+    Also covers the plugin-action registration surface PluginLoader uses
+    during start/stop, so the mock can stand in for the real engine when
+    wired into a real loader.
+    """
 
     def __init__(self):
         self.executed: list[str] = []
+        self.registered_actions: list[tuple[str, str]] = []
 
     async def execute(self, macro_id: str, context: dict | None = None) -> None:
         self.executed.append(macro_id)
+
+    def register_plugin_action(
+        self, action_type: str, handler, plugin_id: str, label: str = ""
+    ) -> None:
+        self.registered_actions.append((plugin_id, action_type))
+
+    def unregister_plugin_actions(self, plugin_id: str) -> None:
+        self.registered_actions = [
+            (pid, action) for pid, action in self.registered_actions
+            if pid != plugin_id
+        ]
 
 
 class MockDeviceManager:

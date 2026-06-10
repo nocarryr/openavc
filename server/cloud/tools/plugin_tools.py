@@ -109,13 +109,33 @@ class PluginToolsMixin:
         else:
             engine.project.plugins[plugin_id].enabled = True
 
-        save_project(engine.project_path, engine.project)
-        await self._notify_project_changed()
+        # Start first; only persist enabled=True if the start succeeded.
+        # start_plugins() retries every enabled entry at each startup, so
+        # persisting before the start would make a broken plugin retry on
+        # every boot (mirrors the REST enable endpoint's rollback).
         config = engine.project.plugins[plugin_id].config
         success = await engine.plugin_loader.start_plugin(plugin_id, config)
+        if not success:
+            engine.project.plugins[plugin_id].enabled = False
+
+        save_project(engine.project_path, engine.project)
+        await self._notify_project_changed()
+
+        if not success:
+            health = await engine.plugin_loader.get_health(plugin_id)
+            return {
+                "status": "error",
+                "error": (
+                    f"Plugin '{plugin_id}' failed to start: "
+                    f"{health.get('message', 'unknown error')}. "
+                    f"The enable was rolled back; its config is preserved."
+                ),
+                "plugin_id": plugin_id,
+                "config": config,
+            }
 
         return {
-            "status": "enabled" if success else "error",
+            "status": "enabled",
             "plugin_id": plugin_id,
             "config": config,
         }
@@ -194,9 +214,21 @@ class PluginToolsMixin:
             return {"error": "No project loaded"}
 
         plugin_id = input.get("plugin_id", "")
-        new_config = input.get("config", {})
         if not plugin_id:
             return {"error": "plugin_id is required"}
+
+        # 'config' must be explicit — defaulting an omitted arg to {} would
+        # silently wipe the plugin's configuration and restart it broken.
+        # (An explicit {} is a legitimate complete config for a plugin whose
+        # schema has no required fields; only the missing key is an error.)
+        if "config" not in input:
+            return {
+                "error": "config is required — pass the complete configuration "
+                         "object (call get_plugin_config first)"
+            }
+        new_config = input["config"]
+        if not isinstance(new_config, dict):
+            return {"error": "config must be an object"}
 
         if plugin_id not in engine.project.plugins:
             return {"error": f"Plugin '{plugin_id}' not in project"}

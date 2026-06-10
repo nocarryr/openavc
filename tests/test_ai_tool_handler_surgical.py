@@ -1164,3 +1164,166 @@ async def test_disable_plugin_bumps_revision(handler, mock_agent, mock_engine):
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
     mock_engine.bump_project_revision.assert_called_once()
+
+
+class _StubPlugin:
+    PLUGIN_INFO = {"id": "stub_plugin", "name": "Stub", "version": "1.0.0"}
+    CONFIG_SCHEMA = {}
+
+
+def _plugin_loader_mock(start_ok=True):
+    loader = MagicMock()
+    loader.start_plugin = AsyncMock(return_value=start_ok)
+    loader.stop_plugin = AsyncMock()
+    loader.restart_or_apply = AsyncMock()
+    loader.get_health = AsyncMock(
+        return_value={"status": "error", "message": "start() raised RuntimeError"}
+    )
+    return loader
+
+
+@pytest.mark.asyncio
+async def test_enable_plugin_rolls_back_on_start_failure(handler, mock_agent, mock_engine):
+    """A failed enable must not persist enabled=True — start_plugins() retries
+    every enabled entry at startup, so a broken plugin would retry on every
+    boot (the REST enable endpoint rolls back; the AI tool must match)."""
+    from server.core.plugin_loader import _PLUGIN_CLASS_REGISTRY
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {
+        "stub_plugin": PluginConfig(enabled=False, config={"keep": "me"})
+    }
+    mock_engine.plugin_loader = _plugin_loader_mock(start_ok=False)
+
+    with patch.dict(_PLUGIN_CLASS_REGISTRY, {"stub_plugin": _StubPlugin}), \
+         patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("enable_plugin", {"plugin_id": "stub_plugin"})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    # The failure is reported as a failure (error key -> is_error classifier)
+    assert payload["success"] is False
+    # enabled=True was rolled back before the save; config preserved
+    assert mock_engine.project.plugins["stub_plugin"].enabled is False
+    assert mock_engine.project.plugins["stub_plugin"].config == {"keep": "me"}
+    # The rolled-back state was still persisted + revision bumped
+    mock_engine.bump_project_revision.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_enable_plugin_first_time_failure_keeps_entry_disabled(
+    handler, mock_agent, mock_engine
+):
+    """First-time enable that fails persists the new entry disabled, so the
+    default config is kept for a later fix-and-retry but never auto-started."""
+    from server.core.plugin_loader import _PLUGIN_CLASS_REGISTRY
+
+    mock_engine.project.plugins = {}
+    mock_engine.plugin_loader = _plugin_loader_mock(start_ok=False)
+
+    with patch.dict(_PLUGIN_CLASS_REGISTRY, {"stub_plugin": _StubPlugin}), \
+         patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("enable_plugin", {"plugin_id": "stub_plugin"})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
+    assert mock_engine.project.plugins["stub_plugin"].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_enable_plugin_success_persists_enabled(handler, mock_agent, mock_engine):
+    from server.core.plugin_loader import _PLUGIN_CLASS_REGISTRY
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {
+        "stub_plugin": PluginConfig(enabled=False, config={"keep": "me"})
+    }
+    mock_engine.plugin_loader = _plugin_loader_mock(start_ok=True)
+
+    with patch.dict(_PLUGIN_CLASS_REGISTRY, {"stub_plugin": _StubPlugin}), \
+         patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("enable_plugin", {"plugin_id": "stub_plugin"})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    assert mock_engine.project.plugins["stub_plugin"].enabled is True
+    mock_engine.bump_project_revision.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_plugin_config_rejects_missing_config(handler, mock_agent, mock_engine):
+    """Omitting 'config' must be an error, not a silent wipe-to-{} + restart."""
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {
+        "some_plugin": PluginConfig(enabled=True, config={"brightness": 80})
+    }
+    mock_engine.plugin_loader = _plugin_loader_mock()
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("update_plugin_config", {"plugin_id": "some_plugin"})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
+    assert payload.get("error")
+    # Config untouched, no restart, no save/bump
+    assert mock_engine.project.plugins["some_plugin"].config == {"brightness": 80}
+    mock_engine.plugin_loader.restart_or_apply.assert_not_awaited()
+    mock_engine.bump_project_revision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_plugin_config_rejects_non_dict_config(handler, mock_agent, mock_engine):
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {
+        "some_plugin": PluginConfig(enabled=True, config={"brightness": 80})
+    }
+    mock_engine.plugin_loader = _plugin_loader_mock()
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("update_plugin_config", {
+            "plugin_id": "some_plugin",
+            "config": "not-an-object",
+        })
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
+    assert mock_engine.project.plugins["some_plugin"].config == {"brightness": 80}
+    mock_engine.plugin_loader.restart_or_apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_plugin_config_allows_explicit_empty_object(
+    handler, mock_agent, mock_engine
+):
+    """An explicit {} is a legitimate complete config (schema with no required
+    fields) — only the *omitted* key is rejected."""
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {
+        "some_plugin": PluginConfig(enabled=True, config={"brightness": 80})
+    }
+    mock_engine.plugin_loader = _plugin_loader_mock()
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("update_plugin_config", {
+            "plugin_id": "some_plugin",
+            "config": {},
+        })
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    assert mock_engine.project.plugins["some_plugin"].config == {}
+    mock_engine.plugin_loader.restart_or_apply.assert_awaited_once()

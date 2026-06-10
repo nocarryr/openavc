@@ -5,6 +5,8 @@ its running instance (the loader swaps the live api.config first); returning
 False or raising falls back to the normal stop/start restart.
 """
 
+import asyncio
+
 import pytest
 
 from server.core.event_bus import EventBus
@@ -116,8 +118,10 @@ async def test_restart_or_apply_hot_path_skips_restart(monkeypatch):
         calls.append(("start", pid))
         return True
 
-    monkeypatch.setattr(loader, "stop_plugin", _record_stop)
-    monkeypatch.setattr(loader, "start_plugin", _record_start)
+    # restart_or_apply holds the per-plugin lock, so it restarts via the
+    # _locked variants rather than the public (lock-taking) methods.
+    monkeypatch.setattr(loader, "_stop_plugin_locked", _record_stop)
+    monkeypatch.setattr(loader, "_start_plugin_locked", _record_start)
 
     assert await loader.restart_or_apply("hot", {"x": 1}) is True
     assert calls == []  # hot apply -> no restart
@@ -136,8 +140,8 @@ async def test_restart_or_apply_falls_back_to_restart(monkeypatch):
         calls.append(("start", pid))
         return True
 
-    monkeypatch.setattr(loader, "stop_plugin", _record_stop)
-    monkeypatch.setattr(loader, "start_plugin", _record_start)
+    monkeypatch.setattr(loader, "_stop_plugin_locked", _record_stop)
+    monkeypatch.setattr(loader, "_start_plugin_locked", _record_start)
 
     assert await loader.restart_or_apply("hot", {"x": 1}) is True
     assert calls == [("stop", "hot"), ("start", "hot")]
@@ -149,6 +153,101 @@ async def test_restart_or_apply_noop_when_not_running():
         StateStore(), EventBus(), MockMacroEngine(), MockDeviceManager()
     )
     assert await loader.restart_or_apply("ghost", {"x": 1}) is False
+
+
+@pytest.mark.asyncio
+async def test_apply_config_hung_hook_times_out(monkeypatch):
+    """A hook that never returns must not wedge apply_config — restart_or_apply
+    holds the per-plugin lifecycle lock across it, so an unbounded await would
+    block every future stop/start of that plugin."""
+    from server.core import plugin_loader as pl
+
+    monkeypatch.setattr(pl, "PLUGIN_APPLY_TIMEOUT", 0.05)
+
+    class _HungPlugin:
+        PLUGIN_INFO = {
+            "id": "hot", "name": "Hot", "version": "1.0.0", "capabilities": [],
+        }
+
+        async def start(self, api):
+            self.api = api
+
+        async def stop(self):
+            pass
+
+        async def on_config_changed(self, new_config):
+            await asyncio.Event().wait()  # never returns
+
+    plugin = _HungPlugin()
+    loader, _api = _make_loader_with(plugin, "hot")
+    # Pre-fix this await never completes; bound it so a regression fails
+    # instead of hanging the suite.
+    handled = await asyncio.wait_for(loader.apply_config("hot", {"x": 1}), timeout=2)
+    assert handled is False  # falls back to restart
+
+
+@pytest.mark.asyncio
+async def test_restart_or_apply_serializes_overlapping_updates(monkeypatch):
+    """Two overlapping config updates must serialize as whole operations.
+
+    Without the composite lock, update B lands in A's mid-restart not-running
+    window: B returns "nothing to do" without applying, and the plugin comes
+    back up on A's config while the project file holds B's — runtime and disk
+    silently diverged (the cloud AI layer fans tool calls out as tasks, so
+    this overlap is real, not theoretical)."""
+    from server.core import plugin_loader as pl
+
+    entered_stop = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class _SlowStopPlugin:
+        """The injected running instance — its stop() blocks until released."""
+
+        PLUGIN_INFO = {
+            "id": "hot", "name": "Hot", "version": "1.0.0", "capabilities": [],
+        }
+
+        async def start(self, api):
+            self.api = api
+
+        async def stop(self):
+            entered_stop.set()
+            await release_stop.wait()
+
+    class _FreshPlugin:
+        """What the registry instantiates for each restart — stops instantly."""
+
+        PLUGIN_INFO = {
+            "id": "hot", "name": "Hot", "version": "1.0.0",
+            "author": "t", "description": "t", "category": "utility",
+            "license": "MIT", "capabilities": [],
+        }
+
+        async def start(self, api):
+            self.api = api
+
+        async def stop(self):
+            pass
+
+    blocking = _SlowStopPlugin()
+    loader, _api = _make_loader_with(blocking, "hot")
+    monkeypatch.setitem(pl._PLUGIN_CLASS_REGISTRY, "hot", _FreshPlugin)
+
+    task_a = asyncio.create_task(loader.restart_or_apply("hot", {"cfg": "A"}))
+    await asyncio.wait_for(entered_stop.wait(), timeout=2)
+    task_b = asyncio.create_task(loader.restart_or_apply("hot", {"cfg": "B"}))
+    # Give B every chance to (wrongly) run ahead while A is mid-stop.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    release_stop.set()
+    result_a = await asyncio.wait_for(task_a, timeout=5)
+    result_b = await asyncio.wait_for(task_b, timeout=5)
+
+    # Pre-lock: B observed not-running and returned False without applying.
+    assert (result_a, result_b) == (True, True)
+    # The last-queued update wins and the runtime config matches it.
+    assert loader.get_running_config("hot") == {"cfg": "B"}
+    assert loader.is_running("hot")
 
 
 @pytest.mark.asyncio
