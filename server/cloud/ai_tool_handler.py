@@ -40,6 +40,11 @@ Each entry in the array represents one physical button:
   "icon": "power",       // Lucide icon name, e.g. "power", "volume-2", "play" (optional)
   "bg_color": "#1a1a2e", // Per-button default background color, hex (optional)
   "text_color": "#e0e0e0", // Per-button default text color, hex (optional)
+  "label_source": "var.x",   // State key whose live value replaces the label (optional)
+  "value_source": "var.lvl", // State key shown live under the label (optional)
+  "unit": "dB",              // Appended to the live value (optional)
+  "meter": { "min": 0, "max": 100, "color": "#8ab493",   // Level bar along the
+    "thresholds": [{ "above": 90, "color": "#e05341" }] }, // bottom edge (optional)
   "bindings": {          // Action and feedback configuration
     "press": [{            // MUST be an array of action objects
       "action": "macro",           // Action type: "macro", "device.command", "state.set", "navigate"
@@ -105,14 +110,28 @@ state. Configure them with a top-level "dials" array (dials are not paged):
   {
     "index": 0,            // Dial position (0-based)
     "label": "Volume",     // Shown on the surface's display if it has one
+    "icon": "volume-2",    // Optional icon on the dial's strip readout
+    "unit": "%",           // Optional unit appended to the live value
+    "meter": {...},        // Optional level-bar override (automatic when the
+                           // adjust has min+max; false disables)
     "adjust": {            // Optional: turn increments a numeric state value
       "key": "var.volume", // var.* variable or the plugin's own plugin.<id>.* state
       "step": 2,           // Added per detent turned (negative when turned back)
       "min": 0, "max": 100 // Optional clamp
     },
-    "cw": [{...}],         // Optional actions per clockwise turn event
-    "ccw": [{...}],        // Optional actions per counter-clockwise turn event
-    "press": [{...}]       // Optional actions on dial push
+    "cw": [{...}],         // Optional actions, fired once per detent turned
+    "ccw": [{...}],        // (capped at 8 per event for fast spins)
+    "press": [{...}],      // Optional actions on dial push
+    "long_press": [{...}], // Optional: hold then release fires these instead
+    "hold_threshold_ms": 500,
+    "pressed_adjust": {...}, // Optional: turning WHILE pushed adjusts this
+                             // (fine trim); pressed_cw/pressed_ccw also exist.
+                             // A push that turned never fires press/long_press.
+    "touch": [{...}],        // Optional: tapping the dial's strip readout
+                             // (default: tap presses the dial)
+    "long_touch": [{...}],   // Optional long-tap override
+    "fader": true            // Optional: taps/swipes on the readout jump the
+                             // adjust value to the touched position
   }
 ]
 
@@ -120,27 +139,37 @@ Action objects use the same format as button "press" actions. A macro or trigger
 watching the adjust key turns the dial into a device control (volume, gain, pan).
 
 Touchscreen strip (optional): surfaces reporting has_touchscreen render one zone per
-dial by default (the dial's label + live adjust value, no config needed). Customize
-with a top-level "touchscreen" object:
+dial by default — the dial's label, icon, live adjust value, and an automatic level
+bar when the adjust has bounds; tapping a dial's zone presses the dial. With nothing
+configured at all the strip shows a clock ({"touchscreen": {"idle": "blank"}} opts
+out). Take over the strip with a top-level "touchscreen" object:
 
 "touchscreen": {
   "zones": [
     {
       "label": "Mics",                 // Static label (label_source state key overrides)
       "value_source": "var.mic_gain",  // State key whose live value is displayed
+      "unit": "dB",                    // Optional unit appended to the value
+      "icon": "mic",                   // Optional Lucide icon
+      "meter": { "min": 0, "max": 100, "thresholds": [{...}] },  // Level bar
+      "feedback": {...},               // Optional state-driven colors (same
+                                       // schema as button feedback)
       "touch": [{...}],                // Optional actions when the zone is tapped
       "long_touch": [{...}],           // Optional actions on long-press (falls back to touch)
       "drag_adjust": {                 // Optional: a horizontal swipe steps a value
-        "key": "var.mic_gain", "step": 1, "min": 0, "max": 100
+        "key": "var.mic_gain", "step": 1, "min": 0, "max": 100,
+        "fader": true                  // Taps/swipes jump to the touched position
       },
       "bg_color": "#1a1a2e", "text_color": "#e0e0e0"  // Optional colors
     }
   ]
 }
 
-Zones split the strip evenly; explicit "x"/"w" pixel bounds override. Default
-per-dial zones wire drag_adjust to the dial's adjust automatically, so swiping
-under a dial does what turning it does.
+Zones split the strip evenly; explicit "x"/"w" pixel bounds override (strip is
+800x100). Default per-dial zones wire drag_adjust to the dial's adjust
+automatically, so swiping under a dial does what turning it does. Every touch
+briefly flashes the touched zone. Custom zones replace ALL default per-dial
+zones — carry over any readouts that should stay.
 
 Touch keys (optional): surfaces reporting touch_key_count in plugin state have
 color-only keys at the indices after the LCD keys (key_count .. key_count +
@@ -154,8 +183,16 @@ Info screen (optional): surfaces reporting has_info_screen accept a top-level
 "info_strip": { "source": "state", "key": "var.room_temp", "label": "Temp" }
 // or static text:
 "info_strip": { "source": "text", "text": "Room A", "label": "" }
+// or two elements side by side:
+"info_strip": { "items": [
+  { "label": "Temp", "key": "var.room_temp", "unit": "F" },
+  { "source": "text", "text": "Room A" }
+] }
 
 A "state" source shows the key's live value and refreshes when it changes.
+Info elements accept the same display fields as zones (icon, unit, meter,
+feedback). With no info_strip configured the screen shows a clock;
+{"source": "clock"} asks for it explicitly, {"source": "blank"} turns it off.
 """
 
 
