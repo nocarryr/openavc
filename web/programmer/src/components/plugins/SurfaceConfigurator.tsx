@@ -11,8 +11,10 @@
  *   custom — Arbitrary positioned controls. x/y/width/height positioning.
  *   matrix — Routing matrix (Dante, NDI). Dynamic rows/cols from state.
  */
-import { useState, useCallback, useRef, useEffect } from "react";
-import { X, Trash2, ChevronLeft, ChevronRight, Usb } from "lucide-react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { X, Trash2, ChevronLeft, ChevronRight, Usb, Pin, Play, MoreHorizontal } from "lucide-react";
+import { CopyButton } from "../shared/CopyButton";
+import { showInfo } from "../../store/toastStore";
 import { CollapsibleSection } from "../driver-builder/CollapsibleSection";
 import { useConnectionStore } from "../../store/connectionStore";
 import { useProjectStore } from "../../store/projectStore";
@@ -131,180 +133,29 @@ export function SurfaceConfigurator({
 }: SurfaceConfiguratorProps) {
   const [selectedControl, setSelectedControl] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
-  const [selectedDeckSerial, setSelectedDeckSerial] = useState<string | null>(null);
 
-  // Live-detected hardware geometry. Surface plugins publish what's actually
-  // plugged in (plugin.<id>.rows / columns / connected ...), which beats the
-  // static SURFACE_LAYOUT default — so an XL renders as 8x4 even though the
-  // plugin's declared default is the Neo's 2x4. Falls back to the static
-  // layout when no hardware is connected. With more than one deck attached,
-  // the deck picker selects which deck's geometry and config are shown
-  // (per-serial state keys: plugin.<id>.<serial>.*).
   const liveState = useConnectionStore((s) => s.liveState);
   const statePrefix = `plugin.${pluginId}.`;
   const deckSerials = String(liveState[`${statePrefix}deck_serials`] ?? "")
     .split(",")
     .filter(Boolean);
-  const activeSerial =
-    selectedDeckSerial && deckSerials.includes(selectedDeckSerial)
-      ? selectedDeckSerial
-      : deckSerials[0] ?? null;
-  const liveKey = (suffix: string) =>
-    activeSerial ? `${statePrefix}${activeSerial}.${suffix}` : `${statePrefix}${suffix}`;
-
-  const deckConnected = Boolean(liveState[liveKey("connected")]);
-  const liveRows = Number(liveState[liveKey("rows")] ?? 0);
-  const liveColumns = Number(liveState[liveKey("columns")] ?? 0);
-  const liveDialCount = deckConnected
-    ? Number(liveState[liveKey("dial_count")] ?? 0)
-    : 0;
-  const liveHasTouchscreen =
-    deckConnected && Boolean(liveState[liveKey("has_touchscreen")]);
-  const liveKeyCount = Number(liveState[liveKey("key_count")] ?? 0);
-  const liveTouchKeyCount = deckConnected
-    ? Number(liveState[liveKey("touch_key_count")] ?? 0)
-    : 0;
-  const liveHasInfoScreen =
-    deckConnected && Boolean(liveState[liveKey("has_info_screen")]);
-  // Page count is a global plugin setting (config.max_pages, flat config —
-  // the runtime reads it un-overridden), beating the static SURFACE_LAYOUT.
-  const configMaxPages = Number((config as { max_pages?: unknown }).max_pages);
-  const effectiveMaxPages =
-    Number.isFinite(configMaxPages) && configMaxPages >= 1
-      ? Math.min(100, Math.floor(configMaxPages))
-      : staticLayout.max_pages ?? 10;
-  const layout: SurfaceLayout = {
-    ...(staticLayout.type === "grid" && deckConnected && liveRows > 0 && liveColumns > 0
-      ? { ...staticLayout, rows: liveRows, columns: liveColumns }
-      : staticLayout),
-    max_pages: effectiveMaxPages,
-  };
-
-  // Keep the selected page tab valid when the page count is lowered.
-  useEffect(() => {
-    if (currentPage > effectiveMaxPages - 1) {
-      setCurrentPage(effectiveMaxPages - 1);
-    }
-  }, [currentPage, effectiveMaxPages]);
-
-  // Input echo: pressing a physical control flashes it in the editor.
-  // The plugin publishes <serial>.last_input = "kind:index:seq" on input.
-  const lastInput = String(liveState[liveKey("last_input")] ?? "");
-  const [inputFlash, setInputFlash] = useState<{ kind: string; index: number } | null>(null);
-  useEffect(() => {
-    if (!lastInput) return;
-    const [kind, indexStr] = lastInput.split(":");
-    const index = Number(indexStr);
-    if (!Number.isFinite(index)) return;
-    setInputFlash({ kind, index });
-    const timer = setTimeout(() => setInputFlash(null), 350);
-    return () => clearTimeout(timer);
-  }, [lastInput]);
-
-  // Per-deck config view. A decks[serial] override fully replaces the deck's
-  // sections (buttons, dials, ...); a deck without one mirrors the flat
-  // config — the runtime resolves it the same way.
+  // Units the project remembers even when they aren't connected: anything
+  // with its own layout or a friendly name stays visible (dimmed) so a
+  // saved layout is never stranded behind a dead or unplugged unit.
   const decksMap =
     (config.decks as Record<string, Record<string, unknown>> | undefined) ?? {};
-  const deckOverride = activeSerial ? decksMap[activeSerial] : undefined;
-  const isCustomized = deckOverride !== undefined;
-  const viewConfig = isCustomized ? deckOverride : config;
-  const onViewChange = useCallback(
-    (next: Record<string, unknown>) => {
-      if (isCustomized && activeSerial) {
-        onConfigChange({ ...config, decks: { ...decksMap, [activeSerial]: next } });
-      } else {
-        onConfigChange(next);
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isCustomized, activeSerial, config, onConfigChange]
-  );
+  const deckNames = (config.deck_names as Record<string, string> | undefined) ?? {};
+  const rememberedSerials = [
+    ...new Set([...Object.keys(decksMap), ...Object.keys(deckNames)]),
+  ].filter((s) => !deckSerials.includes(s));
+  const knownSerials = [...deckSerials, ...rememberedSerials];
 
-  // Layout transfer: re-key a custom layout (decks[from] + its name) to
-  // another serial. Covers handing a virtual deck's layout to the real one
-  // and dead-deck replacement. A virtual source is retired afterwards.
-  const reassignLayout = useCallback(
-    (fromSerial: string, toSerial: string) => {
-      const layoutToMove = decksMap[fromSerial];
-      if (!layoutToMove || fromSerial === toSerial) return;
-      const nextDecks = { ...decksMap };
-      delete nextDecks[fromSerial];
-      nextDecks[toSerial] = layoutToMove;
-
-      const names = (config.deck_names as Record<string, string> | undefined) ?? {};
-      const nextNames = { ...names };
-      if (nextNames[fromSerial] !== undefined) {
-        nextNames[toSerial] = nextNames[fromSerial];
-        delete nextNames[fromSerial];
-      }
-
-      const next: Record<string, unknown> = {
-        ...config,
-        decks: nextDecks,
-        deck_names: nextNames,
-      };
-      const virtuals =
-        (config.virtual_decks as { model?: string; serial?: string }[] | undefined) ?? [];
-      if (virtuals.some((v) => v.serial === fromSerial)) {
-        next.virtual_decks = virtuals.filter((v) => v.serial !== fromSerial);
-      }
-      onConfigChange(next);
-      setSelectedDeckSerial(toSerial);
-      setSelectedControl(null);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [decksMap, config, onConfigChange]
-  );
-
-  const deleteOrphanLayout = useCallback(
-    (serial: string) => {
-      const nextDecks = { ...decksMap };
-      delete nextDecks[serial];
-      const names = (config.deck_names as Record<string, string> | undefined) ?? {};
-      const nextNames = { ...names };
-      delete nextNames[serial];
-      onConfigChange({ ...config, decks: nextDecks, deck_names: nextNames });
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [decksMap, config, onConfigChange]
-  );
-
-  // Custom layouts whose deck is no longer connected (unplugged, replaced,
-  // or a removed virtual deck).
-  const orphanedLayoutSerials = Object.keys(decksMap).filter(
-    (serial) => !deckSerials.includes(serial)
-  );
-
-  const buttons = (viewConfig.buttons as ButtonAssignment[] | undefined) ?? [];
-  const dials = (viewConfig.dials as DialAssignment[] | undefined) ?? [];
-
-  // Optional page labels (per-deck section): {"0": "Sources", ...}
-  const pageNames = (viewConfig.page_names as Record<string, string> | undefined) ?? {};
-  const pageLabel = useCallback(
-    (p: number) => pageNames[String(p)] || `Page ${p + 1}`,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viewConfig.page_names]
-  );
-  const renamePage = useCallback(
-    (p: number, name: string) => {
-      const next = { ...pageNames };
-      if (name.trim()) {
-        next[String(p)] = name.trim();
-      } else {
-        delete next[String(p)];
-      }
-      onViewChange({ ...viewConfig, page_names: next });
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pageNames, viewConfig, onViewChange]
-  );
-
-  // A physical surface button supports a subset of element actions: macro,
-  // device command, set-state, and (on paged surfaces) deck-page navigation.
-  // value_map needs a continuous input value and script.call is panel-only.
-  const supportsPages = !!layout.supports_pages;
-  const maxPages = layout.max_pages ?? 10;
+  // Flat-config assignment helpers for the simple layout types (strip,
+  // custom, static grid). Device-backed grids manage their own state inside
+  // DeckWorkbench.
+  const buttons = (config.buttons as ButtonAssignment[] | undefined) ?? [];
+  const supportsPages = !!staticLayout.supports_pages;
+  const maxPages = staticLayout.max_pages ?? 10;
   const allowedActions = supportsPages
     ? ["macro", "device.command", "state.set", "navigate"]
     : ["macro", "device.command", "state.set"];
@@ -314,7 +165,7 @@ export function SurfaceConfigurator({
         { value: "__prev_page__", label: "Previous Page" },
         ...Array.from({ length: maxPages }, (_, p) => ({
           value: String(p),
-          label: pageLabel(p),
+          label: `Page ${p + 1}`,
         })),
       ]
     : undefined;
@@ -335,9 +186,9 @@ export function SurfaceConfigurator({
         (b) => b.index === index && (b.page ?? 0) === page
       );
       const updated = { index, page, ...(current ?? {}), ...updates };
-      onViewChange({ ...viewConfig, buttons: [...existing, updated] });
+      onConfigChange({ ...config, buttons: [...existing, updated] });
     },
-    [buttons, viewConfig, onViewChange]
+    [buttons, config, onConfigChange]
   );
 
   const clearAssignment = useCallback(
@@ -345,308 +196,62 @@ export function SurfaceConfigurator({
       const filtered = buttons.filter(
         (b) => !(b.index === index && (b.page ?? 0) === page)
       );
-      onViewChange({ ...viewConfig, buttons: filtered });
+      onConfigChange({ ...config, buttons: filtered });
     },
-    [buttons, viewConfig, onViewChange]
+    [buttons, config, onConfigChange]
   );
 
-  // Assignment clipboard + arrange operations (copy/paste/move/swap pages
-  // included). All operate on the current view so per-deck overrides are
-  // respected.
-  const [clipboard, setClipboard] = useState<ButtonAssignment | null>(null);
-
-  const copyAssignment = useCallback(
-    (index: number, page: number) => {
-      const current = buttons.find(
-        (b) => b.index === index && (b.page ?? 0) === page
-      );
-      if (!current) return;
-      const { index: _i, page: _p, ...rest } = current;
-      setClipboard(JSON.parse(JSON.stringify(rest)));
-    },
-    [buttons]
-  );
-
-  const pasteAssignment = useCallback(
-    (index: number, page: number) => {
-      if (!clipboard) return;
-      const others = buttons.filter(
-        (b) => !(b.index === index && (b.page ?? 0) === page)
-      );
-      onViewChange({
-        ...viewConfig,
-        buttons: [...others, { ...JSON.parse(JSON.stringify(clipboard)), index, page }],
-      });
-    },
-    [clipboard, buttons, viewConfig, onViewChange]
-  );
-
-  const moveAssignment = useCallback(
-    (from: { index: number; page: number }, to: { index: number; page: number }) => {
-      const source = buttons.find(
-        (b) => b.index === from.index && (b.page ?? 0) === from.page
-      );
-      if (!source) return;
-      const others = buttons.filter(
-        (b) =>
-          !(b.index === from.index && (b.page ?? 0) === from.page) &&
-          !(b.index === to.index && (b.page ?? 0) === to.page)
-      );
-      onViewChange({
-        ...viewConfig,
-        buttons: [...others, { ...source, index: to.index, page: to.page }],
-      });
-      setSelectedControl(String(to.index));
-      setCurrentPage(to.page);
-    },
-    [buttons, viewConfig, onViewChange]
-  );
-
-  const swapAssignments = useCallback(
-    (a: { index: number; page: number }, b: { index: number; page: number }) => {
-      const first = buttons.find(
-        (x) => x.index === a.index && (x.page ?? 0) === a.page
-      );
-      const second = buttons.find(
-        (x) => x.index === b.index && (x.page ?? 0) === b.page
-      );
-      const others = buttons.filter(
-        (x) =>
-          !(x.index === a.index && (x.page ?? 0) === a.page) &&
-          !(x.index === b.index && (x.page ?? 0) === b.page)
-      );
-      const next = [...others];
-      if (first) next.push({ ...first, index: b.index, page: b.page });
-      if (second) next.push({ ...second, index: a.index, page: a.page });
-      onViewChange({ ...viewConfig, buttons: next });
-    },
-    [buttons, viewConfig, onViewChange]
-  );
-
-  const firstEmptyPage = useCallback((): number | null => {
-    for (let p = 0; p < effectiveMaxPages; p++) {
-      if (!buttons.some((b) => (b.page ?? 0) === p)) return p;
-    }
-    return null;
-  }, [buttons, effectiveMaxPages]);
-
-  const duplicatePage = useCallback(
-    (fromPage: number) => {
-      const target = firstEmptyPage();
-      if (target === null || target === fromPage) return;
-      const copies = buttons
-        .filter((b) => (b.page ?? 0) === fromPage)
-        .map((b) => ({ ...JSON.parse(JSON.stringify(b)), page: target }));
-      onViewChange({ ...viewConfig, buttons: [...buttons, ...copies] });
-      setCurrentPage(target);
-    },
-    [buttons, viewConfig, onViewChange, firstEmptyPage]
-  );
-
-  const clearPage = useCallback(
-    (page: number) => {
-      onViewChange({
-        ...viewConfig,
-        buttons: buttons.filter((b) => (b.page ?? 0) !== page),
-      });
-      setSelectedControl(null);
-    },
-    [buttons, viewConfig, onViewChange]
-  );
-
-  const getDial = useCallback(
-    (index: number): DialAssignment | undefined =>
-      dials.find((d) => d.index === index),
-    [dials]
-  );
-
-  const updateDial = useCallback(
-    (index: number, updates: Partial<DialAssignment>) => {
-      const others = dials.filter((d) => d.index !== index);
-      const current = dials.find((d) => d.index === index);
-      onViewChange({
-        ...viewConfig,
-        dials: [...others, { index, ...(current ?? {}), ...updates }],
-      });
-    },
-    [dials, viewConfig, onViewChange]
-  );
-
-  const clearDial = useCallback(
-    (index: number) => {
-      onViewChange({ ...viewConfig, dials: dials.filter((d) => d.index !== index) });
-    },
-    [dials, viewConfig, onViewChange]
-  );
-
-  const selectedDialIndex =
-    selectedControl !== null && selectedControl.startsWith("dial:")
-      ? parseInt(selectedControl.slice(5))
-      : null;
-
-  // Collapsed-section summaries (shown in the headers so a glance tells
-  // what's configured without expanding anything).
-  const activeIsVirtual = activeSerial
-    ? Boolean(liveState[`${statePrefix}${activeSerial}.virtual`])
-    : false;
-  const autoPageRules = (viewConfig.auto_page as unknown[] | undefined) ?? [];
-  const brightnessRules =
-    (viewConfig.auto_brightness as unknown[] | undefined) ?? [];
-  const idleDim = viewConfig.idle_dim as
-    | { after_seconds?: number; level?: number }
-    | undefined;
-  const customZones =
-    ((viewConfig.touchscreen as { zones?: unknown[] } | undefined)?.zones) ?? [];
-  const infoStrip = viewConfig.info_strip as
-    | { source?: string; key?: string; text?: string }
-    | undefined;
-  const infoStripMeta = !infoStrip
-    ? "off"
-    : (infoStrip.source ?? "state") === "text"
-      ? "static text"
-      : infoStrip.key || "state value";
-  const effectiveBaseBrightness =
-    typeof viewConfig.brightness === "number"
-      ? (viewConfig.brightness as number)
-      : typeof config.brightness === "number"
-        ? (config.brightness as number)
-        : 70;
-  const brightnessParts = [`base ${effectiveBaseBrightness}%`];
-  if (idleDim) brightnessParts.push(`idle dim ${idleDim.level ?? 10}%`);
-  if (brightnessRules.length) {
-    brightnessParts.push(
-      `${brightnessRules.length} rule${brightnessRules.length === 1 ? "" : "s"}`
-    );
-  }
-  const brightnessMeta = brightnessParts.join(" · ");
-
-  switch (layout.type) {
+  switch (staticLayout.type) {
     case "grid":
-      // Device-backed surface with nothing attached: an honest empty state
-      // instead of an editable grid for hardware that isn't there.
-      if (staticLayout.requires_device && deckSerials.length === 0) {
+      // Device-backed surface: the workbench (live canvas + inspector rail).
+      // With no unit at all — connected or remembered — an honest empty
+      // state instead of an editable grid for hardware that isn't there.
+      if (staticLayout.requires_device) {
+        if (knownSerials.length === 0) {
+          return (
+            <NoDeviceState
+              layout={staticLayout}
+              config={config}
+              onConfigChange={onConfigChange}
+            />
+          );
+        }
         return (
-          <NoDeviceState
-            layout={staticLayout}
+          <DeckWorkbench
+            pluginId={pluginId}
+            staticLayout={staticLayout}
             config={config}
             onConfigChange={onConfigChange}
           />
         );
       }
+      // Static-grid plugins (no requires_device): the classic schematic grid
+      // with the declared geometry and max_pages cap.
       return (
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-lg)" }}>
-          {/* Deck strip — names the deck being edited (even with just one)
-              and carries the per-deck tools + the add-virtual affordance */}
-          {deckSerials.length > 0 && (
-            <DeckPicker
-              serials={deckSerials}
-              activeSerial={activeSerial}
-              onSelect={(serial) => {
-                setSelectedDeckSerial(serial);
-                setSelectedControl(null);
-              }}
-              statePrefix={statePrefix}
-              pluginId={pluginId}
-              decksMap={decksMap}
-              config={config}
-              onConfigChange={onConfigChange}
-              onTransferLayout={reassignLayout}
-              virtualModels={staticLayout.virtual_models ?? []}
-              deviceLabel={staticLayout.device_label}
-            />
-          )}
-          {/* Custom layouts saved for decks that are no longer connected
-              (replaced hardware, retired virtual decks) */}
-          {activeSerial && orphanedLayoutSerials.length > 0 && (
-            <OrphanLayoutNotice
-              orphans={orphanedLayoutSerials}
-              deckNames={(config.deck_names as Record<string, string> | undefined) ?? {}}
-              targetSerial={activeSerial}
-              targetCustomized={isCustomized}
-              onAdopt={(serial) => reassignLayout(serial, activeSerial)}
-              onDelete={deleteOrphanLayout}
-            />
-          )}
-          {/* Per-deck overrides for the global scalar settings (customized decks only) */}
-          {isCustomized && (
-            <DeckScalarSettings viewConfig={viewConfig} onViewChange={onViewChange} />
-          )}
           <div style={{ display: "flex", gap: "var(--space-lg)" }}>
             <div style={{ flex: "0 0 auto" }}>
-              {/* Page tabs */}
-              {layout.supports_pages && (
-                <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
-                  <PageTabs
-                    currentPage={currentPage}
-                    maxPages={layout.max_pages ?? 10}
-                    onChange={setCurrentPage}
-                    label={pageLabel(currentPage)}
-                    onRename={(name) => renamePage(currentPage, name)}
-                  />
-                  <PageActions
-                    canDuplicate={firstEmptyPage() !== null && buttons.some((b) => (b.page ?? 0) === currentPage)}
-                    onDuplicate={() => duplicatePage(currentPage)}
-                    onClear={() => clearPage(currentPage)}
-                  />
-                </div>
+              {supportsPages && (
+                <PageTabs
+                  currentPage={currentPage}
+                  maxPages={maxPages}
+                  onChange={setCurrentPage}
+                />
               )}
               <GridSurface
-                layout={layout}
+                layout={staticLayout}
                 currentPage={currentPage}
                 selectedControl={selectedControl}
                 onSelectControl={setSelectedControl}
                 getAssignment={getAssignment}
-                flashIndex={inputFlash?.kind === "key" ? inputFlash.index : null}
               />
-              {/* Dials (detected on the connected hardware) */}
-              {liveDialCount > 0 && (
-                <DialRow
-                  count={liveDialCount}
-                  selectedControl={selectedControl}
-                  onSelectControl={setSelectedControl}
-                  getDial={getDial}
-                  flashIndex={inputFlash?.kind === "dial" ? inputFlash.index : null}
-                />
-              )}
-              {/* Color-only touch keys (indexed after the LCD keys) */}
-              {liveTouchKeyCount > 0 && liveKeyCount > 0 && (
-                <TouchKeyRow
-                  keyCount={liveKeyCount}
-                  touchKeyCount={liveTouchKeyCount}
-                  currentPage={currentPage}
-                  selectedControl={selectedControl}
-                  onSelectControl={setSelectedControl}
-                  getAssignment={getAssignment}
-                  flashIndex={inputFlash?.kind === "key" ? inputFlash.index : null}
-                />
-              )}
             </div>
-            {selectedDialIndex !== null && (
-              <DialAssignmentPanel
-                dialIndex={selectedDialIndex}
-                dial={getDial(selectedDialIndex)}
-                allowedActions={allowedActions}
-                navigateOptions={navigateOptions}
-                onUpdate={(updates) => updateDial(selectedDialIndex, updates)}
-                onClear={() => clearDial(selectedDialIndex)}
-                onClose={() => setSelectedControl(null)}
-              />
-            )}
-            {selectedControl !== null && selectedDialIndex === null && (
+            {selectedControl !== null && (
               <ControlAssignmentPanel
                 controlId={selectedControl}
                 allowedActions={allowedActions}
                 navigateOptions={navigateOptions}
-                colorOnly={
-                  liveTouchKeyCount > 0 &&
-                  liveKeyCount > 0 &&
-                  parseInt(selectedControl) >= liveKeyCount
-                }
-                keyCount={liveKeyCount}
-                assignment={getAssignment(
-                  parseInt(selectedControl),
-                  currentPage
-                )}
+                assignment={getAssignment(parseInt(selectedControl), currentPage)}
                 onUpdate={(updates) =>
                   updateAssignment(parseInt(selectedControl), currentPage, updates)
                 }
@@ -654,151 +259,22 @@ export function SurfaceConfigurator({
                   clearAssignment(parseInt(selectedControl), currentPage)
                 }
                 onClose={() => setSelectedControl(null)}
-                arrange={{
-                  page: currentPage,
-                  maxPages: effectiveMaxPages,
-                  totalKeys:
-                    deckConnected && liveKeyCount > 0
-                      ? liveKeyCount + liveTouchKeyCount
-                      : (layout.rows ?? 3) * (layout.columns ?? 5),
-                  pageLabel,
-                  clipboardReady: clipboard !== null,
-                  onCopy: () => copyAssignment(parseInt(selectedControl), currentPage),
-                  onPaste: () => pasteAssignment(parseInt(selectedControl), currentPage),
-                  onMove: (to) =>
-                    moveAssignment(
-                      { index: parseInt(selectedControl), page: currentPage }, to
-                    ),
-                  onSwap: (to) =>
-                    swapAssignments(
-                      { index: parseInt(selectedControl), page: currentPage }, to
-                    ),
-                }}
               />
-            )}
-            {/* Nothing selected: show where the editor lives instead of
-                leaving the space blank */}
-            {selectedControl === null && (
-              <div
-                style={{
-                  width: 300,
-                  flexShrink: 0,
-                  alignSelf: "stretch",
-                  minHeight: 120,
-                  border: "1px dashed var(--border-color)",
-                  borderRadius: "var(--border-radius)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  padding: "var(--space-lg)",
-                  color: "var(--text-muted)",
-                  fontSize: "var(--font-size-sm)",
-                  textAlign: "center",
-                  lineHeight: 1.6,
-                }}
-              >
-                Select a key to set what it does.
-                <br />
-                Its label, icon, colors, and actions are edited here.
-              </div>
             )}
           </div>
-          {/* Live preview — the deck's actual rendering, clickable to press.
-              Keyed by serial so switching decks resets the open state (open
-              by default for virtual decks: clicking it is how they're used). */}
-          {deckConnected && activeSerial && (
+          {supportsPages && (
             <CollapsibleSection
-              key={`live-${activeSerial}`}
-              title="Live Preview"
-              subtitle="Exactly what this deck is showing right now. Click keys to press them."
-              meta={activeIsVirtual ? "virtual deck" : undefined}
-              defaultOpen={activeIsVirtual}
-            >
-              <SurfaceLiveView
-                pluginId={pluginId}
-                serial={activeSerial}
-                statePrefix={statePrefix}
-              />
-            </CollapsibleSection>
-          )}
-          {liveHasTouchscreen && (
-            <CollapsibleSection
-              title="Touch Strip"
-              subtitle="What the touchscreen under the dials shows, and what tapping it does"
-              meta={
-                customZones.length
-                  ? `${customZones.length} custom zone${customZones.length === 1 ? "" : "s"}`
-                  : "default: one zone per dial"
-              }
-              defaultOpen={false}
-            >
-              <TouchscreenZonesEditor
-                config={viewConfig}
-                onConfigChange={onViewChange}
-                allowedActions={allowedActions}
-                navigateOptions={navigateOptions}
-              />
-            </CollapsibleSection>
-          )}
-          {liveHasInfoScreen && (
-            <CollapsibleSection
-              title="Info Screen"
-              subtitle="Show a live state value or static text on the small screen between the touch keys"
-              meta={infoStripMeta}
-              defaultOpen={false}
-            >
-              <InfoStripEditor config={viewConfig} onConfigChange={onViewChange} />
-            </CollapsibleSection>
-          )}
-          {layout.supports_pages && (
-            <CollapsibleSection
-              title="Automatic Page Switching"
+              title="Page automation"
               subtitle="Jump to a button page when system state changes"
-              meta={
-                autoPageRules.length
-                  ? `${autoPageRules.length} rule${autoPageRules.length === 1 ? "" : "s"}`
-                  : "off"
-              }
               defaultOpen={false}
             >
               <AutoPageEditor
-                layout={layout}
-                config={viewConfig}
-                onConfigChange={onViewChange}
+                layout={staticLayout}
+                config={config}
+                onConfigChange={onConfigChange}
               />
             </CollapsibleSection>
           )}
-          <CollapsibleSection
-            title="Brightness"
-            subtitle="Base level, idle dimming, and state-driven rules"
-            meta={brightnessMeta}
-            defaultOpen={false}
-          >
-            <BrightnessEditor
-              config={viewConfig}
-              onConfigChange={onViewChange}
-              baseBrightness={
-                isCustomized
-                  ? undefined
-                  : typeof config.brightness === "number"
-                    ? (config.brightness as number)
-                    : undefined
-              }
-              onBaseBrightnessChange={
-                isCustomized
-                  ? undefined
-                  : (v) => {
-                      const next = { ...config };
-                      if (v === undefined) {
-                        delete next.brightness;
-                      } else {
-                        next.brightness = v;
-                      }
-                      onConfigChange(next);
-                    }
-              }
-            />
-          </CollapsibleSection>
         </div>
       );
 
@@ -806,7 +282,7 @@ export function SurfaceConfigurator({
       return (
         <div style={{ display: "flex", gap: "var(--space-lg)" }}>
           <StripSurface
-            layout={layout}
+            layout={staticLayout}
             selectedControl={selectedControl}
             onSelectControl={setSelectedControl}
             getAssignment={getAssignment}
@@ -831,7 +307,7 @@ export function SurfaceConfigurator({
       return (
         <div style={{ display: "flex", gap: "var(--space-lg)" }}>
           <CustomSurface
-            layout={layout}
+            layout={staticLayout}
             selectedControl={selectedControl}
             onSelectControl={setSelectedControl}
             getAssignment={getAssignment}
@@ -853,12 +329,12 @@ export function SurfaceConfigurator({
       );
 
     case "matrix":
-      return <RoutingMatrix layout={layout} pluginId={pluginId} config={config} onRequestConfigRefresh={onRequestConfigRefresh} />;
+      return <RoutingMatrix layout={staticLayout} pluginId={pluginId} config={config} onRequestConfigRefresh={onRequestConfigRefresh} />;
 
     default:
       return (
         <div style={{ color: "var(--text-muted)", padding: "var(--space-lg)" }}>
-          Unknown surface type: {layout.type}
+          Unknown surface type: {staticLayout.type}
         </div>
       );
   }
@@ -1596,6 +1072,11 @@ function ControlAssignmentPanel({
   colorOnly = false,
   keyCount = 0,
   arrange,
+  pageName,
+  locked,
+  onToggleLock,
+  lockShadowCount = 0,
+  onPress,
 }: {
   controlId: string;
   assignment: ButtonAssignment | undefined;
@@ -1608,17 +1089,67 @@ function ControlAssignmentPanel({
   colorOnly?: boolean;
   keyCount?: number;
   arrange?: ArrangeOps;
+  // Workbench extras: page context in the title, the lock toggle, and a
+  // real press (simulate_input) button.
+  pageName?: string;
+  locked?: boolean;
+  onToggleLock?: (locked: boolean) => void;
+  lockShadowCount?: number;
+  onPress?: () => void;
 }) {
   const project = useProjectStore((s) => s.project);
   const [arrangeMode, setArrangeMode] = useState<"move" | "swap" | null>(null);
   const [targetPage, setTargetPage] = useState(0);
   const [targetKey, setTargetKey] = useState(0);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const currentBindings: ButtonBindings = assignment?.bindings ?? {};
   const controlIndex = parseInt(controlId);
-  const title = colorOnly
+  const keyNoun = colorOnly
     ? `Touch Key ${controlIndex - keyCount + 1}`
-    : `Button ${controlIndex + 1}`;
+    : onToggleLock
+      ? `Key ${controlIndex + 1}`
+      : `Button ${controlIndex + 1}`;
+  const title = locked
+    ? `${keyNoun} — every page`
+    : pageName
+      ? `${keyNoun} — ${pageName}`
+      : keyNoun;
+
+  const whatItShows = (
+    <div>
+      <label style={panelLabelStyle}>{colorOnly ? "Key Color" : "What It Shows"}</label>
+      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+        {!colorOnly && (
+          <IconPicker
+            value={assignment?.icon ?? ""}
+            onChange={(icon) => onUpdate({ icon: icon || undefined })}
+          />
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
+          <span style={panelHintStyle}>Background</span>
+          <InlineColorPicker
+            value={assignment?.bg_color ?? ""}
+            onChange={(c) => onUpdate({ bg_color: c || undefined })}
+          />
+        </div>
+        {!colorOnly && (
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
+            <span style={panelHintStyle}>Text</span>
+            <InlineColorPicker
+              value={assignment?.text_color ?? ""}
+              onChange={(c) => onUpdate({ text_color: c || undefined })}
+            />
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+        {colorOnly
+          ? "This key has no display — it glows with this color. Feedback colors override it when active; labels and icons don't apply."
+          : "Feedback colors override these when active."}
+      </div>
+    </div>
+  );
 
   return (
     <div
@@ -1637,55 +1168,68 @@ function ControlAssignmentPanel({
       }}
     >
       {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h4 style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--space-sm)" }}>
+        <h4 style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {title}
         </h4>
-        <button onClick={onClose} style={{ color: "var(--text-muted)", cursor: "pointer" }}>
-          <X size={14} />
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", flexShrink: 0 }}>
+          {onPress && (
+            <button
+              onClick={onPress}
+              title="Press this key for real (same as pushing it on the deck)"
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                padding: "2px 8px", borderRadius: "var(--border-radius)",
+                background: "var(--bg-hover)", color: "var(--text-secondary)",
+                fontSize: 11, cursor: "pointer",
+              }}
+            >
+              <Play size={11} /> Press
+            </button>
+          )}
+          <button onClick={onClose} style={{ color: "var(--text-muted)", cursor: "pointer" }}>
+            <X size={14} />
+          </button>
+        </div>
       </div>
 
-      {/* Icon (LCD keys only) */}
-      {!colorOnly && (
+      {/* Lock: keep this key identical on every page */}
+      {onToggleLock && (
         <div>
-          <label style={panelLabelStyle}>Icon</label>
-          <IconPicker
-            value={assignment?.icon ?? ""}
-            onChange={(icon) => onUpdate({ icon: icon || undefined })}
-          />
+          <label
+            style={{
+              display: "flex", alignItems: "center", gap: "var(--space-sm)",
+              fontSize: "var(--font-size-sm)", cursor: "pointer",
+              color: "var(--text-primary)",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={!!locked}
+              onChange={(e) => onToggleLock(e.target.checked)}
+              style={{ accentColor: "var(--accent)" }}
+            />
+            <Pin size={13} style={{ color: locked ? "var(--accent)" : "var(--text-muted)" }} />
+            Same on every page
+          </label>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+            Locked keys keep this assignment on every page. Great for page
+            switchers.
+            {!locked && lockShadowCount > 0 && (
+              <>
+                {" "}
+                <span style={{ color: "var(--color-warning, #f59e0b)" }}>
+                  {lockShadowCount} page{lockShadowCount === 1 ? " has" : "s have"} something
+                  on this key; that stays hidden while it's locked.
+                </span>
+              </>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Default Colors */}
-      <div>
-        <label style={panelLabelStyle}>{colorOnly ? "Key Color" : "Default Colors"}</label>
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
-            <span style={panelHintStyle}>Background</span>
-            <InlineColorPicker
-              value={assignment?.bg_color ?? ""}
-              onChange={(c) => onUpdate({ bg_color: c || undefined })}
-            />
-          </div>
-          {!colorOnly && (
-            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
-              <span style={panelHintStyle}>Text</span>
-              <InlineColorPicker
-                value={assignment?.text_color ?? ""}
-                onChange={(c) => onUpdate({ text_color: c || undefined })}
-              />
-            </div>
-          )}
-        </div>
-        <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
-          {colorOnly
-            ? "This key has no display — it glows with this color. Feedback colors override it when active; labels and icons don't apply."
-            : "Feedback colors override these when active."}
-        </div>
-      </div>
-
-      {/* Shared binding editor — same component the web UI Builder uses */}
+      {/* Shared binding editor — same component the web UI Builder uses.
+          Surface order: what it does first, then label, press style, feedback. */}
       {project ? (
         <ButtonBindingEditor
           bindings={currentBindings}
@@ -1699,10 +1243,31 @@ function ControlAssignmentPanel({
           showToggleLabels={!colorOnly}
           allowedActions={allowedActions}
           navigateOptions={navigateOptions}
+          surfaceOrder
         />
       ) : (
         <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Loading project...</div>
       )}
+
+      {whatItShows}
+
+      {/* More: visibility + arrange, tucked away */}
+      <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--border-radius)", overflow: "hidden" }}>
+        <button
+          onClick={() => setMoreOpen(!moreOpen)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            width: "100%", padding: "6px 10px", fontSize: "var(--font-size-sm)",
+            background: "var(--bg-surface)", textAlign: "left", cursor: "pointer",
+          }}
+        >
+          <span style={{ fontWeight: 500 }}>More</span>
+          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            visibility{locked ? "" : " · arrange"}
+          </span>
+        </button>
+        {moreOpen && (
+          <div style={{ padding: "var(--space-sm)", borderTop: "1px solid var(--border-color)", display: "flex", flexDirection: "column", gap: "var(--space-lg)" }}>
 
       {/* Visibility — hide this button based on system state */}
       <div>
@@ -1720,8 +1285,9 @@ function ControlAssignmentPanel({
         </div>
       </div>
 
-      {/* Arrange: copy/paste/move/swap */}
-      {arrange && (
+      {/* Arrange: copy/paste/move/swap (page keys only — locked keys are
+          everywhere already) */}
+      {arrange && !locked && (
         <div>
           <label style={panelLabelStyle}>Arrange</label>
           <div style={{ display: "flex", gap: "var(--space-xs)", flexWrap: "wrap" }}>
@@ -1805,6 +1371,9 @@ function ControlAssignmentPanel({
           )}
         </div>
       )}
+          </div>
+        )}
+      </div>
 
       {/* Clear All */}
       <button
@@ -1840,205 +1409,6 @@ const arrangeBtnStyle = (disabled: boolean, active = false): React.CSSProperties
   cursor: disabled ? "default" : "pointer",
   opacity: disabled ? 0.5 : 1,
 });
-
-// ──── Page Actions (duplicate / clear) ────
-
-function PageActions({
-  canDuplicate,
-  onDuplicate,
-  onClear,
-}: {
-  canDuplicate: boolean;
-  onDuplicate: () => void;
-  onClear: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [confirmClear, setConfirmClear] = useState(false);
-
-  return (
-    <div style={{ position: "relative", marginBottom: "var(--space-sm)" }}>
-      <button
-        onClick={() => {
-          setOpen(!open);
-          setConfirmClear(false);
-        }}
-        title="Page actions"
-        style={{
-          padding: "var(--space-xs) var(--space-sm)",
-          borderRadius: "var(--border-radius)",
-          background: "var(--bg-hover)",
-          fontSize: "var(--font-size-sm)",
-          cursor: "pointer",
-        }}
-      >
-        &#8943;
-      </button>
-      {open && (
-        <div
-          style={{
-            position: "absolute", top: "100%", left: 0, zIndex: 50,
-            marginTop: 4, minWidth: 200,
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border-color)",
-            borderRadius: "var(--border-radius)",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-            display: "flex", flexDirection: "column",
-          }}
-        >
-          <button
-            onClick={() => {
-              onDuplicate();
-              setOpen(false);
-            }}
-            disabled={!canDuplicate}
-            title={canDuplicate ? "Copy every assignment on this page to the first empty page" : "Needs assignments here and an empty page to copy to"}
-            style={{
-              padding: "var(--space-sm) var(--space-md)", textAlign: "left",
-              fontSize: "var(--font-size-sm)", cursor: canDuplicate ? "pointer" : "default",
-              opacity: canDuplicate ? 1 : 0.5,
-            }}
-          >
-            Duplicate to first empty page
-          </button>
-          {!confirmClear ? (
-            <button
-              onClick={() => setConfirmClear(true)}
-              style={{
-                padding: "var(--space-sm) var(--space-md)", textAlign: "left",
-                fontSize: "var(--font-size-sm)", color: "var(--color-error)", cursor: "pointer",
-              }}
-            >
-              Clear this page...
-            </button>
-          ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", padding: "var(--space-sm) var(--space-md)", fontSize: 12 }}>
-              <span style={{ color: "var(--color-error)" }}>Remove every assignment?</span>
-              <button
-                onClick={() => {
-                  onClear();
-                  setOpen(false);
-                  setConfirmClear(false);
-                }}
-                style={{ padding: "2px 8px", borderRadius: "var(--border-radius)", background: "var(--bg-hover)", cursor: "pointer", fontSize: 12 }}
-              >
-                Yes
-              </button>
-              <button
-                onClick={() => setConfirmClear(false)}
-                style={{ padding: "2px 8px", borderRadius: "var(--border-radius)", background: "var(--bg-hover)", cursor: "pointer", fontSize: 12 }}
-              >
-                No
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ──── Orphaned Layout Notice ────
-//
-// A decks[serial] custom layout whose deck is gone (replaced hardware or a
-// retired virtual deck). Offer to re-key it onto the selected deck — the
-// dead-deck-replacement path — or delete it.
-
-function OrphanLayoutNotice({
-  orphans,
-  deckNames,
-  targetSerial,
-  targetCustomized,
-  onAdopt,
-  onDelete,
-}: {
-  orphans: string[];
-  deckNames: Record<string, string>;
-  targetSerial: string;
-  targetCustomized: boolean;
-  onAdopt: (serial: string) => void;
-  onDelete: (serial: string) => void;
-}) {
-  const [confirm, setConfirm] = useState<{ serial: string; action: "adopt" | "delete" } | null>(null);
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "var(--space-xs)",
-        padding: "var(--space-sm) var(--space-md)",
-        border: "1px dashed var(--border-color)",
-        borderRadius: "var(--border-radius)",
-        background: "var(--bg-surface)",
-      }}
-    >
-      {orphans.map((serial) => {
-        const label = deckNames[serial] ? `${deckNames[serial]} (${serial})` : serial;
-        const pending = confirm?.serial === serial ? confirm.action : null;
-        return (
-          <div key={serial} style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", flexWrap: "wrap", fontSize: 12 }}>
-            <span style={{ color: "var(--text-secondary)" }}>
-              Saved layout from a disconnected deck: <strong>{label}</strong>
-            </span>
-            {!pending && (
-              <>
-                <button
-                  onClick={() =>
-                    targetCustomized
-                      ? setConfirm({ serial, action: "adopt" })
-                      : onAdopt(serial)
-                  }
-                  title="Move this custom layout (and its name) onto the selected deck"
-                  style={{
-                    padding: "2px 8px", borderRadius: "var(--border-radius)",
-                    background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-                  }}
-                >
-                  Use on this deck
-                </button>
-                <button
-                  onClick={() => setConfirm({ serial, action: "delete" })}
-                  style={{
-                    padding: "2px 8px", borderRadius: "var(--border-radius)",
-                    background: "transparent", border: "1px solid var(--border-color)",
-                    color: "var(--color-error)", fontSize: 12, cursor: "pointer",
-                  }}
-                >
-                  Delete
-                </button>
-              </>
-            )}
-            {pending && (
-              <span style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
-                <span style={{ color: "var(--color-error, #ef4444)" }}>
-                  {pending === "adopt"
-                    ? `Replace ${targetSerial}'s custom layout?`
-                    : "Delete this saved layout?"}
-                </span>
-                <button
-                  onClick={() => {
-                    if (pending === "adopt") onAdopt(serial);
-                    else onDelete(serial);
-                    setConfirm(null);
-                  }}
-                  style={{ padding: "2px 8px", borderRadius: "var(--border-radius)", background: "var(--bg-hover)", fontSize: 12, cursor: "pointer" }}
-                >
-                  Yes
-                </button>
-                <button
-                  onClick={() => setConfirm(null)}
-                  style={{ padding: "2px 8px", borderRadius: "var(--border-radius)", background: "var(--bg-hover)", fontSize: 12, cursor: "pointer" }}
-                >
-                  No
-                </button>
-              </span>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 // ──── No Device State ────
 //
@@ -2183,835 +1553,6 @@ function NoDeviceState({
   );
 }
 
-// ──── Live View (mirrored deck rendering, clickable) ────
-
-function SurfaceLiveView({
-  pluginId,
-  serial,
-  statePrefix,
-}: {
-  pluginId: string;
-  serial: string;
-  statePrefix: string;
-}) {
-  const liveState = useConnectionStore((s) => s.liveState);
-  const sp = `${statePrefix}${serial}.`;
-  const rows = Number(liveState[`${sp}rows`] ?? 0) || 1;
-  const columns = Number(liveState[`${sp}columns`] ?? 0) || 1;
-  const keyCount = Number(liveState[`${sp}key_count`] ?? 0);
-  const touchKeyCount = Number(liveState[`${sp}touch_key_count`] ?? 0);
-  const dialCount = Number(liveState[`${sp}dial_count`] ?? 0);
-  const hasTouchscreen = Boolean(liveState[`${sp}has_touchscreen`]);
-  const hasInfoScreen = Boolean(liveState[`${sp}has_info_screen`]);
-  const isVirtual = Boolean(liveState[`${sp}virtual`]);
-  const renderVersion = Number(liveState[`${sp}render_version`] ?? 0);
-
-  const [images, setImages] = useState<Record<string, string>>({});
-  const imagesRef = useRef<Record<string, string>>({});
-  imagesRef.current = images;
-
-  // Physical decks only mirror while a live view is open.
-  useEffect(() => {
-    if (isVirtual) return;
-    api.emitContextAction(pluginId, "set_live_mirror", { on: true }).catch(() => {});
-    return () => {
-      api.emitContextAction(pluginId, "set_live_mirror", { on: false }).catch(() => {});
-    };
-  }, [pluginId, isVirtual]);
-
-  // (Re)fetch the mirrored images whenever the deck re-renders.
-  useEffect(() => {
-    let cancelled = false;
-    const items: string[] = [];
-    for (let i = 0; i < keyCount; i++) items.push(`key_${i}`);
-    if (hasTouchscreen) items.push("touchscreen");
-    if (hasInfoScreen) items.push("screen");
-
-    (async () => {
-      const next: Record<string, string> = {};
-      await Promise.all(
-        items.map(async (item) => {
-          try {
-            const res = await fetch(
-              `${BASE}/plugins/${pluginId}/ext/live/${serial}/${item}?v=${renderVersion}`
-            );
-            if (!res.ok) return;
-            next[item] = URL.createObjectURL(await res.blob());
-          } catch {
-            /* mirror not populated yet */
-          }
-        })
-      );
-      if (cancelled) {
-        Object.values(next).forEach((url) => URL.revokeObjectURL(url));
-        return;
-      }
-      setImages((prev) => {
-        Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
-        return next;
-      });
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [pluginId, serial, renderVersion, keyCount, hasTouchscreen, hasInfoScreen]);
-
-  // Revoke object URLs on unmount.
-  useEffect(
-    () => () => {
-      Object.values(imagesRef.current).forEach((url) => URL.revokeObjectURL(url));
-    },
-    []
-  );
-
-  const simulate = (payload: Record<string, unknown>) => {
-    api.emitContextAction(pluginId, "simulate_input", { serial, ...payload }).catch(() => {});
-  };
-
-  const keyPx = 64;
-  const gap = 6;
-  const gridWidth = columns * keyPx + (columns - 1) * gap;
-
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        flexDirection: "column",
-        gap,
-        padding: "var(--space-md)",
-        background: "#0c0c14",
-        borderRadius: "var(--border-radius)",
-        border: "1px solid var(--border-color)",
-      }}
-    >
-      {/* LCD keys */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${columns}, ${keyPx}px)`,
-          gridTemplateRows: `repeat(${rows}, ${keyPx}px)`,
-          gap,
-        }}
-      >
-        {Array.from({ length: keyCount }, (_, i) => (
-          <button
-            key={i}
-            onMouseDown={() => simulate({ type: "key", index: i, pressed: true })}
-            onMouseUp={() => simulate({ type: "key", index: i, pressed: false })}
-            onMouseLeave={(e) => {
-              if (e.buttons & 1) simulate({ type: "key", index: i, pressed: false });
-            }}
-            title={`Press key ${i + 1}`}
-            style={{
-              width: keyPx, height: keyPx, padding: 0, borderRadius: 8,
-              overflow: "hidden", border: "1px solid #2a2a3a",
-              background: "#000", cursor: "pointer",
-            }}
-          >
-            {images[`key_${i}`] ? (
-              <img
-                src={images[`key_${i}`]}
-                draggable={false}
-                style={{ width: "100%", height: "100%", display: "block" }}
-                alt=""
-              />
-            ) : (
-              <span style={{ fontSize: 10, color: "#444" }}>{i + 1}</span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {/* Info screen + touch keys (Neo) */}
-      {(hasInfoScreen || touchKeyCount > 0) && (
-        <div style={{ display: "flex", alignItems: "center", gap }}>
-          {touchKeyCount > 0 && (
-            <TouchKeyPill
-              color={String(liveState[`${sp}touch_key.${keyCount}`] ?? "#000000")}
-              onTap={() => simulate({ type: "key", index: keyCount })}
-            />
-          )}
-          {hasInfoScreen && (
-            <div
-              style={{
-                flex: 1, height: Math.round((gridWidth * 0.6 * 58) / 248),
-                borderRadius: 4, overflow: "hidden", background: "#000",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}
-            >
-              {images["screen"] && (
-                <img
-                  src={images["screen"]}
-                  draggable={false}
-                  style={{ height: "100%", display: "block" }}
-                  alt=""
-                />
-              )}
-            </div>
-          )}
-          {touchKeyCount > 1 && (
-            <TouchKeyPill
-              color={String(liveState[`${sp}touch_key.${keyCount + 1}`] ?? "#000000")}
-              onTap={() => simulate({ type: "key", index: keyCount + 1 })}
-            />
-          )}
-        </div>
-      )}
-
-      {/* Touchscreen strip (Plus) */}
-      {hasTouchscreen && (
-        <div
-          onClick={(e) => {
-            const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-            const x = Math.round(((e.clientX - rect.left) / rect.width) * 800);
-            simulate({ type: "touch", x });
-          }}
-          title="Tap the touchscreen"
-          style={{
-            width: gridWidth, height: Math.round(gridWidth / 8),
-            borderRadius: 4, overflow: "hidden", background: "#000", cursor: "pointer",
-          }}
-        >
-          {images["touchscreen"] && (
-            <img
-              src={images["touchscreen"]}
-              draggable={false}
-              style={{ width: "100%", height: "100%", display: "block" }}
-              alt=""
-            />
-          )}
-        </div>
-      )}
-
-      {/* Dials (Plus) */}
-      {dialCount > 0 && (
-        <div style={{ display: "flex", justifyContent: "space-around" }}>
-          {Array.from({ length: dialCount }, (_, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 2 }}>
-              <button
-                onClick={() => simulate({ type: "dial_turn", index: i, amount: -1 })}
-                title={`Turn dial ${i + 1} counter-clockwise`}
-                style={{ color: "#888", cursor: "pointer", fontSize: 14, padding: 2 }}
-              >
-                &#8634;
-              </button>
-              <button
-                onClick={() => simulate({ type: "dial_push", index: i })}
-                title={`Press dial ${i + 1}`}
-                style={{
-                  width: 26, height: 26, borderRadius: "50%",
-                  border: "1px solid #2a2a3a", background: "#16161f",
-                  cursor: "pointer",
-                }}
-              />
-              <button
-                onClick={() => simulate({ type: "dial_turn", index: i, amount: 1 })}
-                title={`Turn dial ${i + 1} clockwise`}
-                style={{ color: "#888", cursor: "pointer", fontSize: 14, padding: 2 }}
-              >
-                &#8635;
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TouchKeyPill({ color, onTap }: { color: string; onTap: () => void }) {
-  return (
-    <button
-      onClick={onTap}
-      title="Tap touch key"
-      style={{
-        width: 22, height: 44, borderRadius: 11,
-        border: "1px solid #2a2a3a",
-        background: color || "#000000",
-        cursor: "pointer",
-      }}
-    />
-  );
-}
-
-// ──── Deck Picker (the "you are editing this deck" strip) ────
-//
-// Renders for every deck count >= 1: each unit is a labeled card (name,
-// model, serial, virtual marker, custom-vs-mirrored), the active unit
-// carries the per-deck tools, and adding a virtual unit lives at the end
-// of the strip.
-
-function DeckPicker({
-  serials,
-  activeSerial,
-  onSelect,
-  statePrefix,
-  pluginId,
-  decksMap,
-  config,
-  onConfigChange,
-  onTransferLayout,
-  virtualModels = [],
-  deviceLabel,
-}: {
-  serials: string[];
-  activeSerial: string | null;
-  onSelect: (serial: string) => void;
-  statePrefix: string;
-  pluginId: string;
-  decksMap: Record<string, Record<string, unknown>>;
-  config: Record<string, unknown>;
-  onConfigChange: (config: Record<string, unknown>) => void;
-  onTransferLayout?: (fromSerial: string, toSerial: string) => void;
-  virtualModels?: string[];
-  deviceLabel?: string;
-}) {
-  const liveState = useConnectionStore((s) => s.liveState);
-  const [confirmRevert, setConfirmRevert] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  const [transferTarget, setTransferTarget] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [addModel, setAddModel] = useState(virtualModels[0] ?? "");
-  const [pendingAdd, setPendingAdd] = useState<string | null>(null);
-  const isCustomized = activeSerial ? decksMap[activeSerial] !== undefined : false;
-  const deckNames = (config.deck_names as Record<string, string> | undefined) ?? {};
-  const activeIsVirtual = activeSerial
-    ? Boolean(liveState[`${statePrefix}${activeSerial}.virtual`])
-    : false;
-
-  // Clear the "connecting..." hint once the new virtual unit shows up.
-  useEffect(() => {
-    if (pendingAdd && serials.includes(pendingAdd)) setPendingAdd(null);
-  }, [pendingAdd, serials]);
-
-  // The per-deck config sections an override replaces (mirrors the runtime).
-  const DECK_SECTIONS = [
-    "buttons", "auto_page", "dials", "touchscreen",
-    "info_strip", "auto_brightness", "idle_dim", "page_names",
-  ];
-
-  const renameDeck = (serial: string, name: string) => {
-    const next = { ...deckNames };
-    if (name) {
-      next[serial] = name;
-    } else {
-      delete next[serial];
-    }
-    onConfigChange({ ...config, deck_names: next });
-  };
-
-  const customizeDeck = () => {
-    if (!activeSerial) return;
-    // Start the override as a copy of the main config's sections so the deck
-    // keeps its current behavior until it's edited.
-    const copy: Record<string, unknown> = {};
-    for (const section of DECK_SECTIONS) {
-      if (config[section] !== undefined) {
-        copy[section] = JSON.parse(JSON.stringify(config[section]));
-      }
-    }
-    onConfigChange({ ...config, decks: { ...decksMap, [activeSerial]: copy } });
-  };
-
-  const revertDeck = () => {
-    if (!activeSerial) return;
-    const next = { ...decksMap };
-    delete next[activeSerial];
-    onConfigChange({ ...config, decks: next });
-    setConfirmRevert(false);
-  };
-
-  const addVirtual = () => {
-    if (!addModel) return;
-    const { next, serial } = addVirtualUnit(config, addModel);
-    onConfigChange(next);
-    setPendingAdd(serial);
-    setAdding(false);
-  };
-
-  // Removing a virtual unit keeps any custom layout it had — the saved
-  // layout resurfaces via the orphan notice if it was customized.
-  const removeVirtualDeck = () => {
-    if (!activeSerial) return;
-    const virtuals =
-      (config.virtual_decks as { model?: string; serial?: string }[] | undefined) ?? [];
-    onConfigChange({
-      ...config,
-      virtual_decks: virtuals.filter((v) => v.serial !== activeSerial),
-    });
-    setConfirmRemove(false);
-  };
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "var(--space-sm)",
-        flexWrap: "wrap",
-      }}
-    >
-      {serials.map((serial) => {
-        const model = String(liveState[`${statePrefix}${serial}.model`] ?? "Deck");
-        const custom = decksMap[serial] !== undefined;
-        const virtual = Boolean(liveState[`${statePrefix}${serial}.virtual`]);
-        const isActive = serial === activeSerial;
-        return (
-          <button
-            key={serial}
-            onClick={() => {
-              setConfirmRevert(false);
-              onSelect(serial);
-            }}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-start",
-              padding: "var(--space-xs) var(--space-md)",
-              borderRadius: "var(--border-radius)",
-              background: isActive ? "var(--accent-dim)" : "var(--bg-surface)",
-              border: isActive
-                ? "2px solid var(--accent)"
-                : "1px solid var(--border-color)",
-              cursor: "pointer",
-            }}
-          >
-            <span style={{ fontSize: "var(--font-size-sm)", fontWeight: isActive ? 600 : 400 }}>
-              {deckNames[serial] || model}
-            </span>
-            <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-              {deckNames[serial] ? `${model} · ` : ""}{serial}{virtual ? " · virtual" : ""}
-              {custom
-                ? " — custom layout"
-                : serials.length > 1
-                  ? " — mirrors main config"
-                  : ""}
-            </span>
-          </button>
-        );
-      })}
-
-      {/* Add a virtual unit (software deck, runs like attached hardware) */}
-      {virtualModels.length > 0 && !adding && (
-        <button
-          onClick={() => setAdding(true)}
-          title="Add a software unit that runs exactly like attached hardware, for building layouts without it"
-          style={{
-            padding: "var(--space-xs) var(--space-md)",
-            borderRadius: "var(--border-radius)",
-            border: "1px dashed var(--border-color)",
-            background: "transparent",
-            color: "var(--text-muted)",
-            fontSize: "var(--font-size-sm)",
-            cursor: "pointer",
-          }}
-        >
-          + Virtual {deviceLabel || "unit"}
-        </button>
-      )}
-      {adding && (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xs)" }}>
-          <select
-            value={addModel}
-            onChange={(e) => setAddModel(e.target.value)}
-            style={{
-              padding: "4px 6px", borderRadius: "var(--border-radius)",
-              border: "1px solid var(--border-color)", background: "var(--bg-surface)",
-              color: "var(--text-primary)", fontSize: 12,
-            }}
-          >
-            {virtualModels.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-          <button
-            onClick={addVirtual}
-            style={{
-              padding: "4px 10px", borderRadius: "var(--border-radius)",
-              background: "var(--accent-bg)", color: "var(--text-on-accent)",
-              fontSize: 12, cursor: "pointer",
-            }}
-          >
-            Add
-          </button>
-          <button
-            onClick={() => setAdding(false)}
-            style={{
-              padding: "4px 10px", borderRadius: "var(--border-radius)",
-              background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-            }}
-          >
-            Cancel
-          </button>
-        </span>
-      )}
-      {pendingAdd && (
-        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-          Connecting... the new deck appears here in a few seconds.
-        </span>
-      )}
-
-      {activeSerial && (
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", marginLeft: "auto" }}>
-          <input
-            value={deckNames[activeSerial] ?? ""}
-            placeholder="Name this deck"
-            title="Friendly name shown in the picker (e.g. Lectern, Tech Booth)"
-            onChange={(e) => renameDeck(activeSerial, e.target.value)}
-            style={{
-              width: 120, padding: "var(--space-xs) var(--space-sm)",
-              borderRadius: "var(--border-radius)",
-              border: "1px solid var(--border-color)",
-              background: "var(--bg-surface)", color: "var(--text-primary)",
-              fontSize: "var(--font-size-sm)",
-            }}
-          />
-          <button
-            onClick={() => api.emitContextAction(pluginId, "identify_deck", { serial: activeSerial })}
-            title="Flash this deck's keys so you can tell which one it is"
-            style={{
-              padding: "var(--space-xs) var(--space-sm)",
-              borderRadius: "var(--border-radius)",
-              background: "var(--bg-hover)",
-              fontSize: "var(--font-size-sm)",
-              cursor: "pointer",
-            }}
-          >
-            Identify
-          </button>
-          {!isCustomized && (
-            <button
-              onClick={customizeDeck}
-              title="Give this deck its own button/dial assignments instead of mirroring the main config"
-              style={{
-                padding: "var(--space-xs) var(--space-sm)",
-                borderRadius: "var(--border-radius)",
-                background: "var(--bg-hover)",
-                fontSize: "var(--font-size-sm)",
-                cursor: "pointer",
-              }}
-            >
-              Customize separately
-            </button>
-          )}
-          {isCustomized && onTransferLayout && serials.length > 1 && transferTarget === null && (
-            <button
-              onClick={() =>
-                setTransferTarget(serials.find((s) => s !== activeSerial) ?? null)
-              }
-              title="Move this deck's custom layout (and name) onto another deck — e.g. hand a virtual deck's layout to the real one"
-              style={{
-                padding: "var(--space-xs) var(--space-sm)",
-                borderRadius: "var(--border-radius)",
-                background: "var(--bg-hover)",
-                fontSize: "var(--font-size-sm)",
-                cursor: "pointer",
-              }}
-            >
-              Transfer layout to...
-            </button>
-          )}
-          {transferTarget !== null && (
-            <span style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12 }}>
-              <select
-                value={transferTarget}
-                onChange={(e) => setTransferTarget(e.target.value)}
-                style={{
-                  padding: "2px 6px", borderRadius: "var(--border-radius)",
-                  border: "1px solid var(--border-color)",
-                  background: "var(--bg-surface)", color: "var(--text-primary)",
-                  fontSize: 12,
-                }}
-              >
-                {serials
-                  .filter((s) => s !== activeSerial)
-                  .map((s) => (
-                    <option key={s} value={s}>
-                      {(deckNames[s] || String(liveState[`${statePrefix}${s}.model`] ?? "Deck"))} ({s})
-                      {decksMap[s] !== undefined ? " — replaces its custom layout" : ""}
-                    </option>
-                  ))}
-              </select>
-              <button
-                onClick={() => {
-                  if (transferTarget && activeSerial && onTransferLayout) {
-                    onTransferLayout(activeSerial, transferTarget);
-                  }
-                  setTransferTarget(null);
-                }}
-                style={{
-                  padding: "2px 8px", borderRadius: "var(--border-radius)",
-                  background: "var(--accent-bg)", color: "white", fontSize: 12, cursor: "pointer",
-                }}
-              >
-                Transfer
-              </button>
-              <button
-                onClick={() => setTransferTarget(null)}
-                style={{
-                  padding: "2px 8px", borderRadius: "var(--border-radius)",
-                  background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
-            </span>
-          )}
-          {isCustomized && !confirmRevert && (
-            <button
-              onClick={() => setConfirmRevert(true)}
-              title="Drop this deck's custom assignments and mirror the main config again"
-              style={{
-                padding: "var(--space-xs) var(--space-sm)",
-                borderRadius: "var(--border-radius)",
-                background: "var(--bg-hover)",
-                fontSize: "var(--font-size-sm)",
-                cursor: "pointer",
-              }}
-            >
-              Mirror main config
-            </button>
-          )}
-          {confirmRevert && (
-            <span style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12 }}>
-              <span style={{ color: "var(--color-error, #ef4444)" }}>
-                Delete this deck's custom assignments?
-              </span>
-              <button
-                onClick={revertDeck}
-                style={{
-                  padding: "2px 8px", borderRadius: "var(--border-radius)",
-                  background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-                }}
-              >
-                Yes
-              </button>
-              <button
-                onClick={() => setConfirmRevert(false)}
-                style={{
-                  padding: "2px 8px", borderRadius: "var(--border-radius)",
-                  background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-                }}
-              >
-                No
-              </button>
-            </span>
-          )}
-          {activeIsVirtual && !confirmRemove && (
-            <button
-              onClick={() => setConfirmRemove(true)}
-              title="Remove this virtual deck. A custom layout it had is kept and can be put on another deck."
-              style={{
-                padding: "var(--space-xs) var(--space-sm)",
-                borderRadius: "var(--border-radius)",
-                background: "var(--bg-hover)",
-                color: "var(--color-error, #dc2626)",
-                fontSize: "var(--font-size-sm)",
-                cursor: "pointer",
-              }}
-            >
-              Remove
-            </button>
-          )}
-          {confirmRemove && (
-            <span style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12 }}>
-              <span style={{ color: "var(--color-error, #ef4444)" }}>
-                Remove this virtual deck?
-              </span>
-              <button
-                onClick={removeVirtualDeck}
-                style={{
-                  padding: "2px 8px", borderRadius: "var(--border-radius)",
-                  background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-                }}
-              >
-                Yes
-              </button>
-              <button
-                onClick={() => setConfirmRemove(false)}
-                style={{
-                  padding: "2px 8px", borderRadius: "var(--border-radius)",
-                  background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
-                }}
-              >
-                No
-              </button>
-            </span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ──── Per-Deck Scalar Settings (customized decks only) ────
-//
-// The runtime resolves brightness/button_color/text_color per deck via the
-// decks[serial] override first, then the flat plugin settings. This row lets
-// a customized deck author those overrides; blank = inherit the main setting.
-
-function DeckScalarSettings({
-  viewConfig,
-  onViewChange,
-}: {
-  viewConfig: Record<string, unknown>;
-  onViewChange: (next: Record<string, unknown>) => void;
-}) {
-  const brightness = viewConfig.brightness;
-  const setField = (field: string, value: unknown) => {
-    const next = { ...viewConfig };
-    if (value === undefined || value === "") {
-      delete next[field];
-    } else {
-      next[field] = value;
-    }
-    onViewChange(next);
-  };
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "var(--space-lg)",
-        flexWrap: "wrap",
-        padding: "var(--space-sm) var(--space-md)",
-        border: "1px solid var(--border-color)",
-        borderRadius: "var(--border-radius)",
-        background: "var(--bg-surface)",
-      }}
-    >
-      <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
-        This deck's settings
-      </span>
-      <label style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12, color: "var(--text-muted)" }}>
-        Brightness
-        <input
-          type="number"
-          min={0}
-          max={100}
-          value={typeof brightness === "number" ? brightness : ""}
-          placeholder="main"
-          onChange={(e) =>
-            setField(
-              "brightness",
-              e.target.value === "" ? undefined : Math.max(0, Math.min(100, Number(e.target.value)))
-            )
-          }
-          style={{
-            width: 64, padding: "4px 6px",
-            borderRadius: "var(--border-radius)",
-            border: "1px solid var(--border-color)",
-            background: "var(--bg-surface)", color: "var(--text-primary)",
-            fontSize: "var(--font-size-sm)",
-          }}
-        />
-        %
-      </label>
-      <label style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12, color: "var(--text-muted)" }}>
-        Button color
-        <InlineColorPicker
-          value={typeof viewConfig.button_color === "string" ? viewConfig.button_color : ""}
-          onChange={(c) => setField("button_color", c || undefined)}
-        />
-      </label>
-      <label style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12, color: "var(--text-muted)" }}>
-        Text color
-        <InlineColorPicker
-          value={typeof viewConfig.text_color === "string" ? viewConfig.text_color : ""}
-          onChange={(c) => setField("text_color", c || undefined)}
-        />
-      </label>
-      <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-        Blank values use the main plugin settings.
-      </span>
-    </div>
-  );
-}
-
-// ──── Dial Row (rotary encoders under the key grid) ────
-
-function DialRow({
-  count,
-  selectedControl,
-  onSelectControl,
-  getDial,
-  flashIndex = null,
-}: {
-  count: number;
-  selectedControl: string | null;
-  onSelectControl: (id: string) => void;
-  getDial: (index: number) => DialAssignment | undefined;
-  flashIndex?: number | null;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-around",
-        gap: "var(--space-sm)",
-        marginTop: "var(--space-sm)",
-        padding: "var(--space-md)",
-        background: "var(--bg-base)",
-        borderRadius: "var(--border-radius)",
-        border: "1px solid var(--border-color)",
-      }}
-    >
-      {Array.from({ length: count }, (_, i) => {
-        const dial = getDial(i);
-        const isSelected = selectedControl === `dial:${i}`;
-        const hasAssignment =
-          !!dial?.label || !!dial?.adjust?.key ||
-          !!dial?.cw?.length || !!dial?.ccw?.length || !!dial?.press?.length;
-        return (
-          <div
-            key={i}
-            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}
-          >
-            <button
-              onClick={() => onSelectControl(`dial:${i}`)}
-              title={dial?.label ? `Dial ${i + 1}: ${dial.label}` : `Dial ${i + 1} (unassigned)`}
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: "50%",
-                background: isSelected
-                  ? "var(--accent-dim)"
-                  : hasAssignment
-                    ? "var(--bg-elevated)"
-                    : "var(--bg-surface)",
-                border: isSelected
-                  ? "2px solid var(--accent)"
-                  : "1px solid var(--border-color)",
-                boxShadow: flashIndex === i ? "0 0 0 3px #f59e0b" : undefined,
-                cursor: "pointer",
-                position: "relative",
-              }}
-            >
-              {/* Knob indicator line */}
-              <div
-                style={{
-                  position: "absolute",
-                  top: 4,
-                  left: "50%",
-                  width: 2,
-                  height: 10,
-                  marginLeft: -1,
-                  background: hasAssignment ? "var(--accent)" : "var(--text-muted)",
-                  borderRadius: 1,
-                }}
-              />
-            </button>
-            <div style={{ fontSize: 9, color: "var(--text-muted)", maxWidth: 60, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {dial?.label || `Dial ${i + 1}`}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 // ──── Action List Editor (ordered list of surface actions) ────
 
 function ActionListEditor({
@@ -3088,6 +1629,7 @@ function DialAssignmentPanel({
   onClose,
   allowedActions,
   navigateOptions,
+  onSimulate,
 }: {
   dialIndex: number;
   dial: DialAssignment | undefined;
@@ -3096,6 +1638,8 @@ function DialAssignmentPanel({
   onClose: () => void;
   allowedActions?: string[];
   navigateOptions?: { value: string; label: string }[];
+  // Workbench extra: fire real dial input (simulate_input) to test it.
+  onSimulate?: (payload: Record<string, unknown>) => void;
 }) {
   const project = useProjectStore((s) => s.project);
   const adjust = dial?.adjust ?? {};
@@ -3166,6 +1710,34 @@ function DialAssignmentPanel({
           <X size={14} />
         </button>
       </div>
+
+      {/* Try it: real input through the same path as the hardware */}
+      {onSimulate && (
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
+          <span style={{ fontSize: 11, color: "var(--text-muted)", flex: 1 }}>Try it</span>
+          <button
+            onClick={() => onSimulate({ type: "dial_turn", index: dialIndex, amount: -1 })}
+            title="Turn counter-clockwise"
+            style={dialTestBtnStyle}
+          >
+            &#8634;
+          </button>
+          <button
+            onClick={() => onSimulate({ type: "dial_push", index: dialIndex })}
+            title="Press the dial"
+            style={dialTestBtnStyle}
+          >
+            <Play size={11} />
+          </button>
+          <button
+            onClick={() => onSimulate({ type: "dial_turn", index: dialIndex, amount: 1 })}
+            title="Turn clockwise"
+            style={dialTestBtnStyle}
+          >
+            &#8635;
+          </button>
+        </div>
+      )}
 
       {/* Label */}
       <div>
@@ -3267,16 +1839,19 @@ function TouchscreenZonesEditor({
   onConfigChange,
   allowedActions,
   navigateOptions,
+  initialExpanded = null,
 }: {
   config: Record<string, unknown>;
   onConfigChange: (config: Record<string, unknown>) => void;
   allowedActions?: string[];
   navigateOptions?: { value: string; label: string }[];
+  // The workbench canvas opens the editor on the zone that was clicked.
+  initialExpanded?: number | null;
 }) {
   const project = useProjectStore((s) => s.project);
   const touchscreen = (config.touchscreen as { zones?: TouchZone[] } | undefined) ?? {};
   const zones = touchscreen.zones ?? [];
-  const [expandedZone, setExpandedZone] = useState<number | null>(null);
+  const [expandedZone, setExpandedZone] = useState<number | null>(initialExpanded);
 
   const setZones = (next: TouchZone[]) => {
     onConfigChange({
@@ -3510,72 +2085,6 @@ function TouchscreenZonesEditor({
       >
         + Add custom zone
       </button>
-    </div>
-  );
-}
-
-// ──── Touch Key Row (color-only keys indexed after the LCD keys) ────
-
-function TouchKeyRow({
-  keyCount,
-  touchKeyCount,
-  currentPage,
-  selectedControl,
-  onSelectControl,
-  getAssignment,
-  flashIndex = null,
-}: {
-  keyCount: number;
-  touchKeyCount: number;
-  currentPage: number;
-  selectedControl: string | null;
-  onSelectControl: (id: string) => void;
-  getAssignment: (index: number, page?: number) => ButtonAssignment | undefined;
-  flashIndex?: number | null;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        gap: "var(--space-sm)",
-        marginTop: "var(--space-sm)",
-        padding: "var(--space-sm) var(--space-md)",
-        background: "var(--bg-base)",
-        borderRadius: "var(--border-radius)",
-        border: "1px solid var(--border-color)",
-      }}
-    >
-      {Array.from({ length: touchKeyCount }, (_, i) => {
-        const index = keyCount + i;
-        const assignment = getAssignment(index, currentPage);
-        const isSelected = selectedControl === String(index);
-        const hasAssignment = !!assignment?.bg_color || !!assignment?.bindings?.press;
-        return (
-          <button
-            key={index}
-            onClick={() => onSelectControl(String(index))}
-            title={`Touch Key ${i + 1}${hasAssignment ? "" : " (unassigned)"}`}
-            style={{
-              flex: 1,
-              height: 22,
-              borderRadius: 11,
-              background: isSelected
-                ? "var(--accent-dim)"
-                : assignment?.bg_color || "var(--bg-surface)",
-              border: isSelected
-                ? "2px solid var(--accent)"
-                : "1px solid var(--border-color)",
-              boxShadow: flashIndex === index ? "0 0 0 3px #f59e0b" : undefined,
-              cursor: "pointer",
-              fontSize: 9,
-              color: "var(--text-muted)",
-            }}
-          >
-            {hasAssignment ? "" : `T${i + 1}`}
-          </button>
-        );
-      })}
     </div>
   );
 }
@@ -4112,3 +2621,2320 @@ const panelHintStyle: React.CSSProperties = {
   width: 56,
   flexShrink: 0,
 };
+
+const dialTestBtnStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 28,
+  height: 24,
+  borderRadius: "var(--border-radius)",
+  background: "var(--bg-hover)",
+  color: "var(--text-secondary)",
+  fontSize: 14,
+  cursor: "pointer",
+};
+
+// ──── Deck Workbench (device-backed surfaces) ────
+//
+// The one home for a device-backed surface: a live picture of the unit
+// with a persistent inspector rail. Click a control to edit it, Shift+click
+// to press it; with nothing selected the rail shows the deck itself. The
+// editor page and the hardware page stay in lockstep both ways.
+
+type WorkbenchSelection =
+  | { kind: "deck" }
+  | { kind: "key"; index: number }
+  | { kind: "dial"; index: number }
+  | { kind: "strip"; zone: number | null }
+  | { kind: "screen" };
+
+const SURFACE_ACTIONS = ["macro", "device.command", "state.set", "navigate"];
+
+// The per-unit config sections an own layout replaces (mirrors the runtime).
+const DECK_SECTION_KEYS = [
+  "buttons", "global_buttons", "auto_page", "dials", "touchscreen",
+  "info_strip", "auto_brightness", "idle_dim", "page_names",
+];
+
+function actionList(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    return value.filter((a) => a && typeof a === "object") as Record<string, unknown>[];
+  }
+  if (value && typeof value === "object") return [value as Record<string, unknown>];
+  return [];
+}
+
+function forEachNavigateTarget(
+  view: Record<string, unknown>,
+  fn: (page: unknown) => void
+) {
+  const scan = (value: unknown) => {
+    for (const action of actionList(value)) {
+      if (action.action === "navigate") fn(action.page);
+      for (const nested of ["off_action", "hold_action"]) {
+        const sub = action[nested] as Record<string, unknown> | undefined;
+        if (sub && typeof sub === "object" && sub.action === "navigate") {
+          fn(sub.page);
+        }
+      }
+    }
+  };
+  const buttons = (view.buttons as ButtonAssignment[] | undefined) ?? [];
+  for (const b of buttons) scan(b?.bindings?.press);
+  const globals = (view.global_buttons as ButtonAssignment[] | undefined) ?? [];
+  for (const b of globals) scan(b?.bindings?.press);
+  const dials = (view.dials as DialAssignment[] | undefined) ?? [];
+  for (const d of dials) {
+    scan(d?.cw);
+    scan(d?.ccw);
+    scan(d?.press);
+  }
+  const zones =
+    ((view.touchscreen as { zones?: TouchZone[] } | undefined)?.zones) ?? [];
+  for (const z of zones) {
+    scan(z?.touch);
+    scan(z?.long_touch);
+  }
+}
+
+// Mirrors the runtime: pages exist by being used — 1 + the highest page
+// index referenced by entries, names, paging rules, or navigate targets.
+function effectivePageCount(view: Record<string, unknown>): number {
+  let highest = 0;
+  const note = (value: unknown) => {
+    if (typeof value !== "string" && typeof value !== "number") return;
+    const n = Number(value);
+    if (Number.isInteger(n) && n > highest) highest = n;
+  };
+  const buttons = (view.buttons as ButtonAssignment[] | undefined) ?? [];
+  for (const b of buttons) note(b?.page ?? 0);
+  const rules = (view.auto_page as { page?: unknown }[] | undefined) ?? [];
+  for (const r of rules) if (r && typeof r === "object") note(r.page);
+  const names = (view.page_names as Record<string, string> | undefined) ?? {};
+  for (const k of Object.keys(names)) note(k);
+  forEachNavigateTarget(view, note);
+  return highest + 1;
+}
+
+function hasAnyNavigate(view: Record<string, unknown>): boolean {
+  let found = false;
+  forEachNavigateTarget(view, () => {
+    found = true;
+  });
+  return found;
+}
+
+function DeckWorkbench({
+  pluginId,
+  staticLayout,
+  config,
+  onConfigChange,
+}: {
+  pluginId: string;
+  staticLayout: SurfaceLayout;
+  config: Record<string, unknown>;
+  onConfigChange: (config: Record<string, unknown>) => void;
+}) {
+  const liveState = useConnectionStore((s) => s.liveState);
+  const statePrefix = `plugin.${pluginId}.`;
+
+  const deckSerials = String(liveState[`${statePrefix}deck_serials`] ?? "")
+    .split(",")
+    .filter(Boolean);
+  const decksMap =
+    (config.decks as Record<string, Record<string, unknown>> | undefined) ?? {};
+  const deckNames = (config.deck_names as Record<string, string> | undefined) ?? {};
+  const deckSettings =
+    (config.deck_settings as Record<string, { brightness?: number }> | undefined) ?? {};
+  const rememberedSerials = [
+    ...new Set([...Object.keys(decksMap), ...Object.keys(deckNames)]),
+  ].filter((s) => !deckSerials.includes(s));
+  const knownSerials = [...deckSerials, ...rememberedSerials];
+
+  const [selectedSerial, setSelectedSerial] = useState<string | null>(null);
+  const activeSerial =
+    selectedSerial && knownSerials.includes(selectedSerial)
+      ? selectedSerial
+      : knownSerials[0];
+  const sp = `${statePrefix}${activeSerial}.`;
+  const connected = Boolean(liveState[`${sp}connected`]);
+  const model = String(liveState[`${sp}model`] ?? "");
+  const rows = Number(liveState[`${sp}rows`] ?? 0);
+  const columns = Number(liveState[`${sp}columns`] ?? 0);
+  const keyCount = Number(liveState[`${sp}key_count`] ?? 0);
+  const touchKeyCount = Number(liveState[`${sp}touch_key_count`] ?? 0);
+  const dialCount = Number(liveState[`${sp}dial_count`] ?? 0);
+  const hasTouchscreen = Boolean(liveState[`${sp}has_touchscreen`]);
+  const hasInfoScreen = Boolean(liveState[`${sp}has_info_screen`]);
+  const isVisual = liveState[`${sp}visual`] === undefined
+    ? true
+    : Boolean(liveState[`${sp}visual`]);
+  const isVirtual = Boolean(liveState[`${sp}virtual`]);
+  const renderVersion = Number(liveState[`${sp}render_version`] ?? 0);
+  const deckPage = Number(liveState[`${sp}current_page`] ?? 0);
+  // Geometry can outlive a disconnect within a session; a ghost with no
+  // geometry at all can't draw a canvas (its layout is still kept).
+  const hasGeometry = rows > 0 && columns > 0 && keyCount > 0;
+
+  const isOwn = activeSerial ? decksMap[activeSerial] !== undefined : false;
+  const viewConfig: Record<string, unknown> =
+    isOwn && activeSerial ? decksMap[activeSerial] : config;
+  const onViewChange = useCallback(
+    (next: Record<string, unknown>) => {
+      if (isOwn && activeSerial) {
+        onConfigChange({ ...config, decks: { ...decksMap, [activeSerial]: next } });
+      } else {
+        onConfigChange(next);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isOwn, activeSerial, config, onConfigChange]
+  );
+
+  // ── Pages (emergent) ──
+  const pageCount = effectivePageCount(viewConfig);
+  const [selection, setSelection] = useState<WorkbenchSelection>({ kind: "deck" });
+  const [editorPage, setEditorPage] = useState(0);
+  const [draftPage, setDraftPage] = useState(false);
+  const totalPages = pageCount + (draftPage ? 1 : 0);
+
+  // A draft page becomes real the moment something references it.
+  useEffect(() => {
+    if (draftPage && editorPage < pageCount) setDraftPage(false);
+  }, [draftPage, editorPage, pageCount]);
+  useEffect(() => {
+    if (editorPage > totalPages - 1) setEditorPage(totalPages - 1);
+  }, [editorPage, totalPages]);
+
+  const pageNames = (viewConfig.page_names as Record<string, string> | undefined) ?? {};
+  const pageLabel = useCallback(
+    (p: number) => pageNames[String(p)] || `Page ${p + 1}`,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewConfig.page_names]
+  );
+  const renamePage = useCallback(
+    (p: number, name: string) => {
+      const next = { ...pageNames };
+      if (name.trim()) {
+        next[String(p)] = name.trim();
+      } else {
+        delete next[String(p)];
+      }
+      onViewChange({ ...viewConfig, page_names: next });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pageNames, viewConfig, onViewChange]
+  );
+
+  const navigateOptions = useMemo(
+    () => [
+      { value: "__next_page__", label: "Next Page" },
+      { value: "__prev_page__", label: "Previous Page" },
+      ...Array.from({ length: totalPages }, (_, p) => ({
+        value: String(p),
+        label: pageLabel(p),
+      })),
+    ],
+    [totalPages, pageLabel]
+  );
+
+  // ── Two-way page sync: the canvas can never lie ──
+  const userNavAt = useRef(0);
+  const onSelectPage = useCallback(
+    (p: number) => {
+      setEditorPage(p);
+      if (p < pageCount && connected && activeSerial) {
+        userNavAt.current = Date.now();
+        api
+          .emitContextAction(pluginId, "set_page", { serial: activeSerial, page: p })
+          .catch(() => {});
+      }
+    },
+    [pageCount, connected, activeSerial, pluginId]
+  );
+  useEffect(() => {
+    if (!connected) return;
+    if (draftPage && editorPage >= pageCount) return; // building a new page
+    if (deckPage === editorPage) return;
+    setEditorPage(deckPage);
+    // The user's own tab clicks come right back via state — only narrate
+    // flips that came from somewhere else (a page rule, a nav key, a macro).
+    if (Date.now() - userNavAt.current > 2500) {
+      showInfo(`${deckNames[activeSerial ?? ""] || model || "Deck"} moved to ${pageLabel(deckPage)}.`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deckPage, connected]);
+
+  // Switching decks resets the bench to that deck's reality.
+  useEffect(() => {
+    setSelection({ kind: "deck" });
+    setDraftPage(false);
+    setEditorPage(Number(useConnectionStore.getState().liveState[`${statePrefix}${activeSerial}.current_page`] ?? 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSerial]);
+
+  // ── Input echo: pressing a physical control flashes it here ──
+  const lastInput = String(liveState[`${sp}last_input`] ?? "");
+  const [inputFlash, setInputFlash] = useState<{ kind: string; index: number } | null>(null);
+  useEffect(() => {
+    if (!lastInput) return;
+    const [kind, indexStr] = lastInput.split(":");
+    const index = Number(indexStr);
+    if (!Number.isFinite(index)) return;
+    setInputFlash({ kind, index });
+    const timer = setTimeout(() => setInputFlash(null), 350);
+    return () => clearTimeout(timer);
+  }, [lastInput]);
+
+  // ── Live mirror (physical decks mirror only while the bench is open) ──
+  useEffect(() => {
+    if (!connected || isVirtual) return;
+    api.emitContextAction(pluginId, "set_live_mirror", { on: true }).catch(() => {});
+    return () => {
+      api.emitContextAction(pluginId, "set_live_mirror", { on: false }).catch(() => {});
+    };
+  }, [pluginId, activeSerial, isVirtual, connected]);
+
+  const [images, setImages] = useState<Record<string, string>>({});
+  const imagesRef = useRef<Record<string, string>>({});
+  imagesRef.current = images;
+  useEffect(() => {
+    if (!connected || !isVisual || !activeSerial) {
+      setImages((prev) => {
+        Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
+        return {};
+      });
+      return;
+    }
+    let cancelled = false;
+    const items: string[] = [];
+    for (let i = 0; i < keyCount; i++) items.push(`key_${i}`);
+    if (hasTouchscreen) items.push("touchscreen");
+    if (hasInfoScreen) items.push("screen");
+    (async () => {
+      const next: Record<string, string> = {};
+      await Promise.all(
+        items.map(async (item) => {
+          try {
+            const res = await fetch(
+              `${BASE}/plugins/${pluginId}/ext/live/${activeSerial}/${item}?v=${renderVersion}`
+            );
+            if (!res.ok) return;
+            next[item] = URL.createObjectURL(await res.blob());
+          } catch {
+            /* mirror not populated yet */
+          }
+        })
+      );
+      if (cancelled) {
+        Object.values(next).forEach((url) => URL.revokeObjectURL(url));
+        return;
+      }
+      setImages((prev) => {
+        Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pluginId, activeSerial, renderVersion, keyCount, hasTouchscreen, hasInfoScreen, connected, isVisual]);
+  useEffect(
+    () => () => {
+      Object.values(imagesRef.current).forEach((url) => URL.revokeObjectURL(url));
+    },
+    []
+  );
+
+  const simulate = useCallback(
+    (payload: Record<string, unknown>) => {
+      if (!activeSerial) return;
+      api
+        .emitContextAction(pluginId, "simulate_input", { serial: activeSerial, ...payload })
+        .catch(() => {});
+    },
+    [pluginId, activeSerial]
+  );
+
+  // ── Assignments (locked keys win on every page, like the runtime) ──
+  const buttons = (viewConfig.buttons as ButtonAssignment[] | undefined) ?? [];
+  const globalButtons =
+    (viewConfig.global_buttons as ButtonAssignment[] | undefined) ?? [];
+  const lockedIndexes = useMemo(
+    () => new Set(globalButtons.map((b) => b.index)),
+    [globalButtons]
+  );
+  const isLocked = useCallback(
+    (index: number) => lockedIndexes.has(index),
+    [lockedIndexes]
+  );
+  const getAssignment = useCallback(
+    (index: number, page: number = 0): ButtonAssignment | undefined => {
+      const locked = globalButtons.find((b) => b.index === index);
+      if (locked) return locked;
+      return buttons.find((b) => b.index === index && (b.page ?? 0) === page);
+    },
+    [buttons, globalButtons]
+  );
+  const shadowPageCount = useCallback(
+    (index: number) =>
+      new Set(
+        buttons.filter((b) => b.index === index).map((b) => b.page ?? 0)
+      ).size,
+    [buttons]
+  );
+
+  const updateAssignment = useCallback(
+    (index: number, page: number, updates: Partial<ButtonAssignment>) => {
+      if (lockedIndexes.has(index)) {
+        const others = globalButtons.filter((b) => b.index !== index);
+        const current = globalButtons.find((b) => b.index === index);
+        const updated = { index, ...(current ?? {}), ...updates };
+        delete (updated as Record<string, unknown>).page;
+        onViewChange({ ...viewConfig, global_buttons: [...others, updated] });
+        return;
+      }
+      const existing = buttons.filter(
+        (b) => !(b.index === index && (b.page ?? 0) === page)
+      );
+      const current = buttons.find(
+        (b) => b.index === index && (b.page ?? 0) === page
+      );
+      const updated = { index, page, ...(current ?? {}), ...updates };
+      onViewChange({ ...viewConfig, buttons: [...existing, updated] });
+    },
+    [buttons, globalButtons, lockedIndexes, viewConfig, onViewChange]
+  );
+
+  const clearAssignment = useCallback(
+    (index: number, page: number) => {
+      if (lockedIndexes.has(index)) {
+        onViewChange({
+          ...viewConfig,
+          global_buttons: globalButtons.filter((b) => b.index !== index),
+        });
+        return;
+      }
+      onViewChange({
+        ...viewConfig,
+        buttons: buttons.filter(
+          (b) => !(b.index === index && (b.page ?? 0) === page)
+        ),
+      });
+    },
+    [buttons, globalButtons, lockedIndexes, viewConfig, onViewChange]
+  );
+
+  const toggleLock = useCallback(
+    (index: number, locked: boolean) => {
+      if (locked) {
+        // Lock: the key's current-page content becomes the deck-wide entry.
+        // Page entries stay in config (hidden) so unlocking can't lose work.
+        const template =
+          buttons.find((b) => b.index === index && (b.page ?? 0) === editorPage) ?? {};
+        const entry: ButtonAssignment = JSON.parse(JSON.stringify(template));
+        delete (entry as Record<string, unknown>).page;
+        entry.index = index;
+        onViewChange({
+          ...viewConfig,
+          global_buttons: [...globalButtons.filter((b) => b.index !== index), entry],
+        });
+      } else {
+        // Unlock: the assignment lands on the page being edited (so nothing
+        // visible disappears); other pages' hidden entries come back.
+        const entry = globalButtons.find((b) => b.index === index);
+        const nextGlobals = globalButtons.filter((b) => b.index !== index);
+        const nextButtons = buttons.filter(
+          (b) => !(b.index === index && (b.page ?? 0) === editorPage)
+        );
+        if (entry) {
+          const restored: ButtonAssignment = JSON.parse(JSON.stringify(entry));
+          restored.page = editorPage;
+          nextButtons.push(restored);
+        }
+        onViewChange({
+          ...viewConfig,
+          buttons: nextButtons,
+          global_buttons: nextGlobals,
+        });
+      }
+    },
+    [buttons, globalButtons, editorPage, viewConfig, onViewChange]
+  );
+
+  // ── Clipboard / arrange (page entries only) ──
+  const [clipboard, setClipboard] = useState<ButtonAssignment | null>(null);
+  const copyAssignment = useCallback(
+    (index: number, page: number) => {
+      const current = getAssignment(index, page);
+      if (!current) return;
+      const { index: _i, page: _p, ...rest } = current;
+      setClipboard(JSON.parse(JSON.stringify(rest)));
+    },
+    [getAssignment]
+  );
+  const pasteAssignment = useCallback(
+    (index: number, page: number) => {
+      if (!clipboard) return;
+      updateAssignment(index, page, JSON.parse(JSON.stringify(clipboard)));
+    },
+    [clipboard, updateAssignment]
+  );
+  const moveAssignment = useCallback(
+    (from: { index: number; page: number }, to: { index: number; page: number }) => {
+      const source = buttons.find(
+        (b) => b.index === from.index && (b.page ?? 0) === from.page
+      );
+      if (!source) return;
+      const others = buttons.filter(
+        (b) =>
+          !(b.index === from.index && (b.page ?? 0) === from.page) &&
+          !(b.index === to.index && (b.page ?? 0) === to.page)
+      );
+      onViewChange({
+        ...viewConfig,
+        buttons: [...others, { ...source, index: to.index, page: to.page }],
+      });
+      setSelection({ kind: "key", index: to.index });
+      onSelectPage(to.page);
+    },
+    [buttons, viewConfig, onViewChange, onSelectPage]
+  );
+  const swapAssignments = useCallback(
+    (a: { index: number; page: number }, b: { index: number; page: number }) => {
+      const first = buttons.find(
+        (x) => x.index === a.index && (x.page ?? 0) === a.page
+      );
+      const second = buttons.find(
+        (x) => x.index === b.index && (x.page ?? 0) === b.page
+      );
+      const others = buttons.filter(
+        (x) =>
+          !(x.index === a.index && (x.page ?? 0) === a.page) &&
+          !(x.index === b.index && (x.page ?? 0) === b.page)
+      );
+      const next = [...others];
+      if (first) next.push({ ...first, index: b.index, page: b.page });
+      if (second) next.push({ ...second, index: a.index, page: a.page });
+      onViewChange({ ...viewConfig, buttons: next });
+    },
+    [buttons, viewConfig, onViewChange]
+  );
+
+  // ── Page operations ──
+  const duplicatePage = useCallback(
+    (fromPage: number) => {
+      const target = pageCount; // a fresh page right after the last one
+      const copies = buttons
+        .filter((b) => (b.page ?? 0) === fromPage)
+        .map((b) => ({ ...JSON.parse(JSON.stringify(b)), page: target }));
+      if (copies.length === 0) return;
+      onViewChange({ ...viewConfig, buttons: [...buttons, ...copies] });
+      setEditorPage(target);
+    },
+    [buttons, pageCount, viewConfig, onViewChange]
+  );
+  const clearPage = useCallback(
+    (page: number) => {
+      onViewChange({
+        ...viewConfig,
+        buttons: buttons.filter((b) => (b.page ?? 0) !== page),
+      });
+      setSelection({ kind: "deck" });
+    },
+    [buttons, viewConfig, onViewChange]
+  );
+  // The last page can be deleted only when nothing else (a rule, a navigate
+  // target) keeps it alive — content and name are removed together.
+  const lastPageBlockers = useMemo(() => {
+    if (pageCount <= 1) return true;
+    const last = pageCount - 1;
+    const rules = (viewConfig.auto_page as { page?: unknown }[] | undefined) ?? [];
+    if (rules.some((r) => Number(r?.page) === last)) return true;
+    let referenced = false;
+    forEachNavigateTarget(viewConfig, (page) => {
+      if (Number(page) === last) referenced = true;
+    });
+    return referenced;
+  }, [viewConfig, pageCount]);
+  const deleteLastPage = useCallback(() => {
+    const last = pageCount - 1;
+    const nextNames = { ...pageNames };
+    delete nextNames[String(last)];
+    onViewChange({
+      ...viewConfig,
+      buttons: buttons.filter((b) => (b.page ?? 0) !== last),
+      page_names: nextNames,
+    });
+    setEditorPage(Math.max(0, last - 1));
+    setSelection({ kind: "deck" });
+  }, [buttons, pageNames, pageCount, viewConfig, onViewChange]);
+
+  // ── Add page (+) with first-time locked nav keys ──
+  const addPage = useCallback(() => {
+    if (draftPage) {
+      setEditorPage(pageCount); // already drafting — just go there
+      return;
+    }
+    let nextView = viewConfig;
+    if (pageCount === 1 && isVisual && hasGeometry && !hasAnyNavigate(viewConfig)) {
+      // Both free slots scan backward from the bottom-right LCD key; only
+      // slots empty on every page (and not locked) are eligible. Fewer than
+      // two free slots -> skip silently, never shadow existing work.
+      const free: number[] = [];
+      for (let i = keyCount - 1; i >= 0 && free.length < 2; i--) {
+        const used =
+          lockedIndexes.has(i) || buttons.some((b) => b.index === i);
+        if (!used) free.push(i);
+      }
+      if (free.length === 2) {
+        const [nextIdx, prevIdx] = free; // rightmost = next page
+        nextView = {
+          ...viewConfig,
+          global_buttons: [
+            ...globalButtons,
+            {
+              index: prevIdx,
+              icon: "chevron-left",
+              bindings: { press: [{ action: "navigate", page: "__prev_page__" }] },
+            },
+            {
+              index: nextIdx,
+              icon: "chevron-right",
+              bindings: { press: [{ action: "navigate", page: "__next_page__" }] },
+            },
+          ],
+        };
+        onViewChange(nextView);
+        showInfo("Added locked page keys — move or remove them anytime.");
+      }
+    }
+    setDraftPage(true);
+    setEditorPage(effectivePageCount(nextView));
+  }, [draftPage, pageCount, isVisual, hasGeometry, viewConfig, keyCount, lockedIndexes, buttons, globalButtons, onViewChange]);
+
+  // ── Dials ──
+  const dials = (viewConfig.dials as DialAssignment[] | undefined) ?? [];
+  const getDial = useCallback(
+    (index: number): DialAssignment | undefined => dials.find((d) => d.index === index),
+    [dials]
+  );
+  const updateDial = useCallback(
+    (index: number, updates: Partial<DialAssignment>) => {
+      const others = dials.filter((d) => d.index !== index);
+      const current = dials.find((d) => d.index === index);
+      onViewChange({
+        ...viewConfig,
+        dials: [...others, { index, ...(current ?? {}), ...updates }],
+      });
+    },
+    [dials, viewConfig, onViewChange]
+  );
+  const clearDial = useCallback(
+    (index: number) => {
+      onViewChange({ ...viewConfig, dials: dials.filter((d) => d.index !== index) });
+    },
+    [dials, viewConfig, onViewChange]
+  );
+
+  // ── Unit + layout operations ──
+  const renameDeck = useCallback(
+    (serial: string, name: string) => {
+      const next = { ...deckNames };
+      if (name) {
+        next[serial] = name;
+      } else {
+        delete next[serial];
+      }
+      onConfigChange({ ...config, deck_names: next });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deckNames, config, onConfigChange]
+  );
+  const setDeckBrightness = useCallback(
+    (serial: string, level: number | undefined) => {
+      const next = { ...deckSettings };
+      if (level === undefined) {
+        const entry = { ...(next[serial] ?? {}) };
+        delete entry.brightness;
+        if (Object.keys(entry).length === 0) {
+          delete next[serial];
+        } else {
+          next[serial] = entry;
+        }
+      } else {
+        next[serial] = { ...(next[serial] ?? {}), brightness: level };
+      }
+      onConfigChange({ ...config, deck_settings: next });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deckSettings, config, onConfigChange]
+  );
+  const giveOwnLayout = useCallback(() => {
+    if (!activeSerial) return;
+    const copy: Record<string, unknown> = {};
+    for (const section of DECK_SECTION_KEYS) {
+      if (config[section] !== undefined) {
+        copy[section] = JSON.parse(JSON.stringify(config[section]));
+      }
+    }
+    onConfigChange({ ...config, decks: { ...decksMap, [activeSerial]: copy } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSerial, config, decksMap, onConfigChange]);
+  const useSharedLayout = useCallback(() => {
+    if (!activeSerial) return;
+    const next = { ...decksMap };
+    delete next[activeSerial];
+    onConfigChange({ ...config, decks: next });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSerial, config, decksMap, onConfigChange]);
+  const moveLayoutTo = useCallback(
+    (fromSerial: string, toSerial: string) => {
+      const layoutToMove = decksMap[fromSerial];
+      if (!layoutToMove || fromSerial === toSerial) return;
+      const nextDecks = { ...decksMap };
+      delete nextDecks[fromSerial];
+      nextDecks[toSerial] = layoutToMove;
+      const nextNames = { ...deckNames };
+      if (nextNames[fromSerial] !== undefined) {
+        nextNames[toSerial] = nextNames[fromSerial];
+        delete nextNames[fromSerial];
+      }
+      const next: Record<string, unknown> = {
+        ...config,
+        decks: nextDecks,
+        deck_names: nextNames,
+      };
+      const virtuals =
+        (config.virtual_decks as { model?: string; serial?: string }[] | undefined) ?? [];
+      if (virtuals.some((v) => v.serial === fromSerial)) {
+        next.virtual_decks = virtuals.filter((v) => v.serial !== fromSerial);
+      }
+      onConfigChange(next);
+      setSelectedSerial(toSerial);
+      setSelection({ kind: "deck" });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [decksMap, deckNames, config, onConfigChange]
+  );
+  const forgetDeck = useCallback(
+    (serial: string) => {
+      const nextDecks = { ...decksMap };
+      delete nextDecks[serial];
+      const nextNames = { ...deckNames };
+      delete nextNames[serial];
+      const nextSettings = { ...deckSettings };
+      delete nextSettings[serial];
+      onConfigChange({
+        ...config,
+        decks: nextDecks,
+        deck_names: nextNames,
+        deck_settings: nextSettings,
+      });
+      setSelectedSerial(null);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [decksMap, deckNames, deckSettings, config, onConfigChange]
+  );
+  const removeVirtualDeck = useCallback(
+    (serial: string) => {
+      const virtuals =
+        (config.virtual_decks as { model?: string; serial?: string }[] | undefined) ?? [];
+      onConfigChange({
+        ...config,
+        virtual_decks: virtuals.filter((v) => v.serial !== serial),
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [config, onConfigChange]
+  );
+  const addVirtual = useCallback(
+    (modelName: string) => {
+      onConfigChange(addVirtualUnit(config, modelName).next);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [config, onConfigChange]
+  );
+
+  // ── Section summary metas ──
+  const autoPageRules = (viewConfig.auto_page as unknown[] | undefined) ?? [];
+  const brightnessRules =
+    (viewConfig.auto_brightness as unknown[] | undefined) ?? [];
+  const idleDim = viewConfig.idle_dim as
+    | { after_seconds?: number; level?: number }
+    | undefined;
+  const brightnessAutoParts: string[] = [];
+  if (idleDim) brightnessAutoParts.push(`idle dim ${idleDim.level ?? 10}%`);
+  if (brightnessRules.length) {
+    brightnessAutoParts.push(
+      `${brightnessRules.length} rule${brightnessRules.length === 1 ? "" : "s"}`
+    );
+  }
+  const appearanceParts: string[] = [];
+  if (typeof viewConfig.button_color === "string") appearanceParts.push("button color");
+  if (typeof viewConfig.text_color === "string") appearanceParts.push("text color");
+
+  const deckDisplayName = activeSerial
+    ? deckNames[activeSerial] || model || activeSerial
+    : "";
+  const ownerName = isOwn ? deckDisplayName : null;
+  const sharedWith = deckSerials.filter((s) => decksMap[s] === undefined);
+
+  const selectedKeyIndex = selection.kind === "key" ? selection.index : null;
+  const totalKeys = keyCount + touchKeyCount;
+
+  const inspector =
+    selection.kind === "key" && selectedKeyIndex !== null ? (
+      <ControlAssignmentPanel
+        controlId={String(selectedKeyIndex)}
+        allowedActions={SURFACE_ACTIONS}
+        navigateOptions={navigateOptions}
+        colorOnly={touchKeyCount > 0 && selectedKeyIndex >= keyCount}
+        keyCount={keyCount}
+        assignment={getAssignment(selectedKeyIndex, editorPage)}
+        onUpdate={(updates) => updateAssignment(selectedKeyIndex, editorPage, updates)}
+        onClear={() => clearAssignment(selectedKeyIndex, editorPage)}
+        onClose={() => setSelection({ kind: "deck" })}
+        pageName={pageLabel(editorPage)}
+        locked={isLocked(selectedKeyIndex)}
+        onToggleLock={(locked) => toggleLock(selectedKeyIndex, locked)}
+        lockShadowCount={shadowPageCount(selectedKeyIndex)}
+        onPress={
+          connected
+            ? () => simulate({ type: "key", index: selectedKeyIndex })
+            : undefined
+        }
+        arrange={{
+          page: editorPage,
+          maxPages: totalPages,
+          totalKeys: totalKeys > 0 ? totalKeys : (rows || 3) * (columns || 5),
+          pageLabel,
+          clipboardReady: clipboard !== null,
+          onCopy: () => copyAssignment(selectedKeyIndex, editorPage),
+          onPaste: () => pasteAssignment(selectedKeyIndex, editorPage),
+          onMove: (to) => moveAssignment({ index: selectedKeyIndex, page: editorPage }, to),
+          onSwap: (to) => swapAssignments({ index: selectedKeyIndex, page: editorPage }, to),
+        }}
+      />
+    ) : selection.kind === "dial" ? (
+      <DialAssignmentPanel
+        dialIndex={selection.index}
+        dial={getDial(selection.index)}
+        allowedActions={SURFACE_ACTIONS}
+        navigateOptions={navigateOptions}
+        onUpdate={(updates) => updateDial(selection.index, updates)}
+        onClear={() => clearDial(selection.index)}
+        onClose={() => setSelection({ kind: "deck" })}
+        onSimulate={connected ? simulate : undefined}
+      />
+    ) : selection.kind === "strip" ? (
+      <RailPanel title="Touch Strip" onClose={() => setSelection({ kind: "deck" })}>
+        <TouchscreenZonesEditor
+          config={viewConfig}
+          onConfigChange={onViewChange}
+          allowedActions={SURFACE_ACTIONS}
+          navigateOptions={navigateOptions}
+          initialExpanded={selection.zone}
+        />
+      </RailPanel>
+    ) : selection.kind === "screen" ? (
+      <RailPanel title="Info Screen" onClose={() => setSelection({ kind: "deck" })}>
+        <InfoStripEditor config={viewConfig} onConfigChange={onViewChange} />
+      </RailPanel>
+    ) : (
+      <DeckInspector
+        serial={activeSerial ?? ""}
+        name={activeSerial ? deckNames[activeSerial] ?? "" : ""}
+        model={model}
+        connected={connected}
+        isVirtual={isVirtual}
+        deckCount={knownSerials.length}
+        isOwn={isOwn}
+        sharedCount={sharedWith.length}
+        brightness={
+          activeSerial ? deckSettings[activeSerial]?.brightness : undefined
+        }
+        fallbackBrightness={
+          typeof config.brightness === "number" ? (config.brightness as number) : 70
+        }
+        onRename={(name) => activeSerial && renameDeck(activeSerial, name)}
+        onBrightness={(level) => activeSerial && setDeckBrightness(activeSerial, level)}
+        onIdentify={
+          connected && activeSerial
+            ? () =>
+                api
+                  .emitContextAction(pluginId, "identify_deck", { serial: activeSerial })
+                  .catch(() => {})
+            : undefined
+        }
+        onGiveOwnLayout={!isOwn && knownSerials.length > 1 ? giveOwnLayout : undefined}
+        onUseSharedLayout={isOwn ? useSharedLayout : undefined}
+        moveTargets={
+          isOwn
+            ? knownSerials
+                .filter((s) => s !== activeSerial)
+                .map((s) => ({
+                  serial: s,
+                  label: deckNames[s] || String(liveState[`${statePrefix}${s}.model`] ?? s),
+                  hasOwn: decksMap[s] !== undefined,
+                }))
+            : []
+        }
+        onMoveLayoutTo={(to) => activeSerial && moveLayoutTo(activeSerial, to)}
+        onRemoveVirtual={
+          isVirtual && activeSerial ? () => removeVirtualDeck(activeSerial) : undefined
+        }
+        onForget={
+          !connected && activeSerial ? () => forgetDeck(activeSerial) : undefined
+        }
+        virtualModels={staticLayout.virtual_models ?? []}
+        deviceLabel={staticLayout.device_label || "device"}
+        onAddVirtual={addVirtual}
+      />
+    );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-lg)" }}>
+      {/* Known decks (connected + remembered) — selection cards */}
+      {knownSerials.length > 1 && (
+        <DeckCards
+          serials={knownSerials}
+          connectedSerials={deckSerials}
+          activeSerial={activeSerial ?? ""}
+          statePrefix={statePrefix}
+          deckNames={deckNames}
+          decksMap={decksMap}
+          liveState={liveState}
+          onSelect={(serial) => {
+            setSelectedSerial(serial);
+          }}
+        />
+      )}
+
+      <div style={{ display: "flex", gap: "var(--space-lg)", alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+          {/* Page tabs + the always-visible editing scope */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "var(--space-md)",
+              flexWrap: "wrap",
+              marginBottom: "var(--space-sm)",
+            }}
+          >
+            <PageTabsRow
+              totalPages={totalPages}
+              pageCount={pageCount}
+              currentPage={editorPage}
+              pageLabel={pageLabel}
+              onSelect={onSelectPage}
+              onAdd={addPage}
+              onRename={(p, name) => renamePage(p, name)}
+              onDuplicate={() => duplicatePage(editorPage)}
+              onClearPage={() => clearPage(editorPage)}
+              canDelete={editorPage === pageCount - 1 && !lastPageBlockers}
+              onDelete={deleteLastPage}
+              hasContent={buttons.some((b) => (b.page ?? 0) === editorPage)}
+            />
+            {knownSerials.length > 1 && (
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {isOwn ? (
+                  <>
+                    Editing <strong style={{ color: "var(--text-secondary)" }}>{ownerName}'s own layout</strong> — other decks aren't affected.
+                  </>
+                ) : (
+                  <>
+                    Editing the <strong style={{ color: "var(--text-secondary)" }}>shared layout</strong> — shown on every deck without its own.
+                  </>
+                )}
+              </span>
+            )}
+          </div>
+
+          {draftPage && editorPage >= pageCount && (
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: "var(--space-sm)" }}>
+              New page — it's created (and reachable from the deck) as soon as
+              you put something on it.
+            </div>
+          )}
+
+          {hasGeometry ? (
+            <BezelCanvas
+              name={deckDisplayName}
+              model={model}
+              connected={connected}
+              isVirtual={isVirtual}
+              rows={rows}
+              columns={columns}
+              keyCount={keyCount}
+              touchKeyCount={touchKeyCount}
+              dialCount={dialCount}
+              hasTouchscreen={hasTouchscreen}
+              hasInfoScreen={hasInfoScreen}
+              images={draftPage && editorPage >= pageCount ? {} : images}
+              liveImagesValid={connected && isVisual && !(draftPage && editorPage >= pageCount)}
+              touchKeyColors={Array.from({ length: touchKeyCount }, (_, i) =>
+                String(liveState[`${sp}touch_key.${keyCount + i}`] ?? "")
+              )}
+              selection={selection}
+              lockedIndexes={lockedIndexes}
+              inputFlash={inputFlash}
+              currentPage={editorPage}
+              getAssignment={getAssignment}
+              getDial={getDial}
+              customZoneCount={
+                (((viewConfig.touchscreen as { zones?: TouchZone[] } | undefined)?.zones) ?? []).length
+              }
+              onSelect={setSelection}
+              onSimulate={connected ? simulate : undefined}
+            />
+          ) : (
+            <div
+              style={{
+                padding: "var(--space-xl)",
+                border: "1px dashed var(--border-color)",
+                borderRadius: "var(--border-radius)",
+                color: "var(--text-muted)",
+                fontSize: "var(--font-size-sm)",
+                textAlign: "center",
+                lineHeight: 1.6,
+              }}
+            >
+              {deckDisplayName} is not connected.
+              <br />
+              Reconnect it to edit — its layout is kept. Layout tools are in
+              the panel on the right.
+            </div>
+          )}
+        </div>
+
+        {inspector}
+      </div>
+
+      {/* Layout-scoped extras, tucked below the bench */}
+      <CollapsibleSection
+        title="Page automation"
+        subtitle="Jump to a page when system state changes"
+        meta={
+          autoPageRules.length
+            ? `${autoPageRules.length} rule${autoPageRules.length === 1 ? "" : "s"}`
+            : "off"
+        }
+        defaultOpen={false}
+      >
+        <AutoPageEditor
+          layout={{ ...staticLayout, max_pages: totalPages }}
+          config={viewConfig}
+          onConfigChange={onViewChange}
+        />
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Brightness automation"
+        subtitle="Idle dimming and state-driven levels (base brightness lives on the deck)"
+        meta={brightnessAutoParts.length ? brightnessAutoParts.join(" · ") : "off"}
+        defaultOpen={false}
+      >
+        <BrightnessEditor config={viewConfig} onConfigChange={onViewChange} />
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Appearance"
+        subtitle="Default key colors for this layout"
+        meta={appearanceParts.length ? appearanceParts.join(" · ") : "defaults"}
+        defaultOpen={false}
+      >
+        <AppearanceEditor
+          viewConfig={viewConfig}
+          onViewChange={onViewChange}
+          inherits={isOwn}
+        />
+      </CollapsibleSection>
+    </div>
+  );
+}
+
+// ──── Rail Panel (inspector shell for strip / screen editors) ────
+
+function RailPanel({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        width: 300,
+        flexShrink: 0,
+        background: "var(--bg-surface)",
+        borderRadius: "var(--border-radius)",
+        border: "1px solid var(--border-color)",
+        padding: "var(--space-md)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-md)",
+        maxHeight: "100%",
+        overflow: "auto",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h4 style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}>{title}</h4>
+        <button onClick={onClose} style={{ color: "var(--text-muted)", cursor: "pointer" }}>
+          <X size={14} />
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ──── Deck Cards (known units: connected, virtual, remembered) ────
+
+function DeckCards({
+  serials,
+  connectedSerials,
+  activeSerial,
+  statePrefix,
+  deckNames,
+  decksMap,
+  liveState,
+  onSelect,
+}: {
+  serials: string[];
+  connectedSerials: string[];
+  activeSerial: string;
+  statePrefix: string;
+  deckNames: Record<string, string>;
+  decksMap: Record<string, Record<string, unknown>>;
+  liveState: Record<string, unknown>;
+  onSelect: (serial: string) => void;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "stretch", gap: "var(--space-sm)", flexWrap: "wrap" }}>
+      {serials.map((serial) => {
+        const isConnected = connectedSerials.includes(serial);
+        const isActive = serial === activeSerial;
+        const model = String(liveState[`${statePrefix}${serial}.model`] ?? "");
+        const virtual = Boolean(liveState[`${statePrefix}${serial}.virtual`]);
+        const own = decksMap[serial] !== undefined;
+        const page = Number(liveState[`${statePrefix}${serial}.current_page`] ?? 0);
+        const pageNames =
+          ((own ? decksMap[serial] : undefined)?.page_names as Record<string, string> | undefined) ?? {};
+        const status: string[] = [];
+        if (!isConnected) {
+          status.push(own ? "not connected · layout saved" : "not connected");
+        } else {
+          status.push(own ? "own layout" : "shared layout");
+          status.push(`on ${pageNames[String(page)] || `Page ${page + 1}`}`);
+        }
+        return (
+          <button
+            key={serial}
+            onClick={() => onSelect(serial)}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-start",
+              gap: 2,
+              padding: "var(--space-xs) var(--space-md)",
+              borderRadius: "var(--border-radius)",
+              background: isActive ? "var(--accent-dim)" : "var(--bg-surface)",
+              border: isActive ? "2px solid var(--accent)" : "1px solid var(--border-color)",
+              opacity: isConnected ? 1 : 0.55,
+              cursor: "pointer",
+              textAlign: "left",
+            }}
+          >
+            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "var(--font-size-sm)", fontWeight: isActive ? 600 : 400 }}>
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  flexShrink: 0,
+                  background: isConnected ? "var(--color-success)" : "var(--text-muted)",
+                }}
+              />
+              {deckNames[serial] || model || serial}
+              {virtual && (
+                <span style={{ fontSize: 9, color: "var(--text-muted)", border: "1px solid var(--border-color)", borderRadius: 3, padding: "0 4px" }}>
+                  virtual
+                </span>
+              )}
+            </span>
+            <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+              {(deckNames[serial] && model ? `${model} · ` : "")}{status.join(" · ")}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ──── Page Tabs Row (emergent pages: tabs + add + page menu) ────
+
+function PageTabsRow({
+  totalPages,
+  pageCount,
+  currentPage,
+  pageLabel,
+  onSelect,
+  onAdd,
+  onRename,
+  onDuplicate,
+  onClearPage,
+  canDelete,
+  onDelete,
+  hasContent,
+}: {
+  totalPages: number;
+  pageCount: number;
+  currentPage: number;
+  pageLabel: (p: number) => string;
+  onSelect: (p: number) => void;
+  onAdd: () => void;
+  onRename: (p: number, name: string) => void;
+  onDuplicate: () => void;
+  onClearPage: () => void;
+  canDelete: boolean;
+  onDelete: () => void;
+  hasContent: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const commit = () => {
+    setEditing(false);
+    onRename(currentPage, draft);
+  };
+  const startRename = () => {
+    const label = pageLabel(currentPage);
+    setDraft(label !== `Page ${currentPage + 1}` ? label : "");
+    setEditing(true);
+    setMenuOpen(false);
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", flexWrap: "wrap" }}>
+      {Array.from({ length: totalPages }, (_, p) => {
+        const isActive = p === currentPage;
+        const isDraft = p >= pageCount;
+        if (isActive && editing) {
+          return (
+            <input
+              key={p}
+              autoFocus
+              value={draft}
+              placeholder={`Page ${p + 1}`}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              style={{
+                width: 110,
+                padding: "3px 8px",
+                borderRadius: "var(--border-radius)",
+                border: "1px solid var(--accent)",
+                background: "var(--bg-surface)",
+                color: "var(--text-primary)",
+                fontSize: "var(--font-size-sm)",
+              }}
+            />
+          );
+        }
+        return (
+          <button
+            key={p}
+            onClick={() => onSelect(p)}
+            onDoubleClick={isActive ? startRename : undefined}
+            title={isActive ? "Double-click to rename this page" : undefined}
+            style={{
+              padding: "3px 12px",
+              borderRadius: "var(--border-radius)",
+              border: isActive ? "1px solid var(--accent)" : "1px solid var(--border-color)",
+              background: isActive ? "var(--accent-dim)" : "var(--bg-surface)",
+              color: isActive ? "var(--text-primary)" : "var(--text-secondary)",
+              fontSize: "var(--font-size-sm)",
+              fontWeight: isActive ? 600 : 400,
+              fontStyle: isDraft ? "italic" : "normal",
+              opacity: isDraft && !isActive ? 0.6 : 1,
+              cursor: "pointer",
+              maxWidth: 160,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {pageLabel(p)}
+          </button>
+        );
+      })}
+      <button
+        onClick={onAdd}
+        title="Add a page"
+        style={{
+          padding: "3px 10px",
+          borderRadius: "var(--border-radius)",
+          border: "1px dashed var(--border-color)",
+          background: "transparent",
+          color: "var(--text-muted)",
+          fontSize: "var(--font-size-sm)",
+          cursor: "pointer",
+        }}
+      >
+        +
+      </button>
+      <div style={{ position: "relative" }}>
+        <button
+          onClick={() => {
+            setMenuOpen(!menuOpen);
+            setConfirmClear(false);
+            setConfirmDelete(false);
+          }}
+          title="Page actions"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            padding: "4px 6px",
+            borderRadius: "var(--border-radius)",
+            background: "var(--bg-hover)",
+            color: "var(--text-secondary)",
+            cursor: "pointer",
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+        {menuOpen && (
+          <div
+            style={{
+              position: "absolute",
+              top: "100%",
+              left: 0,
+              zIndex: 50,
+              marginTop: 4,
+              minWidth: 210,
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border-color)",
+              borderRadius: "var(--border-radius)",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <button onClick={startRename} style={pageMenuItemStyle(true)}>
+              Rename page
+            </button>
+            <button
+              onClick={() => {
+                onDuplicate();
+                setMenuOpen(false);
+              }}
+              disabled={!hasContent}
+              title={hasContent ? "Copy this page's keys onto a new page" : "Nothing on this page to copy"}
+              style={pageMenuItemStyle(hasContent)}
+            >
+              Duplicate to a new page
+            </button>
+            {!confirmClear ? (
+              <button
+                onClick={() => setConfirmClear(true)}
+                disabled={!hasContent}
+                style={{ ...pageMenuItemStyle(hasContent), color: hasContent ? "var(--color-error)" : undefined }}
+              >
+                Clear this page...
+              </button>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", padding: "var(--space-sm) var(--space-md)", fontSize: 12 }}>
+                <span style={{ color: "var(--color-error)" }}>Remove every key?</span>
+                <button
+                  onClick={() => {
+                    onClearPage();
+                    setMenuOpen(false);
+                    setConfirmClear(false);
+                  }}
+                  style={pageMenuConfirmStyle}
+                >
+                  Yes
+                </button>
+                <button onClick={() => setConfirmClear(false)} style={pageMenuConfirmStyle}>
+                  No
+                </button>
+              </div>
+            )}
+            {!confirmDelete ? (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                disabled={!canDelete}
+                title={
+                  canDelete
+                    ? "Remove the last page (its keys and name go with it)"
+                    : "Only the last page can be deleted, and only when no rule or page key still points at it"
+                }
+                style={{ ...pageMenuItemStyle(canDelete), color: canDelete ? "var(--color-error)" : undefined }}
+              >
+                Delete page
+              </button>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", padding: "var(--space-sm) var(--space-md)", fontSize: 12 }}>
+                <span style={{ color: "var(--color-error)" }}>Delete this page?</span>
+                <button
+                  onClick={() => {
+                    onDelete();
+                    setMenuOpen(false);
+                    setConfirmDelete(false);
+                  }}
+                  style={pageMenuConfirmStyle}
+                >
+                  Yes
+                </button>
+                <button onClick={() => setConfirmDelete(false)} style={pageMenuConfirmStyle}>
+                  No
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const pageMenuItemStyle = (enabled: boolean): React.CSSProperties => ({
+  padding: "var(--space-sm) var(--space-md)",
+  textAlign: "left",
+  fontSize: "var(--font-size-sm)",
+  cursor: enabled ? "pointer" : "default",
+  opacity: enabled ? 1 : 0.45,
+  background: "transparent",
+});
+
+const pageMenuConfirmStyle: React.CSSProperties = {
+  padding: "2px 8px",
+  borderRadius: "var(--border-radius)",
+  background: "var(--bg-hover)",
+  cursor: "pointer",
+  fontSize: 12,
+};
+
+// ──── Bezel Canvas (the live picture of the deck) ────
+//
+// Drawn as the physical object: keys, side touch keys, info screen, touch
+// strip, and dials in hardware order inside a dark shell, with the deck's
+// identity etched on the lower edge. Cells show the deck's real rendering
+// (live mirror) and fall back to a schematic before it populates. Click =
+// edit, Shift+click (or the hover ▶) = press.
+
+const CANVAS_KEY_PX = 72;
+const CANVAS_GAP = 6;
+
+function BezelCanvas({
+  name,
+  model,
+  connected,
+  isVirtual,
+  rows,
+  columns,
+  keyCount,
+  touchKeyCount,
+  dialCount,
+  hasTouchscreen,
+  hasInfoScreen,
+  images,
+  liveImagesValid,
+  touchKeyColors,
+  selection,
+  lockedIndexes,
+  inputFlash,
+  currentPage,
+  getAssignment,
+  getDial,
+  customZoneCount,
+  onSelect,
+  onSimulate,
+}: {
+  name: string;
+  model: string;
+  connected: boolean;
+  isVirtual: boolean;
+  rows: number;
+  columns: number;
+  keyCount: number;
+  touchKeyCount: number;
+  dialCount: number;
+  hasTouchscreen: boolean;
+  hasInfoScreen: boolean;
+  images: Record<string, string>;
+  liveImagesValid: boolean;
+  touchKeyColors: string[];
+  selection: WorkbenchSelection;
+  lockedIndexes: Set<number | undefined>;
+  inputFlash: { kind: string; index: number } | null;
+  currentPage: number;
+  getAssignment: (index: number, page?: number) => ButtonAssignment | undefined;
+  getDial: (index: number) => DialAssignment | undefined;
+  customZoneCount: number;
+  onSelect: (sel: WorkbenchSelection) => void;
+  onSimulate?: (payload: Record<string, unknown>) => void;
+}) {
+  const gridWidth = columns * CANVAS_KEY_PX + (columns - 1) * CANVAS_GAP;
+
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        flexDirection: "column",
+        gap: CANVAS_GAP,
+        padding: "var(--space-lg)",
+        background: "#0c0c14",
+        borderRadius: 16,
+        border: "1px solid var(--border-color)",
+      }}
+    >
+      {/* LCD keys */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${columns}, ${CANVAS_KEY_PX}px)`,
+          gridTemplateRows: `repeat(${rows}, ${CANVAS_KEY_PX}px)`,
+          gap: CANVAS_GAP,
+        }}
+      >
+        {Array.from({ length: keyCount }, (_, i) => (
+          <KeyCell
+            key={i}
+            index={i}
+            image={liveImagesValid ? images[`key_${i}`] : undefined}
+            assignment={getAssignment(i, currentPage)}
+            selected={selection.kind === "key" && selection.index === i}
+            locked={lockedIndexes.has(i)}
+            flashing={inputFlash?.kind === "key" && inputFlash.index === i}
+            onSelect={() => onSelect({ kind: "key", index: i })}
+            onPress={onSimulate ? () => onSimulate({ type: "key", index: i }) : undefined}
+          />
+        ))}
+      </div>
+
+      {/* Info screen flanked by the side touch keys (color-only) */}
+      {(hasInfoScreen || touchKeyCount > 0) && (
+        <div style={{ display: "flex", alignItems: "center", gap: CANVAS_GAP }}>
+          {touchKeyCount > 0 && (
+            <CanvasTouchKey
+              color={touchKeyColors[0] || (getAssignment(keyCount, currentPage)?.bg_color ?? "")}
+              selected={selection.kind === "key" && selection.index === keyCount}
+              locked={lockedIndexes.has(keyCount)}
+              flashing={inputFlash?.kind === "key" && inputFlash.index === keyCount}
+              onSelect={() => onSelect({ kind: "key", index: keyCount })}
+              onPress={onSimulate ? () => onSimulate({ type: "key", index: keyCount }) : undefined}
+            />
+          )}
+          {hasInfoScreen && (
+            <button
+              onClick={() => onSelect({ kind: "screen" })}
+              title="Info screen — click to set what it shows"
+              style={{
+                flex: 1,
+                height: Math.max(34, Math.round((gridWidth * 0.55 * 58) / 248)),
+                borderRadius: 4,
+                overflow: "hidden",
+                background: "#000",
+                border:
+                  selection.kind === "screen"
+                    ? "2px solid var(--accent)"
+                    : "1px solid #2a2a3a",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                color: "#445",
+                fontSize: 10,
+              }}
+            >
+              {liveImagesValid && images["screen"] ? (
+                <img
+                  src={images["screen"]}
+                  draggable={false}
+                  style={{ height: "100%", display: "block" }}
+                  alt=""
+                />
+              ) : (
+                "info screen"
+              )}
+            </button>
+          )}
+          {touchKeyCount > 1 && (
+            <CanvasTouchKey
+              color={touchKeyColors[1] || (getAssignment(keyCount + 1, currentPage)?.bg_color ?? "")}
+              selected={selection.kind === "key" && selection.index === keyCount + 1}
+              locked={lockedIndexes.has(keyCount + 1)}
+              flashing={inputFlash?.kind === "key" && inputFlash.index === keyCount + 1}
+              onSelect={() => onSelect({ kind: "key", index: keyCount + 1 })}
+              onPress={onSimulate ? () => onSimulate({ type: "key", index: keyCount + 1 }) : undefined}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Touch strip */}
+      {hasTouchscreen && (
+        <div
+          onClick={(e) => {
+            const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+            const x = Math.round(((e.clientX - rect.left) / rect.width) * 800);
+            if (e.shiftKey) {
+              onSimulate?.({ type: "touch", x });
+              return;
+            }
+            if (customZoneCount > 0) {
+              const zone = Math.min(
+                customZoneCount - 1,
+                Math.floor(x / (800 / customZoneCount))
+              );
+              onSelect({ kind: "strip", zone });
+            } else if (dialCount > 0) {
+              // Default zones are the dials' readouts — clicking one edits
+              // that dial.
+              const dial = Math.min(dialCount - 1, Math.floor(x / (800 / dialCount)));
+              onSelect({ kind: "dial", index: dial });
+            } else {
+              onSelect({ kind: "strip", zone: null });
+            }
+          }}
+          title="Touch strip — click to edit, Shift+click to tap it"
+          style={{
+            width: gridWidth,
+            height: Math.round(gridWidth / 8),
+            borderRadius: 4,
+            overflow: "hidden",
+            background: "#000",
+            border:
+              selection.kind === "strip"
+                ? "2px solid var(--accent)"
+                : inputFlash?.kind === "touch"
+                  ? "2px solid #f59e0b"
+                  : "1px solid #2a2a3a",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#445",
+            fontSize: 10,
+          }}
+        >
+          {liveImagesValid && images["touchscreen"] ? (
+            <img
+              src={images["touchscreen"]}
+              draggable={false}
+              style={{ width: "100%", height: "100%", display: "block" }}
+              alt=""
+            />
+          ) : (
+            "touch strip"
+          )}
+        </div>
+      )}
+
+      {/* Dials */}
+      {dialCount > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-around" }}>
+          {Array.from({ length: dialCount }, (_, i) => {
+            const dial = getDial(i);
+            const isSelected = selection.kind === "dial" && selection.index === i;
+            const hasAssignment =
+              !!dial?.label || !!dial?.adjust?.key ||
+              !!dial?.cw?.length || !!dial?.ccw?.length || !!dial?.press?.length;
+            return (
+              <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                <button
+                  onClick={(e) => {
+                    if (e.shiftKey) {
+                      onSimulate?.({ type: "dial_push", index: i });
+                      return;
+                    }
+                    onSelect({ kind: "dial", index: i });
+                  }}
+                  title={`Dial ${i + 1}${dial?.label ? ` — ${dial.label}` : ""} · click to edit, Shift+click to press`}
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: "50%",
+                    background: "#16161f",
+                    border: isSelected
+                      ? "2px solid var(--accent)"
+                      : "1px solid #2a2a3a",
+                    boxShadow:
+                      inputFlash?.kind === "dial" && inputFlash.index === i
+                        ? "0 0 0 3px #f59e0b"
+                        : undefined,
+                    cursor: "pointer",
+                    position: "relative",
+                  }}
+                >
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 4,
+                      left: "50%",
+                      width: 2,
+                      height: 9,
+                      marginLeft: -1,
+                      background: hasAssignment ? "var(--accent)" : "#3a3a4e",
+                      borderRadius: 1,
+                    }}
+                  />
+                </button>
+                <div style={{ fontSize: 9, color: "#667", maxWidth: 64, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {dial?.label || `Dial ${i + 1}`}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* The shell carries the unit's identity */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 6,
+          marginTop: 2,
+          fontSize: 10,
+          color: "#556",
+          userSelect: "none",
+        }}
+      >
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: connected ? "var(--color-success)" : "var(--text-muted)",
+          }}
+        />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: Math.max(160, gridWidth - 40) }}>
+          {name}
+          {model && name !== model ? ` · ${model}` : ""}
+          {isVirtual ? " · virtual" : ""}
+          {!connected ? " · not connected" : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function KeyCell({
+  index,
+  image,
+  assignment,
+  selected,
+  locked,
+  flashing,
+  onSelect,
+  onPress,
+}: {
+  index: number;
+  image?: string;
+  assignment: ButtonAssignment | undefined;
+  selected: boolean;
+  locked: boolean;
+  flashing: boolean;
+  onSelect: () => void;
+  onPress?: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const hasAssignment =
+    !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press;
+
+  return (
+    <div
+      style={{ position: "relative", width: CANVAS_KEY_PX, height: CANVAS_KEY_PX }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <button
+        onClick={(e) => {
+          if (e.shiftKey && onPress) {
+            onPress();
+            return;
+          }
+          onSelect();
+        }}
+        title={`Key ${index + 1}${assignment?.label ? ` — ${assignment.label}` : ""} · click to edit${onPress ? ", Shift+click to press" : ""}`}
+        style={{
+          width: "100%",
+          height: "100%",
+          padding: 0,
+          borderRadius: 8,
+          overflow: "hidden",
+          border: selected ? "2px solid var(--accent)" : "1px solid #2a2a3a",
+          boxShadow: flashing ? "0 0 0 3px #f59e0b" : undefined,
+          background: image ? "#000" : assignment?.bg_color || "#101018",
+          cursor: "pointer",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 2,
+          color: assignment?.text_color || "#778",
+        }}
+      >
+        {image ? (
+          <img
+            src={image}
+            draggable={false}
+            style={{ width: "100%", height: "100%", display: "block" }}
+            alt=""
+          />
+        ) : (
+          <>
+            {!hasAssignment && (
+              <span style={{ fontSize: 10, color: "#33334a" }}>{index + 1}</span>
+            )}
+            {assignment?.icon && (
+              <ElementIcon
+                name={assignment.icon}
+                size={assignment.label ? 22 : 30}
+                color={assignment?.text_color || "#99a"}
+              />
+            )}
+            {assignment?.label && (
+              <span
+                style={{
+                  fontSize: 9,
+                  maxWidth: CANVAS_KEY_PX - 10,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {assignment.label}
+              </span>
+            )}
+          </>
+        )}
+      </button>
+      {locked && (
+        <span
+          title="Locked — same on every page"
+          style={{
+            position: "absolute",
+            top: 3,
+            left: 3,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 14,
+            height: 14,
+            borderRadius: 4,
+            background: "rgba(12,12,20,0.75)",
+            color: "var(--accent)",
+            pointerEvents: "none",
+          }}
+        >
+          <Pin size={9} />
+        </span>
+      )}
+      {onPress && hovered && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onPress();
+          }}
+          title="Press this key"
+          style={{
+            position: "absolute",
+            top: 3,
+            right: 3,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 16,
+            height: 16,
+            borderRadius: 4,
+            background: "rgba(12,12,20,0.8)",
+            color: "#cdd",
+            cursor: "pointer",
+          }}
+        >
+          <Play size={9} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function CanvasTouchKey({
+  color,
+  selected,
+  locked,
+  flashing,
+  onSelect,
+  onPress,
+}: {
+  color: string;
+  selected: boolean;
+  locked: boolean;
+  flashing: boolean;
+  onSelect: () => void;
+  onPress?: () => void;
+}) {
+  return (
+    <button
+      onClick={(e) => {
+        if (e.shiftKey && onPress) {
+          onPress();
+          return;
+        }
+        onSelect();
+      }}
+      title={`Touch key · click to edit${onPress ? ", Shift+click to tap" : ""}${locked ? " · locked" : ""}`}
+      style={{
+        width: 22,
+        height: 44,
+        borderRadius: 11,
+        flexShrink: 0,
+        border: selected ? "2px solid var(--accent)" : "1px solid #2a2a3a",
+        boxShadow: flashing ? "0 0 0 3px #f59e0b" : undefined,
+        background: color && color !== "#000000" ? color : "#101018",
+        cursor: "pointer",
+      }}
+    />
+  );
+}
+
+// ──── Deck Inspector (the rail's idle state: the unit itself) ────
+
+function DeckInspector({
+  serial,
+  name,
+  model,
+  connected,
+  isVirtual,
+  deckCount,
+  isOwn,
+  sharedCount,
+  brightness,
+  fallbackBrightness,
+  onRename,
+  onBrightness,
+  onIdentify,
+  onGiveOwnLayout,
+  onUseSharedLayout,
+  moveTargets,
+  onMoveLayoutTo,
+  onRemoveVirtual,
+  onForget,
+  virtualModels,
+  deviceLabel,
+  onAddVirtual,
+}: {
+  serial: string;
+  name: string;
+  model: string;
+  connected: boolean;
+  isVirtual: boolean;
+  deckCount: number;
+  isOwn: boolean;
+  sharedCount: number;
+  brightness?: number;
+  fallbackBrightness: number;
+  onRename: (name: string) => void;
+  onBrightness: (level: number | undefined) => void;
+  onIdentify?: () => void;
+  onGiveOwnLayout?: () => void;
+  onUseSharedLayout?: () => void;
+  moveTargets: { serial: string; label: string; hasOwn: boolean }[];
+  onMoveLayoutTo: (serial: string) => void;
+  onRemoveVirtual?: () => void;
+  onForget?: () => void;
+  virtualModels: string[];
+  deviceLabel: string;
+  onAddVirtual: (model: string) => void;
+}) {
+  const [confirmShared, setConfirmShared] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [confirmForget, setConfirmForget] = useState(false);
+  const [moveTarget, setMoveTarget] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [addModel, setAddModel] = useState(virtualModels[0] ?? "");
+  const level = typeof brightness === "number" ? brightness : fallbackBrightness;
+
+  return (
+    <div
+      style={{
+        width: 300,
+        flexShrink: 0,
+        background: "var(--bg-surface)",
+        borderRadius: "var(--border-radius)",
+        border: "1px solid var(--border-color)",
+        padding: "var(--space-md)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-lg)",
+        maxHeight: "100%",
+        overflow: "auto",
+      }}
+    >
+      {/* Identity */}
+      <div>
+        <input
+          value={name}
+          placeholder="Name this deck"
+          title="Friendly name shown everywhere (e.g. Lectern, Tech Booth)"
+          onChange={(e) => onRename(e.target.value)}
+          style={{
+            width: "100%",
+            padding: "var(--space-xs) var(--space-sm)",
+            borderRadius: "var(--border-radius)",
+            border: "1px solid var(--border-color)",
+            background: "var(--bg-surface)",
+            color: "var(--text-primary)",
+            fontSize: "var(--font-size-base)",
+            fontWeight: 600,
+          }}
+        />
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            marginTop: "var(--space-xs)",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            flexWrap: "wrap",
+          }}
+        >
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: connected ? "var(--color-success)" : "var(--text-muted)",
+            }}
+          />
+          {connected ? "Connected" : "Not connected"}
+          {model && <> · {model}</>}
+          {isVirtual && <> · virtual</>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+          <code style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+            {serial}
+          </code>
+          <CopyButton value={serial} title="Copy serial" />
+        </div>
+      </div>
+
+      {/* Brightness — a property of this unit, not of any layout */}
+      {connected && (
+        <div>
+          <label style={panelLabelStyle}>Brightness</label>
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={level}
+              onChange={(e) => onBrightness(Number(e.target.value))}
+              style={{ flex: 1, accentColor: "var(--accent)" }}
+            />
+            <span style={{ fontSize: "var(--font-size-sm)", width: 38, textAlign: "right" }}>
+              {level}%
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+            Just this deck.{" "}
+            {typeof brightness === "number" && (
+              <button
+                onClick={() => onBrightness(undefined)}
+                style={{ color: "var(--accent)", cursor: "pointer", background: "none", fontSize: 10 }}
+              >
+                Use the shared level ({fallbackBrightness}%)
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Actions on the unit */}
+      {onIdentify && (
+        <button onClick={onIdentify} style={deckActionBtnStyle} title="Flash this deck's keys so you can tell which one it is">
+          Identify — flash this deck
+        </button>
+      )}
+
+      {/* Layout ownership (only meaningful with more than one known deck) */}
+      {deckCount > 1 && (
+        <div>
+          <label style={panelLabelStyle}>Layout</label>
+          <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-secondary)", marginBottom: "var(--space-sm)" }}>
+            {isOwn ? (
+              <>Shows <strong>its own layout</strong>.</>
+            ) : (
+              <>Shows the <strong>shared layout</strong>{sharedCount > 1 ? ` (with ${sharedCount - 1} other deck${sharedCount > 2 ? "s" : ""})` : ""}.</>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+            {onGiveOwnLayout && (
+              <button
+                onClick={onGiveOwnLayout}
+                style={deckActionBtnStyle}
+                title="Starts as a copy of the shared layout; other decks keep sharing"
+              >
+                Give this deck its own layout
+              </button>
+            )}
+            {onUseSharedLayout && !confirmShared && (
+              <button onClick={() => setConfirmShared(true)} style={deckActionBtnStyle}>
+                Use the shared layout instead
+              </button>
+            )}
+            {onUseSharedLayout && confirmShared && (
+              <InlineConfirm
+                question={`Delete ${name || model || "this deck"}'s own layout and show the shared one? This can't be undone.`}
+                onYes={() => {
+                  onUseSharedLayout();
+                  setConfirmShared(false);
+                }}
+                onNo={() => setConfirmShared(false)}
+              />
+            )}
+            {isOwn && moveTargets.length > 0 && moveTarget === null && (
+              <button
+                onClick={() => setMoveTarget(moveTargets[0].serial)}
+                style={deckActionBtnStyle}
+                title="Re-key this layout (and the deck's name) onto another deck — e.g. a replacement unit"
+              >
+                Move this layout to another deck...
+              </button>
+            )}
+            {moveTarget !== null && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+                <select
+                  value={moveTarget}
+                  onChange={(e) => setMoveTarget(e.target.value)}
+                  style={{
+                    padding: "4px 6px",
+                    borderRadius: "var(--border-radius)",
+                    border: "1px solid var(--border-color)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                    fontSize: 12,
+                  }}
+                >
+                  {moveTargets.map((t) => (
+                    <option key={t.serial} value={t.serial}>
+                      {t.label} ({t.serial}){t.hasOwn ? " — replaces its own layout" : ""}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ display: "flex", gap: "var(--space-xs)" }}>
+                  <button
+                    onClick={() => {
+                      if (moveTarget) onMoveLayoutTo(moveTarget);
+                      setMoveTarget(null);
+                    }}
+                    style={{ ...pageMenuConfirmStyle, background: "var(--accent-bg)", color: "var(--text-on-accent)" }}
+                  >
+                    Move
+                  </button>
+                  <button onClick={() => setMoveTarget(null)} style={pageMenuConfirmStyle}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Virtual / remembered-unit upkeep */}
+      {(onRemoveVirtual || onForget) && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+          {onRemoveVirtual && !confirmRemove && (
+            <button
+              onClick={() => setConfirmRemove(true)}
+              style={{ ...deckActionBtnStyle, color: "var(--color-error)" }}
+              title="Remove this virtual deck. A layout of its own is kept and can be moved to another deck."
+            >
+              Remove virtual deck
+            </button>
+          )}
+          {onRemoveVirtual && confirmRemove && (
+            <InlineConfirm
+              question="Remove this virtual deck?"
+              onYes={() => {
+                onRemoveVirtual();
+                setConfirmRemove(false);
+              }}
+              onNo={() => setConfirmRemove(false)}
+            />
+          )}
+          {onForget && !confirmForget && (
+            <button
+              onClick={() => setConfirmForget(true)}
+              style={{ ...deckActionBtnStyle, color: "var(--color-error)" }}
+              title="Drop this deck's name, settings, and saved layout"
+            >
+              Forget this deck
+            </button>
+          )}
+          {onForget && confirmForget && (
+            <InlineConfirm
+              question={`Forget ${name || serial}? Its saved layout is deleted.`}
+              onYes={() => {
+                onForget();
+                setConfirmForget(false);
+              }}
+              onNo={() => setConfirmForget(false)}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Add a virtual unit */}
+      {virtualModels.length > 0 && (
+        <div style={{ marginTop: "auto" }}>
+          {!adding ? (
+            <button
+              onClick={() => setAdding(true)}
+              style={{
+                padding: "var(--space-xs) var(--space-sm)",
+                borderRadius: "var(--border-radius)",
+                border: "1px dashed var(--border-color)",
+                background: "transparent",
+                color: "var(--text-muted)",
+                fontSize: "var(--font-size-sm)",
+                cursor: "pointer",
+                width: "100%",
+              }}
+              title="Add a software unit that runs exactly like plugged-in hardware"
+            >
+              + Virtual {deviceLabel}
+            </button>
+          ) : (
+            <div style={{ display: "flex", gap: "var(--space-xs)" }}>
+              <select
+                value={addModel}
+                onChange={(e) => setAddModel(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: "4px 6px",
+                  borderRadius: "var(--border-radius)",
+                  border: "1px solid var(--border-color)",
+                  background: "var(--bg-surface)",
+                  color: "var(--text-primary)",
+                  fontSize: 12,
+                }}
+              >
+                {virtualModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => {
+                  if (addModel) onAddVirtual(addModel);
+                  setAdding(false);
+                }}
+                style={{ ...pageMenuConfirmStyle, background: "var(--accent-bg)", color: "var(--text-on-accent)" }}
+              >
+                Add
+              </button>
+              <button onClick={() => setAdding(false)} style={pageMenuConfirmStyle}>
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InlineConfirm({
+  question,
+  onYes,
+  onNo,
+}: {
+  question: string;
+  onYes: () => void;
+  onNo: () => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)", fontSize: 12 }}>
+      <span style={{ color: "var(--color-error, #ef4444)" }}>{question}</span>
+      <div style={{ display: "flex", gap: "var(--space-xs)" }}>
+        <button onClick={onYes} style={pageMenuConfirmStyle}>Yes</button>
+        <button onClick={onNo} style={pageMenuConfirmStyle}>No</button>
+      </div>
+    </div>
+  );
+}
+
+const deckActionBtnStyle: React.CSSProperties = {
+  padding: "var(--space-xs) var(--space-sm)",
+  borderRadius: "var(--border-radius)",
+  background: "var(--bg-hover)",
+  color: "var(--text-secondary)",
+  fontSize: "var(--font-size-sm)",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+// ──── Appearance (layout-scoped default colors) ────
+
+function AppearanceEditor({
+  viewConfig,
+  onViewChange,
+  inherits,
+}: {
+  viewConfig: Record<string, unknown>;
+  onViewChange: (next: Record<string, unknown>) => void;
+  inherits: boolean;
+}) {
+  const setField = (field: string, value: unknown) => {
+    const next = { ...viewConfig };
+    if (value === undefined || value === "") {
+      delete next[field];
+    } else {
+      next[field] = value;
+    }
+    onViewChange(next);
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)", maxWidth: 420 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
+        <label style={{ fontSize: "var(--font-size-sm)", color: "var(--text-secondary)", width: 130 }}>
+          Default key color
+        </label>
+        <InlineColorPicker
+          value={typeof viewConfig.button_color === "string" ? (viewConfig.button_color as string) : ""}
+          onChange={(c) => setField("button_color", c || undefined)}
+        />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
+        <label style={{ fontSize: "var(--font-size-sm)", color: "var(--text-secondary)", width: 130 }}>
+          Text color
+        </label>
+        <InlineColorPicker
+          value={typeof viewConfig.text_color === "string" ? (viewConfig.text_color as string) : ""}
+          onChange={(c) => setField("text_color", c || undefined)}
+        />
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+        Keys without their own colors use these.
+        {inherits && " Blank values fall back to the shared layout's colors."}
+      </div>
+    </div>
+  );
+}

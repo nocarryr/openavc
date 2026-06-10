@@ -78,6 +78,15 @@ Color priority: feedback style > per-button defaults > global plugin config defa
 A hidden button (visible_when false) renders as a blank black key and ignores presses.
 Only include fields you need. Unassigned buttons can be omitted from the array.
 
+Locked buttons (optional): entries that must stay identical on every page (page
+switchers, mute-all, help) go in a top-level "global_buttons" array. Same entry shape
+as "buttons" but with NO "page" field. A global_buttons entry at an index wins over
+any per-page button at that index, on every page. A button navigating to a specific
+page index is automatically highlighted while that page is showing.
+
+Pages exist by being used (there is no page-count setting): placing a button, paging
+rule, page name, or numeric navigate target on page N creates pages 0 through N.
+
 Automatic paging (optional): add a top-level "auto_page" array alongside "buttons" to
 switch pages automatically when state changes:
 

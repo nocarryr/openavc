@@ -44,6 +44,9 @@ interface ButtonBindingEditorProps {
   allowedActions?: string[];
   // Navigate targets for control surfaces (deck pages, not panel pages).
   navigateOptions?: { value: string; label: string }[];
+  // Surface inspectors lead with what the key DOES: action slots first,
+  // then label, then the press-style (mode) block, then feedback.
+  surfaceOrder?: boolean;
 }
 
 export function ButtonBindingEditor({
@@ -57,6 +60,7 @@ export function ButtonBindingEditor({
   showToggleLabels = false,
   allowedActions,
   navigateOptions,
+  surfaceOrder = false,
 }: ButtonBindingEditorProps) {
   const [expandedSlot, setExpandedSlot] = useState<string | null>(null);
 
@@ -215,25 +219,23 @@ export function ButtonBindingEditor({
     return summarizeAction(getActionValue(sectionId));
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
-      {/* Label */}
-      {showLabel && onLabelChange && (
-        <div>
-          <label style={sectionLabelStyle}>Button Label</label>
-          <input
-            type="text"
-            value={label ?? ""}
-            placeholder="Text shown on the button"
-            onChange={(e) => onLabelChange(e.target.value)}
-            style={inputStyle}
-          />
-        </div>
-      )}
+  const labelBlock =
+    showLabel && onLabelChange ? (
+      <div key="label">
+        <label style={sectionLabelStyle}>Button Label</label>
+        <input
+          type="text"
+          value={label ?? ""}
+          placeholder="Text shown on the button"
+          onChange={(e) => onLabelChange(e.target.value)}
+          style={inputStyle}
+        />
+      </div>
+    ) : null;
 
-      {/* Button Mode */}
-      <div>
-        <label style={sectionLabelStyle}>Button Mode</label>
+  const modeBlock = (
+      <div key="mode">
+        <label style={sectionLabelStyle}>{surfaceOrder ? "Press Style" : "Button Mode"}</label>
         <select
           value={currentMode}
           onChange={(e) => handleModeChange(e.target.value)}
@@ -382,9 +384,9 @@ export function ButtonBindingEditor({
           </div>
         )}
       </div>
+  );
 
-      {/* Sections */}
-      {sections.map((section) => {
+  const renderSection = (section: Section) => {
         const isExpanded = expandedSlot === section.id;
         const summary = getSummary(section.id);
         const isConfigured = summary !== "Not configured";
@@ -458,8 +460,10 @@ export function ButtonBindingEditor({
             )}
           </div>
         );
-      })}
+  };
 
+  const extrasBlock = (
+    <>
       {/* Extra actions (tap mode only) */}
       {currentMode === "tap" && extraActions.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
@@ -548,6 +552,30 @@ export function ButtonBindingEditor({
         >
           + Add another action
         </button>
+      )}
+    </>
+  );
+
+  const actionSections = sections.filter((s) => s.type !== "feedback");
+  const feedbackSections = sections.filter((s) => s.type === "feedback");
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
+      {surfaceOrder ? (
+        <>
+          {actionSections.map(renderSection)}
+          {extrasBlock}
+          {labelBlock}
+          {modeBlock}
+          {feedbackSections.map(renderSection)}
+        </>
+      ) : (
+        <>
+          {labelBlock}
+          {modeBlock}
+          {sections.map(renderSection)}
+          {extrasBlock}
+        </>
       )}
     </div>
   );
