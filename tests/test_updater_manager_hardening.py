@@ -398,3 +398,83 @@ async def test_apply_cloud_update_rejects_non_https(tmp_path):
 def test_safe_artifact_filename(tmp_path, url_path, version, deployment, expected):
     mgr = _bare_manager(tmp_path, deployment=deployment)
     assert mgr._safe_artifact_filename(url_path, version) == expected
+
+
+# ── Cloud-staged update surfaced: get_status field + state re-seed on boot ──
+
+def test_get_status_includes_staged_version(tmp_path):
+    mgr = _bare_manager(tmp_path)
+    with patch("server.updater.manager.can_self_update", return_value=True), \
+         patch("server.updater.rollback.can_rollback", return_value=False), \
+         patch("server.system_config.APP_DIR", tmp_path):
+        assert mgr.get_status()["staged_version"] == ""
+
+    mgr.stage_update("9.9.9", "https://x/u.tar.gz", "deadbeef")
+    with patch("server.updater.manager.can_self_update", return_value=True), \
+         patch("server.updater.rollback.can_rollback", return_value=False), \
+         patch("server.system_config.APP_DIR", tmp_path):
+        assert mgr.get_status()["staged_version"] == "9.9.9"
+
+
+def test_init_reseeds_staged_state_key(tmp_path):
+    """A staged update persists on disk; the state key must come back after
+    a server restart or the IDE loses sight of the staged update."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "staged-update.json").write_text(
+        json.dumps({
+            "target_version": "9.9.9",
+            "update_url": "https://x/u.tar.gz",
+            "checksum_sha256": "deadbeef",
+        }),
+        encoding="utf-8",
+    )
+    state = MagicMock()
+    UpdateManager(
+        state_store=state, data_dir=data_dir, project_path=data_dir / "p.avc",
+    )
+    state.set.assert_any_call("system.update_staged_version", "9.9.9", source="system")
+
+
+def test_init_without_staged_file_does_not_touch_key(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state = MagicMock()
+    UpdateManager(
+        state_store=state, data_dir=data_dir, project_path=data_dir / "p.avc",
+    )
+    staged_calls = [
+        c for c in state.set.call_args_list
+        if c.args and c.args[0] == "system.update_staged_version"
+    ]
+    assert staged_calls == []
+
+
+# ── Rollback history records the real target version + rollback flag ──
+
+@pytest.mark.asyncio
+async def test_rollback_history_records_target_and_flag(tmp_path):
+    mgr = _bare_manager(tmp_path)
+    with patch("server.updater.rollback.can_rollback", return_value=True), \
+         patch("server.updater.rollback.perform_rollback", return_value=True), \
+         patch("server.updater.rollback.rollback_target_version", return_value="0.12.0"), \
+         patch("server.updater.backup.create_backup", return_value=tmp_path / "b.zip"), \
+         patch("server.updater.backup.cleanup_old_backups", MagicMock()), \
+         patch("server.system_config.APP_DIR", tmp_path), \
+         patch("server.updater.manager.__version__", "0.13.0"), \
+         patch.object(mgr, "_restart_process"), \
+         patch.object(mgr, "_save_history"):
+        result = await mgr.rollback()
+
+    assert result["success"] is True
+    entry = mgr._history[0]
+    assert entry["rollback"] is True
+    assert entry["from_version"] == "0.13.0"
+    assert entry["to_version"] == "0.12.0"  # the real target, not "rollback"
+
+
+def test_update_history_entries_record_rollback_false(tmp_path):
+    mgr = _bare_manager(tmp_path)
+    with patch.object(mgr, "_save_history"):
+        mgr._add_history_entry("0.13.0", "0.14.0", "pending")
+    assert mgr._history[0]["rollback"] is False

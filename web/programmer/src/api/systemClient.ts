@@ -61,6 +61,8 @@ export interface UpdateStatus {
   update_status: string;
   update_progress: number;
   update_error: string;
+  /** Version of a cloud-staged update awaiting manual install ("" if none). */
+  staged_version?: string;
   rollback_available: boolean;
   rollback_version: string;
 }
@@ -84,6 +86,9 @@ export interface UpdateHistoryEntry {
   to_version: string;
   status: string;
   error?: string;
+  /** True when this entry records a rollback rather than an update. Older
+   *  entries instead carry the literal string "rollback" in to_version. */
+  rollback?: boolean;
   timestamp: string;
 }
 

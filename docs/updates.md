@@ -80,6 +80,7 @@ If your system is connected to OpenAVC Cloud, your integrator may manage updates
 
 - They can see your system's current version in the cloud portal
 - They can trigger updates from the portal without needing local access
+- They can stage an update without restarting: it appears in the Programmer IDE's Updates view as "staged from the cloud", ready to install whenever it suits the space
 - They can set an update policy for your organization: manual, notify-only, or auto-update during a maintenance window
 
 Even with cloud management, you can always check for and install updates locally from the Programmer IDE.

@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { RefreshCw, Download, RotateCcw, CheckCircle, XCircle, Loader } from "lucide-react";
+import { RefreshCw, Download, RotateCcw, CheckCircle, XCircle, Loader, CloudDownload } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { useConnectionStore } from "../store/connectionStore";
 import { showError, showSuccess } from "../store/toastStore";
 import * as api from "../api/restClient";
 import type { UpdateStatus, UpdateCheckResult, UpdateHistoryEntry } from "../api/restClient";
+import { updateCompletionOutcome, historyEntryDisplay } from "./updatesHelpers";
 
 const cardStyle: React.CSSProperties = {
   background: "var(--bg-surface)",
@@ -78,7 +79,13 @@ export function UpdatesView() {
   const [checking, setChecking] = useState(false);
   const [showProgressModal, setShowProgressModal] = useState(false);
   const [showRollbackConfirm, setShowRollbackConfirm] = useState(false);
+  const [watchdogTripped, setWatchdogTripped] = useState(false);
   const prevVersionRef = useRef<string>("");
+  const prevStatusRef = useRef<string>("");
+  // Which action this view started, so the completion toast can tell a
+  // rollback from an update (semver direction is the fallback for actions
+  // started elsewhere, e.g. cloud-initiated).
+  const actionRef = useRef<"update" | "rollback" | null>(null);
 
   // Load initial data
   useEffect(() => {
@@ -91,6 +98,7 @@ export function UpdatesView() {
   const updateProgress = Number(liveState["system.update_progress"] ?? 0);
   const updateError = String(liveState["system.update_error"] ?? "");
   const updateAvailable = String(liveState["system.update_available"] ?? "");
+  const stagedVersion = String(liveState["system.update_staged_version"] ?? status?.staged_version ?? "");
   const currentVersion = String(liveState["system.version"] ?? status?.current_version ?? "");
 
   // Show progress modal when update is in progress
@@ -99,17 +107,41 @@ export function UpdatesView() {
     if (active) setShowProgressModal(true);
   }, [updateStatus]);
 
-  // Detect version change after update (WebSocket reconnect delivers new version)
+  // Detect completion after the restart (the WebSocket reconnect snapshot
+  // delivers the new version + update_status reset to idle in one shot):
+  // version change = update or rollback finished; restarting -> idle with no
+  // version change = the restart happened but nothing was applied.
   useEffect(() => {
-    if (prevVersionRef.current && currentVersion && currentVersion !== prevVersionRef.current) {
-      showSuccess("Updated to v" + currentVersion);
-      setShowProgressModal(false);
-      // Refresh status and history
-      api.getUpdateStatus().then(setStatus).catch(console.error);
-      api.getUpdateHistory().then(setHistory).catch(console.error);
-    }
+    const prevVersion = prevVersionRef.current;
+    const prevStatus = prevStatusRef.current;
     prevVersionRef.current = currentVersion;
-  }, [currentVersion]);
+    prevStatusRef.current = updateStatus;
+
+    const outcome = updateCompletionOutcome(
+      prevVersion, prevStatus, currentVersion, updateStatus, actionRef.current,
+    );
+    if (!outcome) return;
+
+    if (outcome === "same_version_restart") {
+      if (!showProgressModal) return;
+      setShowProgressModal(false);
+      showError(
+        "The server restarted but the version did not change (still v" + currentVersion +
+        "). The update may not have applied — check Update History.",
+      );
+    } else {
+      showSuccess(
+        outcome === "rolled_back"
+          ? "Rolled back to v" + currentVersion
+          : "Updated to v" + currentVersion,
+      );
+      setShowProgressModal(false);
+    }
+    actionRef.current = null;
+    // Refresh status and history
+    api.getUpdateStatus().then(setStatus).catch(console.error);
+    api.getUpdateHistory().then(setHistory).catch(console.error);
+  }, [currentVersion, updateStatus, showProgressModal]);
 
   // Detect error state
   useEffect(() => {
@@ -117,6 +149,19 @@ export function UpdatesView() {
       setShowProgressModal(false);
     }
   }, [updateStatus, updateError]);
+
+  // Watchdog: if nothing moves (no status/progress change) for two minutes
+  // while the modal is up — e.g. the server never comes back after the
+  // restart — surface guidance and a way out instead of hanging forever.
+  useEffect(() => {
+    if (!showProgressModal) {
+      setWatchdogTripped(false);
+      return;
+    }
+    setWatchdogTripped(false);
+    const timer = window.setTimeout(() => setWatchdogTripped(true), 120_000);
+    return () => window.clearTimeout(timer);
+  }, [showProgressModal, updateStatus, updateProgress]);
 
   const handleCheck = async () => {
     setChecking(true);
@@ -136,26 +181,32 @@ export function UpdatesView() {
   };
 
   const handleApply = async () => {
+    actionRef.current = "update";
     try {
       const result = await api.applyUpdate();
       if (!result.success) {
+        actionRef.current = null;
         showError(result.error ?? "Update failed");
       }
     } catch (e) {
+      actionRef.current = null;
       showError("Failed to start update: " + String(e));
     }
   };
 
   const handleRollback = useCallback(async () => {
     setShowRollbackConfirm(false);
+    actionRef.current = "rollback";
     try {
       const result = await api.rollbackUpdate();
       if (result.success) {
         showSuccess(result.message ?? "Rollback initiated");
       } else {
+        actionRef.current = null;
         showError(result.error ?? "Rollback failed");
       }
     } catch (e) {
+      actionRef.current = null;
       showError("Rollback failed: " + String(e));
     }
   }, []);
@@ -174,6 +225,10 @@ export function UpdatesView() {
   const canSelfUpdate = status?.can_self_update ?? false;
   const changelog = checkResult?.changelog ?? "";
   const hasUpdate = !!updateAvailable;
+  const hasStaged = !!stagedVersion;
+  // apply_update consumes a cloud-staged update before checking GitHub, so
+  // the staged version is what an Install actually installs.
+  const installTarget = stagedVersion || updateAvailable;
 
   return (
     <ViewContainer title="System Updates">
@@ -189,6 +244,11 @@ export function UpdatesView() {
               <span style={{ fontWeight: 600, color: "var(--accent)" }}>{"v" + updateAvailable}</span>
             </>}
 
+            {hasStaged && <>
+              <span style={{ color: "var(--text-secondary)" }}>Staged from cloud</span>
+              <span style={{ fontWeight: 600, color: "var(--accent)" }}>{"v" + stagedVersion}</span>
+            </>}
+
             <span style={{ color: "var(--text-secondary)" }}>Channel</span>
             <span>{status?.update_channel ?? "stable"}</span>
 
@@ -197,8 +257,21 @@ export function UpdatesView() {
           </div>
         </div>
 
+        {/* Cloud-staged update */}
+        {hasStaged && (
+          <div style={{ ...cardStyle, marginBottom: "var(--space-xl)", borderColor: "var(--accent-bg)", display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
+            <CloudDownload size={20} style={{ color: "var(--accent)", flexShrink: 0 }} />
+            <div>
+              <div style={{ fontWeight: 500, fontSize: "var(--font-size-sm)" }}>{"Update to v" + stagedVersion + " staged from the cloud"}</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+                It's ready to install whenever you are. Installing restarts the server.
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Up to date message */}
-        {!hasUpdate && updateStatus === "idle" && !updateError && (
+        {!hasUpdate && !hasStaged && updateStatus === "idle" && !updateError && (
           <div style={{ ...cardStyle, marginBottom: "var(--space-xl)", display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
             <CheckCircle size={20} style={{ color: "var(--color-success)", flexShrink: 0 }} />
             <div>
@@ -249,14 +322,14 @@ export function UpdatesView() {
             <span>{checking ? "Checking..." : "Check for Updates"}</span>
           </button>
 
-          {hasUpdate && canSelfUpdate && (
+          {(hasUpdate || hasStaged) && canSelfUpdate && (
             <button
               style={primaryBtn}
               onClick={handleApply}
               disabled={updateStatus !== "idle" && updateStatus !== "error"}
             >
               <Download size={14} />
-              <span>{"Install v" + updateAvailable}</span>
+              <span>{"Install v" + installTarget}</span>
             </button>
           )}
         </div>
@@ -266,47 +339,64 @@ export function UpdatesView() {
           <div style={{ marginBottom: "var(--space-xl)" }}>
             <h3 style={sectionTitle}>Update History</h3>
             <div style={{ ...cardStyle, padding: 0, overflow: "hidden" }}>
-              {history.map((entry, i) => (
-                <div
-                  key={i}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "var(--space-md)",
-                    padding: "var(--space-sm) var(--space-md)",
-                    borderTop: i > 0 ? "1px solid var(--border-color)" : undefined,
-                    fontSize: "var(--font-size-sm)",
-                  }}
-                >
-                  {entry.status === "success" || entry.status === "applied" ? (
-                    <CheckCircle size={14} style={{ color: "var(--color-success)", flexShrink: 0 }} />
-                  ) : (
-                    <XCircle size={14} style={{ color: "var(--color-error)", flexShrink: 0 }} />
-                  )}
-                  <span style={{ fontWeight: 500 }}>
-                    {"v" + entry.from_version + " \u2192 v" + entry.to_version}
-                  </span>
-                  <span style={{ color: "var(--text-muted)", fontSize: 12, marginLeft: "auto" }}>
-                    {new Date(entry.timestamp).toLocaleDateString()}
-                  </span>
-                  <span style={{
-                    fontSize: 10,
-                    fontWeight: 600,
-                    padding: "1px 6px",
-                    borderRadius: 3,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.5px",
-                    background: entry.status === "success" || entry.status === "applied"
-                      ? "rgba(76,175,80,0.15)"
-                      : "rgba(239,68,68,0.15)",
-                    color: entry.status === "success" || entry.status === "applied"
-                      ? "var(--color-success)"
-                      : "var(--color-error)",
-                  }}>
-                    {entry.status}
-                  </span>
-                </div>
-              ))}
+              {history.map((entry, i) => {
+                const display = historyEntryDisplay(entry);
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "var(--space-md)",
+                      padding: "var(--space-sm) var(--space-md)",
+                      borderTop: i > 0 ? "1px solid var(--border-color)" : undefined,
+                      fontSize: "var(--font-size-sm)",
+                    }}
+                  >
+                    {entry.status === "success" || entry.status === "applied" ? (
+                      <CheckCircle size={14} style={{ color: "var(--color-success)", flexShrink: 0 }} />
+                    ) : (
+                      <XCircle size={14} style={{ color: "var(--color-error)", flexShrink: 0 }} />
+                    )}
+                    <span style={{ fontWeight: 500 }}>
+                      {display.label}
+                    </span>
+                    {display.isRollback && (
+                      <span style={{
+                        fontSize: 10,
+                        fontWeight: 600,
+                        padding: "1px 6px",
+                        borderRadius: 3,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px",
+                        background: "rgba(59,130,246,0.15)",
+                        color: "#3b82f6",
+                      }}>
+                        rollback
+                      </span>
+                    )}
+                    <span style={{ color: "var(--text-muted)", fontSize: 12, marginLeft: "auto" }}>
+                      {new Date(entry.timestamp).toLocaleDateString()}
+                    </span>
+                    <span style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      padding: "1px 6px",
+                      borderRadius: 3,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.5px",
+                      background: entry.status === "success" || entry.status === "applied"
+                        ? "rgba(76,175,80,0.15)"
+                        : "rgba(239,68,68,0.15)",
+                      color: entry.status === "success" || entry.status === "applied"
+                        ? "var(--color-success)"
+                        : "var(--color-error)",
+                    }}>
+                      {entry.status}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -356,7 +446,7 @@ export function UpdatesView() {
             boxShadow: "var(--shadow-md)",
           }}>
             <div style={{ fontSize: "var(--font-size-lg)", fontWeight: 600, marginBottom: "var(--space-lg)" }}>
-              {"Installing OpenAVC v" + updateAvailable}
+              {installTarget ? "Installing OpenAVC v" + installTarget : "Updating OpenAVC"}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)", marginBottom: "var(--space-lg)" }}>
@@ -397,9 +487,25 @@ export function UpdatesView() {
               </div>
             )}
 
-            <div style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>
-              Do not close this window or power off the system.
-            </div>
+            {watchdogTripped && updateStatus !== "error" ? (
+              <div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: "var(--space-sm)" }}>
+                  This is taking longer than expected. The server may still be coming back up —
+                  if this dialog doesn't close within a few minutes, check the server logs.
+                  It's safe to close this dialog; any update in progress continues on the server.
+                </div>
+                <button
+                  style={secondaryBtn}
+                  onClick={() => setShowProgressModal(false)}
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>
+                Do not close this window or power off the system.
+              </div>
+            )}
 
             {/* Error in modal */}
             {updateStatus === "error" && (

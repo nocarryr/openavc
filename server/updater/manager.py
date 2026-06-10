@@ -69,6 +69,15 @@ class UpdateManager:
         # Load update history
         self._load_history()
 
+        # Re-surface a cloud-staged update across restarts. The staged record
+        # persists on disk, but state keys don't — without this the IDE would
+        # lose sight of a staged update the moment the server restarts.
+        staged = self.get_staged_update()
+        if staged:
+            self._set_state(
+                "system.update_staged_version", staged.get("target_version", "")
+            )
+
     def _set_state(self, key: str, value: Any) -> None:
         """Set a state key if state store is available."""
         if self._state:
@@ -126,13 +135,17 @@ class UpdateManager:
         except OSError as e:
             log.warning("Failed to save update history: %s", e)
 
-    def _add_history_entry(self, from_version: str, to_version: str, status: str, error: str = "") -> None:
+    def _add_history_entry(
+        self, from_version: str, to_version: str, status: str, error: str = "",
+        rollback: bool = False,
+    ) -> None:
         """Record an update attempt in history."""
         self._history.insert(0, {
             "from_version": from_version,
             "to_version": to_version,
             "status": status,
             "error": error,
+            "rollback": rollback,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         # Keep last 50 entries
@@ -712,7 +725,9 @@ class UpdateManager:
 
     async def rollback(self) -> dict[str, Any]:
         """Rollback to the previous version."""
-        from server.updater.rollback import can_rollback, perform_rollback
+        from server.updater.rollback import (
+            can_rollback, perform_rollback, rollback_target_version,
+        )
         from server.system_config import APP_DIR
 
         if self._update_in_progress:
@@ -720,6 +735,10 @@ class UpdateManager:
 
         if not can_rollback(APP_DIR):
             return {"success": False, "error": "No previous version available for rollback"}
+
+        # Resolve the actual target version up front so history can record a
+        # real version instead of a placeholder.
+        target_version = rollback_target_version(APP_DIR)
 
         # Create a backup of current state before rolling back
         self._set_state("system.update_status", "backing_up")
@@ -739,7 +758,9 @@ class UpdateManager:
         success = perform_rollback(self._data_dir)
 
         if success:
-            self._add_history_entry(__version__, "rollback", "success")
+            self._add_history_entry(
+                __version__, target_version, "success", rollback=True,
+            )
             self._set_state("system.update_status", "restarting")
             # Schedule process exit so the API response can be sent first.
             # On Windows, the installer (launched by perform_rollback) handles restart.
@@ -766,6 +787,8 @@ class UpdateManager:
             from server.updater.rollback import rollback_target_version
             rollback_version = rollback_target_version(APP_DIR)
 
+        staged = self.get_staged_update()
+
         return {
             "current_version": __version__,
             "deployment_type": self._deployment_type.value,
@@ -775,6 +798,7 @@ class UpdateManager:
             "update_status": self._state.get("system.update_status", "idle") if self._state else "idle",
             "update_progress": self._state.get("system.update_progress", 0) if self._state else 0,
             "update_error": self._state.get("system.update_error", "") if self._state else "",
+            "staged_version": staged.get("target_version", "") if staged else "",
             "rollback_available": has_rollback,
             "rollback_version": rollback_version,
         }
