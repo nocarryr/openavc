@@ -725,6 +725,22 @@ def _validate_state_key(key: str) -> str | None:
     return None
 
 
+def _validate_state_value(value: Any) -> str | None:
+    """Enforce the flat-primitive state contract at the AI boundary.
+
+    The state store drops non-primitive writes itself, but silently — without
+    this check the tool would report success for a write that never happened.
+    Mirrors the REST (422) and plugin-API guards.
+    """
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return None
+    return (
+        f"State values must be flat primitives (string, number, boolean, or "
+        f"null) — got {type(value).__name__}. Store structured data under "
+        f"multiple keys or as a JSON string."
+    )
+
+
 # --- Tool result classification ---
 
 def _tool_result_is_error(result: Any) -> bool:

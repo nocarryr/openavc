@@ -1019,3 +1019,148 @@ def test_all_surgical_tools_registered():
     }
     for name in expected:
         assert name in handler._tools, f"Tool '{name}' not registered in dispatch table"
+
+
+# ===== STATE VALUE / SCRIPT SCAN / REVISION / FORWARD-COMPAT GUARDS =====
+
+
+@pytest.mark.asyncio
+async def test_set_state_value_rejects_non_primitive(handler, mock_agent):
+    """A dict/list value must be rejected at the AI boundary — the store
+    drops non-primitives silently, so without this the tool reports success
+    for a write that never happened."""
+    for bad in ({"nested": 1}, [1, 2, 3]):
+        mock_agent.state.set.reset_mock()
+        msg = _make_tool_call_msg("set_state_value", {"key": "var.x", "value": bad})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+        payload = _get_result_payload(mock_agent)
+        assert payload["success"] is False
+        assert "flat primitive" in payload["result"]["error"]
+        mock_agent.state.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_state_value_accepts_primitives(handler, mock_agent):
+    for good in ("on", 42, 1.5, True, None):
+        mock_agent.state.set.reset_mock()
+        msg = _make_tool_call_msg("set_state_value", {"key": "var.x", "value": good})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+        payload = _get_result_payload(mock_agent)
+        assert payload["success"] is True
+        mock_agent.state.set.assert_called_once_with("var.x", good, source="ai")
+
+
+def test_find_references_scans_scripts_beside_project(handler, mock_engine, tmp_path):
+    """Script references must be found relative to the loaded project file,
+    not a hardcoded projects/default path that only exists in dev."""
+    project_dir = tmp_path / "deployed_site"
+    scripts_dir = project_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "auto_lights.py").write_text(
+        'devices.send("projector1", "power_on")', encoding="utf-8"
+    )
+    mock_engine.project_path = project_dir / "site.avc"
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        refs = handler._find_references("device", "projector1")
+
+    assert refs.get("scripts") == [{"script_id": "auto_lights", "file": "auto_lights.py"}]
+
+
+def test_find_references_skips_escaping_script_paths(handler, mock_engine, tmp_path):
+    """A script entry whose file escapes the scripts dir is skipped, not read."""
+    from server.core.project_loader import ScriptConfig
+
+    project_dir = tmp_path / "deployed_site"
+    (project_dir / "scripts").mkdir(parents=True)
+    # A file OUTSIDE the scripts dir that does contain the reference
+    (tmp_path / "outside.py").write_text("projector1", encoding="utf-8")
+    mock_engine.project_path = project_dir / "site.avc"
+    mock_engine.project.scripts = [
+        ScriptConfig(id="evil", file="../../outside.py", description=""),
+    ]
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        refs = handler._find_references("device", "projector1")
+
+    assert "scripts" not in refs
+
+
+@pytest.mark.asyncio
+async def test_update_macro_preserves_forward_compat_fields(handler, mock_agent, mock_engine):
+    """Editing a macro must not strip extra='allow' fields a newer platform
+    version stored on it."""
+    from server.core.project_loader import MacroConfig
+
+    mock_engine.project.macros[1] = MacroConfig(**{
+        "id": "presentation",
+        "name": "Presentation Mode",
+        "steps": [],
+        "future_field": "from-a-newer-version",
+    })
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("update_macro", {
+            "macro_id": "presentation",
+            "name": "Renamed Mode",
+        })
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    updated = mock_engine.project.macros[1]
+    assert updated.name == "Renamed Mode"
+    assert updated.model_dump().get("future_field") == "from-a-newer-version"
+
+
+@pytest.mark.asyncio
+async def test_plugin_config_update_bumps_revision(handler, mock_agent, mock_engine):
+    """Plugin tools persist the project directly; without a revision bump an
+    open IDE's stale ETag still matches and its next save clobbers the edit."""
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {"some_plugin": PluginConfig(enabled=True, config={})}
+    # Async loader surface broad enough for either restart shape (stop/start
+    # or a hot-apply restart_or_apply path).
+    mock_engine.plugin_loader = MagicMock()
+    mock_engine.plugin_loader.is_running.return_value = False
+    mock_engine.plugin_loader.restart_or_apply = AsyncMock()
+    mock_engine.plugin_loader.stop_plugin = AsyncMock()
+    mock_engine.plugin_loader.start_plugin = AsyncMock(return_value=True)
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("update_plugin_config", {
+            "plugin_id": "some_plugin",
+            "config": {"volume": 5},
+        })
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    mock_engine.bump_project_revision.assert_called_once()
+    assert any(
+        c.args[0].get("type") == "project.reloaded"
+        for c in mock_engine.broadcast_ws.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_disable_plugin_bumps_revision(handler, mock_agent, mock_engine):
+    from server.core.project_loader import PluginConfig
+
+    mock_engine.project.plugins = {"some_plugin": PluginConfig(enabled=True, config={})}
+    mock_engine.plugin_loader = MagicMock()
+    mock_engine.plugin_loader.stop_plugin = AsyncMock()
+
+    with patch.object(handler, "_get_engine", return_value=mock_engine):
+        msg = _make_tool_call_msg("disable_plugin", {"plugin_id": "some_plugin"})
+        await handler.handle(msg)
+        await asyncio.sleep(0)
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    mock_engine.bump_project_revision.assert_called_once()

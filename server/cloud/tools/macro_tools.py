@@ -179,9 +179,8 @@ class MacroToolsMixin:
 
         from server.core.project_loader import MacroConfig, save_project
         from server.cloud.ai_tool_handler import _validate_macro
+        from server.cloud.tools.ui_tools import _merge_forward_compat
         existing = engine.project.macros[macro_idx]
-        steps = input["steps"] if "steps" in input else existing.steps
-        triggers = input["triggers"] if "triggers" in input else existing.triggers
         # Only validate fields that are being changed
         if "steps" in input or "triggers" in input:
             err = _validate_macro(
@@ -192,14 +191,15 @@ class MacroToolsMixin:
             if err:
                 return {"error": f"Macro '{macro_id}': {err}"}
 
-        updated = MacroConfig(
-            id=macro_id,
-            name=input.get("name", existing.name),
-            steps=steps,
-            triggers=triggers,
-            stop_on_error=input.get("stop_on_error", existing.stop_on_error),
-            cancel_group=input.get("cancel_group", existing.cancel_group),
-        )
+        # Merge onto the existing macro rather than rebuilding from declared
+        # fields, so forward-compat (extra='allow') fields a newer platform
+        # stored survive the edit.
+        patch = {
+            k: input[k]
+            for k in ("name", "steps", "triggers", "stop_on_error", "cancel_group")
+            if k in input
+        }
+        updated = _merge_forward_compat(existing, MacroConfig, patch)
         engine.project.macros[macro_idx] = updated
         save_project(engine.project_path, engine.project)
 
@@ -254,11 +254,17 @@ class MacroToolsMixin:
 
     async def _set_state_value(self, input: dict) -> Any:
         key = input.get("key", "")
-        from server.cloud.ai_tool_handler import _validate_state_key
+        from server.cloud.ai_tool_handler import _validate_state_key, _validate_state_value
         err = _validate_state_key(key)
         if err:
             return {"error": err}
         value = input.get("value")
+        # The store enforces the flat-primitive contract itself (and drops
+        # offenders), but silently — reject here so the AI gets a clear error
+        # instead of a success report for a write that never happened.
+        err = _validate_state_value(value)
+        if err:
+            return {"error": err}
         self._agent.state.set(key, value, source="ai")
         return {"key": key, "value": value}
 
@@ -305,6 +311,31 @@ class MacroToolsMixin:
         refs = self._find_references(ref_type, ref_id)
         return {"type": ref_type, "id": ref_id, "referenced_by": refs}
 
+    def _scan_scripts_for_ref(self, engine: Any, ref_id: str) -> list[dict]:
+        """Grep the project's scripts for a reference to ``ref_id``.
+
+        The scripts directory lives next to the loaded project file
+        (engine.project_path), NOT under a fixed projects/default path —
+        every non-dev deployment sets OPENAVC_PROJECT elsewhere, and a wrong
+        base dir silently under-reports references before destructive
+        deletes. Paths are containment-checked like the scripts API route.
+        """
+        from server.utils.paths import safe_path_within
+
+        hits: list[dict] = []
+        scripts_dir = engine.project_path.parent / "scripts"
+        for s in engine.project.scripts:
+            try:
+                script_path = safe_path_within(scripts_dir, s.file)
+                if script_path is None or not script_path.exists():
+                    continue
+                content = script_path.read_text(encoding="utf-8")
+                if ref_id in content:
+                    hits.append({"script_id": s.id, "file": s.file})
+            except (OSError, UnicodeDecodeError):
+                log.debug("Failed to read script '%s' for reference check", s.file)
+        return hits
+
     def _find_references(self, ref_type: str, ref_id: str) -> dict:
         """Find all references to a macro, device, variable, or script in the project."""
         engine = self._get_engine()
@@ -333,16 +364,7 @@ class MacroToolsMixin:
                                     result["bindings"].append({"page_id": page.id, "element_id": el.id, "slot": slot})
                                     break
             # Check scripts
-            for s in p.scripts:
-                try:
-                    from server.config import BASE_DIR
-                    script_path = BASE_DIR / "projects" / "default" / "scripts" / s.file
-                    if script_path.exists():
-                        content = script_path.read_text(encoding="utf-8")
-                        if ref_id in content:
-                            result["scripts"].append({"script_id": s.id, "file": s.file})
-                except (OSError, UnicodeDecodeError):
-                    log.debug("Failed to read script '%s' for reference check", s.file)
+            result["scripts"] = self._scan_scripts_for_ref(engine, ref_id)
 
         elif ref_type == "device":
             # Check macros for device commands
@@ -364,16 +386,7 @@ class MacroToolsMixin:
                                     result["bindings"].append({"page_id": page.id, "element_id": el.id, "slot": slot})
                                     break
             # Check scripts
-            for s in p.scripts:
-                try:
-                    from server.config import BASE_DIR
-                    script_path = BASE_DIR / "projects" / "default" / "scripts" / s.file
-                    if script_path.exists():
-                        content = script_path.read_text(encoding="utf-8")
-                        if ref_id in content:
-                            result["scripts"].append({"script_id": s.id, "file": s.file})
-                except (OSError, UnicodeDecodeError):
-                    log.debug("Failed to read script '%s' for reference check", s.file)
+            result["scripts"] = self._scan_scripts_for_ref(engine, ref_id)
 
         elif ref_type == "variable":
             state_key = f"var.{ref_id}"
@@ -395,16 +408,7 @@ class MacroToolsMixin:
                     if isinstance(trigger_dict, dict) and trigger_dict.get("key") in (ref_id, state_key):
                         result["triggers"].append({"macro_id": m.id})
             # Check scripts
-            for s in p.scripts:
-                try:
-                    from server.config import BASE_DIR
-                    script_path = BASE_DIR / "projects" / "default" / "scripts" / s.file
-                    if script_path.exists():
-                        content = script_path.read_text(encoding="utf-8")
-                        if ref_id in content:
-                            result["scripts"].append({"script_id": s.id, "file": s.file})
-                except (OSError, UnicodeDecodeError):
-                    log.debug("Failed to read script '%s' for reference check", s.file)
+            result["scripts"] = self._scan_scripts_for_ref(engine, ref_id)
 
         # Remove empty lists
         return {k: v for k, v in result.items() if v}

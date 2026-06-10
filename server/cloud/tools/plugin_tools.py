@@ -76,6 +76,7 @@ class PluginToolsMixin:
             ]
             from server.core.project_loader import save_project
             save_project(engine.project_path, engine.project)
+            await self._notify_project_changed()
 
         # Clear missing plugin state if tracked
         engine.plugin_loader.clear_missing(plugin_id)
@@ -109,6 +110,7 @@ class PluginToolsMixin:
             engine.project.plugins[plugin_id].enabled = True
 
         save_project(engine.project_path, engine.project)
+        await self._notify_project_changed()
         config = engine.project.plugins[plugin_id].config
         success = await engine.plugin_loader.start_plugin(plugin_id, config)
 
@@ -134,6 +136,7 @@ class PluginToolsMixin:
 
         engine.project.plugins[plugin_id].enabled = False
         save_project(engine.project_path, engine.project)
+        await self._notify_project_changed()
         await engine.plugin_loader.stop_plugin(plugin_id)
 
         return {"status": "disabled", "plugin_id": plugin_id}
@@ -215,6 +218,7 @@ class PluginToolsMixin:
 
         engine.project.plugins[plugin_id].config = new_config
         save_project(engine.project_path, engine.project)
+        await self._notify_project_changed()
 
         # Restart if running
         if engine.plugin_loader.is_running(plugin_id):
