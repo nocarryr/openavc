@@ -217,6 +217,27 @@ export function SurfaceConfigurator({
   const buttons = (viewConfig.buttons as ButtonAssignment[] | undefined) ?? [];
   const dials = (viewConfig.dials as DialAssignment[] | undefined) ?? [];
 
+  // Optional page labels (per-deck section): {"0": "Sources", ...}
+  const pageNames = (viewConfig.page_names as Record<string, string> | undefined) ?? {};
+  const pageLabel = useCallback(
+    (p: number) => pageNames[String(p)] || `Page ${p + 1}`,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewConfig.page_names]
+  );
+  const renamePage = useCallback(
+    (p: number, name: string) => {
+      const next = { ...pageNames };
+      if (name.trim()) {
+        next[String(p)] = name.trim();
+      } else {
+        delete next[String(p)];
+      }
+      onViewChange({ ...viewConfig, page_names: next });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pageNames, viewConfig, onViewChange]
+  );
+
   // A physical surface button supports a subset of element actions: macro,
   // device command, set-state, and (on paged surfaces) deck-page navigation.
   // value_map needs a continuous input value and script.call is panel-only.
@@ -231,7 +252,7 @@ export function SurfaceConfigurator({
         { value: "__prev_page__", label: "Previous Page" },
         ...Array.from({ length: maxPages }, (_, p) => ({
           value: String(p),
-          label: `Page ${p + 1}`,
+          label: pageLabel(p),
         })),
       ]
     : undefined;
@@ -331,6 +352,8 @@ export function SurfaceConfigurator({
                   currentPage={currentPage}
                   maxPages={layout.max_pages ?? 10}
                   onChange={setCurrentPage}
+                  label={pageLabel(currentPage)}
+                  onRename={(name) => renamePage(currentPage, name)}
                 />
               )}
               <GridSurface
@@ -1786,12 +1809,23 @@ function DeckPicker({
   const liveState = useConnectionStore((s) => s.liveState);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const isCustomized = activeSerial ? decksMap[activeSerial] !== undefined : false;
+  const deckNames = (config.deck_names as Record<string, string> | undefined) ?? {};
 
   // The per-deck config sections an override replaces (mirrors the runtime).
   const DECK_SECTIONS = [
     "buttons", "auto_page", "dials", "touchscreen",
-    "info_strip", "auto_brightness", "idle_dim",
+    "info_strip", "auto_brightness", "idle_dim", "page_names",
   ];
+
+  const renameDeck = (serial: string, name: string) => {
+    const next = { ...deckNames };
+    if (name) {
+      next[serial] = name;
+    } else {
+      delete next[serial];
+    }
+    onConfigChange({ ...config, deck_names: next });
+  };
 
   const customizeDeck = () => {
     if (!activeSerial) return;
@@ -1849,10 +1883,10 @@ function DeckPicker({
             }}
           >
             <span style={{ fontSize: "var(--font-size-sm)", fontWeight: isActive ? 600 : 400 }}>
-              {model}
+              {deckNames[serial] || model}
             </span>
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-              {serial}{virtual ? " · virtual" : ""} — {custom ? "custom layout" : "mirrors main config"}
+              {deckNames[serial] ? `${model} · ` : ""}{serial}{virtual ? " · virtual" : ""} — {custom ? "custom layout" : "mirrors main config"}
             </span>
           </button>
         );
@@ -1860,6 +1894,19 @@ function DeckPicker({
 
       {activeSerial && (
         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", marginLeft: "auto" }}>
+          <input
+            value={deckNames[activeSerial] ?? ""}
+            placeholder="Name this deck"
+            title="Friendly name shown in the picker (e.g. Lectern, Tech Booth)"
+            onChange={(e) => renameDeck(activeSerial, e.target.value)}
+            style={{
+              width: 120, padding: "var(--space-xs) var(--space-sm)",
+              borderRadius: "var(--border-radius)",
+              border: "1px solid var(--border-color)",
+              background: "var(--bg-surface)", color: "var(--text-primary)",
+              fontSize: "var(--font-size-sm)",
+            }}
+          />
           <button
             onClick={() => api.emitContextAction(pluginId, "identify_deck", { serial: activeSerial })}
             title="Flash this deck's keys so you can tell which one it is"
@@ -2775,11 +2822,23 @@ function PageTabs({
   currentPage,
   maxPages,
   onChange,
+  label,
+  onRename,
 }: {
   currentPage: number;
   maxPages: number;
   onChange: (page: number) => void;
+  label?: string;
+  onRename?: (name: string) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const commit = () => {
+    setEditing(false);
+    onRename?.(draft);
+  };
+
   return (
     <div
       style={{
@@ -2802,9 +2861,44 @@ function PageTabs({
       >
         <ChevronLeft size={14} />
       </button>
-      <span style={{ fontSize: "var(--font-size-sm)", color: "var(--text-secondary)", minWidth: 60, textAlign: "center" }}>
-        Page {currentPage + 1}
-      </span>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          placeholder={`Page ${currentPage + 1}`}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          style={{
+            width: 110, padding: "2px 6px", textAlign: "center",
+            borderRadius: "var(--border-radius)",
+            border: "1px solid var(--border-color)",
+            background: "var(--bg-surface)", color: "var(--text-primary)",
+            fontSize: "var(--font-size-sm)",
+          }}
+        />
+      ) : (
+        <span
+          onDoubleClick={() => {
+            if (!onRename) return;
+            setDraft(label && label !== `Page ${currentPage + 1}` ? label : "");
+            setEditing(true);
+          }}
+          title={onRename ? "Double-click to rename this page" : undefined}
+          style={{
+            fontSize: "var(--font-size-sm)", color: "var(--text-secondary)",
+            minWidth: 60, textAlign: "center",
+            cursor: onRename ? "text" : "default",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            maxWidth: 140,
+          }}
+        >
+          {label ?? `Page ${currentPage + 1}`}
+        </span>
+      )}
       <button
         onClick={() => onChange(Math.min(maxPages - 1, currentPage + 1))}
         disabled={currentPage >= maxPages - 1}
@@ -2840,6 +2934,7 @@ function AutoPageEditor({
 }) {
   const rules = (config.auto_page as AutoPageRule[] | undefined) ?? [];
   const maxPages = layout.max_pages ?? 10;
+  const pageNames = (config.page_names as Record<string, string> | undefined) ?? {};
 
   const setRules = (next: AutoPageRule[]) => {
     onConfigChange({ ...config, auto_page: next });
@@ -2904,7 +2999,7 @@ function AutoPageEditor({
                 }}
               >
                 {Array.from({ length: maxPages }, (_, p) => (
-                  <option key={p} value={p}>Page {p + 1}</option>
+                  <option key={p} value={p}>{pageNames[String(p)] || `Page ${p + 1}`}</option>
                 ))}
               </select>
               <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
