@@ -180,6 +180,20 @@ export function SurfaceConfigurator({
     }
   }, [currentPage, effectiveMaxPages]);
 
+  // Input echo: pressing a physical control flashes it in the editor.
+  // The plugin publishes <serial>.last_input = "kind:index:seq" on input.
+  const lastInput = String(liveState[liveKey("last_input")] ?? "");
+  const [inputFlash, setInputFlash] = useState<{ kind: string; index: number } | null>(null);
+  useEffect(() => {
+    if (!lastInput) return;
+    const [kind, indexStr] = lastInput.split(":");
+    const index = Number(indexStr);
+    if (!Number.isFinite(index)) return;
+    setInputFlash({ kind, index });
+    const timer = setTimeout(() => setInputFlash(null), 350);
+    return () => clearTimeout(timer);
+  }, [lastInput]);
+
   // Per-deck config view. A decks[serial] override fully replaces the deck's
   // sections (buttons, dials, ...); a deck without one mirrors the flat
   // config — the runtime resolves it the same way.
@@ -325,6 +339,7 @@ export function SurfaceConfigurator({
                 selectedControl={selectedControl}
                 onSelectControl={setSelectedControl}
                 getAssignment={getAssignment}
+                flashIndex={inputFlash?.kind === "key" ? inputFlash.index : null}
               />
               {/* Dials (detected on the connected hardware) */}
               {liveDialCount > 0 && (
@@ -333,6 +348,7 @@ export function SurfaceConfigurator({
                   selectedControl={selectedControl}
                   onSelectControl={setSelectedControl}
                   getDial={getDial}
+                  flashIndex={inputFlash?.kind === "dial" ? inputFlash.index : null}
                 />
               )}
               {/* Color-only touch keys (indexed after the LCD keys) */}
@@ -344,6 +360,7 @@ export function SurfaceConfigurator({
                   selectedControl={selectedControl}
                   onSelectControl={setSelectedControl}
                   getAssignment={getAssignment}
+                  flashIndex={inputFlash?.kind === "key" ? inputFlash.index : null}
                 />
               )}
             </div>
@@ -483,12 +500,14 @@ function GridSurface({
   selectedControl,
   onSelectControl,
   getAssignment,
+  flashIndex = null,
 }: {
   layout: SurfaceLayout;
   currentPage: number;
   selectedControl: string | null;
   onSelectControl: (id: string) => void;
   getAssignment: (index: number, page?: number) => ButtonAssignment | undefined;
+  flashIndex?: number | null;
 }) {
   const rows = layout.rows ?? 3;
   const cols = layout.columns ?? 5;
@@ -528,6 +547,7 @@ function GridSurface({
               border: isSelected
                 ? "2px solid var(--accent)"
                 : "1px solid var(--border-color)",
+              boxShadow: flashIndex === i ? "0 0 0 3px #f59e0b" : undefined,
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -2006,11 +2026,13 @@ function DialRow({
   selectedControl,
   onSelectControl,
   getDial,
+  flashIndex = null,
 }: {
   count: number;
   selectedControl: string | null;
   onSelectControl: (id: string) => void;
   getDial: (index: number) => DialAssignment | undefined;
+  flashIndex?: number | null;
 }) {
   return (
     <div
@@ -2051,6 +2073,7 @@ function DialRow({
                 border: isSelected
                   ? "2px solid var(--accent)"
                   : "1px solid var(--border-color)",
+                boxShadow: flashIndex === i ? "0 0 0 3px #f59e0b" : undefined,
                 cursor: "pointer",
                 position: "relative",
               }}
@@ -2593,6 +2616,7 @@ function TouchKeyRow({
   selectedControl,
   onSelectControl,
   getAssignment,
+  flashIndex = null,
 }: {
   keyCount: number;
   touchKeyCount: number;
@@ -2600,6 +2624,7 @@ function TouchKeyRow({
   selectedControl: string | null;
   onSelectControl: (id: string) => void;
   getAssignment: (index: number, page?: number) => ButtonAssignment | undefined;
+  flashIndex?: number | null;
 }) {
   return (
     <div
@@ -2634,6 +2659,7 @@ function TouchKeyRow({
               border: isSelected
                 ? "2px solid var(--accent)"
                 : "1px solid var(--border-color)",
+              boxShadow: flashIndex === index ? "0 0 0 3px #f59e0b" : undefined,
               cursor: "pointer",
               fontSize: 9,
               color: "var(--text-muted)",
