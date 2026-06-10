@@ -214,6 +214,61 @@ export function SurfaceConfigurator({
     [isCustomized, activeSerial, config, onConfigChange]
   );
 
+  // Layout transfer: re-key a custom layout (decks[from] + its name) to
+  // another serial. Covers handing a virtual deck's layout to the real one
+  // and dead-deck replacement. A virtual source is retired afterwards.
+  const reassignLayout = useCallback(
+    (fromSerial: string, toSerial: string) => {
+      const layoutToMove = decksMap[fromSerial];
+      if (!layoutToMove || fromSerial === toSerial) return;
+      const nextDecks = { ...decksMap };
+      delete nextDecks[fromSerial];
+      nextDecks[toSerial] = layoutToMove;
+
+      const names = (config.deck_names as Record<string, string> | undefined) ?? {};
+      const nextNames = { ...names };
+      if (nextNames[fromSerial] !== undefined) {
+        nextNames[toSerial] = nextNames[fromSerial];
+        delete nextNames[fromSerial];
+      }
+
+      const next: Record<string, unknown> = {
+        ...config,
+        decks: nextDecks,
+        deck_names: nextNames,
+      };
+      const virtuals =
+        (config.virtual_decks as { model?: string; serial?: string }[] | undefined) ?? [];
+      if (virtuals.some((v) => v.serial === fromSerial)) {
+        next.virtual_decks = virtuals.filter((v) => v.serial !== fromSerial);
+      }
+      onConfigChange(next);
+      setSelectedDeckSerial(toSerial);
+      setSelectedControl(null);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [decksMap, config, onConfigChange]
+  );
+
+  const deleteOrphanLayout = useCallback(
+    (serial: string) => {
+      const nextDecks = { ...decksMap };
+      delete nextDecks[serial];
+      const names = (config.deck_names as Record<string, string> | undefined) ?? {};
+      const nextNames = { ...names };
+      delete nextNames[serial];
+      onConfigChange({ ...config, decks: nextDecks, deck_names: nextNames });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [decksMap, config, onConfigChange]
+  );
+
+  // Custom layouts whose deck is no longer connected (unplugged, replaced,
+  // or a removed virtual deck).
+  const orphanedLayoutSerials = Object.keys(decksMap).filter(
+    (serial) => !deckSerials.includes(serial)
+  );
+
   const buttons = (viewConfig.buttons as ButtonAssignment[] | undefined) ?? [];
   const dials = (viewConfig.dials as DialAssignment[] | undefined) ?? [];
 
@@ -440,6 +495,19 @@ export function SurfaceConfigurator({
               decksMap={decksMap}
               config={config}
               onConfigChange={onConfigChange}
+              onTransferLayout={reassignLayout}
+            />
+          )}
+          {/* Custom layouts saved for decks that are no longer connected
+              (replaced hardware, retired virtual decks) */}
+          {activeSerial && orphanedLayoutSerials.length > 0 && (
+            <OrphanLayoutNotice
+              orphans={orphanedLayoutSerials}
+              deckNames={(config.deck_names as Record<string, string> | undefined) ?? {}}
+              targetSerial={activeSerial}
+              targetCustomized={isCustomized}
+              onAdopt={(serial) => reassignLayout(serial, activeSerial)}
+              onDelete={deleteOrphanLayout}
             />
           )}
           {/* Virtual decks — work on layouts with no hardware attached */}
@@ -1719,6 +1787,109 @@ function PageActions({
   );
 }
 
+// ──── Orphaned Layout Notice ────
+//
+// A decks[serial] custom layout whose deck is gone (replaced hardware or a
+// retired virtual deck). Offer to re-key it onto the selected deck — the
+// dead-deck-replacement path — or delete it.
+
+function OrphanLayoutNotice({
+  orphans,
+  deckNames,
+  targetSerial,
+  targetCustomized,
+  onAdopt,
+  onDelete,
+}: {
+  orphans: string[];
+  deckNames: Record<string, string>;
+  targetSerial: string;
+  targetCustomized: boolean;
+  onAdopt: (serial: string) => void;
+  onDelete: (serial: string) => void;
+}) {
+  const [confirm, setConfirm] = useState<{ serial: string; action: "adopt" | "delete" } | null>(null);
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-xs)",
+        padding: "var(--space-sm) var(--space-md)",
+        border: "1px dashed var(--border-color)",
+        borderRadius: "var(--border-radius)",
+        background: "var(--bg-surface)",
+      }}
+    >
+      {orphans.map((serial) => {
+        const label = deckNames[serial] ? `${deckNames[serial]} (${serial})` : serial;
+        const pending = confirm?.serial === serial ? confirm.action : null;
+        return (
+          <div key={serial} style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", flexWrap: "wrap", fontSize: 12 }}>
+            <span style={{ color: "var(--text-secondary)" }}>
+              Saved layout from a disconnected deck: <strong>{label}</strong>
+            </span>
+            {!pending && (
+              <>
+                <button
+                  onClick={() =>
+                    targetCustomized
+                      ? setConfirm({ serial, action: "adopt" })
+                      : onAdopt(serial)
+                  }
+                  title="Move this custom layout (and its name) onto the selected deck"
+                  style={{
+                    padding: "2px 8px", borderRadius: "var(--border-radius)",
+                    background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
+                  }}
+                >
+                  Use on this deck
+                </button>
+                <button
+                  onClick={() => setConfirm({ serial, action: "delete" })}
+                  style={{
+                    padding: "2px 8px", borderRadius: "var(--border-radius)",
+                    background: "transparent", border: "1px solid var(--border-color)",
+                    color: "var(--color-error)", fontSize: 12, cursor: "pointer",
+                  }}
+                >
+                  Delete
+                </button>
+              </>
+            )}
+            {pending && (
+              <span style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
+                <span style={{ color: "var(--color-error, #ef4444)" }}>
+                  {pending === "adopt"
+                    ? `Replace ${targetSerial}'s custom layout?`
+                    : "Delete this saved layout?"}
+                </span>
+                <button
+                  onClick={() => {
+                    if (pending === "adopt") onAdopt(serial);
+                    else onDelete(serial);
+                    setConfirm(null);
+                  }}
+                  style={{ padding: "2px 8px", borderRadius: "var(--border-radius)", background: "var(--bg-hover)", fontSize: 12, cursor: "pointer" }}
+                >
+                  Yes
+                </button>
+                <button
+                  onClick={() => setConfirm(null)}
+                  style={{ padding: "2px 8px", borderRadius: "var(--border-radius)", background: "var(--bg-hover)", fontSize: 12, cursor: "pointer" }}
+                >
+                  No
+                </button>
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ──── Virtual Deck Manager ────
 //
 // Virtual decks are software decks the plugin runs exactly like attached
@@ -2137,6 +2308,7 @@ function DeckPicker({
   decksMap,
   config,
   onConfigChange,
+  onTransferLayout,
 }: {
   serials: string[];
   activeSerial: string | null;
@@ -2146,9 +2318,11 @@ function DeckPicker({
   decksMap: Record<string, Record<string, unknown>>;
   config: Record<string, unknown>;
   onConfigChange: (config: Record<string, unknown>) => void;
+  onTransferLayout?: (fromSerial: string, toSerial: string) => void;
 }) {
   const liveState = useConnectionStore((s) => s.liveState);
   const [confirmRevert, setConfirmRevert] = useState(false);
+  const [transferTarget, setTransferTarget] = useState<string | null>(null);
   const isCustomized = activeSerial ? decksMap[activeSerial] !== undefined : false;
   const deckNames = (config.deck_names as Record<string, string> | undefined) ?? {};
 
@@ -2275,6 +2449,69 @@ function DeckPicker({
             >
               Customize separately
             </button>
+          )}
+          {isCustomized && onTransferLayout && serials.length > 1 && transferTarget === null && (
+            <button
+              onClick={() =>
+                setTransferTarget(serials.find((s) => s !== activeSerial) ?? null)
+              }
+              title="Move this deck's custom layout (and name) onto another deck — e.g. hand a virtual deck's layout to the real one"
+              style={{
+                padding: "var(--space-xs) var(--space-sm)",
+                borderRadius: "var(--border-radius)",
+                background: "var(--bg-hover)",
+                fontSize: "var(--font-size-sm)",
+                cursor: "pointer",
+              }}
+            >
+              Transfer layout to...
+            </button>
+          )}
+          {transferTarget !== null && (
+            <span style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", fontSize: 12 }}>
+              <select
+                value={transferTarget}
+                onChange={(e) => setTransferTarget(e.target.value)}
+                style={{
+                  padding: "2px 6px", borderRadius: "var(--border-radius)",
+                  border: "1px solid var(--border-color)",
+                  background: "var(--bg-surface)", color: "var(--text-primary)",
+                  fontSize: 12,
+                }}
+              >
+                {serials
+                  .filter((s) => s !== activeSerial)
+                  .map((s) => (
+                    <option key={s} value={s}>
+                      {(deckNames[s] || String(liveState[`${statePrefix}${s}.model`] ?? "Deck"))} ({s})
+                      {decksMap[s] !== undefined ? " — replaces its custom layout" : ""}
+                    </option>
+                  ))}
+              </select>
+              <button
+                onClick={() => {
+                  if (transferTarget && activeSerial && onTransferLayout) {
+                    onTransferLayout(activeSerial, transferTarget);
+                  }
+                  setTransferTarget(null);
+                }}
+                style={{
+                  padding: "2px 8px", borderRadius: "var(--border-radius)",
+                  background: "var(--accent-bg)", color: "white", fontSize: 12, cursor: "pointer",
+                }}
+              >
+                Transfer
+              </button>
+              <button
+                onClick={() => setTransferTarget(null)}
+                style={{
+                  padding: "2px 8px", borderRadius: "var(--border-radius)",
+                  background: "var(--bg-hover)", fontSize: 12, cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </span>
           )}
           {isCustomized && !confirmRevert && (
             <button
