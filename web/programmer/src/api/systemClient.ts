@@ -392,3 +392,94 @@ export interface NetworkAdapter {
 export async function getNetworkAdapters(): Promise<{ adapters: NetworkAdapter[] }> {
   return request("/network/adapters");
 }
+
+// --- Host Network Configuration ---
+// The machine's own network (IP, gateway, DNS, WiFi, hostname) — distinct
+// from the adapter list above, which only selects the control interface.
+// Available only on deployments where OpenAVC owns the OS (Pi appliance,
+// Linux with NetworkManager); elsewhere the GET throws "API 404" and the
+// settings card hides itself.
+
+export interface HostNetworkConfig {
+  method: string; // "auto" (DHCP) | "manual" (static)
+  addresses: string[];
+  gateway: string | null;
+  dns: string[];
+}
+
+export interface HostNetworkInterface {
+  device: string;
+  type: "ethernet" | "wifi";
+  state: string;
+  connection: string | null;
+  mac: string | null;
+  ip4: { addresses: string[]; gateway: string | null; dns: string[] };
+  config: HostNetworkConfig | null;
+}
+
+export interface HostNetworkStatus {
+  backend: string;
+  hostname: string | null;
+  capabilities: { ipv4: boolean; wifi: boolean; hostname: boolean };
+  interfaces: HostNetworkInterface[];
+}
+
+/** Result of POST /system/network/ipv4. With `confirmed: false` the server
+ *  only validates (`applied: false`, warnings populated); with `confirmed:
+ *  true` it applies, rolling back automatically if activation fails. */
+export interface HostIpv4Result {
+  ok?: boolean;
+  valid?: boolean;
+  applied?: boolean;
+  rolled_back?: boolean;
+  warnings?: string[];
+  error?: string;
+}
+
+export interface WifiNetwork {
+  ssid: string;
+  signal: number;
+  secured: boolean;
+  in_use: boolean;
+}
+
+export async function getHostNetwork(): Promise<HostNetworkStatus> {
+  return request("/system/network");
+}
+
+export async function setHostIpv4(body: {
+  connection: string;
+  method: "auto" | "manual";
+  address?: string | null;
+  gateway?: string | null;
+  dns?: string[];
+  confirmed: boolean;
+}): Promise<HostIpv4Result> {
+  return request("/system/network/ipv4", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function scanHostWifi(): Promise<{ networks: WifiNetwork[] }> {
+  return request("/system/network/wifi/scan", { method: "POST" });
+}
+
+export async function connectHostWifi(
+  ssid: string,
+  psk: string | null
+): Promise<{ ok: boolean; error?: string }> {
+  return request("/system/network/wifi/connect", {
+    method: "POST",
+    body: JSON.stringify({ ssid, psk }),
+  });
+}
+
+export async function setHostHostname(
+  hostname: string
+): Promise<{ ok: boolean; error?: string }> {
+  return request("/system/network/hostname", {
+    method: "POST",
+    body: JSON.stringify({ hostname }),
+  });
+}

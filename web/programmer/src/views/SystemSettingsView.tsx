@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power, Upload, FileCheck2, ChevronDown, ChevronRight, Copy, Smartphone } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
+import { HostNetworkCard } from "../components/system/HostNetworkCard";
 import { RestartProgressDialog } from "../components/shared/RestartProgressDialog";
 import { showError, showSuccess } from "../store/toastStore";
 import * as api from "../api/restClient";
@@ -698,6 +699,10 @@ export function SystemSettingsView() {
             </span>
           </div>
         </div>
+
+        {/* Host network configuration (Pi appliance / Linux with NetworkManager).
+            Renders nothing when the deployment has no backend. */}
+        <HostNetworkCard />
 
         {/* Security (HTTPS / TLS) */}
         <h3 style={sectionTitle}>Security</h3>

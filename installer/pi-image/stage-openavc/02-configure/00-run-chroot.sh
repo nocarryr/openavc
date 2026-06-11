@@ -31,7 +31,8 @@ usermod -aG video,input,dialout "$OPENAVC_USER"
 # /opt/openavc, which is chowned to 'openavc' and could otherwise be rewritten
 # by a compromised server to gain root. It is hard-coded to the openavc user
 # and a fixed action set, so the server can never target root or run arbitrary
-# commands. Reusable for the planned Host Network Config UI (nmcli).
+# commands. (Host network config does NOT go through here — NetworkManager
+# authorizes over D-Bus, so it gets a scoped polkit rule below instead.)
 mkdir -p /usr/local/sbin
 cat > /usr/local/sbin/openavc-privileged-helper.sh << 'HELPER'
 #!/bin/bash
@@ -155,6 +156,33 @@ SVCUNIT
 mkdir -p "$DATA_DIR/priv-requests" "$DATA_DIR/priv-results"
 chown "$OPENAVC_USER:$OPENAVC_USER" "$DATA_DIR/priv-requests" "$DATA_DIR/priv-results"
 chmod 700 "$DATA_DIR/priv-requests" "$DATA_DIR/priv-results"
+
+# --- Host network configuration authorization ---
+#
+# The Network page (Programmer System Settings + the /setup screen) drives
+# nmcli as the unprivileged 'openavc' user. NetworkManager authorizes over
+# D-Bus via polkit — which NoNewPrivileges does not affect — so a scoped
+# polkit rule, not the request-file helper, is the right mechanism here:
+# reads (status, WiFi scans) need rich results the helper protocol doesn't
+# carry, and polkit is NetworkManager's native authorization layer.
+# Scope: NetworkManager actions + hostname changes, nothing else.
+mkdir -p /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-openavc-network.rules << 'POLKIT'
+// Allow the OpenAVC service user to manage host network configuration
+// (Network settings in the OpenAVC web UI). Installed by the Pi image.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "openavc") {
+        if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0) {
+            return polkit.Result.YES;
+        }
+        if (action.id == "org.freedesktop.hostname1.set-hostname" ||
+            action.id == "org.freedesktop.hostname1.set-static-hostname") {
+            return polkit.Result.YES;
+        }
+    }
+});
+POLKIT
+chmod 644 /etc/polkit-1/rules.d/50-openavc-network.rules
 
 # --- Lock the OS account; ship SSH off (C10) ---
 #

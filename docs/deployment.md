@@ -303,6 +303,15 @@ The `panel-kiosk.sh` script reads the kiosk settings from `system.json`, waits f
 
 While kiosk mode is off (the default on a fresh device), the display shows the **setup screen** (`/setup`) instead of the panel: the device's IP address, the Programmer and Panel URLs, and first-run instructions. The screen updates live — connecting a network cable or claiming the device refreshes it automatically, no reboot needed. Once your project has panel content, the display switches to the Panel UI on its own; you never have to touch the device to complete setup. (To read the setup screen while a project is running, open `/setup?stay=1`.)
 
+### Changing the device's network settings
+
+On the Pi appliance (and any Linux install running NetworkManager), OpenAVC can configure the machine's own network — no SSH or terminal needed:
+
+- **From the device's screen:** the setup screen has a **Network Settings** section with a DHCP/static form and WiFi scan-and-join. This works before the device has any network connection at all, which is how you bring a device onto a static-only network or a WiFi-only site. Text entry needs a keyboard (USB, or the on-screen keyboard on tablet hardware).
+- **From a laptop:** Programmer > Settings > Network > **This Device's Network** offers the same controls plus a hostname field. When you change the address you're connected through, the Programmer becomes unreachable at the old address — the confirmation dialog shows the new URL to reconnect to.
+
+A static IP that fails to activate is rolled back to the previous configuration automatically, so a typo can't strand the device off the network. On deployments where OpenAVC doesn't manage the host (Windows, Docker, Linux without NetworkManager), these controls don't appear — configure the host's network as you normally would.
+
 On the Raspberry Pi image, an `openavc-info.service` also displays the IP address and access URLs on the HDMI console at boot, so you can find the device on the network even without mDNS.
 
 ### Raspberry Pi: OS login and SSH
