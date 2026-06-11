@@ -1542,6 +1542,10 @@ interface NetworkDeckEntry {
   host?: string;
   port?: number;
   serial?: string;
+  // The serial the unit advertises over mDNS (the dock's alias for the
+  // deck). Same physical deck as `serial`; used only to suppress a
+  // duplicate card and to follow the deck across address changes.
+  mdns_sn?: string;
 }
 
 function networkEntriesOf(config: Record<string, unknown>): NetworkDeckEntry[] {
@@ -3948,14 +3952,23 @@ function DeckWorkbench({
   const networkSerials = networkEntries
     .map((e) => e.serial)
     .filter((s): s is string => Boolean(s));
+  // A network deck answers to a second, ADVERTISED serial (the dock's mDNS
+  // alias, e.g. "A00WA6111J9SAM" for a deck whose own serial is
+  // "WA6111J9SAM"). It is the same physical deck — never let the alias
+  // become its own card.
+  const aliasSerials = new Set(
+    networkEntries.map((e) => e.mdns_sn).filter((s): s is string => Boolean(s))
+  );
   const rememberedSerials = [
     ...new Set([
       ...Object.keys(decksMap),
       ...Object.keys(deckNames),
       ...networkSerials,
     ]),
-  ].filter((s) => !deckSerials.includes(s));
-  const knownSerials = [...deckSerials, ...rememberedSerials];
+  ].filter((s) => !deckSerials.includes(s) && !aliasSerials.has(s));
+  const knownSerials = [...deckSerials, ...rememberedSerials].filter(
+    (s) => !aliasSerials.has(s)
+  );
 
   const [selectedSerial, setSelectedSerial] = useState<string | null>(null);
   const activeSerial =
