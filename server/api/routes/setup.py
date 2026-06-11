@@ -31,7 +31,13 @@ from fastapi.security import HTTPBasicCredentials
 
 from server import host_control
 from server.api._engine import _get_engine
-from server.api.auth import _basic, auth_state, is_claimed, programmer_auth_satisfied
+from server.api.auth import (
+    _basic,
+    auth_state,
+    is_claimed,
+    is_loopback_request,
+    programmer_auth_satisfied,
+)
 from server.system_config import get_system_config
 from server.version import __version__
 
@@ -42,11 +48,6 @@ open_router = APIRouter()
 # 3-second poll from the kiosk. Cached with a short TTL.
 _SSH_CACHE_TTL = 10.0
 _ssh_cache: tuple[float, dict] | None = None
-
-
-def _is_loopback(request: Request) -> bool:
-    client = request.client
-    return client is not None and client.host in ("127.0.0.1", "::1", "localhost")
 
 
 def _ssh_info() -> dict:
@@ -121,7 +122,7 @@ async def setup_status(
         "network": None,
     }
 
-    if not (_is_loopback(request) or programmer_auth_satisfied(request, credentials)):
+    if not (is_loopback_request(request) or programmer_auth_satisfied(request, credentials)):
         return payload
 
     # Re-detect rather than serve the startup cache: a device that boots
@@ -211,6 +212,43 @@ _PAGE = """<!DOCTYPE html>
   .hint p { color: #888; font-size: 0.8rem; line-height: 1.4; }
   .hint strong { color: #8AB493; }
   .version { margin-top: 1.25rem; font-size: 0.7rem; color: #555; }
+  .netcfg-toggle {
+    background: none; border: 1px solid #2a2a4a; border-radius: 10px;
+    color: #8AB493; font-size: 0.8rem; font-family: inherit;
+    padding: 0.6rem 1.25rem; width: 100%; cursor: pointer; margin-bottom: 1rem;
+  }
+  .iface-block { padding: 0.5rem 0; border-bottom: 1px solid #2a2a4a; }
+  .iface-block:last-child { border-bottom: none; }
+  .iface-title { font-size: 0.8rem; color: #fff; font-weight: 600; margin-bottom: 0.4rem; }
+  .iface-state { color: #888; font-weight: 400; }
+  .net-form { display: grid; grid-template-columns: 7.5rem 1fr; gap: 0.45rem 0.75rem; align-items: center; margin: 0.5rem 0; }
+  .net-form label { color: #888; font-size: 0.8rem; }
+  .net-form input[type=text], .net-form input[type=password] {
+    background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 6px;
+    color: #fff; font-family: 'SF Mono', 'Consolas', monospace; font-size: 0.8rem;
+    padding: 0.45rem 0.6rem; width: 100%;
+  }
+  .net-form input[disabled] { opacity: 0.4; }
+  .net-form .radio-row { display: flex; gap: 1.25rem; color: #ccc; font-size: 0.8rem; }
+  .net-btn {
+    background: #8AB493; border: none; border-radius: 8px; color: #fff;
+    font-size: 0.8rem; font-family: inherit; font-weight: 500;
+    padding: 0.5rem 1.25rem; cursor: pointer;
+  }
+  .net-btn.secondary { background: #2a2a4a; color: #ccc; }
+  .net-btn[disabled] { opacity: 0.5; cursor: default; }
+  .net-msg { font-size: 0.75rem; line-height: 1.4; margin-top: 0.5rem; }
+  .net-msg.ok { color: #8AB493; }
+  .net-msg.warn { color: #d0b070; }
+  .net-msg.err { color: #d08080; }
+  .wifi-list { list-style: none; margin-top: 0.5rem; }
+  .wifi-list li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.5rem 0.25rem; border-bottom: 1px solid #2a2a4a;
+    color: #fff; font-size: 0.8rem; cursor: pointer;
+  }
+  .wifi-list li:last-child { border-bottom: none; }
+  .wifi-meta { color: #888; font-size: 0.75rem; font-family: 'SF Mono', 'Consolas', monospace; }
   .offline-banner {
     display: none;
     background: #3a2a2a; border: 1px solid #5a3a3a; border-radius: 10px;
@@ -244,6 +282,27 @@ _PAGE = """<!DOCTYPE html>
     <div class="field"><span class="label">Programmer</span><span class="value" id="url-programmer"></span></div>
     <div class="field"><span class="label">Panel</span><span class="value" id="url-panel"></span></div>
     <div class="field" id="row-ssh" hidden><span class="label">SSH</span><span class="value" id="ssh-state"></span></div>
+  </div>
+
+  <button class="netcfg-toggle" id="netcfg-toggle" hidden>Network Settings</button>
+
+  <div class="card" id="netcfg-card" hidden>
+    <h2>Network Settings</h2>
+    <div id="netcfg-interfaces"></div>
+    <div class="net-msg" id="netcfg-msg"></div>
+    <div id="netcfg-wifi" hidden>
+      <div class="iface-title" style="margin-top:0.75rem">WiFi</div>
+      <button class="net-btn secondary" id="wifi-scan">Scan for Networks</button>
+      <ul class="wifi-list" id="wifi-list"></ul>
+      <div class="net-form" id="wifi-join" hidden>
+        <label id="wifi-join-label">Password</label>
+        <input type="password" id="wifi-psk" autocomplete="off">
+        <span></span>
+        <span><button class="net-btn" id="wifi-connect">Connect</button>
+        <button class="net-btn secondary" id="wifi-cancel">Cancel</button></span>
+      </div>
+      <div class="net-msg" id="wifi-msg"></div>
+    </div>
   </div>
 
   <div class="hint" id="hint" hidden>
@@ -322,7 +381,270 @@ _PAGE = """<!DOCTYPE html>
     }
 
     text('version', s.version ? 'v' + s.version : '');
+
+    if (net && netAvailable === null) probeNetcfg();
   }
+
+  // --- Network settings (on-device configuration) ---
+  // Shown only when /api/system/network answers (a host network backend
+  // exists AND this caller is loopback or authenticated). This is how an
+  // appliance gets onto a network it isn't on yet: static IP or WiFi
+  // credentials entered on the device's own screen.
+  var netAvailable = null;
+  var wifiPick = null;
+
+  function el(tag, cls, textValue) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (textValue !== undefined) node.textContent = textValue;
+    return node;
+  }
+
+  function probeNetcfg() {
+    netAvailable = false;
+    fetch('/api/system/network', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (data) {
+        netAvailable = true;
+        show('netcfg-toggle', true);
+        renderNetcfg(data);
+      })
+      .catch(function () { netAvailable = false; });
+  }
+
+  function refreshNetcfg() {
+    fetch('/api/system/network', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(renderNetcfg)
+      .catch(function () {});
+  }
+
+  function renderNetcfg(data) {
+    var container = document.getElementById('netcfg-interfaces');
+    container.textContent = '';
+    (data.interfaces || []).forEach(function (iface) {
+      var block = el('div', 'iface-block');
+      var title = el('div', 'iface-title',
+        iface.device + ' (' + iface.type + ') ');
+      title.appendChild(el('span', 'iface-state', iface.state +
+        (iface.ip4 && iface.ip4.addresses.length ? ' · ' + iface.ip4.addresses.join(', ') : '')));
+      block.appendChild(title);
+
+      if (iface.type === 'ethernet') {
+        if (!iface.connection) {
+          block.appendChild(el('div', 'net-msg', 'No connection profile. Connect a cable and it will appear here.'));
+        } else {
+          block.appendChild(buildIpv4Form(iface));
+        }
+      }
+      container.appendChild(block);
+    });
+    show('netcfg-wifi', !!(data.capabilities && data.capabilities.wifi));
+  }
+
+  function buildIpv4Form(iface) {
+    var cfg = iface.config || { method: 'auto', addresses: [], gateway: null, dns: [] };
+    var form = el('div');
+    var radios = el('div', 'net-form');
+    var radioRow = el('div', 'radio-row');
+    var name = 'method-' + iface.device;
+
+    function radio(value, labelText, checked) {
+      var lab = el('label');
+      var input = document.createElement('input');
+      input.type = 'radio'; input.name = name; input.value = value;
+      input.checked = checked;
+      lab.appendChild(input);
+      lab.appendChild(document.createTextNode(' ' + labelText));
+      return lab;
+    }
+    radioRow.appendChild(radio('auto', 'Automatic (DHCP)', cfg.method !== 'manual'));
+    radioRow.appendChild(radio('manual', 'Static IP', cfg.method === 'manual'));
+    radios.appendChild(el('label', null, 'Address mode'));
+    radios.appendChild(radioRow);
+    form.appendChild(radios);
+
+    var fields = el('div', 'net-form');
+    function input(labelText, value, placeholder) {
+      fields.appendChild(el('label', null, labelText));
+      var node = document.createElement('input');
+      node.type = 'text'; node.value = value || ''; node.placeholder = placeholder || '';
+      node.autocapitalize = 'off'; node.autocomplete = 'off';
+      fields.appendChild(node);
+      return node;
+    }
+    var addr = input('Address', cfg.addresses[0] || (iface.ip4 && iface.ip4.addresses[0]) || '', '192.168.1.50/24');
+    var gw = input('Gateway', cfg.gateway || (iface.ip4 && iface.ip4.gateway) || '', '192.168.1.1');
+    var dns = input('DNS', (cfg.dns && cfg.dns.length ? cfg.dns : (iface.ip4 ? iface.ip4.dns : [])).join(', '), '8.8.8.8, 1.1.1.1');
+    form.appendChild(fields);
+
+    var staticOnly = [addr, gw, dns];
+    function syncFields() {
+      var manual = form.querySelector('input[value=manual]').checked;
+      staticOnly.forEach(function (f) { f.disabled = !manual; });
+    }
+    form.addEventListener('change', syncFields);
+    syncFields();
+
+    var applyBtn = el('button', 'net-btn', 'Apply');
+    var msg = el('div', 'net-msg');
+    form.appendChild(applyBtn);
+    form.appendChild(msg);
+
+    var pendingConfirm = false;
+    applyBtn.addEventListener('click', function () {
+      var manual = form.querySelector('input[value=manual]').checked;
+      var body = {
+        connection: iface.connection,
+        method: manual ? 'manual' : 'auto',
+        address: addr.value.trim() || null,
+        gateway: gw.value.trim() || null,
+        dns: dns.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        confirmed: pendingConfirm
+      };
+      applyBtn.disabled = true;
+      msg.className = 'net-msg';
+      msg.textContent = pendingConfirm ? 'Applying…' : 'Checking…';
+      fetch('/api/system/network/ipv4', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+        .then(function (resp) {
+          applyBtn.disabled = false;
+          if (!resp.ok) {
+            msg.className = 'net-msg err';
+            msg.textContent = resp.body.detail || 'Invalid configuration.';
+            pendingConfirm = false; applyBtn.textContent = 'Apply';
+            return;
+          }
+          var b = resp.body;
+          if (!pendingConfirm) {
+            if (b.warnings && b.warnings.length) {
+              msg.className = 'net-msg warn';
+              msg.textContent = b.warnings.join(' ') + ' Tap again to apply anyway.';
+              pendingConfirm = true; applyBtn.textContent = 'Apply Anyway';
+              return;
+            }
+            pendingConfirm = true;
+            applyBtn.click();
+            return;
+          }
+          pendingConfirm = false; applyBtn.textContent = 'Apply';
+          // The interface list re-renders after an apply, so the result
+          // goes to the shared status line that survives the refresh.
+          var shared = document.getElementById('netcfg-msg');
+          if (b.ok) {
+            shared.className = 'net-msg ok';
+            shared.textContent = iface.device + ': applied.';
+          } else if (b.rolled_back) {
+            shared.className = 'net-msg err';
+            shared.textContent = iface.device + ': change failed and the previous settings were restored: ' + (b.error || '');
+          } else {
+            shared.className = 'net-msg err';
+            shared.textContent = iface.device + ': ' + (b.error || 'failed to apply.');
+          }
+          refreshNetcfg();
+        })
+        .catch(function () {
+          applyBtn.disabled = false;
+          pendingConfirm = false; applyBtn.textContent = 'Apply';
+          msg.className = 'net-msg err';
+          msg.textContent = 'Request failed. If the address changed, this screen will recover on its own.';
+          refreshNetcfg();
+        });
+    });
+    return form;
+  }
+
+  document.getElementById('netcfg-toggle').addEventListener('click', function () {
+    var card = document.getElementById('netcfg-card');
+    card.hidden = !card.hidden;
+    if (!card.hidden) refreshNetcfg();
+  });
+
+  document.getElementById('wifi-scan').addEventListener('click', function () {
+    var btn = document.getElementById('wifi-scan');
+    var msgEl = document.getElementById('wifi-msg');
+    btn.disabled = true; btn.textContent = 'Scanning…';
+    msgEl.className = 'net-msg'; msgEl.textContent = '';
+    fetch('/api/system/network/wifi/scan', { method: 'POST' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (data) {
+        btn.disabled = false; btn.textContent = 'Scan for Networks';
+        var list = document.getElementById('wifi-list');
+        list.textContent = '';
+        (data.networks || []).forEach(function (n) {
+          var item = el('li');
+          item.appendChild(el('span', null, (n.in_use ? '✓ ' : '') + n.ssid));
+          item.appendChild(el('span', 'wifi-meta',
+            n.signal + '%' + (n.secured ? ' 🔒' : '')));
+          item.addEventListener('click', function () { pickWifi(n); });
+          list.appendChild(item);
+        });
+        if (!(data.networks || []).length) {
+          msgEl.textContent = 'No networks found.';
+        }
+      })
+      .catch(function () {
+        btn.disabled = false; btn.textContent = 'Scan for Networks';
+        msgEl.className = 'net-msg err';
+        msgEl.textContent = 'Scan failed.';
+      });
+  });
+
+  function pickWifi(n) {
+    wifiPick = n;
+    var join = document.getElementById('wifi-join');
+    if (n.secured) {
+      join.hidden = false;
+      text('wifi-join-label', 'Password for ' + n.ssid);
+      document.getElementById('wifi-psk').value = '';
+      document.getElementById('wifi-psk').focus();
+    } else {
+      join.hidden = true;
+      connectWifi();
+    }
+  }
+
+  function connectWifi() {
+    if (!wifiPick) return;
+    var msgEl = document.getElementById('wifi-msg');
+    var btn = document.getElementById('wifi-connect');
+    btn.disabled = true;
+    msgEl.className = 'net-msg';
+    msgEl.textContent = 'Connecting to ' + wifiPick.ssid + '…';
+    fetch('/api/system/network/wifi/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid: wifiPick.ssid, psk: document.getElementById('wifi-psk').value || null })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (resp) {
+        btn.disabled = false;
+        if (resp.ok && resp.body.ok) {
+          msgEl.className = 'net-msg ok';
+          msgEl.textContent = 'Connected to ' + wifiPick.ssid + '.';
+          document.getElementById('wifi-join').hidden = true;
+          refreshNetcfg();
+        } else {
+          msgEl.className = 'net-msg err';
+          msgEl.textContent = resp.body.error || resp.body.detail || 'Connection failed.';
+        }
+      })
+      .catch(function () {
+        btn.disabled = false;
+        msgEl.className = 'net-msg err';
+        msgEl.textContent = 'Connection failed.';
+      });
+  }
+
+  document.getElementById('wifi-connect').addEventListener('click', connectWifi);
+  document.getElementById('wifi-cancel').addEventListener('click', function () {
+    document.getElementById('wifi-join').hidden = true;
+    wifiPick = null;
+  });
 
   function tick() {
     fetch('/api/setup/status', { cache: 'no-store' })

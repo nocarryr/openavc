@@ -206,6 +206,35 @@ async def require_programmer_auth(
     )
 
 
+def is_loopback_request(request: Request) -> bool:
+    """Whether the request arrived over loopback (the device's own browser)."""
+    client = request.client
+    return client is not None and client.host in ("127.0.0.1", "::1", "localhost")
+
+
+async def require_local_or_programmer_auth(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(_basic),
+) -> None:
+    """FastAPI dependency for on-device appliance surfaces (network config).
+
+    Loopback callers are allowed without credentials: an appliance must be
+    configurable from its own screen before it has any network or any claim
+    (the no-DHCP VLAN and WiFi-only bootstrap cases), and physical access to
+    the console is the trust anchor — the same model as the /setup screen's
+    network-info disclosure. Remote callers need programmer credentials.
+    """
+    if is_loopback_request(request):
+        return
+    if programmer_auth_satisfied(request, credentials):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+
 async def require_claimed_auth(
     request: Request,
     credentials: HTTPBasicCredentials | None = Depends(_basic),

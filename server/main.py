@@ -32,6 +32,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 
 from server import config
 from server.api import rest, ws, isc_ws, discovery as discovery_api, plugins as plugins_api, assets as assets_api, themes as themes_api, ai_proxy as ai_proxy_api
+from server.api.routes import network as network_routes
 from server.api.routes import pair as pair_routes
 from server.api.routes import setup as setup_routes
 from server.core.engine import Engine
@@ -250,6 +251,7 @@ app.include_router(themes_api.router)
 app.include_router(ai_proxy_api.router)
 app.include_router(pair_routes.router)
 app.include_router(setup_routes.router)
+app.include_router(network_routes.router)
 
 # CORS — allow same-origin and localhost by default.
 # Additional origins can be set via OPENAVC_CORS_ORIGINS (comma-separated).

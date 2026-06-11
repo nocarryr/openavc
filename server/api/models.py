@@ -244,3 +244,29 @@ class ChildEntityPatchRequest(BaseModel):
 
     label: str | None = None
     config: dict[str, Any] | None = None
+
+
+class NetworkIPv4Request(BaseModel):
+    """Body for ``POST /api/system/network/ipv4``.
+
+    ``confirmed: false`` is a dry run: the server validates and returns
+    warnings (e.g. gateway outside the subnet) without changing anything.
+    ``confirmed: true`` applies the change, with automatic rollback if the
+    connection fails to activate.
+    """
+
+    connection: str
+    method: str  # "auto" (DHCP) or "manual" (static)
+    address: str | None = None  # CIDR, required when method == "manual"
+    gateway: str | None = None
+    dns: list[str] = []
+    confirmed: bool = False
+
+
+class WifiConnectRequest(BaseModel):
+    ssid: str
+    psk: str | None = None
+
+
+class HostnameRequest(BaseModel):
+    hostname: str
