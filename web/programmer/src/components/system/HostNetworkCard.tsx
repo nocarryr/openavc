@@ -93,9 +93,11 @@ function newProgrammerUrl(addressCidr: string): string {
 
 function IfaceEditor({
   iface,
+  applyMode,
   onApplied,
 }: {
   iface: HostNetworkInterface;
+  applyMode: "live" | "reboot";
   onApplied: () => void;
 }) {
   const cfg = iface.config;
@@ -137,6 +139,14 @@ function IfaceEditor({
     setBusy(true);
     try {
       const result = await api.setHostIpv4({ ...body(), confirmed: true });
+      if (result.ok && result.reboot) {
+        // Saved to the device's boot configuration; it is now restarting.
+        // Skip the status refresh — the server is going down with it.
+        showSuccess(
+          `${iface.device}: settings saved — the device is restarting to apply them.`
+        );
+        return;
+      }
       if (result.ok) {
         showSuccess(`${iface.device}: network change applied`);
       } else if (result.rolled_back) {
@@ -161,10 +171,17 @@ function IfaceEditor({
   };
 
   if (!iface.connection) {
+    // No editable profile. Say why honestly: a live link without a profile
+    // is not a cabling problem.
+    const linkUp =
+      iface.state === "connected" ||
+      iface.state.startsWith("connecting") ||
+      iface.ip4.addresses.length > 0;
     return (
       <div style={{ ...description, marginBottom: "var(--space-md)" }}>
-        No connection profile on {iface.device}. Connect a cable and it will
-        appear here.
+        {linkUp
+          ? `${iface.device} is connected, but its settings aren't editable from here.`
+          : `No connection profile on ${iface.device}. Connect a cable and it will appear here.`}
       </div>
     );
   }
@@ -217,6 +234,11 @@ function IfaceEditor({
         <Check size={14} />
         Apply to {iface.device}
       </button>
+      {applyMode === "reboot" && (
+        <div style={{ ...labelStyle, marginTop: "var(--space-sm)" }}>
+          Applying a change restarts the device.
+        </div>
+      )}
 
       {confirm && (
         <ConfirmDialog
@@ -234,13 +256,16 @@ function IfaceEditor({
                 If this changes the address you are connected through, the
                 Programmer becomes unreachable here.
                 {method === "manual" && address.trim() && (
-                  <> Reconnect at <code>{newProgrammerUrl(address)}</code> after
-                  about 10 seconds.</>
+                  <> Reconnect at <code>{newProgrammerUrl(address)}</code>{" "}
+                  {applyMode === "reboot"
+                    ? "after it restarts (about a minute)."
+                    : "after about 10 seconds."}</>
                 )}
               </p>
               <p>
-                If the new settings fail to activate, the previous
-                configuration is restored automatically.
+                {applyMode === "reboot"
+                  ? "The device restarts to apply the change. If the new settings are wrong, fix them from the device's own screen."
+                  : "If the new settings fail to activate, the previous configuration is restored automatically."}
               </p>
             </div>
           }
@@ -460,9 +485,13 @@ export function HostNetworkCard() {
               {iface.ip4.addresses.length > 0 && ` · ${iface.ip4.addresses.join(", ")}`}
             </span>
           </div>
-          {iface.type === "ethernet" && (
+          {iface.type === "ethernet" && status.capabilities.ipv4 && (
             <div style={{ marginTop: "var(--space-sm)" }}>
-              <IfaceEditor iface={iface} onApplied={load} />
+              <IfaceEditor
+                iface={iface}
+                applyMode={status.capabilities.ipv4_apply === "reboot" ? "reboot" : "live"}
+                onApplied={load}
+              />
             </div>
           )}
         </div>

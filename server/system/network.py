@@ -291,7 +291,16 @@ class NmcliBackend(NetworkBackend):
         return {
             "backend": self.name,
             "hostname": hostname,
-            "capabilities": {"ipv4": True, "wifi": has_wifi, "hostname": True},
+            # ipv4_apply tells the UI how an IPv4 change takes effect:
+            # "live" (applied immediately, rolled back on failure) or
+            # "reboot" (saved, applied by restarting the device) — some
+            # appliance backends have no runtime apply path.
+            "capabilities": {
+                "ipv4": True,
+                "wifi": has_wifi,
+                "hostname": True,
+                "ipv4_apply": "live",
+            },
             "interfaces": interfaces,
         }
 

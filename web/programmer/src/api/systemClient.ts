@@ -420,18 +420,27 @@ export interface HostNetworkInterface {
 export interface HostNetworkStatus {
   backend: string;
   hostname: string | null;
-  capabilities: { ipv4: boolean; wifi: boolean; hostname: boolean };
+  capabilities: {
+    ipv4: boolean;
+    wifi: boolean;
+    hostname: boolean;
+    /** How an IPv4 change takes effect: applied immediately ("live",
+     *  rolled back on failure) or by restarting the device ("reboot"). */
+    ipv4_apply?: "live" | "reboot";
+  };
   interfaces: HostNetworkInterface[];
 }
 
 /** Result of POST /system/network/ipv4. With `confirmed: false` the server
  *  only validates (`applied: false`, warnings populated); with `confirmed:
- *  true` it applies, rolling back automatically if activation fails. */
+ *  true` it applies — live backends roll back automatically if activation
+ *  fails, reboot backends save and restart the device (`reboot: true`). */
 export interface HostIpv4Result {
   ok?: boolean;
   valid?: boolean;
   applied?: boolean;
   rolled_back?: boolean;
+  reboot?: boolean;
   warnings?: string[];
   error?: string;
 }

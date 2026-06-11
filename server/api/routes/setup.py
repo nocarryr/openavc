@@ -430,11 +430,18 @@ _PAGE = """<!DOCTYPE html>
         (iface.ip4 && iface.ip4.addresses.length ? ' · ' + iface.ip4.addresses.join(', ') : '')));
       block.appendChild(title);
 
-      if (iface.type === 'ethernet') {
+      if (iface.type === 'ethernet' && !(data.capabilities && data.capabilities.ipv4 === false)) {
         if (!iface.connection) {
-          block.appendChild(el('div', 'net-msg', 'No connection profile. Connect a cable and it will appear here.'));
+          // No editable profile — only blame the cable when the link is
+          // actually down.
+          var linkUp = iface.state === 'connected' ||
+            iface.state.indexOf('connecting') === 0 ||
+            !!(iface.ip4 && iface.ip4.addresses.length);
+          block.appendChild(el('div', 'net-msg', linkUp
+            ? iface.device + ' is connected, but its settings cannot be edited from this screen.'
+            : 'No connection profile. Connect a cable and it will appear here.'));
         } else {
-          block.appendChild(buildIpv4Form(iface));
+          block.appendChild(buildIpv4Form(iface, data.capabilities || {}));
         }
       }
       container.appendChild(block);
@@ -442,7 +449,7 @@ _PAGE = """<!DOCTYPE html>
     show('netcfg-wifi', !!(data.capabilities && data.capabilities.wifi));
   }
 
-  function buildIpv4Form(iface) {
+  function buildIpv4Form(iface, caps) {
     var cfg = iface.config || { method: 'auto', addresses: [], gateway: null, dns: [] };
     var form = el('div');
     var radios = el('div', 'net-form');
@@ -489,6 +496,9 @@ _PAGE = """<!DOCTYPE html>
     var applyBtn = el('button', 'net-btn', 'Apply');
     var msg = el('div', 'net-msg');
     form.appendChild(applyBtn);
+    if (caps.ipv4_apply === 'reboot') {
+      form.appendChild(el('div', 'net-msg', 'Applying a change restarts the device.'));
+    }
     form.appendChild(msg);
 
     var pendingConfirm = false;
@@ -535,6 +545,14 @@ _PAGE = """<!DOCTYPE html>
           // The interface list re-renders after an apply, so the result
           // goes to the shared status line that survives the refresh.
           var shared = document.getElementById('netcfg-msg');
+          if (b.ok && b.reboot) {
+            // Saved to the boot configuration; the device is restarting.
+            // Skip the refresh — the server is going down with it, and
+            // this screen recovers on its own after the boot.
+            shared.className = 'net-msg ok';
+            shared.textContent = iface.device + ': saved. The device is restarting to apply the new settings.';
+            return;
+          }
           if (b.ok) {
             shared.className = 'net-msg ok';
             shared.textContent = iface.device + ': applied.';
