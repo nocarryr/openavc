@@ -110,6 +110,14 @@ class PanelApp {
         this.bindings = [];          // Active bindings to evaluate on state change
         this.elementMap = {};        // element_id -> {el, elementDef} for ui.* overrides
         this.holdTimers = {};        // element_id -> interval for hold-repeat mode
+        // A panel that goes to the background mid-press never sees the
+        // release — end every hold-repeat rather than let it fire blind.
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                for (const t of Object.values(this.holdTimers)) clearInterval(t);
+                this.holdTimers = {};
+            }
+        });
         this.debounceTimers = [];    // Track all debounce timeouts for cleanup
         this._pluginMessageHandlers = new Set(); // Track all plugin iframe message handlers
         this._clockElements = [];    // All clock update functions for batched interval
@@ -1070,16 +1078,46 @@ class PanelApp {
         const effectiveMode = (mode === 'toggle' && !pressBinding.toggle_key) ? 'tap' : mode;
 
         let pressTime = 0;
+        let pressActive = false;
+
+        const endHold = () => {
+            if (this.holdTimers[element.id]) {
+                clearInterval(this.holdTimers[element.id]);
+                delete this.holdTimers[element.id];
+            }
+        };
 
         const onPress = (e) => {
             e.preventDefault();
             el.classList.add('pressing');
             pressTime = Date.now();
+            pressActive = true;
+
+            // The release must be un-missable: kiosk WebViews and mobile
+            // browsers sometimes swallow the element-level touchend (gesture
+            // interception, system dialogs), and a hold-repeat interval that
+            // outlives the physical press fires its action forever. Window-
+            // level one-shot fallbacks end the press no matter where (or
+            // whether) the browser delivers the release event.
+            const winEnd = (ev) => {
+                winCleanup();
+                onRelease(ev);
+            };
+            const winCleanup = () => {
+                window.removeEventListener('mouseup', winEnd);
+                window.removeEventListener('touchend', winEnd);
+                window.removeEventListener('touchcancel', winEnd);
+                window.removeEventListener('blur', winEnd);
+            };
+            window.addEventListener('mouseup', winEnd);
+            window.addEventListener('touchend', winEnd, { passive: true });
+            window.addEventListener('touchcancel', winEnd, { passive: true });
+            window.addEventListener('blur', winEnd);
 
             if (effectiveMode === 'hold_repeat') {
                 this.send({ type: 'ui.press', element_id: element.id });
                 // Clear any existing timer before starting a new one
-                if (this.holdTimers[element.id]) clearInterval(this.holdTimers[element.id]);
+                endHold();
                 this.holdTimers[element.id] = setInterval(() => {
                     this.send({ type: 'ui.press', element_id: element.id });
                 }, holdRepeatMs);
@@ -1100,12 +1138,15 @@ class PanelApp {
             // tap_hold: nothing on press — decided on release
         };
         const onRelease = (e) => {
-            e.preventDefault();
+            // Element handler and window fallback both route here; only the
+            // first one for a given press does anything.
+            if (!pressActive) return;
+            pressActive = false;
+            if (e && e.cancelable && e.preventDefault) e.preventDefault();
             el.classList.remove('pressing');
 
             if (effectiveMode === 'hold_repeat') {
-                clearInterval(this.holdTimers[element.id]);
-                delete this.holdTimers[element.id];
+                endHold();
             } else if (effectiveMode === 'tap_hold') {
                 const held = Date.now() - pressTime;
                 if (held >= holdThresholdMs) {
@@ -1121,22 +1162,15 @@ class PanelApp {
         el.addEventListener('mousedown', onPress);
         el.addEventListener('mouseup', onRelease);
         el.addEventListener('mouseleave', () => {
+            // Hold ends when the pointer leaves; the press cycle itself is
+            // closed by the window-level mouseup fallback.
             el.classList.remove('pressing');
-            if (this.holdTimers[element.id]) {
-                clearInterval(this.holdTimers[element.id]);
-                delete this.holdTimers[element.id];
-            }
+            endHold();
         });
         el.style.touchAction = 'none';
         el.addEventListener('touchstart', onPress);
         el.addEventListener('touchend', onRelease);
-        el.addEventListener('touchcancel', () => {
-            el.classList.remove('pressing');
-            if (this.holdTimers[element.id]) {
-                clearInterval(this.holdTimers[element.id]);
-                delete this.holdTimers[element.id];
-            }
-        });
+        el.addEventListener('touchcancel', onRelease);
 
         // Feedback binding
         if (element.bindings && element.bindings.feedback) {
