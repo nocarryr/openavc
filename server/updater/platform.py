@@ -4,6 +4,9 @@ Platform detection for the update system.
 Detects how OpenAVC was installed to determine update behavior:
 - windows_installer: Silent installer re-run
 - linux_package: Archive extraction + systemd restart
+- android_appliance: Archive extraction + supervised-process restart
+  (pre-provisioned appliance hardware; the device supervisor applies the
+  staged update on the next launch)
 - docker: Notification only (containers are immutable)
 - git_dev: Notification only (developer manages source)
 - unknown: Notification only
@@ -21,9 +24,28 @@ from server.system_config import INSTALL_DIR, _is_docker
 class DeploymentType(str, Enum):
     WINDOWS_INSTALLER = "windows_installer"
     LINUX_PACKAGE = "linux_package"
+    ANDROID_APPLIANCE = "android_appliance"
     DOCKER = "docker"
     GIT_DEV = "git_dev"
     UNKNOWN = "unknown"
+
+
+# Explicit deployment marker, written at provisioning time by appliance
+# images whose deployment type can't be inferred from filesystem heuristics.
+# Content is one DeploymentType value. Checked before every heuristic —
+# provisioning intent beats inference.
+_DEPLOYMENT_MARKER = Path("/etc/openavc-deployment")
+
+
+def _explicit_deployment_type() -> DeploymentType | None:
+    try:
+        value = _DEPLOYMENT_MARKER.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        return DeploymentType(value)
+    except ValueError:
+        return None
 
 
 def _is_git_checkout(app_dir: Path) -> bool:
@@ -67,6 +89,10 @@ def detect_deployment_type(app_dir: Path | None = None) -> DeploymentType:
     if app_dir is None:
         app_dir = INSTALL_DIR
 
+    explicit = _explicit_deployment_type()
+    if explicit is not None:
+        return explicit
+
     if _is_docker():
         return DeploymentType.DOCKER
 
@@ -87,6 +113,7 @@ def can_self_update(deployment_type: DeploymentType) -> bool:
     return deployment_type in (
         DeploymentType.WINDOWS_INSTALLER,
         DeploymentType.LINUX_PACKAGE,
+        DeploymentType.ANDROID_APPLIANCE,
     )
 
 

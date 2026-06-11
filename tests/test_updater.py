@@ -231,10 +231,37 @@ class TestPlatformDetection:
     def test_can_self_update_installer(self):
         assert can_self_update(DeploymentType.WINDOWS_INSTALLER) is True
         assert can_self_update(DeploymentType.LINUX_PACKAGE) is True
+        assert can_self_update(DeploymentType.ANDROID_APPLIANCE) is True
 
     def test_cannot_self_update_docker(self):
         assert can_self_update(DeploymentType.DOCKER) is False
         assert can_self_update(DeploymentType.GIT_DEV) is False
+
+    def test_explicit_marker_wins(self, tmp_path, monkeypatch):
+        """A provisioning-time /etc/openavc-deployment marker beats every
+        filesystem heuristic."""
+        import server.updater.platform as platform_mod
+        marker = tmp_path / "openavc-deployment"
+        marker.write_text("android_appliance\n")
+        monkeypatch.setattr(platform_mod, "_DEPLOYMENT_MARKER", marker)
+        app_dir = Path(__file__).resolve().parent.parent  # a git checkout
+        assert detect_deployment_type(app_dir) == DeploymentType.ANDROID_APPLIANCE
+
+    def test_invalid_marker_ignored(self, tmp_path, monkeypatch):
+        import server.updater.platform as platform_mod
+        marker = tmp_path / "openavc-deployment"
+        marker.write_text("not-a-real-type")
+        monkeypatch.setattr(platform_mod, "_DEPLOYMENT_MARKER", marker)
+        app_dir = Path(__file__).resolve().parent.parent
+        assert detect_deployment_type(app_dir) == DeploymentType.GIT_DEV
+
+    def test_missing_marker_falls_through(self, tmp_path, monkeypatch):
+        import server.updater.platform as platform_mod
+        monkeypatch.setattr(
+            platform_mod, "_DEPLOYMENT_MARKER", tmp_path / "absent"
+        )
+        app_dir = Path(__file__).resolve().parent.parent
+        assert detect_deployment_type(app_dir) == DeploymentType.GIT_DEV
 
     def test_update_instructions_docker(self):
         msg = update_instructions(DeploymentType.DOCKER, "1.0.0")

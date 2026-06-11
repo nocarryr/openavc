@@ -11,8 +11,7 @@ Backends are capability-detected at runtime:
   appliance image, most desktop Linux). Talks to ``nmcli``; on the Pi image a
   polkit rule authorizes the unprivileged service user for NetworkManager and
   hostnamed actions (``sudo`` is unusable under ``NoNewPrivileges``).
-- Android appliance backend (rooted chroot) — planned; slots in behind the
-  same interface once the ``android_appliance`` deployment type lands.
+- Additional appliance backends slot in behind the same interface.
 
 Where no backend is available (Windows, Docker, generic servers without
 NetworkManager) ``get_backend()`` returns ``None``, the API answers 404, and
@@ -491,8 +490,7 @@ def get_backend() -> NetworkBackend | None:
     backend: NetworkBackend | None = None
     if _nmcli_running():
         backend = NmcliBackend()
-    # Android appliance backend slots in here once the android_appliance
-    # deployment type lands (rooted chroot; ip/cmd instead of nmcli).
+    # Additional appliance backends are detected here, most capable first.
     _backend = backend
     _backend_resolved = True
     if backend:

@@ -437,7 +437,8 @@ class UpdateManager:
             self._set_state("system.update_status", "applying")
             if self._deployment_type == DeploymentType.WINDOWS_INSTALLER:
                 self._apply_windows(artifact_path, release.version)
-            elif self._deployment_type == DeploymentType.LINUX_PACKAGE:
+            elif self._deployment_type in (DeploymentType.LINUX_PACKAGE,
+                                           DeploymentType.ANDROID_APPLIANCE):
                 self._apply_linux(artifact_path, release.version)
 
             # Step 5: Record success and restart
@@ -540,7 +541,8 @@ class UpdateManager:
             self._set_state("system.update_status", "applying")
             if self._deployment_type == DeploymentType.WINDOWS_INSTALLER:
                 self._apply_windows(artifact_path, target_version)
-            elif self._deployment_type == DeploymentType.LINUX_PACKAGE:
+            elif self._deployment_type in (DeploymentType.LINUX_PACKAGE,
+                                           DeploymentType.ANDROID_APPLIANCE):
                 self._apply_linux(artifact_path, target_version)
 
             self._add_history_entry(__version__, target_version, "pending")
@@ -721,6 +723,9 @@ class UpdateManager:
             os._exit(42)
         elif self._deployment_type == DeploymentType.LINUX_PACKAGE:
             log.info("Exiting for update — systemd will apply and restart (exit 0)")
+            os._exit(0)
+        elif self._deployment_type == DeploymentType.ANDROID_APPLIANCE:
+            log.info("Exiting for update — appliance supervisor will apply and restart (exit 0)")
             os._exit(0)
 
     async def rollback(self) -> dict[str, Any]:
