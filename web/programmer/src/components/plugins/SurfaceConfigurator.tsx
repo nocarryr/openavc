@@ -1603,15 +1603,19 @@ function NetworkDeckDialog({
     void scan();
   }, [scan]);
 
-  const addEntry = (h: string, p: number) => {
+  const addEntry = (h: string, p: number, sn?: string) => {
     const entries = networkEntriesOf(config);
     if (entries.some((e) => networkEntryKey(e) === `${h}:${p}`)) {
       onClose();
       return;
     }
+    // The advertised serial (mdns_sn) lets the plugin follow this unit to a
+    // new DHCP address even before it has connected once.
+    const entry: Record<string, unknown> = { host: h, port: p };
+    if (sn) entry.mdns_sn = sn;
     onConfigChange({
       ...config,
-      network_decks: [...((config.network_decks as unknown[]) ?? []), { host: h, port: p }],
+      network_decks: [...((config.network_decks as unknown[]) ?? []), entry],
     });
     onClose();
   };
@@ -1711,7 +1715,7 @@ function NetworkDeckDialog({
                   <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Added</span>
                 ) : (
                   <button
-                    onClick={() => addEntry(f.host, f.port)}
+                    onClick={() => addEntry(f.host, f.port, f.serial)}
                     style={{
                       padding: "2px 12px",
                       borderRadius: "var(--border-radius)",
