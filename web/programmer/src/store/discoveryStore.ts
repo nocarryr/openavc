@@ -19,6 +19,8 @@ interface DiscoveryState {
   scanId: string;
   /** Dynamic port labels from baseline + driver hints + community catalog */
   portLabels: Record<string, string>;
+  /** Environment problems that kept scan phases from working */
+  warnings: string[];
 
   /** Update or add a device from a WS event */
   upsertDevice: (device: DiscoveredDevice) => void;
@@ -32,6 +34,8 @@ interface DiscoveryState {
   setScanId: (id: string) => void;
   /** Set port labels from API */
   setPortLabels: (labels: Record<string, string>) => void;
+  /** Set environment warnings from API/WS */
+  setWarnings: (warnings: string[]) => void;
   /** Clear all results */
   clear: () => void;
 }
@@ -44,6 +48,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set) => ({
   message: "",
   scanId: "",
   portLabels: {},
+  warnings: [],
 
   upsertDevice: (device) =>
     set((s) => ({
@@ -64,6 +69,8 @@ export const useDiscoveryStore = create<DiscoveryState>((set) => ({
 
   setPortLabels: (labels) => set({ portLabels: labels }),
 
+  setWarnings: (warnings) => set({ warnings }),
+
   clear: () =>
     set({
       devices: {},
@@ -73,5 +80,6 @@ export const useDiscoveryStore = create<DiscoveryState>((set) => ({
       message: "",
       scanId: "",
       portLabels: {},
+      warnings: [],
     }),
 }));

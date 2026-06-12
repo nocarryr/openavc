@@ -34,10 +34,10 @@ import asyncio
 import logging
 import re
 import socket
-import struct
 from dataclasses import dataclass
 from typing import Any
 
+from server.discovery.multicast import join_group_on_interfaces
 from server.discovery.result import Evidence
 from server.discovery.tier_matcher import evidence_amx_ddp
 
@@ -162,6 +162,9 @@ class AMXDDPScanner:
         self._running = False
         self._results: dict[str, DDPBeacon] = {}
         self._control_ip = control_ip
+        # Environment failure that kept the listener from working at all —
+        # surfaced as a scan warning (see MDNSScanner.env_error).
+        self.env_error: str | None = None
 
     @property
     def results(self) -> dict[str, DDPBeacon]:
@@ -171,11 +174,13 @@ class AMXDDPScanner:
         """Listen on the DDP multicast group for ``duration`` seconds."""
         self._results.clear()
         self._running = True
+        self.env_error = None
 
         try:
             self._sock = _create_ddp_socket(self._control_ip)
         except OSError as exc:
             log.warning("Could not create AMX DDP socket: %s", exc)
+            self.env_error = f"AMX DDP listener unavailable: {exc}"
             return {}
 
         try:
@@ -238,27 +243,27 @@ class AMXDDPScanner:
 def _create_ddp_socket(control_ip: str = "") -> socket.socket:
     """Create a UDP socket subscribed to the AMX DDP multicast group.
 
-    Cross-platform: Windows binds to ("", DDP_PORT); Linux binds to
-    (DDP_GROUP, DDP_PORT) when available, falling back to ("", DDP_PORT).
-    The ``control_ip`` controls which interface joins the multicast group;
-    empty string means INADDR_ANY (all interfaces, OS default).
+    Binding to ("", port) on both platforms and relying on
+    IP_ADD_MEMBERSHIP for interface selection is portable. When
+    ``control_ip`` is set the group is joined via that interface only;
+    otherwise it is joined once per interface IP with INADDR_ANY as the
+    fallback (see ``discovery.multicast``). Raises OSError when the group
+    could not be joined on any interface.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # Bind to receive on the well-known port. Binding to ("", port) on
-    # both platforms and relying on IP_ADD_MEMBERSHIP for interface
-    # selection is portable.
-    sock.bind(("", DDP_PORT))
+    try:
+        # Bind to receive on the well-known port.
+        sock.bind(("", DDP_PORT))
 
-    # Join the multicast group on the chosen interface (or all interfaces).
-    iface = control_ip or "0.0.0.0"
-    mreq = struct.pack(
-        "4s4s",
-        socket.inet_aton(DDP_GROUP),
-        socket.inet_aton(iface),
-    )
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        joined = join_group_on_interfaces(sock, DDP_GROUP, control_ip=control_ip)
+        if not joined:
+            raise OSError(f"could not join {DDP_GROUP} on any interface")
 
-    sock.setblocking(False)
+        sock.setblocking(False)
+    except OSError:
+        sock.close()
+        raise
+
     return sock

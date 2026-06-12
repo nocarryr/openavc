@@ -281,6 +281,7 @@ async def get_results(
         "total_devices": len(devices),
         "scan_duration_seconds": status["duration"],
         "port_labels": port_labels,
+        "warnings": status["warnings"],
     }
 
 

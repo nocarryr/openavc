@@ -11,6 +11,8 @@ import socket
 import struct
 from typing import Callable, Awaitable
 
+from server.discovery import icmp
+
 log = logging.getLogger("discovery.network")
 
 # Platform detection
@@ -83,6 +85,35 @@ def get_network_adapters() -> list[dict[str, str]]:
             entry.setdefault("mac", "")
 
     return adapters
+
+
+def get_interface_ips() -> list[str]:
+    """Non-loopback, non-link-local IPv4 addresses of physical adapters.
+
+    Used for per-interface multicast group joins and sends (see
+    ``discovery.multicast``). Same adapter filtering as
+    ``get_local_subnets``.
+    """
+    ips: list[str] = []
+    try:
+        import ifaddr
+
+        for adapter in ifaddr.get_adapters():
+            if _VIRTUAL_ADAPTER_PATTERNS.search(adapter.nice_name):
+                continue
+            for ip_info in adapter.ips:
+                if not isinstance(ip_info.ip, str):
+                    continue  # Skip IPv6 tuples
+                addr = ip_info.ip
+                if addr.startswith("127.") or addr.startswith("169.254."):
+                    continue
+                if addr not in ips:
+                    ips.append(addr)
+    except ImportError:
+        log.warning("ifaddr not installed -- cannot enumerate interface IPs")
+    except OSError as exc:
+        log.warning("Failed to enumerate interface IPs: %s", exc)
+    return ips
 
 
 def get_local_subnets(interface_ip: str | None = None) -> list[str]:
@@ -162,18 +193,27 @@ async def ping_sweep(
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     min_prefix: int = 20,
     source_ip: str = "",
+    stats: icmp.PingSweepStats | None = None,
 ) -> list[str]:
     """Ping all addresses in the given subnets. Returns list of responding IPs.
 
-    Uses system ping command (no elevated privileges required).
-    Runs up to ``concurrency`` pings simultaneously.
+    The ICMP method is probed once per sweep (unprivileged datagram socket,
+    raw socket, or system ping — see ``discovery.icmp``), so no elevated
+    privileges or ping binary are required where the kernel allows ICMP
+    sockets. Runs up to ``concurrency`` pings simultaneously.
 
     Args:
         on_found: Called with IP when a host responds.
         on_progress: Called with (completed_count, total_count) after each host.
         min_prefix: Minimum CIDR prefix length. Subnets larger than this are skipped.
         source_ip: Bind pings to this source address on multi-homed hosts.
+        stats: Optional accounting object — filled with the selected method
+            and alive/timeout/error counts so the caller can surface
+            environment failures (errors are NOT dead hosts).
     """
+    if stats is None:
+        stats = icmp.PingSweepStats()
+
     all_ips: list[str] = []
     for cidr in subnets:
         all_ips.extend(_parse_cidr(cidr, min_prefix=min_prefix))
@@ -182,10 +222,30 @@ async def ping_sweep(
         return []
 
     total = len(all_ips)
+    stats.total = total
+    stats.method = icmp.select_ping_method()
+
+    if stats.method == icmp.METHOD_NONE:
+        # No ICMP socket permission and no ping binary on PATH. The scan
+        # carries on (passive listeners may still find devices) but every
+        # host counts as an error so the status warnings call this out.
+        stats.errors = total
+        log.error(
+            "Ping sweep skipped: no ICMP socket permission and no system "
+            "ping binary found — active discovery cannot see hosts",
+        )
+        return []
+
     if source_ip:
-        log.info("Ping sweep: %d addresses across %d subnet(s) (source: %s)", total, len(subnets), source_ip)
+        log.info(
+            "Ping sweep: %d addresses across %d subnet(s) (method: %s, source: %s)",
+            total, len(subnets), stats.method, source_ip,
+        )
     else:
-        log.info("Ping sweep: %d addresses across %d subnet(s)", total, len(subnets))
+        log.info(
+            "Ping sweep: %d addresses across %d subnet(s) (method: %s)",
+            total, len(subnets), stats.method,
+        )
 
     alive: list[str] = []
     semaphore = asyncio.Semaphore(concurrency)
@@ -194,48 +254,28 @@ async def ping_sweep(
     async def _ping_one(ip: str) -> None:
         nonlocal completed
         async with semaphore:
-            if await _ping(ip, timeout, source_ip=source_ip):
+            result = await icmp.ping_host(
+                ip, timeout, source_ip=source_ip, method=stats.method,
+            )
+            if result == icmp.RESULT_ALIVE:
                 alive.append(ip)
+                stats.alive += 1
                 if on_found:
                     await on_found(ip)
+            elif result == icmp.RESULT_ERROR:
+                stats.errors += 1
+            else:
+                stats.timeouts += 1
             completed += 1
             if on_progress:
                 await on_progress(completed, total)
 
     await asyncio.gather(*[_ping_one(ip) for ip in all_ips])
-    log.info("Ping sweep complete: %d/%d hosts alive", len(alive), total)
+    log.info(
+        "Ping sweep complete: %d/%d hosts alive (%d timeouts, %d errors, method=%s)",
+        len(alive), total, stats.timeouts, stats.errors, stats.method,
+    )
     return sorted(alive, key=lambda x: ipaddress.IPv4Address(x))
-
-
-async def _ping(ip: str, timeout: float = 1.0, source_ip: str = "") -> bool:
-    """Ping a single IP address. Returns True if it responds.
-
-    Args:
-        source_ip: If set, bind the ping to this source address (``-S`` on
-            Windows, ``-I`` on Linux).  Needed on multi-homed hosts where
-            the kernel might pick a Docker/VPN source and get filtered.
-    """
-    if _IS_WINDOWS:
-        cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000))]
-        if source_ip:
-            cmd.extend(["-S", source_ip])
-        cmd.append(ip)
-    else:
-        cmd = ["ping", "-c", "1", "-W", str(max(1, int(timeout)))]
-        if source_ip:
-            cmd.extend(["-I", source_ip])
-        cmd.append(ip)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=timeout + 2)
-        return proc.returncode == 0
-    except (asyncio.TimeoutError, OSError):
-        return False
 
 
 async def harvest_arp_table() -> dict[str, str]:
@@ -280,8 +320,58 @@ async def _harvest_arp_windows() -> dict[str, str]:
     return result
 
 
+_PROC_NET_ARP = "/proc/net/arp"
+
+# Complete /proc/net/arp entry: "192.168.1.1  0x1  0x2  a4:91:b1:aa:bb:cc  *  wlan0"
+_ARP_MAC_RE = re.compile(
+    r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$"
+)
+
+
+def _parse_proc_net_arp(text: str) -> dict[str, str]:
+    """Parse /proc/net/arp content. Returns {ip: mac} for complete entries.
+
+    Skips the header line, incomplete entries (ATF_COM flag 0x2 not set),
+    all-zero MACs, and broadcast MACs.
+    """
+    result: dict[str, str] = {}
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        ip, _hw_type, flags, mac = fields[0], fields[1], fields[2], fields[3]
+        try:
+            if not int(flags, 16) & 0x2:  # ATF_COM unset — incomplete entry
+                continue
+        except ValueError:
+            continue
+        mac = mac.lower()
+        if not _ARP_MAC_RE.match(mac):
+            continue
+        if mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+            continue
+        result[ip] = mac
+    return result
+
+
 async def _harvest_arp_linux() -> dict[str, str]:
-    """Parse Linux 'ip neigh' output."""
+    """Read the kernel ARP table from /proc/net/arp.
+
+    procfs is always present on Linux — no iproute2 needed, which slim
+    container/appliance images don't ship. ``ip neigh`` remains only as a
+    fallback for the unlikely case /proc/net/arp is unreadable.
+    """
+    try:
+        with open(_PROC_NET_ARP, encoding="ascii", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        log.debug("%s unreadable (%s); falling back to 'ip neigh'", _PROC_NET_ARP, exc)
+        return await _harvest_arp_ip_neigh()
+    return _parse_proc_net_arp(text)
+
+
+async def _harvest_arp_ip_neigh() -> dict[str, str]:
+    """Parse 'ip neigh' output (fallback when /proc/net/arp is unreadable)."""
     proc = await asyncio.create_subprocess_exec(
         "ip", "neigh",
         stdout=asyncio.subprocess.PIPE,

@@ -57,6 +57,8 @@ export interface DiscoveryScanResult {
   total_devices: number;
   scan_duration_seconds: number;
   port_labels?: Record<string, string>;
+  /** Environment problems that kept scan phases from working */
+  warnings?: string[];
 }
 
 export interface DiscoveryScanStatus {
@@ -72,6 +74,8 @@ export interface DiscoveryScanStatus {
   duration: number;
   subnets: string[];
   total_hosts_scanned: number;
+  /** Environment problems that kept scan phases from working */
+  warnings: string[];
 }
 
 export type ScanDepth = "quick" | "standard" | "thorough";

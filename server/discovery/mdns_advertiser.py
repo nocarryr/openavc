@@ -30,6 +30,7 @@ from server.discovery.mdns_scanner import (
     decode_dns_name,
     encode_dns_name,
 )
+from server.discovery.multicast import ANY_INTERFACE, join_group_on_interfaces
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -46,6 +47,11 @@ RE_ANNOUNCE_INTERVAL = 60.0  # seconds
 
 # Default TTL for mDNS records (75 minutes)
 DEFAULT_TTL = 4500
+
+# Backoff schedule when the advertiser can't start (no network yet — e.g.
+# WiFi associates after boot). After the last entry, keep retrying at the
+# final interval forever; the network may appear minutes later.
+RETRY_DELAYS = (5.0, 10.0, 20.0, 40.0, 60.0)
 
 
 # --- Helpers ---
@@ -213,33 +219,40 @@ def _parse_query_questions(data: bytes) -> list[tuple[str, int]]:
 # --- Socket ---
 
 
-def _create_advertiser_socket() -> socket.socket:
+def _create_advertiser_socket() -> tuple[socket.socket, list[str]]:
     """Create a UDP socket for mDNS advertisement.
 
     Similar to _create_mdns_socket() in mdns_scanner.py but with
     IP_MULTICAST_LOOP disabled to avoid receiving own announcements.
+    The group is joined once per interface IP with INADDR_ANY as the
+    fallback (see ``discovery.multicast``).
+
+    Returns ``(socket, joined_interface_ips)``. Raises OSError when the
+    group could not be joined on any interface (e.g. no network yet).
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    sock.bind(("", MDNS_PORT))
+    try:
+        sock.bind(("", MDNS_PORT))
 
-    # Join multicast group (required to receive queries)
-    mreq = struct.pack(
-        "4s4s",
-        socket.inet_aton(MDNS_ADDR),
-        socket.inet_aton("0.0.0.0"),
-    )
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        # Join multicast group (required to receive queries)
+        joined = join_group_on_interfaces(sock, MDNS_ADDR)
+        if not joined:
+            raise OSError(f"could not join {MDNS_ADDR} on any interface")
 
-    # mDNS uses TTL=255
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        # mDNS uses TTL=255
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
 
-    # Disable loopback so we don't receive our own packets
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        # Disable loopback so we don't receive our own packets
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
 
-    sock.setblocking(False)
-    return sock
+        sock.setblocking(False)
+    except OSError:
+        sock.close()
+        raise
+
+    return sock, joined
 
 
 # --- Advertiser ---
@@ -272,6 +285,8 @@ class MDNSAdvertiser:
         self._sock: socket.socket | None = None
         self._running = False
         self._responder_task: asyncio.Task | None = None
+        self._retry_task: asyncio.Task | None = None
+        self._joined_ips: list[str] = []
         self._local_ip: str = ""
         self._hostname: str = ""
 
@@ -285,11 +300,35 @@ class MDNSAdvertiser:
         return self._tls_port if self._tls_enabled else self._http_port
 
     async def start(self) -> None:
-        """Start advertising the service via mDNS."""
-        self._local_ip = _get_local_ip()
-        self._hostname = _sanitize_hostname(socket.gethostname())
-        self._sock = _create_advertiser_socket()
+        """Start advertising the service via mDNS.
+
+        Never raises: when the environment isn't ready (no network yet —
+        WiFi often associates after boot), the advertiser degrades to a
+        background retry loop with backoff instead of leaving panel-app
+        pairing dead for the life of the process.
+        """
         self._running = True
+        if await self._try_start():
+            return
+        self._retry_task = asyncio.create_task(self._retry_loop())
+        self._retry_task.add_done_callback(self._on_task_done)
+
+    async def _try_start(self) -> bool:
+        """One startup attempt. Returns False on environment failure."""
+        try:
+            self._hostname = _sanitize_hostname(socket.gethostname())
+            self._sock, self._joined_ips = _create_advertiser_socket()
+        except OSError as exc:
+            log.warning(
+                "mDNS advertiser: cannot start yet (%s) — will retry", exc,
+            )
+            self._sock = None
+            return False
+
+        if self._joined_ips and self._joined_ips[0] != ANY_INTERFACE:
+            self._local_ip = self._joined_ips[0]
+        else:
+            self._local_ip = _get_local_ip()
 
         # Send initial announcements (RFC 6762 Section 8.3)
         for i in range(ANNOUNCEMENT_COUNT):
@@ -309,10 +348,31 @@ class MDNSAdvertiser:
             self._service_port,
             "https" if self._tls_enabled else "http",
         )
+        return True
+
+    async def _retry_loop(self) -> None:
+        """Keep retrying startup with backoff until the network appears."""
+        attempt = 0
+        while self._running:
+            delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+            attempt += 1
+            await asyncio.sleep(delay)
+            if not self._running:
+                return
+            if await self._try_start():
+                return
 
     async def stop(self) -> None:
         """Stop advertising and send goodbye packets."""
         self._running = False
+
+        # Cancel a pending startup retry
+        if self._retry_task and not self._retry_task.done():
+            self._retry_task.cancel()
+            try:
+                await self._retry_task
+            except asyncio.CancelledError:
+                pass
 
         # Send goodbye packets (TTL=0) twice for redundancy
         if self._sock:
@@ -391,46 +451,49 @@ class MDNSAdvertiser:
                 asyncio.create_task(self._send_announcement())
                 return
 
-    async def _send_announcement(self) -> None:
-        """Send a full mDNS announcement with current state."""
+    async def _send_record_set(self, ttl: int) -> None:
+        """Send the full record set once per joined interface.
+
+        Each interface's announcement carries that interface's own IP in
+        the A record, so a panel app on any attached network resolves an
+        address it can actually reach (multi-NIC hosts: corporate / AV /
+        control VLANs each hear their own).
+        """
         if not self._sock:
             return
-        # Re-detect IP each time (handles network interface changes)
-        self._local_ip = _get_local_ip()
-        records = build_announcement_records(
-            instance_name=self._instance_name,
-            service_type=SERVICE_TYPE,
-            hostname=self._hostname,
-            ip=self._local_ip,
-            port=self._service_port,
-            txt_pairs=self._build_txt_pairs(),
-        )
-        packet = build_dns_response(records)
         loop = asyncio.get_running_loop()
-        try:
-            await loop.sock_sendto(self._sock, packet, (MDNS_ADDR, MDNS_PORT))
-        except OSError as e:
-            log.debug("mDNS: Failed to send announcement: %s", e)
+        for iface in self._joined_ips or [ANY_INTERFACE]:
+            # The INADDR_ANY fallback can't know its interface; re-detect
+            # the primary IP each time (handles interface changes).
+            ip = iface if iface != ANY_INTERFACE else _get_local_ip()
+            records = build_announcement_records(
+                instance_name=self._instance_name,
+                service_type=SERVICE_TYPE,
+                hostname=self._hostname,
+                ip=ip,
+                port=self._service_port,
+                txt_pairs=self._build_txt_pairs(),
+                ttl=ttl,
+            )
+            packet = build_dns_response(records)
+            try:
+                if iface != ANY_INTERFACE:
+                    self._sock.setsockopt(
+                        socket.IPPROTO_IP,
+                        socket.IP_MULTICAST_IF,
+                        socket.inet_aton(iface),
+                    )
+                await loop.sock_sendto(self._sock, packet, (MDNS_ADDR, MDNS_PORT))
+            except OSError as e:
+                log.debug("mDNS: Failed to send via %s: %s", iface, e)
+
+    async def _send_announcement(self) -> None:
+        """Send a full mDNS announcement with current state."""
+        await self._send_record_set(DEFAULT_TTL)
 
     async def _send_goodbye(self) -> None:
         """Send goodbye packet (TTL=0) to flush caches."""
-        if not self._sock:
-            return
-        records = build_announcement_records(
-            instance_name=self._instance_name,
-            service_type=SERVICE_TYPE,
-            hostname=self._hostname,
-            ip=self._local_ip,
-            port=self._service_port,
-            txt_pairs=self._build_txt_pairs(),
-            ttl=0,
-        )
-        packet = build_dns_response(records)
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.sock_sendto(self._sock, packet, (MDNS_ADDR, MDNS_PORT))
-        except OSError as e:
-            log.debug("mDNS: Failed to send goodbye: %s", e)
+        await self._send_record_set(0)
 
     def _build_txt_pairs(self) -> dict[str, str]:
         """Build TXT record key=value pairs.

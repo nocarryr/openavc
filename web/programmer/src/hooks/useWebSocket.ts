@@ -305,10 +305,16 @@ export function useWebSocket() {
           (msg.progress as number) ?? 0,
           (msg.message as string) ?? "",
         );
+        if (Array.isArray(msg.warnings)) {
+          useDiscoveryStore.getState().setWarnings(msg.warnings as string[]);
+        }
       }
 
       if (msg.type === "discovery_complete") {
         useDiscoveryStore.getState().setStatus("complete");
+        if (Array.isArray(msg.warnings)) {
+          useDiscoveryStore.getState().setWarnings(msg.warnings as string[]);
+        }
       }
 
       // Plugin events — refresh plugin list AND macro builder's plugin

@@ -21,6 +21,9 @@ from typing import Any
 from defusedxml.ElementTree import fromstring as _safe_xml_fromstring, ParseError as _XMLParseError
 from xml.etree import ElementTree
 
+from server.discovery.multicast import ANY_INTERFACE, send_per_interface
+from server.discovery.network_scanner import get_interface_ips
+
 log = logging.getLogger("discovery.ssdp")
 
 # SSDP constants
@@ -170,6 +173,12 @@ class SSDPScanner:
         self._running = False
         self._results: dict[str, SSDPResult] = {}  # keyed by IP
         self._control_ip = control_ip
+        # Interface IPs M-SEARCH goes out on (one send per entry; responses
+        # come back unicast to the bound port regardless of interface).
+        self._send_ifaces: list[str] = []
+        # Environment failure that kept the scanner from working at all —
+        # surfaced as a scan warning (see MDNSScanner.env_error).
+        self.env_error: str | None = None
 
     @property
     def results(self) -> dict[str, SSDPResult]:
@@ -191,12 +200,22 @@ class SSDPScanner:
         """
         self._results.clear()
         self._running = True
+        self.env_error = None
 
         try:
             self._sock = _create_ssdp_socket(control_ip=self._control_ip)
         except OSError as e:
             log.warning("Could not create SSDP socket: %s", e)
+            self.env_error = f"SSDP scanner unavailable: {e}"
             return {}
+
+        # M-SEARCH goes out once per interface so it reaches every attached
+        # network even without a multicast route in the main table. With a
+        # control interface configured, that one interface is the list.
+        if self._control_ip:
+            self._send_ifaces = [self._control_ip]
+        else:
+            self._send_ifaces = get_interface_ips() or [ANY_INTERFACE]
 
         try:
             # Send M-SEARCH for each search target
@@ -225,24 +244,30 @@ class SSDPScanner:
         self._close_socket()
 
     async def _send_searches(self) -> None:
-        """Send M-SEARCH for each search target."""
+        """Send M-SEARCH for each search target, once per interface."""
         if not self._sock:
             return
 
+        total_sent = 0
         loop = asyncio.get_event_loop()
         for target in SEARCH_TARGETS:
             try:
                 message = M_SEARCH_TEMPLATE.format(search_target=target)
-                await loop.run_in_executor(
-                    None,
-                    lambda m=message: self._sock.sendto(
-                        m.encode("utf-8"), (SSDP_ADDR, SSDP_PORT)
-                    )
+                total_sent += await loop.run_in_executor(
+                    None, send_per_interface,
+                    self._sock, message.encode("utf-8"),
+                    (SSDP_ADDR, SSDP_PORT), self._send_ifaces,
                 )
             except OSError as e:
                 log.debug("Failed to send M-SEARCH for %s: %s", target, e)
 
             await asyncio.sleep(0.1)
+
+        if total_sent == 0:
+            # Every send on every interface failed — devices were never
+            # asked, so an empty result set is an environment problem.
+            self.env_error = "SSDP M-SEARCH could not be sent on any interface"
+            log.warning(self.env_error)
 
     async def _listen(self, timeout: float) -> None:
         """Listen for SSDP responses."""
@@ -512,9 +537,10 @@ async def _http_get(url: str, timeout: float = 3.0) -> str | None:
 def _create_ssdp_socket(control_ip: str = "") -> socket.socket:
     """Create a UDP socket for SSDP M-SEARCH.
 
-    Cross-platform: works on both Windows and Linux. When ``control_ip``
-    is set, outbound multicast is pinned to that interface so M-SEARCH
-    requests leave through the chosen adapter.
+    Cross-platform: works on both Windows and Linux. The outbound
+    multicast interface is pinned per send (see ``_send_searches``);
+    binding to ``control_ip`` here additionally pins the source address
+    so responses come back to the right interface on multi-homed hosts.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
@@ -522,18 +548,7 @@ def _create_ssdp_socket(control_ip: str = "") -> socket.socket:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     # Bind to specific source IP if requested, otherwise INADDR_ANY.
-    # Binding to control_ip:0 also pins the source address on outbound
-    # packets so responses come back to the right interface on
-    # multi-homed hosts.
     sock.bind((control_ip or "", 0))
-
-    # Pin outbound multicast interface when a control IP is selected.
-    if control_ip:
-        sock.setsockopt(
-            socket.IPPROTO_IP,
-            socket.IP_MULTICAST_IF,
-            socket.inet_aton(control_ip),
-        )
 
     # Set TTL for multicast
     sock.setsockopt(

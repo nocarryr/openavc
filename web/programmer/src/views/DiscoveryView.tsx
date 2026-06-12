@@ -15,6 +15,7 @@ import {
   EyeOff,
   Eye,
   HelpCircle,
+  AlertTriangle,
 } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { CopyButton } from "../components/shared/CopyButton";
@@ -183,6 +184,8 @@ export function DiscoveryPanel() {
   const setDevices = useDiscoveryStore((s) => s.setDevices);
   const portLabels = useDiscoveryStore((s) => s.portLabels);
   const setPortLabels = useDiscoveryStore((s) => s.setPortLabels);
+  const warnings = useDiscoveryStore((s) => s.warnings);
+  const setWarnings = useDiscoveryStore((s) => s.setWarnings);
   const clear = useDiscoveryStore((s) => s.clear);
   const upsertDevice = useDiscoveryStore((s) => s.upsertDevice);
 
@@ -240,6 +243,7 @@ export function DiscoveryPanel() {
         else if (r.status === "complete") setStatus("complete");
       }
       if (r.port_labels) setPortLabels(r.port_labels);
+      if (r.warnings) setWarnings(r.warnings);
     }).catch(console.error);
     api.getSystemConfig().then((cfg) => {
       const ip = cfg.network?.control_interface || "";
@@ -254,7 +258,7 @@ export function DiscoveryPanel() {
     }).catch(() => {});
     api.listDrivers().then(setInstalledDrivers).catch(console.error);
     api.fetchCommunityDrivers().then(setCommunityDrivers).catch(console.error);
-  }, [setDevices, setStatus, setPortLabels]);
+  }, [setDevices, setStatus, setPortLabels, setWarnings]);
 
   const driverNameLookup = useMemo(() => {
     const map = new Map<string, { name: string; manufacturer: string; source: "installed" | "community"; community?: CommunityDriver }>();
@@ -271,6 +275,7 @@ export function DiscoveryPanel() {
 
   const handleStartScan = useCallback(async () => {
     try {
+      setWarnings([]); // stale warnings from the previous scan
       await api.discoveryStartScan({
         extra_subnets: extraSubnet ? [extraSubnet] : undefined,
         snmp_enabled: snmpEnabled,
@@ -284,7 +289,7 @@ export function DiscoveryPanel() {
       setStatus("idle");
       showError(String(e));
     }
-  }, [extraSubnet, snmpEnabled, snmpCommunity, gentleMode, scanDepth, maxSubnetSize, setStatus]);
+  }, [extraSubnet, snmpEnabled, snmpCommunity, gentleMode, scanDepth, maxSubnetSize, setStatus, setWarnings]);
 
   const handleStopScan = useCallback(async () => {
     await api.discoveryStopScan();
@@ -617,6 +622,35 @@ export function DiscoveryPanel() {
                 transition: "width 0.8s ease-out",
               }}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Environment warnings — zero devices + a reason beats zero devices + silence */}
+      {status !== "idle" && warnings.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            gap: "var(--space-sm)",
+            alignItems: "flex-start",
+            background: "var(--color-warning-bg)",
+            border: "1px solid var(--color-warning)",
+            borderRadius: "var(--radius-md, 6px)",
+            padding: "var(--space-sm) var(--space-md)",
+            marginBottom: "var(--space-md)",
+            fontSize: "var(--font-size-sm)",
+          }}
+        >
+          <AlertTriangle size={16} style={{ flexShrink: 0, color: "var(--color-warning)", marginTop: 2 }} />
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 2 }}>
+              Scan ran with problems on this system
+            </div>
+            {warnings.map((w, i) => (
+              <div key={i} style={{ marginBottom: i < warnings.length - 1 ? 2 : 0 }}>
+                {w}
+              </div>
+            ))}
           </div>
         </div>
       )}

@@ -18,6 +18,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any
 
+from server.discovery.multicast import join_group_on_interfaces, send_per_interface
+
 log = logging.getLogger("discovery.mdns")
 
 # mDNS constants
@@ -374,6 +376,13 @@ class MDNSScanner:
         self._sock: socket.socket | None = None
         self._running = False
         self._results: dict[str, MDNSResult] = {}  # keyed by IP
+        # Interface IPs the multicast group join succeeded on (queries are
+        # sent once per entry; responses dedup by source IP via _results).
+        self._joined_ips: list[str] = []
+        # Environment failure that kept the listener from working at all
+        # (no socket / no joinable interface). Surfaced as a scan warning
+        # so "zero devices" is distinguishable from "listener never ran".
+        self.env_error: str | None = None
         # Hostname -> IP resolution (from A records)
         self._hostname_to_ip: dict[str, str] = {}
         # Instance -> partial data (before we have IP)
@@ -429,11 +438,15 @@ class MDNSScanner:
         self._hostname_to_ip.clear()
         self._pending.clear()
         self._running = True
+        self.env_error = None
 
         try:
-            self._sock = _create_mdns_socket(control_ip=self._control_ip)
+            self._sock, self._joined_ips = _create_mdns_socket(
+                control_ip=self._control_ip,
+            )
         except OSError as e:
             log.warning("Could not create mDNS socket: %s", e)
+            self.env_error = f"mDNS listener unavailable: {e}"
             return {}
 
         try:
@@ -459,7 +472,13 @@ class MDNSScanner:
         self._close_socket()
 
     async def _send_queries(self) -> None:
-        """Send PTR queries for every configured service type."""
+        """Send PTR queries for every configured service type.
+
+        Each query goes out once per joined interface (IP_MULTICAST_IF
+        pinned per send) so it reaches every attached network even when
+        the routing table has no multicast route. Responses dedup by
+        source IP via ``_results``.
+        """
         if not self._sock:
             return
 
@@ -467,10 +486,15 @@ class MDNSScanner:
         for service_type in self._service_types:
             try:
                 packet = build_dns_query(service_type, DNS_TYPE_PTR)
-                await loop.run_in_executor(
-                    None,
-                    lambda p=packet: self._sock.sendto(p, (MDNS_ADDR, MDNS_PORT))
+                sent = await loop.run_in_executor(
+                    None, send_per_interface,
+                    self._sock, packet, (MDNS_ADDR, MDNS_PORT), self._joined_ips,
                 )
+                if sent == 0:
+                    log.debug(
+                        "mDNS query for %s could not be sent on any interface",
+                        service_type,
+                    )
             except OSError as e:
                 log.debug("Failed to send mDNS query for %s: %s", service_type, e)
 
@@ -681,46 +705,43 @@ class MDNSScanner:
         return set(self._unknown_service_types)
 
 
-def _create_mdns_socket(control_ip: str = "") -> socket.socket:
+def _create_mdns_socket(control_ip: str = "") -> tuple[socket.socket, list[str]]:
     """Create a UDP socket configured for mDNS multicast reception.
 
     Cross-platform: works on both Windows and Linux. When ``control_ip``
     is set, the multicast group join binds to that interface only,
     so on a multi-homed host (corporate / AV / control VLANs all on one
     machine) we only receive announcements from the chosen network.
+    Otherwise the group is joined once per interface IP, with INADDR_ANY
+    only as a fallback (see ``discovery.multicast``).
+
+    Returns ``(socket, joined_interface_ips)``. Raises OSError when the
+    group could not be joined on any interface — listening on a socket
+    that will never hear the group would just masquerade as an empty
+    network.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
     # Allow multiple processes to bind to the same port
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    sock.bind(("", MDNS_PORT))
+    try:
+        sock.bind(("", MDNS_PORT))
 
-    # Join the mDNS multicast group on the chosen interface (or all interfaces).
-    iface = control_ip or "0.0.0.0"
-    mreq = struct.pack(
-        "4s4s",
-        socket.inet_aton(MDNS_ADDR),
-        socket.inet_aton(iface),
-    )
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        joined = join_group_on_interfaces(sock, MDNS_ADDR, control_ip=control_ip)
+        if not joined:
+            raise OSError(f"could not join {MDNS_ADDR} on any interface")
 
-    # When a control interface is selected, also pin outbound multicast
-    # so our PTR queries leave through that adapter.
-    if control_ip:
-        sock.setsockopt(
-            socket.IPPROTO_IP,
-            socket.IP_MULTICAST_IF,
-            socket.inet_aton(control_ip),
-        )
+        # Set TTL for multicast packets (mDNS uses TTL=255)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
 
-    # Set TTL for multicast packets (mDNS uses TTL=255)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        # Non-blocking for asyncio compatibility
+        sock.setblocking(False)
+    except OSError:
+        sock.close()
+        raise
 
-    # Non-blocking for asyncio compatibility
-    sock.setblocking(False)
-
-    return sock
+    return sock, joined
 
 
 def _extract_instance_name(full_name: str, service_type: str) -> str | None:

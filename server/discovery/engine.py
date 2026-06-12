@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
+from server.discovery import icmp
 from server.discovery.network_scanner import get_local_subnets, ping_sweep, harvest_arp_table, netbios_sweep
 from server.discovery.port_scanner import scan_host_ports, grab_banners, BASELINE_PORTS
 from server.discovery.oui_database import OUIDatabase
@@ -168,6 +169,10 @@ class ScanStatus:
         self.subnets: list[str] = []
         self.total_hosts_scanned: int = 0
         self.active_adapter: dict[str, str] | None = None
+        # Environment problems that kept scan phases from working (missing
+        # ping capability, multicast joins failing, ...). Zero devices plus
+        # a reason beats zero devices plus silence.
+        self.warnings: list[str] = []
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,6 +189,7 @@ class ScanStatus:
             "subnets": self.subnets,
             "total_hosts_scanned": self.total_hosts_scanned,
             "active_adapter": self.active_adapter,
+            "warnings": list(self.warnings),
         }
 
 
@@ -542,6 +548,7 @@ class DiscoveryEngine:
                 "scan_id": self.scan_status.scan_id,
                 "total_devices": len(self.results),
                 "duration_seconds": self.scan_status.duration,
+                "warnings": list(self.scan_status.warnings),
             })
 
     async def _scan_pipeline(self, subnets: list[str]) -> None:
@@ -649,6 +656,7 @@ class DiscoveryEngine:
                 if total > 0:
                     await self._update_intra_progress(completed / total)
 
+            ping_stats = icmp.PingSweepStats()
             alive_ips = await ping_sweep(
                 subnets,
                 concurrency=ping_concurrency,
@@ -656,8 +664,25 @@ class DiscoveryEngine:
                 on_progress=on_ping_progress,
                 min_prefix=min_prefix,
                 source_ip=control_ip,
+                stats=ping_stats,
             )
             self.scan_status.total_hosts_scanned = ping_total
+
+            # Environment failures must be loud: a sweep where pings
+            # ERRORED (no ICMP permission, no ping binary, exec failures)
+            # is not an empty network, and the UI must say so.
+            if ping_stats.method == icmp.METHOD_NONE:
+                self.scan_status.warnings.append(
+                    "Host scan could not run: this system has no permission "
+                    "to send pings and no ping command was found. Only "
+                    "devices that announce themselves can be discovered."
+                )
+            elif ping_stats.errors:
+                self.scan_status.warnings.append(
+                    f"Pings failed with system errors on {ping_stats.errors} "
+                    f"of {ping_stats.total} addresses (not timeouts) — "
+                    "results may be incomplete."
+                )
 
             if not alive_ips:
                 log.info("No live hosts found — will still collect passive results")
@@ -836,6 +861,14 @@ class DiscoveryEngine:
 
             await self._collect_passive_results(mdns_task, ssdp_task, amx_ddp_task)
             await self._collect_snmp_results(snmp_task)
+
+            # Surface listener environment failures (multicast join failed
+            # on every interface, socket unavailable, ...) as scan warnings
+            # — a silent {} from a listener that never ran reads as "no
+            # devices on the network", which is the wrong story.
+            for listener in (mdns_scanner, ssdp_scanner, amx_ddp_scanner):
+                if listener.env_error:
+                    self.scan_status.warnings.append(listener.env_error)
 
             # Follow-up: port scan devices found only by passive discovery
             # (mDNS/SSDP/AMX-DDP) that weren't in the ping sweep, so the
@@ -1319,6 +1352,7 @@ class DiscoveryEngine:
             "total_phases": self.scan_status.total_phases,
             "message": message,
             "progress": self.scan_status.progress,
+            "warnings": list(self.scan_status.warnings),
         })
 
     async def _emit_device_update(self, device: DiscoveredDevice, phase: str) -> None:
