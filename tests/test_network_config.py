@@ -259,12 +259,39 @@ async def test_wifi_connect_surfaces_error(backend):
     assert result["error"] == "Error: Secrets were required, but not provided."
 
 
+async def test_get_status_reports_wifi_radio_state(backend):
+    backend._fake.responses["device status"] = (0, DEVICE_STATUS, "")
+    backend._fake.responses["device show"] = (0, DEVICE_SHOW, "")
+    backend._fake.responses["connection show"] = (0, CONNECTION_SHOW, "")
+    backend._fake.responses["general hostname"] = (0, "openavc\n", "")
+
+    backend._fake.responses["radio wifi"] = (0, "enabled\n", "")
+    assert (await backend.get_status())["wifi_enabled"] is True
+
+    backend._fake.responses["radio wifi"] = (0, "disabled\n", "")
+    assert (await backend.get_status())["wifi_enabled"] is False
+
+
+async def test_wifi_set_enabled_runs_nmcli_radio(backend):
+    assert await backend.wifi_set_enabled(True) == {"ok": True, "enabled": True}
+    assert ("radio", "wifi", "on") in backend._fake.calls
+
+    assert await backend.wifi_set_enabled(False) == {"ok": True, "enabled": False}
+    assert ("radio", "wifi", "off") in backend._fake.calls
+
+
 # --- API endpoints ---
 
 
 class StubBackend(NmcliBackend):
     async def get_status(self):
-        return {"backend": "stub", "hostname": "x", "capabilities": {}, "interfaces": []}
+        return {
+            "backend": "stub", "hostname": "x", "wifi_enabled": True,
+            "capabilities": {}, "interfaces": [],
+        }
+
+    async def wifi_set_enabled(self, enabled: bool):
+        return {"ok": True, "enabled": enabled}
 
 
 @pytest.fixture
@@ -300,6 +327,14 @@ async def test_status_passthrough(with_backend):
     resp = with_backend.get("/api/system/network")
     assert resp.status_code == 200
     assert resp.json()["backend"] == "stub"
+
+
+async def test_wifi_radio_endpoint(with_backend):
+    resp = with_backend.post(
+        "/api/system/network/wifi/radio", json={"enabled": False}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "enabled": False}
 
 
 async def test_ipv4_dry_run_returns_warnings(with_backend):

@@ -18,7 +18,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from server.api.auth import require_local_or_programmer_auth
-from server.api.models import HostnameRequest, NetworkIPv4Request, WifiConnectRequest
+from server.api.models import (
+    HostnameRequest,
+    NetworkIPv4Request,
+    WifiConnectRequest,
+    WifiRadioRequest,
+)
 from server.system import network as host_network
 
 router = APIRouter(
@@ -97,6 +102,13 @@ async def network_wifi_connect(body: WifiConnectRequest) -> dict[str, Any]:
     if not ssid:
         raise HTTPException(status_code=400, detail="ssid is required.")
     return await backend.wifi_connect(ssid, body.psk or None)
+
+
+@router.post("/wifi/radio")
+async def network_wifi_set_radio(body: WifiRadioRequest) -> dict[str, Any]:
+    """Turn the WiFi radio on or off."""
+    backend = await _backend()
+    return await backend.wifi_set_enabled(body.enabled)
 
 
 @router.post("/hostname")

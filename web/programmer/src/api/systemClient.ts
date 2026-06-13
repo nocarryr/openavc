@@ -420,6 +420,8 @@ export interface HostNetworkInterface {
 export interface HostNetworkStatus {
   backend: string;
   hostname: string | null;
+  /** WiFi radio state when the backend has a WiFi device; null if unknown. */
+  wifi_enabled?: boolean | null;
   capabilities: {
     ipv4: boolean;
     wifi: boolean;
@@ -481,6 +483,15 @@ export async function connectHostWifi(
   return request("/system/network/wifi/connect", {
     method: "POST",
     body: JSON.stringify({ ssid, psk }),
+  });
+}
+
+export async function setHostWifiRadio(
+  enabled: boolean
+): Promise<{ ok: boolean; enabled?: boolean; error?: string }> {
+  return request("/system/network/wifi/radio", {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
   });
 }
 

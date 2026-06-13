@@ -384,6 +384,70 @@ function WifiPane({ onChanged }: { onChanged: () => void }) {
   );
 }
 
+function WifiSection({
+  enabled,
+  onChanged,
+}: {
+  enabled: boolean | null | undefined;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const on = enabled === true;
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      const result = await api.setHostWifiRadio(!on);
+      if (result.ok) {
+        onChanged();
+      } else {
+        showError(result.error ?? "Could not change WiFi");
+      }
+    } catch (e) {
+      showError(parseApiError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "var(--space-lg)" }}>
+      <div
+        style={{
+          ...subTitle,
+          fontSize: "var(--font-size-sm)",
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-sm)",
+        }}
+      >
+        <Wifi size={14} /> WiFi
+        <label
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            marginLeft: "auto",
+            fontWeight: 400,
+            color: "var(--text-secondary)",
+            cursor: busy ? "default" : "pointer",
+          }}
+        >
+          <input type="checkbox" checked={on} disabled={busy} onChange={toggle} />
+          {on ? "On" : "Off"}
+        </label>
+      </div>
+      {on ? (
+        <WifiPane onChanged={onChanged} />
+      ) : (
+        <div style={{ ...description, marginTop: "var(--space-sm)" }}>
+          WiFi is off. Turn it on to scan for and join networks.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function HostNetworkCard() {
   const [status, setStatus] = useState<HostNetworkStatus | null>(null);
   const [hidden, setHidden] = useState(false);
@@ -497,7 +561,9 @@ export function HostNetworkCard() {
         </div>
       ))}
 
-      {status.capabilities.wifi && <WifiPane onChanged={load} />}
+      {status.capabilities.wifi && (
+        <WifiSection enabled={status.wifi_enabled} onChanged={load} />
+      )}
     </div>
   );
 }

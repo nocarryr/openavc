@@ -292,16 +292,22 @@ _PAGE = """<!DOCTYPE html>
     <div class="net-msg" id="netcfg-msg"></div>
     <div id="netcfg-wifi" hidden>
       <div class="iface-title" style="margin-top:0.75rem">WiFi</div>
-      <button class="net-btn secondary" id="wifi-scan">Scan for Networks</button>
-      <ul class="wifi-list" id="wifi-list"></ul>
-      <div class="net-form" id="wifi-join" hidden>
-        <label id="wifi-join-label">Password</label>
-        <input type="password" id="wifi-psk" autocomplete="off">
-        <span></span>
-        <span><button class="net-btn" id="wifi-connect">Connect</button>
-        <button class="net-btn secondary" id="wifi-cancel">Cancel</button></span>
+      <label style="display:flex;align-items:center;gap:0.5rem;color:#ccc;font-size:0.85rem;margin-bottom:0.5rem">
+        <input type="checkbox" id="wifi-radio"> Enable WiFi
+      </label>
+      <div id="wifi-controls" hidden>
+        <button class="net-btn secondary" id="wifi-scan">Scan for Networks</button>
+        <ul class="wifi-list" id="wifi-list"></ul>
+        <div class="net-form" id="wifi-join" hidden>
+          <label id="wifi-join-label">Password</label>
+          <input type="password" id="wifi-psk" autocomplete="off">
+          <span></span>
+          <span><button class="net-btn" id="wifi-connect">Connect</button>
+          <button class="net-btn secondary" id="wifi-cancel">Cancel</button></span>
+        </div>
+        <div class="net-msg" id="wifi-msg"></div>
       </div>
-      <div class="net-msg" id="wifi-msg"></div>
+      <div class="net-msg" id="wifi-radio-msg"></div>
     </div>
   </div>
 
@@ -446,7 +452,12 @@ _PAGE = """<!DOCTYPE html>
       }
       container.appendChild(block);
     });
-    show('netcfg-wifi', !!(data.capabilities && data.capabilities.wifi));
+    var hasWifi = !!(data.capabilities && data.capabilities.wifi);
+    show('netcfg-wifi', hasWifi);
+    if (hasWifi) {
+      document.getElementById('wifi-radio').checked = data.wifi_enabled === true;
+      show('wifi-controls', data.wifi_enabled !== false);
+    }
   }
 
   function buildIpv4Form(iface, caps) {
@@ -662,6 +673,41 @@ _PAGE = """<!DOCTYPE html>
   document.getElementById('wifi-cancel').addEventListener('click', function () {
     document.getElementById('wifi-join').hidden = true;
     wifiPick = null;
+  });
+
+  document.getElementById('wifi-radio').addEventListener('change', function () {
+    var box = this;
+    var enabled = box.checked;
+    var msgEl = document.getElementById('wifi-radio-msg');
+    box.disabled = true;
+    msgEl.className = 'net-msg';
+    msgEl.textContent = enabled ? 'Turning WiFi on…' : 'Turning WiFi off…';
+    show('wifi-controls', enabled);
+    fetch('/api/system/network/wifi/radio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled })
+    })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('http')); })
+      .then(function (d) {
+        box.disabled = false;
+        if (d && d.ok === false) {
+          box.checked = !enabled;
+          show('wifi-controls', !enabled);
+          msgEl.className = 'net-msg err';
+          msgEl.textContent = d.error || 'Could not change WiFi.';
+          return;
+        }
+        msgEl.textContent = '';
+        setTimeout(refreshNetcfg, 800);
+      })
+      .catch(function () {
+        box.disabled = false;
+        box.checked = !enabled;
+        show('wifi-controls', !enabled);
+        msgEl.className = 'net-msg err';
+        msgEl.textContent = 'Could not change WiFi.';
+      });
   });
 
   function tick() {

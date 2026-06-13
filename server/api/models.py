@@ -268,5 +268,9 @@ class WifiConnectRequest(BaseModel):
     psk: str | None = None
 
 
+class WifiRadioRequest(BaseModel):
+    enabled: bool
+
+
 class HostnameRequest(BaseModel):
     hostname: str

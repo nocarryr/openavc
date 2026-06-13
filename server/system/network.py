@@ -195,6 +195,9 @@ class NetworkBackend:
     async def wifi_connect(self, ssid: str, psk: str | None = None) -> dict:
         raise NotImplementedError
 
+    async def wifi_set_enabled(self, enabled: bool) -> dict:
+        raise NotImplementedError
+
     async def set_hostname(self, name: str) -> dict:
         raise NotImplementedError
 
@@ -288,9 +291,16 @@ class NmcliBackend(NetworkBackend):
         if rc3 == 0:
             hostname = out3.strip() or None
 
+        wifi_enabled = None
+        if has_wifi:
+            rc4, out4, _ = await self._run("-t", "radio", "wifi")
+            if rc4 == 0:
+                wifi_enabled = out4.strip() == "enabled"
+
         return {
             "backend": self.name,
             "hostname": hostname,
+            "wifi_enabled": wifi_enabled,
             # ipv4_apply tells the UI how an IPv4 change takes effect:
             # "live" (applied immediately, rolled back on failure) or
             # "reboot" (saved, applied by restarting the device) — some
@@ -455,6 +465,12 @@ class NmcliBackend(NetworkBackend):
         if rc != 0:
             return {"ok": False, "error": self._error_text(err, out)}
         return {"ok": True}
+
+    async def wifi_set_enabled(self, enabled: bool) -> dict:
+        rc, out, err = await self._run("radio", "wifi", "on" if enabled else "off")
+        if rc != 0:
+            return {"ok": False, "error": self._error_text(err, out)}
+        return {"ok": True, "enabled": enabled}
 
     # --- hostname ---
 
