@@ -7,6 +7,8 @@ from server.transport.frame_parsers import (
     DelimiterFrameParser,
     FixedLengthFrameParser,
     LengthPrefixFrameParser,
+    SlipFrameParser,
+    slip_encode,
 )
 
 
@@ -236,3 +238,94 @@ def test_length_prefix_stalled_frame_stays_bounded():
     # More dribbles, still no completion — still bounded, never over-cap.
     assert p.feed(b"y" * 5) == []
     assert len(p._buffer) <= p._max_buffer
+
+
+# --- SlipFrameParser / slip_encode (RFC 1055 double-END, used by OSC-over-TCP) ---
+
+_END = 0xC0
+_ESC = 0xDB
+_ESC_END = 0xDC
+_ESC_ESC = 0xDD
+
+
+def test_slip_encode_wraps_with_end_bytes():
+    out = slip_encode(b"hi")
+    assert out[0] == _END and out[-1] == _END
+    assert out == bytes([_END]) + b"hi" + bytes([_END])
+
+
+def test_slip_encode_escapes_end_and_esc():
+    # A literal END inside the payload escapes to ESC ESC_END; a literal ESC
+    # escapes to ESC ESC_ESC. END must not appear inside the framed payload.
+    payload = bytes([_END, _ESC, ord("A")])
+    out = slip_encode(payload)
+    assert out == bytes([_END, _ESC, _ESC_END, _ESC, _ESC_ESC, ord("A"), _END])
+    # The only END bytes are the frame delimiters at the ends.
+    assert out[1:-1].count(_END) == 0
+
+
+def test_slip_round_trip_plain():
+    p = SlipFrameParser()
+    assert p.feed(slip_encode(b"hello world")) == [b"hello world"]
+
+
+def test_slip_round_trip_with_control_bytes():
+    p = SlipFrameParser()
+    payload = bytes([_END, _ESC, 0x00, 0xFF, _END, ord("Z")])
+    assert p.feed(slip_encode(payload)) == [payload]
+
+
+def test_slip_double_end_skips_empty_run():
+    # Double-END framing: ...END END... yields no spurious empty message.
+    p = SlipFrameParser()
+    stream = (
+        bytes([_END]) + b"one" + bytes([_END])
+        + bytes([_END]) + b"two" + bytes([_END])
+    )
+    assert p.feed(stream) == [b"one", b"two"]
+
+
+def test_slip_multiple_frames_one_feed():
+    p = SlipFrameParser()
+    stream = slip_encode(b"a") + slip_encode(b"bb") + slip_encode(b"ccc")
+    assert p.feed(stream) == [b"a", b"bb", b"ccc"]
+
+
+def test_slip_partial_feed_across_chunks():
+    p = SlipFrameParser()
+    frame = slip_encode(b"streamed")
+    mid = len(frame) // 2
+    # First half has no terminating END yet -> nothing emitted.
+    assert p.feed(frame[:mid]) == []
+    # Remainder completes the frame.
+    assert p.feed(frame[mid:]) == [b"streamed"]
+
+
+def test_slip_split_inside_escape_sequence():
+    # Feed boundary lands between ESC and its escaped byte; the parser must
+    # still reassemble the original END byte once the rest arrives.
+    p = SlipFrameParser()
+    frame = slip_encode(bytes([ord("x"), _END, ord("y")]))
+    esc_idx = frame.index(_ESC)
+    assert p.feed(frame[: esc_idx + 1]) == []  # trailing ESC held back
+    assert p.feed(frame[esc_idx + 1:]) == [bytes([ord("x"), _END, ord("y")])]
+
+
+def test_slip_buffer_overflow_clears():
+    p = SlipFrameParser(max_buffer=64)
+    # No END ever arrives; the buffer must not grow without bound.
+    assert p.feed(b"x" * 200) == []
+    assert len(p._buffer) <= p._max_buffer
+
+
+def test_slip_carries_a_real_osc_message():
+    # The actual use: an OSC packet survives SLIP framing intact.
+    from server.transport.osc_codec import osc_decode_message, osc_encode_message
+
+    packet = osc_encode_message("/workspace/ABC/cue/1/start", [("f", 1.0)])
+    p = SlipFrameParser()
+    frames = p.feed(slip_encode(packet))
+    assert frames == [packet]
+    addr, args = osc_decode_message(frames[0])
+    assert addr == "/workspace/ABC/cue/1/start"
+    assert args == [("f", 1.0)]

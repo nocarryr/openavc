@@ -188,6 +188,110 @@ class FixedLengthFrameParser(FrameParser):
         self._buffer = b""
 
 
+# SLIP (RFC 1055) control bytes. OSC 1.1 frames OSC packets over a byte
+# stream (TCP/serial) with SLIP "double END" framing — each packet is
+# wrapped END ... END. Used by QLab and other OSC-over-TCP show-control gear.
+_SLIP_END = 0xC0
+_SLIP_ESC = 0xDB
+_SLIP_ESC_END = 0xDC
+_SLIP_ESC_ESC = 0xDD
+
+
+def slip_encode(payload: bytes) -> bytes:
+    """Wrap a payload in a SLIP (RFC 1055) "double END" frame.
+
+    The packet is emitted as ``END <escaped payload> END``. Inside the
+    payload, a literal END byte is escaped to ESC ESC_END and a literal
+    ESC byte to ESC ESC_ESC, so END never appears within the data and can
+    safely delimit frames.
+    """
+    out = bytearray()
+    out.append(_SLIP_END)
+    for b in payload:
+        if b == _SLIP_END:
+            out.append(_SLIP_ESC)
+            out.append(_SLIP_ESC_END)
+        elif b == _SLIP_ESC:
+            out.append(_SLIP_ESC)
+            out.append(_SLIP_ESC_ESC)
+        else:
+            out.append(b)
+    out.append(_SLIP_END)
+    return bytes(out)
+
+
+class SlipFrameParser(FrameParser):
+    """
+    Extracts SLIP (RFC 1055) framed messages from a byte stream.
+
+    Frames are delimited by the END byte (0xC0). This handles both
+    plain END-terminated SLIP and the "double END" variant QLab and the
+    OSC 1.1 spec use (each packet wrapped END ... END) — the empty run
+    between two consecutive END bytes simply yields no message.
+
+    Because END never appears inside an escaped payload, splitting the
+    buffer on raw END bytes is safe; each non-empty segment is then
+    un-escaped (ESC ESC_END -> END, ESC ESC_ESC -> ESC). A trailing ESC
+    with no following byte is kept in the buffer until the next feed().
+    """
+
+    def __init__(self, max_buffer: int = DEFAULT_MAX_BUFFER) -> None:
+        self._buffer = bytearray()
+        self._max_buffer = max_buffer
+
+    def feed(self, data: bytes) -> list[bytes]:
+        self._buffer.extend(data)
+        messages: list[bytes] = []
+
+        while True:
+            try:
+                idx = self._buffer.index(_SLIP_END)
+            except ValueError:
+                break  # No complete frame terminator yet
+            segment = bytes(self._buffer[:idx])
+            del self._buffer[: idx + 1]
+            if segment:  # Skip the empty run from double-END / leading END
+                messages.append(_slip_unescape(segment))
+
+        # Protect against unbounded growth (END never arriving). A SLIP
+        # stream resyncs on the next END, so clearing (like the sibling
+        # parsers) is the right recovery rather than walking byte-by-byte.
+        if len(self._buffer) > self._max_buffer:
+            log.warning(
+                "SLIP parser buffer overflow (%d bytes), clearing",
+                len(self._buffer),
+            )
+            self._buffer = bytearray()
+        return messages
+
+    def reset(self) -> None:
+        self._buffer = bytearray()
+
+
+def _slip_unescape(segment: bytes) -> bytes:
+    """Reverse SLIP escaping within a single frame's payload."""
+    if _SLIP_ESC not in segment:
+        return segment  # Fast path — nothing escaped
+    out = bytearray()
+    escaped = False
+    for b in segment:
+        if escaped:
+            if b == _SLIP_ESC_END:
+                out.append(_SLIP_END)
+            elif b == _SLIP_ESC_ESC:
+                out.append(_SLIP_ESC)
+            else:
+                # Malformed escape — per RFC 1055 implementations are lenient;
+                # keep the byte as-is rather than dropping data.
+                out.append(b)
+            escaped = False
+        elif b == _SLIP_ESC:
+            escaped = True
+        else:
+            out.append(b)
+    return bytes(out)
+
+
 class CallableFrameParser(FrameParser):
     """
     Wraps a user-supplied callable for custom framing logic.

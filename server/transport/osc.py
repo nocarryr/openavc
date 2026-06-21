@@ -10,11 +10,18 @@ Wraps UDPTransport and adds:
 Most OSC devices (Behringer X32, QLab, ETC Eos) reply to the sender's
 port, so listen_port=0 (default) is usually correct. Set listen_port
 only when the device documentation specifies a separate feedback port.
+
+OSC over TCP: pass ``tcp=True`` to back the transport with a TCP
+connection framed with SLIP (RFC 1055 double-END) instead of UDP. This
+is QLab's reliable, large-reply path — replies come back over the same
+connection, so ``listen_port`` is irrelevant in TCP mode. UDP stays the
+default; existing UDP OSC drivers are untouched.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from server.transport.osc_codec import osc_encode_message
@@ -26,7 +33,7 @@ log = get_logger(__name__)
 
 
 class OSCTransport:
-    """Async OSC transport over UDP with optional dual-socket support."""
+    """Async OSC transport over UDP (default) or TCP+SLIP."""
 
     def __init__(
         self,
@@ -37,6 +44,7 @@ class OSCTransport:
         on_disconnect: Callback[[], None] | None = None,
         inter_command_delay: float = 0.0,
         name: str | None = None,
+        tcp: bool = False,
     ) -> None:
         self._host = host
         self._port = port
@@ -45,13 +53,27 @@ class OSCTransport:
         self._on_disconnect = on_disconnect
         self._inter_command_delay = inter_command_delay
         self._name = name or "osc"
+        self._tcp_mode = tcp
 
         self._udp: UDPTransport | None = None
         self._listen_transport: asyncio.DatagramTransport | None = None
         self._listen_protocol: _OSCListenProtocol | None = None
 
+        # TCP+SLIP mode state.
+        self._tcp: Any = None  # TCPTransport, imported lazily
+        self._tcp_last_data: float = 0.0
+
     async def open(self, local_addr: str | None = None) -> None:
-        """Open the send socket and optionally a dedicated listen socket."""
+        """Open the send socket(s).
+
+        UDP (default): a send socket and optionally a dedicated listen
+        socket. TCP+SLIP: a single TCP connection whose replies arrive on
+        the same socket.
+        """
+        if self._tcp_mode:
+            await self._open_tcp(local_addr)
+            return
+
         bind_addr = local_addr or "0.0.0.0"
 
         self._udp = UDPTransport(
@@ -77,8 +99,50 @@ class OSCTransport:
                 f"[{self._name}] OSC listen socket on port {self._listen_port}"
             )
 
+    async def _open_tcp(self, local_addr: str | None = None) -> None:
+        """Open a TCP connection framed with SLIP (RFC 1055) for OSC 1.1."""
+        from server.transport.frame_parsers import SlipFrameParser
+        from server.transport.tcp import TCPTransport
+
+        if not self._host or not self._port:
+            raise ConnectionError(
+                f"[{self._name}] OSC-over-TCP requires a host and port"
+            )
+
+        self._tcp = await TCPTransport.create(
+            host=self._host,
+            port=self._port,
+            on_data=self._on_tcp_data,
+            on_disconnect=self._on_disconnect or (lambda: None),
+            delimiter=None,
+            frame_parser=SlipFrameParser(),
+            inter_command_delay=self._inter_command_delay,
+            name=self._name,
+            local_addr=(local_addr, 0) if local_addr else None,
+        )
+        log.info(f"[{self._name}] OSC-over-TCP (SLIP) connected to "
+                 f"{self._host}:{self._port}")
+
+    def _on_tcp_data(self, data: bytes) -> Any:
+        """Receive a SLIP-deframed OSC packet from the TCP transport.
+
+        The SlipFrameParser has already stripped framing, so ``data`` is a
+        raw OSC message. Stamp the receive time (for last_data_received) and
+        hand it to the same on_data callback the UDP path uses.
+        """
+        self._tcp_last_data = time.monotonic()
+        if self._on_data is not None:
+            return self._on_data(data)
+        return None
+
     async def send(self, data: bytes) -> None:
-        """Send raw bytes via the send socket."""
+        """Send raw bytes via the active socket (SLIP-framed in TCP mode)."""
+        if self._tcp_mode:
+            if self._tcp is None or not self._tcp.connected:
+                raise ConnectionError("OSC transport not open")
+            from server.transport.frame_parsers import slip_encode
+            await self._tcp.send(slip_encode(data))
+            return
         if self._udp is None:
             raise ConnectionError("OSC transport not open")
         await self._udp.send(data)
@@ -105,6 +169,13 @@ class OSCTransport:
         polling the listen socket's last-data timestamp; either path
         counts as a verified connection.
         """
+        # TCP+SLIP: a completed TCP handshake already proves the host is
+        # listening on the OSC port, which is the reachability signal we
+        # need. (QLab won't reply to an unsolicited /info without the
+        # connection being set up first anyway.)
+        if self._tcp_mode:
+            return self._tcp is not None and self._tcp.connected
+
         if self._udp is None or not self._udp.host or not self._udp.port:
             return False
 
@@ -159,6 +230,10 @@ class OSCTransport:
 
     async def close(self) -> None:
         """Close all sockets."""
+        if self._tcp:
+            await self._tcp.close()
+            self._tcp = None
+
         if self._listen_transport:
             self._listen_transport.close()
             self._listen_transport = None
@@ -172,20 +247,26 @@ class OSCTransport:
 
     @property
     def last_data_received(self) -> float:
-        """Monotonic timestamp of last incoming data (from either socket)."""
+        """Monotonic timestamp of last incoming data (from any socket)."""
+        if self._tcp_mode:
+            return self._tcp_last_data
         udp_ts = self._udp.last_data_received if self._udp else 0.0
         listen_ts = self._listen_last_data if hasattr(self, "_listen_last_data") else 0.0
         return max(udp_ts, listen_ts)
 
     @property
     def connected(self) -> bool:
-        """True if the send socket is open and ready."""
+        """True if the active transport is open and ready."""
+        if self._tcp_mode:
+            return self._tcp is not None and self._tcp.connected
         return self._udp is not None and self._udp.connected
 
     @property
     def last_error(self) -> str:
-        """Last error string from the underlying UDP socket (for the
+        """Last error string from the active transport (for the
         connection-fault classifier)."""
+        if self._tcp_mode:
+            return self._tcp.last_error if self._tcp is not None else ""
         return self._udp.last_error if self._udp is not None else ""
 
 

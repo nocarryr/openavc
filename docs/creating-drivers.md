@@ -1191,6 +1191,91 @@ Most OSC devices reply to the sender's port (set `listen_port: 0`, the default).
 | Resolume Arena | 7000 | 0 |
 | vMix | 8088 | 0 |
 
+#### Extracting a value from a JSON reply (`json_path`)
+
+Some OSC devices answer with the useful value buried inside JSON. QLab, for
+example, replies as `/reply/<the address you sent>` with a single string
+argument that holds JSON like `{"status":"ok","data":"Intro Music"}`. Add
+`json_path` to a mapping to parse that string and pull out the value before it
+is coerced and stored:
+
+```yaml
+responses:
+  # QLab reply: the string arg is JSON; take its "data" field.
+  - address: "/reply*/cue/playhead/displayName"
+    mappings:
+      - arg: 0
+        json_path: data
+        state: current_cue_name
+        type: string
+```
+
+`json_path` is a dot-separated path of object keys and integer list indices:
+`data`, `data.name`, `data.0`. If the path lands on an array or object, its
+**length** is used — so a `boolean` state becomes "is there anything?" and an
+`integer` state becomes the count:
+
+```yaml
+  # data is a JSON array of running cues; boolean-coerces to "anything running?"
+  - address: "/reply*/runningOrPausedCues"
+    mappings:
+      - arg: 0
+        json_path: data
+        state: is_running
+        type: boolean
+```
+
+If the argument isn't valid JSON, or the path doesn't resolve, the mapping is
+skipped (the existing state is left untouched) rather than storing a wrong
+value. Omit `json_path` for the normal behavior — the argument is read directly
+by its OSC type. `json_path` also works on regex/text responses (TCP/HTTP), where
+it is applied to the captured group.
+
+#### OSC over TCP (SLIP framing)
+
+QLab and some other OSC gear accept OSC over **TCP** as well as UDP. TCP is the
+reliable path when replies are large (full cue lists) or delivery matters. Add a
+`transport_mode` config field; when it is `tcp`, the platform frames OSC with
+SLIP (RFC 1055) over a TCP connection and replies arrive on the same socket
+(`listen_port` is not used in TCP mode):
+
+```yaml
+config_schema:
+  transport_mode:
+    type: enum
+    values: [udp, tcp]
+    default: udp
+    label: Transport
+default_config:
+  transport_mode: udp
+```
+
+UDP is the default, so OSC drivers that don't declare `transport_mode` are
+unaffected.
+
+#### Derived config values (`config_derived`)
+
+`config_derived` computes extra config values from other config fields. The
+classic use is an **optional address prefix**: QLab messages are either rootless
+(`/go`, the front workspace) or workspace-scoped (`/workspace/<id>/go`). Expose
+one friendly `workspace_id` field and derive the prefix:
+
+```yaml
+config_derived:
+  ws: "/workspace/{workspace_id}"   # "" when workspace_id is blank
+
+commands:
+  go:
+    label: GO
+    address: "{ws}/go"              # "/go" rootless, or "/workspace/<id>/go"
+```
+
+Each entry is a template substituted from config. If **any** `{field}` it
+references is empty or missing, the whole derived value becomes `""` — so the
+optional segment simply disappears. Derived values are computed when the device
+connects and are visible to every command address, `on_connect` entry, response
+address, and poll query, exactly like a real config field.
+
 ---
 
 ## Method 3: Python Driver

@@ -268,6 +268,12 @@ class BaseDriver(ABC):
             port = self._required_port()
             listen_port = self.config.get("listen_port", 0)
             delay = self.config.get("inter_command_delay", 0.0)
+            # OSC over TCP+SLIP when the device opts in (e.g. QLab's reliable
+            # large-reply path). Defaults to UDP, so existing OSC drivers that
+            # don't set transport_mode are unaffected.
+            osc_tcp = str(
+                self.config.get("transport_mode", "udp")
+            ).lower() == "tcp"
 
             self.transport = OSCTransport(
                 host=host,
@@ -277,6 +283,7 @@ class BaseDriver(ABC):
                 on_disconnect=self._handle_transport_disconnect,
                 inter_command_delay=delay,
                 name=self.device_id,
+                tcp=osc_tcp,
             )
             await self.transport.open(
                 local_addr=control_ip or None,

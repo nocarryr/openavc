@@ -44,6 +44,12 @@ except ImportError:  # pragma: no cover - httpx is a hard dependency in practice
 _AUTH_MAX_BUFFER = DEFAULT_MAX_BUFFER
 
 
+# Sentinel returned by _extract_json_path when a JSON string can't be parsed
+# or the requested path doesn't exist — distinct from a legitimately-extracted
+# None so the caller can skip the mapping instead of writing a wrong value.
+_JSON_PATH_MISSING = object()
+
+
 # Tracks (driver_id, legacy_key) tuples that have already been warned about,
 # so a deprecation message fires once per driver type rather than per instance
 # or per response handled.
@@ -103,6 +109,13 @@ class ConfigurableDriver(BaseDriver):
         # _definition is set on the class by the factory function
         self._definition: dict[str, Any] = getattr(self.__class__, "_definition", {})
         super().__init__(*args, **kwargs)
+
+        # Compute declarative derived config values (e.g. an optional address
+        # prefix) into self.config, so every downstream substitution path —
+        # commands, on_connect, responses, polling — sees them. Done before the
+        # responses are compiled below so a derived value can appear in a
+        # response address too.
+        self._compute_derived_config()
 
         # Pre-compile response patterns — two separate lists:
         # 1. Regex patterns for TCP/serial/UDP/HTTP responses
@@ -178,6 +191,33 @@ class ConfigurableDriver(BaseDriver):
                     f"[{self.device_id}] Invalid response pattern "
                     f"'{resp.get('match', resp.get('pattern', ''))}': {e}"
                 )
+
+    def _compute_derived_config(self) -> None:
+        """Populate self.config with values derived from other config fields.
+
+        Driven by the optional top-level ``config_derived`` map of
+        ``{name: template}``. Each template is substituted against config; if
+        any ``{field}`` it references resolves to an empty/missing value, the
+        derived value is ``""`` — so an optional prefixed segment simply
+        disappears. This powers patterns like an OSC workspace prefix::
+
+            config_derived:
+              ws: "/workspace/{workspace_id}"   # "" when workspace_id is blank
+
+        so a single friendly config field drives both rootless and
+        workspace-scoped addressing without conditional logic in every command.
+        """
+        derived = self._definition.get("config_derived")
+        if not isinstance(derived, dict):
+            return
+        for name, template in derived.items():
+            if not isinstance(template, str):
+                continue
+            refs = re.findall(r"\{(\w+)(?::[^{}]*)?\}", template)
+            if any(not str(self.config.get(f, "") or "").strip() for f in refs):
+                self.config[name] = ""
+            else:
+                self.config[name] = self._safe_substitute(template, self.config)
 
     async def connect(self) -> None:
         """Connect and send on_connect initialization commands.
@@ -281,6 +321,13 @@ class ConfigurableDriver(BaseDriver):
                 # current value. This populates state immediately on connect.
                 query_delay = max(delay, 0.005)
                 for addr_pattern, _mappings in self._osc_responses:
+                    # A response address with fnmatch wildcards (e.g. QLab's
+                    # push-only "/update/workspace/*/...") is a match pattern,
+                    # not a queryable address — sending it literally is
+                    # meaningless. Such state arrives via push or a dedicated
+                    # on_connect/poll query instead.
+                    if any(c in addr_pattern for c in "*?["):
+                        continue
                     try:
                         addr = self._safe_substitute(addr_pattern, self.config) if "{" in addr_pattern else addr_pattern
                         await self.transport.send(osc_encode_message(addr))
@@ -789,6 +836,7 @@ class ConfigurableDriver(BaseDriver):
                     group = mapping.get("group", 0)
                     value_type = mapping.get("type", "string")
                     value_map = mapping.get("map")
+                    json_path = mapping.get("json_path")
 
                     try:
                         raw_value = match.group(group)
@@ -797,6 +845,16 @@ class ConfigurableDriver(BaseDriver):
 
                     if raw_value is None:
                         continue
+
+                    # Optional: the captured group is a JSON string; pull the
+                    # value at json_path before mapping/coercion (parity with
+                    # the OSC path — benefits HTTP/TCP JSON replies too).
+                    # Absent json_path = today's behavior exactly.
+                    if json_path is not None:
+                        extracted = self._extract_json_path(raw_value, json_path)
+                        if extracted is _JSON_PATH_MISSING:
+                            continue
+                        raw_value = str(extracted)
 
                     # Apply value map if defined. Coerce the mapped value too
                     # (parity with the OSC path): without this the same map+type
@@ -843,11 +901,21 @@ class ConfigurableDriver(BaseDriver):
                     arg_index = mapping.get("arg", 0)
                     value_type = mapping.get("type", "string")
                     value_map = mapping.get("map")
+                    json_path = mapping.get("json_path")
 
                     if arg_index >= len(args):
                         continue
 
                     _, raw_value = args[arg_index]
+
+                    # Optional: the arg is a JSON string (QLab /reply ...);
+                    # pull the value at json_path before mapping/coercion.
+                    # Absent json_path = positional behavior exactly as before.
+                    if json_path is not None:
+                        extracted = self._extract_json_path(raw_value, json_path)
+                        if extracted is _JSON_PATH_MISSING:
+                            continue
+                        raw_value = extracted
 
                     if value_map:
                         str_val = str(raw_value)
@@ -867,6 +935,53 @@ class ConfigurableDriver(BaseDriver):
 
             if not matched:
                 log.debug(f"[{self.device_id}] Unmatched OSC: {address}")
+
+    @staticmethod
+    def _extract_json_path(raw_value: Any, path: Any) -> Any:
+        """Parse a JSON string and walk a dotted path to a primitive.
+
+        Used by response mappings that declare ``json_path`` — common for OSC
+        devices (QLab's ``/reply/...`` carries a single string arg holding JSON
+        like ``{"status":"ok","data":"Intro Music"}``; ``json_path: data``
+        extracts the useful value).
+
+        Path syntax is dot-separated keys and integer list indices, e.g.
+        ``data``, ``data.name``, ``data.0``. An empty path returns the whole
+        parsed value. A path that lands on a list or dict yields its length —
+        keeping the state store's flat-primitive invariant and making a
+        ``data`` array usable as a boolean "anything?" or an integer count.
+
+        Returns ``_JSON_PATH_MISSING`` when the string isn't valid JSON or the
+        path doesn't resolve, so the caller skips the mapping rather than
+        writing a wrong value.
+        """
+        if isinstance(raw_value, (dict, list)):
+            obj: Any = raw_value
+        else:
+            try:
+                obj = json.loads(raw_value)
+            except (ValueError, TypeError):
+                return _JSON_PATH_MISSING
+
+        if path:
+            for seg in str(path).split("."):
+                if seg == "":
+                    continue
+                if isinstance(obj, dict):
+                    if seg not in obj:
+                        return _JSON_PATH_MISSING
+                    obj = obj[seg]
+                elif isinstance(obj, list):
+                    try:
+                        obj = obj[int(seg)]
+                    except (ValueError, IndexError):
+                        return _JSON_PATH_MISSING
+                else:
+                    return _JSON_PATH_MISSING
+
+        if isinstance(obj, (list, dict)):
+            return len(obj)
+        return obj
 
     @staticmethod
     def _coerce_osc_value(value: Any, value_type: str) -> Any:
