@@ -1278,6 +1278,30 @@ address, and poll query, exactly like a real config field.
 
 ---
 
+### Multi-transport drivers and bridges
+
+Some text protocols run identically over the network and over RS-232. If yours does, add a `transports` list so the same driver can connect either way:
+
+```yaml
+transport: tcp          # the default medium
+transports: [tcp, serial]
+```
+
+A device using this driver then shows a connection picker (`Network (IP)`, `Direct serial`, `Through a bridge`) in its Connection settings. Only declare `transports` when the command and response strings are byte-for-byte identical across the listed media. If they differ, ship separate drivers instead.
+
+A **bridge** is a device that other devices connect through, such as a serial-to-Ethernet adapter. A bridge driver declares the typed ports it exposes:
+
+```yaml
+bridge:
+  ports:
+    - id: "serial:1"
+      kind: serial            # serial, ir, or relay
+      passthrough_port: 4999  # serial: the TCP port that pipes this line
+      label: "RS-232 Port 1"
+```
+
+A downstream device binds to a bridge from its own Connection settings (choose `Through a bridge`, then pick the bridge and port). For a serial port, the platform routes the downstream over the bridge's pass-through with no extra code. Pushing baud and parity to the hardware needs a Python driver that overrides `prepare_bridge_port` (see Method 3). The Global Cache iTach IP2SL driver in the community library is a complete example.
+
 ## Method 3: Python Driver
 
 Python drivers give you full control. Use this method when:

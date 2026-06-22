@@ -244,15 +244,19 @@ class Engine:
         # N x 5 s. Each add_device is independent (writes to its own device_id
         # keys in state/config dicts), so gather is safe.
         startup_errors: list[str] = []
-        results = await asyncio.gather(
-            *(self.devices.add_device(self.resolved_device_config(device))
-              for device in self.project.devices),
-            return_exceptions=True,
-        )
-        for device, result in zip(self.project.devices, results):
-            if isinstance(result, Exception):
-                startup_errors.append(f"Device '{device.id}': {result}")
-                log.error(f"Failed to add device '{device.id}': {result}")
+        resolved = {
+            d.id: self.resolved_device_config(d) for d in self.project.devices
+        }
+        # Bridges first, then their dependents (see _bridge_first).
+        for batch in self._bridge_first(list(resolved), resolved):
+            batch_results = await asyncio.gather(
+                *(self.devices.add_device(resolved[did]) for did in batch),
+                return_exceptions=True,
+            )
+            for did, result in zip(batch, batch_results):
+                if isinstance(result, Exception):
+                    startup_errors.append(f"Device '{did}': {result}")
+                    log.error(f"Failed to add device '{did}': {result}")
 
         # Register UI event bindings
         self._register_ui_bindings()
@@ -700,7 +704,93 @@ class Engine:
         defaults = get_driver_default_config(cfg.get("driver", ""))
         conn = self.project.connections.get(cfg["id"], {})
         cfg["config"] = {**defaults, **cfg.get("config", {}), **conn}
+        cfg["config"] = self._resolve_bridge_binding(cfg["config"])
         return cfg
+
+    def _resolve_bridge_binding(self, config: dict) -> dict:
+        """Rewrite a bridge-bound device's effective connection to its bridge's port.
+
+        When a device's connection carries ``bridge`` (a bridge device id) +
+        ``bridge_port`` (a port the bridge advertises), the device's bytes
+        travel *through* that bridge rather than to a host of its own. For a
+        serial pass-through port this is a pure config rewrite: point the
+        downstream at the bridge's transparent TCP pass-through endpoint
+        (``transport=tcp``, ``host=<bridge host>``, ``port=<passthrough_port>``)
+        and reuse the existing TCP transport unchanged. The serial params
+        (baudrate/parity/...) stay in the config so the bridge driver can push
+        them to the hardware via ``prepare_bridge_port`` before bytes flow.
+
+        Unresolvable bindings (unknown bridge, unknown port, missing host) are
+        left untouched and logged — the device then fails to connect with a
+        clear error rather than silently dialing the wrong place. IR / relay
+        ports are not transport rewrites (commands route through the bridge at
+        send time, Phase 2/3) and are left as-is for that path.
+        """
+        bridge_id = config.get("bridge")
+        bridge_port_id = config.get("bridge_port")
+        if not bridge_id or not bridge_port_id:
+            return config
+
+        bridge_dev = next(
+            (d for d in self.project.devices if d.id == bridge_id), None
+        )
+        if bridge_dev is None:
+            log.warning(
+                "Bridge '%s' referenced by a device's connection is not in the "
+                "project — leaving the binding unresolved", bridge_id,
+            )
+            return config
+
+        from server.core.device_manager import get_driver_bridge_ports
+        port_def = get_driver_bridge_ports(bridge_dev.driver).get(bridge_port_id)
+        if port_def is None:
+            log.warning(
+                "Bridge '%s' (driver '%s') does not advertise port '%s' — "
+                "leaving the binding unresolved",
+                bridge_id, bridge_dev.driver, bridge_port_id,
+            )
+            return config
+
+        passthrough_port = port_def.get("passthrough_port")
+        if port_def.get("kind") == "serial" and passthrough_port:
+            bridge_host = self.project.connections.get(bridge_id, {}).get("host")
+            if not bridge_host:
+                log.warning(
+                    "Bridge '%s' has no host configured — leaving the serial "
+                    "binding for '%s' unresolved", bridge_id, bridge_port_id,
+                )
+                return config
+            resolved = dict(config)
+            resolved["transport"] = "tcp"
+            resolved["host"] = bridge_host
+            resolved["port"] = passthrough_port
+            return resolved
+
+        # IR / relay (and any future non-pass-through kind): no transport
+        # rewrite — the command path routes through the bridge object at send
+        # time (Phase 2/3).
+        return config
+
+    @staticmethod
+    def _is_bridge_config(cfg: dict) -> bool:
+        """True if a resolved device config belongs to a bridge driver."""
+        from server.core.device_manager import get_driver_bridge_ports
+        return bool(get_driver_bridge_ports(cfg.get("driver", "")))
+
+    def _bridge_first(
+        self, device_ids: list[str], resolved: dict[str, dict]
+    ) -> list[list[str]]:
+        """Split ``device_ids`` into ``[bridges, others]`` (each batch included
+        only if non-empty), preserving order within each, so bridge devices are
+        added and connected before the devices that route through them — a
+        bridge-bound device's connect path needs its bridge live to prep the
+        port (push serial baud/parity) first.
+        """
+        bridges: list[str] = []
+        others: list[str] = []
+        for did in device_ids:
+            (bridges if self._is_bridge_config(resolved[did]) else others).append(did)
+        return [batch for batch in (bridges, others) if batch]
 
     async def _sync_devices(self) -> None:
         """Sync running devices with project config (add new, remove deleted, update changed)."""
@@ -727,17 +817,18 @@ class Engine:
                 log.info(f"Cleaned up {len(orphaned)} orphaned state key(s) for removed device '{device_id}'")
 
         # Add new devices in parallel — sequential awaits would serialize
-        # connect timeouts. Match the parallelization in start().
+        # connect timeouts. Match the parallelization in start(). Bridges first
+        # so a bridge-bound device finds its live bridge to prep the port.
         new_device_ids = list(project_ids - running_ids)
         if new_device_ids:
-            add_results = await asyncio.gather(
-                *(self.devices.add_device(project_devices[did])
-                  for did in new_device_ids),
-                return_exceptions=True,
-            )
-            for did, result in zip(new_device_ids, add_results):
-                if isinstance(result, Exception):
-                    log.error(f"Failed to add device '{did}' during sync: {result}")
+            for batch in self._bridge_first(new_device_ids, project_devices):
+                add_results = await asyncio.gather(
+                    *(self.devices.add_device(project_devices[did]) for did in batch),
+                    return_exceptions=True,
+                )
+                for did, result in zip(batch, add_results):
+                    if isinstance(result, Exception):
+                        log.error(f"Failed to add device '{did}' during sync: {result}")
 
         # Update changed devices in parallel — compare raw project config AND
         # connection table entries separately to detect IP/port changes

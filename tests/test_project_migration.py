@@ -9,6 +9,7 @@ from server.core.project_migration import (
     migrate_0_2_to_0_3,
     migrate_0_3_to_0_4,
     migrate_0_4_to_0_5,
+    migrate_0_5_to_0_6,
     migrate_project,
 )
 
@@ -77,6 +78,14 @@ def make_v04_project(**overrides) -> dict:
     """Minimal v0.4.0 project."""
     data = make_v03_project()
     data = migrate_0_3_to_0_4(data)
+    data.update(overrides)
+    return data
+
+
+def make_v05_project(**overrides) -> dict:
+    """Minimal v0.5.0 project."""
+    data = make_v04_project()
+    data = migrate_0_4_to_0_5(data)
     data.update(overrides)
     return data
 
@@ -258,6 +267,31 @@ class TestMigrate04To05:
         assert result["devices"] == []
 
 
+class TestMigrate05To06:
+    def test_version_bumped(self):
+        data = make_v05_project()
+        result = migrate_0_5_to_0_6(copy.deepcopy(data))
+        assert result["openavc_version"] == "0.6.0"
+
+    def test_connections_table_preserved(self):
+        """The bridge model adds free-form keys to the existing connections
+        table, so the version-stamp migration must leave existing connection
+        entries untouched."""
+        data = make_v05_project()
+        data["connections"] = {"proj1": {"host": "192.168.1.10", "port": 4352}}
+        result = migrate_0_5_to_0_6(copy.deepcopy(data))
+        assert result["connections"]["proj1"] == {
+            "host": "192.168.1.10", "port": 4352,
+        }
+
+    def test_no_structural_change(self):
+        """Version-stamp migration: device shape is unchanged."""
+        data = make_v05_project()
+        before_devices = copy.deepcopy(data["devices"])
+        result = migrate_0_5_to_0_6(copy.deepcopy(data))
+        assert result["devices"] == before_devices
+
+
 # ---------------------------------------------------------------------------
 # Full chain: 0.1.0 → CURRENT_VERSION
 # ---------------------------------------------------------------------------
@@ -298,8 +332,8 @@ class TestFullMigrationChain:
         assert "device_groups" in result
 
     def test_current_version_not_migrated(self):
-        data = make_v04_project()
-        data = migrate_0_4_to_0_5(data)  # Now at CURRENT_VERSION (0.5.0)
+        data = make_v05_project()
+        data = migrate_0_5_to_0_6(data)  # Now at CURRENT_VERSION (0.6.0)
         result, migrated = migrate_project(copy.deepcopy(data))
 
         assert migrated is False

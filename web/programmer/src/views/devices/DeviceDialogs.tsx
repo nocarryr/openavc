@@ -8,6 +8,7 @@ import {
   configFieldKind,
   isSecretConfigField,
   splitConnectionFields,
+  SERIAL_PICKER_FIELDS,
 } from "./deviceConfigCoerce";
 
 // --- Typed Config Fields ---
@@ -161,6 +162,298 @@ function ConfigFieldInputs({
         );
       })}
     </>
+  );
+}
+
+// --- Connection Mode Picker (serial-capable drivers) ---
+//
+// For drivers that can speak serial (transport "serial" or `transports`
+// includes "serial"), the connection can be made three ways: over the network
+// (IP), directly to a serial port on this server, or *through a bridge* device
+// (e.g. an iTach) that vends a serial pass-through. A segmented control picks
+// the mode and reveals the matching fields. The Add/Edit dialogs exclude these
+// connection fields (SERIAL_PICKER_FIELDS) from the generic schema section so
+// they aren't rendered twice. Non-serial drivers don't render this at all —
+// their connection UI is unchanged.
+
+const NETWORK_TRANSPORTS = ["tcp", "udp", "http", "osc"];
+const BAUD_RATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"];
+const PARITY_OPTS: [string, string][] = [["N", "None"], ["E", "Even"], ["O", "Odd"]];
+const DATABITS_OPTS = ["5", "6", "7", "8"];
+const STOPBITS_OPTS = ["1", "1.5", "2"];
+const FLOW_OPTS: [string, string][] = [["none", "None"], ["hardware", "Hardware (RTS/CTS)"]];
+
+export function driverSerialCapable(d: DriverInfo | undefined): boolean {
+  if (!d) return false;
+  const t = (d.transport || "").toLowerCase();
+  const ts = (d.transports || []).map((x) => String(x).toLowerCase());
+  return t === "serial" || ts.includes("serial");
+}
+
+function driverNetworkCapable(d: DriverInfo | undefined): boolean {
+  if (!d) return false;
+  const t = (d.transport || "").toLowerCase();
+  const ts = (d.transports || []).map((x) => String(x).toLowerCase());
+  return NETWORK_TRANSPORTS.includes(t) || ts.some((x) => NETWORK_TRANSPORTS.includes(x));
+}
+
+function primaryNetworkTransport(d: DriverInfo | undefined): string {
+  const t = (d?.transport || "").toLowerCase();
+  if (NETWORK_TRANSPORTS.includes(t)) return t;
+  const ts = (d?.transports || []).map((x) => String(x).toLowerCase());
+  return ts.find((x) => NETWORK_TRANSPORTS.includes(x)) || "tcp";
+}
+
+type ConnMode = "network" | "serial" | "bridge";
+
+function inferConnMode(cv: Record<string, string>, d: DriverInfo | undefined): ConnMode {
+  if (cv.bridge && cv.bridge_port) return "bridge";
+  if ((cv.transport || "").toLowerCase() === "serial") return "serial";
+  if ((cv.host ?? "") !== "") return "network";
+  return driverNetworkCapable(d) ? "network" : "serial";
+}
+
+// Rebuild the connection-owned keys when the user switches mode so no stale
+// field from the previous mode is saved (a TCP port left as a COM path, a host
+// left under a bridge binding, ...). Serial line params carry across
+// serial<->bridge.
+function applyConnMode(
+  cv: Record<string, string>,
+  next: ConnMode,
+  d: DriverInfo | undefined,
+): Record<string, string> {
+  const v = { ...cv };
+  if (next === "network") {
+    delete v.bridge;
+    delete v.bridge_port;
+    delete v.baudrate;
+    delete v.bytesize;
+    delete v.parity;
+    delete v.stopbits;
+    delete v.flow_control;
+    v.transport = primaryNetworkTransport(d);
+    if (v.host == null) v.host = "";
+    // A COM path left in `port` is meaningless as a TCP port → reset to the
+    // driver's default network port.
+    if (v.port && /[A-Za-z]/.test(v.port)) {
+      const dp = d?.default_config?.port;
+      v.port = dp != null ? String(dp) : "";
+    }
+  } else if (next === "serial") {
+    delete v.host;
+    delete v.bridge;
+    delete v.bridge_port;
+    v.transport = "serial";
+    // A numeric TCP port is meaningless as a COM path → clear it.
+    if (v.port && /^\d+$/.test(v.port)) v.port = "";
+    if (v.baudrate == null) v.baudrate = "9600";
+  } else {
+    // bridge: the resolver computes transport=tcp + host + pass-through port,
+    // so we store only the binding + serial line params.
+    delete v.host;
+    delete v.transport;
+    delete v.port;
+    if (v.baudrate == null) v.baudrate = "9600";
+  }
+  return v;
+}
+
+const pickerLabelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: "var(--font-size-sm)",
+  color: "var(--text-secondary)",
+  marginBottom: "var(--space-xs)",
+};
+
+function ConnectionModePicker({
+  driverInfo,
+  configValues,
+  setConfigValues,
+  devices,
+  drivers,
+  selfId,
+}: {
+  driverInfo: DriverInfo | undefined;
+  configValues: Record<string, string>;
+  setConfigValues: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  devices: DeviceConfig[];
+  drivers: DriverInfo[];
+  selfId?: string;
+}) {
+  const [mode, setMode] = useState<ConnMode>(() => inferConnMode(configValues, driverInfo));
+
+  // Re-infer when the driver changes (the parent resets configValues then).
+  // Depend only on the id so per-keystroke edits don't reset the mode.
+  useEffect(() => {
+    setMode(inferConnMode(configValues, driverInfo));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driverInfo?.id]);
+
+  if (!driverSerialCapable(driverInfo)) return null;
+
+  const set = (key: string, value: string) =>
+    setConfigValues((v) => ({ ...v, [key]: value }));
+
+  const switchMode = (next: ConnMode) => {
+    if (next === mode) return;
+    setMode(next);
+    setConfigValues((v) => applyConnMode(v, next, driverInfo));
+  };
+
+  const netCapable = driverNetworkCapable(driverInfo);
+  const modes: { id: ConnMode; label: string }[] = [];
+  if (netCapable) modes.push({ id: "network", label: "Network (IP)" });
+  modes.push({ id: "serial", label: "Direct serial" });
+  modes.push({ id: "bridge", label: "Through a bridge" });
+
+  const modeHelp: Record<ConnMode, string> = {
+    network: "Reach the device over the network by IP address.",
+    serial: "A serial (RS-232) port on this server.",
+    bridge: "Route this device's serial line through a bridge device (e.g. an iTach).",
+  };
+
+  // Bridge devices = project devices whose driver advertises bridge ports
+  // (excluding this device itself).
+  const bridges = devices.filter((dev) => {
+    if (selfId && dev.id === selfId) return false;
+    const di = drivers.find((x) => x.id === dev.driver);
+    return (di?.bridge?.ports?.length ?? 0) > 0;
+  });
+  const selectedBridge = bridges.find((b) => b.id === configValues.bridge);
+  const selectedBridgeDriver = selectedBridge
+    ? drivers.find((x) => x.id === selectedBridge.driver)
+    : undefined;
+  // Phase 1: only serial pass-through ports are bindable.
+  const bridgePorts = (selectedBridgeDriver?.bridge?.ports ?? []).filter(
+    (p) => p.kind === "serial",
+  );
+
+  const onBridgeChange = (bridgeId: string) => {
+    setConfigValues((v) => {
+      const bdrv = drivers.find(
+        (x) => x.id === devices.find((d) => d.id === bridgeId)?.driver,
+      );
+      const ports = (bdrv?.bridge?.ports ?? []).filter((p) => p.kind === "serial");
+      // Auto-select when the bridge has exactly one serial port (the IP2SL case).
+      return {
+        ...v,
+        bridge: bridgeId,
+        bridge_port: ports.length === 1 ? ports[0].id : "",
+      };
+    });
+  };
+
+  const field = (label: string, node: React.ReactNode) => (
+    <div style={{ marginBottom: "var(--space-sm)" }}>
+      <label style={pickerLabelStyle}>{label}</label>
+      {node}
+    </div>
+  );
+
+  const serialParams = (
+    <>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-sm)" }}>
+        {field(
+          "Baud rate",
+          <select value={configValues.baudrate ?? "9600"} onChange={(e) => set("baudrate", e.target.value)} style={{ width: "100%" }}>
+            {BAUD_RATES.map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>,
+        )}
+        {field(
+          "Parity",
+          <select value={configValues.parity ?? "N"} onChange={(e) => set("parity", e.target.value)} style={{ width: "100%" }}>
+            {PARITY_OPTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>,
+        )}
+        {field(
+          "Data bits",
+          <select value={configValues.bytesize ?? "8"} onChange={(e) => set("bytesize", e.target.value)} style={{ width: "100%" }}>
+            {DATABITS_OPTS.map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>,
+        )}
+        {field(
+          "Stop bits",
+          <select value={configValues.stopbits ?? "1"} onChange={(e) => set("stopbits", e.target.value)} style={{ width: "100%" }}>
+            {STOPBITS_OPTS.map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>,
+        )}
+      </div>
+      {field(
+        "Flow control",
+        <select value={configValues.flow_control ?? "none"} onChange={(e) => set("flow_control", e.target.value)} style={{ width: "100%" }}>
+          {FLOW_OPTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>,
+      )}
+    </>
+  );
+
+  return (
+    <div style={{ marginBottom: "var(--space-sm)" }}>
+      {/* Segmented mode control */}
+      <div style={{ display: "flex", gap: 2, marginBottom: "var(--space-xs)", background: "var(--bg-hover)", borderRadius: "var(--border-radius)", padding: 2 }}>
+        {modes.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => switchMode(m.id)}
+            style={{
+              flex: 1,
+              padding: "var(--space-xs) var(--space-sm)",
+              borderRadius: "var(--border-radius)",
+              background: mode === m.id ? "var(--accent-bg)" : "transparent",
+              color: mode === m.id ? "var(--text-on-accent)" : "var(--text-secondary)",
+              fontSize: "var(--font-size-sm)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: "var(--space-sm)" }}>
+        {modeHelp[mode]}
+      </div>
+
+      {mode === "network" && (
+        <>
+          {field("IP Address", <input value={configValues.host ?? ""} onChange={(e) => set("host", e.target.value)} placeholder="192.168.1.100" style={{ width: "100%" }} />)}
+          {field("Port", <input type="number" value={configValues.port ?? ""} onChange={(e) => set("port", e.target.value)} placeholder={String(driverInfo?.default_config?.port ?? "1-65535")} style={{ width: "100%" }} />)}
+        </>
+      )}
+
+      {mode === "serial" && (
+        <>
+          {field("Serial Port", <input value={configValues.port ?? ""} onChange={(e) => set("port", e.target.value)} placeholder="COM3 or /dev/ttyUSB0" style={{ width: "100%" }} />)}
+          {serialParams}
+        </>
+      )}
+
+      {mode === "bridge" && (
+        bridges.length === 0 ? (
+          <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", padding: "var(--space-sm)", background: "var(--bg-base)", borderRadius: "var(--border-radius)" }}>
+            No bridge devices in this project yet. Add a bridge (such as a Global Cache iTach) first, then bind this device to one of its ports.
+          </div>
+        ) : (
+          <>
+            {field(
+              "Bridge",
+              <select value={configValues.bridge ?? ""} onChange={(e) => onBridgeChange(e.target.value)} style={{ width: "100%" }}>
+                <option value="">Select a bridge...</option>
+                {bridges.map((b) => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+              </select>,
+            )}
+            {configValues.bridge && field(
+              "Bridge port",
+              <select value={configValues.bridge_port ?? ""} onChange={(e) => set("bridge_port", e.target.value)} style={{ width: "100%" }}>
+                <option value="">Select a port...</option>
+                {bridgePorts.map((p) => <option key={p.id} value={p.id}>{p.label || p.id}</option>)}
+              </select>,
+            )}
+            {configValues.bridge && serialParams}
+          </>
+        )
+      )}
+    </div>
   );
 }
 
@@ -362,6 +655,12 @@ export function AddDeviceDialog({
 
   const driverInfo = drivers.find((d) => d.id === selectedDriver);
   const configKeys = Object.keys((driverInfo?.config_schema ?? {}) as Record<string, unknown>);
+  const serialCapable = driverSerialCapable(driverInfo);
+  // The connection picker owns these fields for serial-capable drivers; keep
+  // them out of the generic schema section so they aren't rendered twice.
+  const visibleConfigKeys = serialCapable
+    ? configKeys.filter((k) => !SERIAL_PICKER_FIELDS.has(k))
+    : configKeys;
 
   // Check if driver has setup settings
   const hasSetupSettings = useMemo(() => hasDriverSetupSettings(driverInfo), [driverInfo]);
@@ -587,7 +886,7 @@ export function AddDeviceDialog({
         </div>
 
 
-        {configKeys.length > 0 && (
+        {(serialCapable || visibleConfigKeys.length > 0) && (
           <div style={{ marginBottom: "var(--space-md)" }}>
             <div
               style={{
@@ -600,12 +899,24 @@ export function AddDeviceDialog({
             >
               Connection Settings
             </div>
-            <ConfigFieldInputs
-              configKeys={configKeys}
-              driverInfo={driverInfo}
-              configValues={configValues}
-              setConfigValues={setConfigValues}
-            />
+            {serialCapable && (
+              <ConnectionModePicker
+                driverInfo={driverInfo}
+                configValues={configValues}
+                setConfigValues={setConfigValues}
+                devices={project?.devices ?? []}
+                drivers={drivers}
+                selfId={deviceId || undefined}
+              />
+            )}
+            {visibleConfigKeys.length > 0 && (
+              <ConfigFieldInputs
+                configKeys={visibleConfigKeys}
+                driverInfo={driverInfo}
+                configValues={configValues}
+                setConfigValues={setConfigValues}
+              />
+            )}
           </div>
         )}
 
@@ -664,6 +975,7 @@ export function EditDeviceDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const project = useProjectStore((s) => s.project);
   const [drivers, setDrivers] = useState<DriverInfo[]>([]);
   const [deviceName, setDeviceName] = useState(device.name);
   const [selectedDriver, setSelectedDriver] = useState(device.driver);
@@ -695,6 +1007,12 @@ export function EditDeviceDialog({
   const schemaKeys = Object.keys((driverInfo?.config_schema ?? {}) as Record<string, unknown>);
   const existingKeys = Object.keys(configValues);
   const configKeys = schemaKeys.length > 0 ? schemaKeys : existingKeys;
+  const serialCapable = driverSerialCapable(driverInfo);
+  // The connection picker owns these fields for serial-capable drivers; keep
+  // them out of the generic schema section so they aren't rendered twice.
+  const visibleConfigKeys = serialCapable
+    ? configKeys.filter((k) => !SERIAL_PICKER_FIELDS.has(k))
+    : configKeys;
 
   // When driver changes, pre-fill config from driver's default_config
   const handleDriverChange = (newDriver: string) => {
@@ -868,7 +1186,7 @@ export function EditDeviceDialog({
         </div>
 
 
-        {configKeys.length > 0 && (
+        {(serialCapable || visibleConfigKeys.length > 0) && (
           <div style={{ marginBottom: "var(--space-md)" }}>
             <div
               style={{
@@ -881,12 +1199,24 @@ export function EditDeviceDialog({
             >
               Connection Settings
             </div>
-            <ConfigFieldInputs
-              configKeys={configKeys}
-              driverInfo={driverInfo}
-              configValues={configValues}
-              setConfigValues={setConfigValues}
-            />
+            {serialCapable && (
+              <ConnectionModePicker
+                driverInfo={driverInfo}
+                configValues={configValues}
+                setConfigValues={setConfigValues}
+                devices={project?.devices ?? []}
+                drivers={drivers}
+                selfId={device.id}
+              />
+            )}
+            {visibleConfigKeys.length > 0 && (
+              <ConfigFieldInputs
+                configKeys={visibleConfigKeys}
+                driverInfo={driverInfo}
+                configValues={configValues}
+                setConfigValues={setConfigValues}
+              />
+            )}
           </div>
         )}
 

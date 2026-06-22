@@ -73,6 +73,33 @@ def get_driver_default_config(driver_id: str) -> dict[str, Any]:
     return dict(defaults)
 
 
+def get_driver_bridge_ports(driver_id: str) -> dict[str, dict[str, Any]]:
+    """Return a registered bridge driver's advertised ports as
+    ``{port_id: {kind, passthrough_port?, label?}}``, or ``{}`` if the driver
+    is unknown or not a bridge.
+
+    A *bridge* driver declares ``DRIVER_INFO["bridge"]["ports"]``: a list of
+    typed ports (``serial`` / ``ir`` / ``relay``) that other devices connect
+    *through*. Serial ports carry a ``passthrough_port`` (the TCP port on the
+    bridge host that transparently pipes that serial line, e.g. 4999); IR /
+    relay ports route commands through the bridge's command socket instead and
+    omit it. Used by ``Engine.resolved_device_config`` to rewrite a
+    bridge-bound downstream device's transport, and by the device manager to
+    order bridges ahead of their dependents.
+    """
+    cls = _DRIVER_REGISTRY.get(driver_id)
+    if cls is None:
+        return {}
+    bridge = cls.DRIVER_INFO.get("bridge") or {}
+    ports = bridge.get("ports") or []
+    result: dict[str, dict[str, Any]] = {}
+    for port in ports:
+        pid = port.get("id")
+        if pid:
+            result[pid] = dict(port)
+    return result
+
+
 def get_driver_registry() -> list[dict[str, Any]]:
     """Return metadata for all registered drivers."""
     return [
@@ -85,6 +112,11 @@ def get_driver_registry() -> list[dict[str, Any]]:
             "version": driver_class.DRIVER_INFO.get("version", ""),
             "author": driver_class.DRIVER_INFO.get("author", ""),
             "transport": driver_class.DRIVER_INFO.get("transport", "tcp"),
+            # Multi-transport drivers ([tcp, serial]) and bridge port
+            # declarations — the connection picker offers "through a bridge"
+            # for serial-capable drivers and lists bridge devices + their ports.
+            "transports": driver_class.DRIVER_INFO.get("transports", []),
+            "bridge": driver_class.DRIVER_INFO.get("bridge", {}),
             "commands": driver_class.DRIVER_INFO.get("commands", {}),
             "config_schema": driver_class.DRIVER_INFO.get("config_schema", {}),
             "default_config": driver_class.DRIVER_INFO.get("default_config", {}),
@@ -203,6 +235,11 @@ class DeviceManager:
         self.state.set(f"device.{device_id}.enabled", True, source="config")
         log.info(f"Added device '{device_id}' ({name}) using driver '{driver_id}'")
 
+        # If this device routes through a bridge, let the bridge configure the
+        # port (e.g. push serial baud/parity) before we open the connection, so
+        # the transparent pass-through carries bytes at the right line settings.
+        await self._prepare_bridge_for(device_id, config)
+
         # Attempt connection
         try:
             await driver.connect()
@@ -212,6 +249,40 @@ class DeviceManager:
             log.warning(f"Failed to connect '{device_id}': {e}")
             self._set_offline_reason(device_id, driver, exc=e)
             self._start_reconnect(device_id)
+
+    async def _prepare_bridge_for(
+        self, device_id: str, config: dict[str, Any]
+    ) -> None:
+        """Best-effort: ask the live bridge driver to prepare a port before a
+        bridge-bound downstream device connects.
+
+        The bridge driver instance owns the bridge's command socket; preparing
+        the port (for serial, pushing baud/parity via the bridge protocol) makes
+        the transparent pass-through carry bytes at the right line settings. A
+        missing / not-yet-live bridge is logged and skipped — bridges are
+        ordered ahead of their dependents on load, and serial config persists on
+        the hardware, so a transient miss self-heals on the next add/edit. Never
+        raises: a bridge-side failure must not strand the downstream offline.
+        """
+        bridge_id = config.get("bridge")
+        bridge_port = config.get("bridge_port")
+        if not bridge_id or not bridge_port:
+            return
+        bridge = self._devices.get(bridge_id)
+        if bridge is None or not getattr(bridge, "is_bridge", False):
+            log.debug(
+                "Device '%s' binds bridge '%s' but it isn't a live bridge "
+                "instance yet — skipping port prep", device_id, bridge_id,
+            )
+            return
+        try:
+            await bridge.prepare_bridge_port(bridge_port, config)
+        except Exception:
+            log.warning(
+                "Bridge '%s' failed to prepare port '%s' for device '%s' — "
+                "connecting anyway", bridge_id, bridge_port, device_id,
+                exc_info=True,
+            )
 
     async def remove_device(self, device_id: str) -> None:
         """Disconnect and remove a device (handles both active and orphaned)."""

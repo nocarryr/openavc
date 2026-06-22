@@ -519,6 +519,38 @@ class BaseDriver(ABC):
         """
         self._setup_context = context
 
+    # --- Bridge support ---
+    #
+    # A "bridge" is a device that exposes typed ports (serial / IR / relay)
+    # which OTHER devices connect *through* (the pro-AV port-binding model).
+    # A bridge driver declares its ports in DRIVER_INFO["bridge"]["ports"].
+    # The platform resolves a downstream device's connection to the bridge's
+    # pass-through endpoint (engine.resolved_device_config) and, just before
+    # that downstream connects, calls prepare_bridge_port() on the live bridge
+    # so the hardware is configured for the downstream first.
+
+    @property
+    def is_bridge(self) -> bool:
+        """True if this driver advertises bridge ports."""
+        return bool((self.DRIVER_INFO.get("bridge") or {}).get("ports"))
+
+    async def prepare_bridge_port(
+        self, port_id: str, params: dict[str, Any]
+    ) -> None:
+        """Configure one of this bridge's ports for a downstream device that is
+        about to connect through it.
+
+        Called by the platform on the *bridge* driver. For a serial port a
+        bridge pushes the downstream's baud/parity to the hardware here, so the
+        transparent pass-through carries bytes at the right line settings;
+        ``params`` is the downstream's resolved connection config (baudrate,
+        parity, bytesize, stopbits, ...). Default: no-op — a bridge that needs
+        no per-port setup, or a port kind that routes commands at send time
+        (IR / relay), does nothing. Raising does NOT block the downstream
+        connect (the platform logs and proceeds), so a transient bridge-side
+        failure can't strand the downstream device offline.
+        """
+
     # --- Optional overrides ---
 
     async def on_data_received(self, data: bytes) -> None:

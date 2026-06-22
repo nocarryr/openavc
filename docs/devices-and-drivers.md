@@ -13,7 +13,7 @@ Use the search box at the top of the device list to filter by name, ID, or drive
 3. Select a driver from the dropdown (e.g., "PJLink Class 1 Projector")
 4. Enter a Device ID (e.g., `projector_main`). This is the name used in macros and scripts, so keep it short and descriptive.
 5. Enter a display name (e.g., "Main Projector"). This is what appears in the UI.
-6. Configure connection settings (host, port, etc.). Defaults are pre-filled from the driver.
+6. Configure connection settings (host, port, etc.). Defaults are pre-filled from the driver. A device that supports serial shows a connection picker with three choices: **Network (IP)**, **Direct serial** (a COM port on this server), or **Through a bridge** (route it over a serial-to-Ethernet bridge such as a Global Cache iTach). See [Connecting Devices Through a Bridge](connecting-through-a-bridge.md).
 7. Click **Add**
 
 The Device ID is permanent and referenced everywhere. Choose a convention and stick with it. Common patterns:
@@ -234,3 +234,4 @@ After enabling the relevant network feature on the device, re-run the scan. If t
 - [Programmer IDE Overview](programmer-overview.md). IDE layout, state concepts, and typical workflow
 - [UI Builder](ui-builder.md). Visual panel designer for touch panels
 - [Creating Drivers](creating-drivers.md). Build device drivers (YAML, Driver Builder, and Python)
+- [Connecting Devices Through a Bridge](connecting-through-a-bridge.md). Route serial devices over an IP-to-serial bridge

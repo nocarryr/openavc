@@ -421,7 +421,9 @@ class PluginConfig(_ForwardCompatModel):
 
 
 class ProjectConfig(_ForwardCompatModel):
-    openavc_version: str = "0.5.0"
+    # Keep in sync with project_migration.CURRENT_VERSION — the default stamped
+    # on a freshly-created project so it isn't immediately "migrated" on reload.
+    openavc_version: str = "0.6.0"
     project: ProjectMeta
     devices: list[DeviceConfig] = Field(default_factory=list)
     device_groups: list[DeviceGroup] = Field(default_factory=list)

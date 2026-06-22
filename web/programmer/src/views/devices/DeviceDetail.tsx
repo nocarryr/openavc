@@ -6,7 +6,7 @@ import { useProjectStore } from "../../store/projectStore";
 import { useConnectionStore } from "../../store/connectionStore";
 import { useLogStore } from "../../store/logStore";
 import * as api from "../../api/restClient";
-import type { ChildEntityEntry, DeviceConfig, DeviceInfo, DeviceSettingValue } from "../../api/types";
+import type { BridgePort, ChildEntityEntry, DeviceConfig, DeviceInfo, DeviceSettingValue } from "../../api/types";
 import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins/PluginExtensions";
 import { findDeviceReferences, validateSettingValue } from "./deviceUtils";
 import { ChildEntities } from "./ChildEntities";
@@ -219,6 +219,20 @@ export function DeviceDetail({
   // Get param fields for selected command
   const commandDef = commands[selectedCommand] as Record<string, unknown> | undefined;
   const paramKeys = Object.keys((commandDef?.params as Record<string, unknown>) ?? {});
+
+  // Bridge: when this device's driver advertises bridge ports, it's a bridge
+  // other devices route through. The card below lists each port + what's bound
+  // to it, plus a link to the unit's own web UI (at its connection host).
+  const bridgePorts =
+    ((deviceInfo?.driver_info as { bridge?: { ports?: BridgePort[] } } | undefined)
+      ?.bridge?.ports) ?? [];
+  const isBridge = bridgePorts.length > 0;
+  const bridgeHost = (project?.connections?.[deviceId]?.host as string | undefined) || "";
+  const devicesBoundToPort = (portId: string) =>
+    (project?.devices ?? []).filter((d) => {
+      const c = project?.connections?.[d.id];
+      return c?.bridge === deviceId && c?.bridge_port === portId;
+    });
 
   const sectionStyle: React.CSSProperties = {
     marginBottom: "var(--space-xl)",
@@ -501,6 +515,67 @@ export function DeviceDetail({
           {testResult.success
             ? `Connected successfully (${testResult.latency_ms}ms)`
             : `Connection failed: ${testResult.error}`}
+        </div>
+      )}
+
+      {/* Bridge Ports — only for bridge devices (driver advertises ports other
+          devices connect through). Lists each port, what's bound to it, and a
+          link to the unit's own web UI. */}
+      {isBridge && (
+        <div style={sectionStyle}>
+          <h3 style={sectionTitleStyle}>Bridge Ports</h3>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: "var(--space-sm)" }}>
+            Other devices connect through this bridge's ports. To bind one, open
+            that device's Connection settings and choose "Through a bridge".
+          </div>
+          {bridgeHost && (
+            <div style={{ marginBottom: "var(--space-sm)", fontSize: "var(--font-size-sm)" }}>
+              <a
+                href={`http://${bridgeHost}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--accent-bg)", textDecoration: "underline" }}
+              >
+                Open this unit's web interface
+              </a>
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+            {bridgePorts.map((p) => {
+              const bound = devicesBoundToPort(p.id);
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    border: "1px solid var(--border-color)",
+                    borderRadius: "var(--border-radius)",
+                    padding: "var(--space-sm) var(--space-md)",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: "var(--font-size-sm)" }}>
+                      {p.label || p.id}
+                      <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
+                        {p.kind}
+                      </span>
+                    </span>
+                    <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                      {p.id}
+                    </code>
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
+                    {bound.length === 0
+                      ? `Nothing bound${
+                          p.kind === "serial" && p.passthrough_port
+                            ? ` (pass-through TCP ${p.passthrough_port})`
+                            : ""
+                        }`
+                      : `Bound: ${bound.map((d) => d.name || d.id).join(", ")}`}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

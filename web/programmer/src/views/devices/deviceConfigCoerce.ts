@@ -119,11 +119,41 @@ export function coerceConfigValue(
 export const CONNECTION_FIELDS = new Set([
   "host",
   "port",
+  // Serial line params — all live with the connection alongside baudrate so a
+  // template deployment swaps them per site (not split half into device.config).
   "baudrate",
+  "bytesize",
+  "parity",
+  "stopbits",
+  "flow_control",
   "username",
   "password",
   "base_url",
   "ssl",
+  // Bridge binding (v0.6.0): a downstream device routes its bytes through
+  // another device's typed port. `bridge` = bridge device id, `bridge_port` =
+  // the port id it advertises (e.g. "serial:1").
+  "bridge",
+  "bridge_port",
+]);
+
+// Connection fields the segmented connection-mode picker owns and renders
+// itself (for serial-capable drivers). The Add/Edit dialogs exclude these from
+// the generic schema-driven section so they aren't rendered twice. `transport`
+// is here too: the picker sets it ("serial" for Direct serial; cleared for
+// bridge mode, where the resolver forces tcp) even though it lives in
+// device.config, not the connections table.
+export const SERIAL_PICKER_FIELDS = new Set([
+  "transport",
+  "host",
+  "port",
+  "bridge",
+  "bridge_port",
+  "baudrate",
+  "bytesize",
+  "parity",
+  "stopbits",
+  "flow_control",
 ]);
 
 // Split a flat config map the way the device-update API does

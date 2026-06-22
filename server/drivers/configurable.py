@@ -1290,6 +1290,20 @@ def create_configurable_driver_class(
     if "child_entity_types" in driver_def:
         driver_info["child_entity_types"] = driver_def["child_entity_types"]
 
+    # Copy the bridge declaration — typed serial/IR/relay ports that other
+    # devices connect *through*. Read by get_driver_bridge_ports() and the
+    # bridge resolver (engine.resolved_device_config).
+    if "bridge" in driver_def:
+        driver_info["bridge"] = driver_def["bridge"]
+
+    # Copy the multi-transport declaration (e.g. ["tcp", "serial"]). The
+    # driver's command/response strings run identically over either medium;
+    # the connection selects the actual transport (BaseDriver.connect reads
+    # config["transport"] first). Enables "through a bridge" for serial-protocol
+    # drivers that can also speak over a raw TCP pass-through.
+    if "transports" in driver_def:
+        driver_info["transports"] = driver_def["transports"]
+
     # Copy help from each state variable
     state_vars = driver_info.get("state_variables", {})
     for var_name, var_def in state_vars.items():

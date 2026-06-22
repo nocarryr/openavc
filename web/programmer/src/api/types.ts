@@ -722,6 +722,18 @@ export interface DeviceSettingValue extends DeviceSettingDef {
   current_value: unknown;
 }
 
+/** A typed port a bridge device advertises (from a driver's
+ *  DRIVER_INFO["bridge"]["ports"]). Other devices connect *through* these.
+ *  Serial ports carry a `passthrough_port` (the TCP port on the bridge host
+ *  that transparently pipes that serial line, e.g. 4999); IR / relay ports
+ *  route commands through the bridge at send time and omit it. */
+export interface BridgePort {
+  id: string;
+  kind: string; // "serial" | "ir" | "relay"
+  passthrough_port?: number;
+  label?: string;
+}
+
 export interface DriverInfo {
   id: string;
   name: string;
@@ -730,6 +742,14 @@ export interface DriverInfo {
   description?: string;
   version?: string;
   author?: string;
+  /** Primary wire transport ("tcp" | "serial" | "udp" | "http" | "osc"). */
+  transport?: string;
+  /** Multi-transport drivers (e.g. ["tcp", "serial"]) — the connection picker
+   *  offers "Direct serial" / "Through a bridge" for serial-capable drivers. */
+  transports?: string[];
+  /** Present + non-empty `ports` => this driver is a bridge other devices can
+   *  connect through. */
+  bridge?: { ports?: BridgePort[] };
   commands: Record<string, unknown>;
   config_schema: Record<string, unknown>;
   default_config?: Record<string, unknown>;

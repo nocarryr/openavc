@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Plus, CheckSquare, Radar } from "lucide-react";
+import { Plus, CheckSquare, Radar, ChevronRight, ChevronDown } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { useProjectStore } from "../store/projectStore";
 import { useConnectionStore } from "../store/connectionStore";
 import { useNavigationStore } from "../store/navigationStore";
 import * as api from "../api/restClient";
-import type { DeviceConfig } from "../api/types";
+import type { DeviceConfig, DriverInfo } from "../api/types";
 import { DiscoveryPanel } from "./DiscoveryView";
 import { DriverPanel } from "./DriverBuilderView";
 import { DeviceDetail } from "./devices/DeviceDetail";
@@ -43,6 +43,8 @@ export function DeviceView() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState<{ message: React.ReactNode } | null>(null);
+  const [showTopology, setShowTopology] = useState(false);
+  const [drivers, setDrivers] = useState<DriverInfo[]>([]);
 
   // Listen for focus changes (e.g., "Go to Device" from discovery)
   useEffect(() => {
@@ -55,8 +57,35 @@ export function DeviceView() {
     });
   }, []);
 
+  // Driver registry — needed to know which devices are bridges (their driver
+  // advertises bridge ports) for the read-only topology panel below.
+  useEffect(() => {
+    api.listDrivers().then(setDrivers).catch(() => {});
+  }, []);
+
   const stateVersion = useConnectionStore((s) => s.stateVersion);
   const deviceConfigs = project?.devices ?? [];
+
+  // Bridge topology: each bridge device, its advertised ports, and which
+  // devices are bound to each port (from the connections table). Drives the
+  // read-only tree panel in the device list column.
+  const bridges = useMemo(() => {
+    const byId = new Map(drivers.map((d) => [d.id, d]));
+    const conns = project?.connections ?? {};
+    return deviceConfigs
+      .map((dev) => ({ dev, ports: byId.get(dev.driver)?.bridge?.ports ?? [] }))
+      .filter((b) => b.ports.length > 0)
+      .map((b) => ({
+        dev: b.dev,
+        ports: b.ports.map((port) => ({
+          port,
+          bound: deviceConfigs.filter((d) => {
+            const c = conns[d.id];
+            return c?.bridge === b.dev.id && c?.bridge_port === port.id;
+          }),
+        })),
+      }));
+  }, [deviceConfigs, drivers, project?.connections]);
 
   const deviceGroups = project?.device_groups ?? [];
 
@@ -321,6 +350,72 @@ export function DeviceView() {
             overflow: "auto",
           }}
         >
+          {/* Bridge topology — read-only overview (bridge > port > device).
+              Only shown when the project has bridge devices. Names are
+              clickable to jump to that device's detail. */}
+          {bridges.length > 0 && (
+            <div style={{ marginBottom: "var(--space-sm)" }}>
+              <button
+                onClick={() => setShowTopology((v) => !v)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 4, width: "100%",
+                  padding: "var(--space-xs) var(--space-sm)", background: "var(--bg-surface)",
+                  border: "1px solid var(--border-color)", borderRadius: "var(--border-radius)",
+                  color: "var(--text-secondary)", fontSize: 11, cursor: "pointer",
+                  textTransform: "uppercase", letterSpacing: "0.5px",
+                }}
+              >
+                {showTopology ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                Bridge topology
+              </button>
+              {showTopology && (
+                <div
+                  style={{
+                    marginTop: "var(--space-xs)", padding: "var(--space-sm)",
+                    border: "1px solid var(--border-color)",
+                    borderRadius: "var(--border-radius)", fontSize: 11,
+                  }}
+                >
+                  {bridges.map(({ dev, ports }) => (
+                    <div key={dev.id} style={{ marginBottom: "var(--space-sm)" }}>
+                      <button
+                        onClick={() => setSelectedId(dev.id)}
+                        style={{
+                          background: "none", border: "none", padding: 0, cursor: "pointer",
+                          color: "var(--text-primary)", fontWeight: 600, textAlign: "left",
+                        }}
+                      >
+                        {dev.name || dev.id}
+                      </button>
+                      {ports.map(({ port, bound }) => (
+                        <div key={port.id} style={{ marginLeft: 10, marginTop: 2, color: "var(--text-secondary)" }}>
+                          {port.label || port.id}
+                          {bound.length === 0 ? (
+                            <div style={{ marginLeft: 10, color: "var(--text-muted)" }}>&mdash; unbound</div>
+                          ) : (
+                            bound.map((b) => (
+                              <div key={b.id} style={{ marginLeft: 10 }}>
+                                <button
+                                  onClick={() => setSelectedId(b.id)}
+                                  style={{
+                                    background: "none", border: "none", padding: 0,
+                                    cursor: "pointer", color: "var(--accent-bg)", textAlign: "left",
+                                  }}
+                                >
+                                  {b.name || b.id}
+                                </button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Search input */}
           <input
             value={search}

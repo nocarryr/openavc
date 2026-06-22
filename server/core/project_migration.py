@@ -9,7 +9,7 @@ from server.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-CURRENT_VERSION = "0.5.0"
+CURRENT_VERSION = "0.6.0"
 
 # Connection-related config fields that belong in the connections table.
 # Names match what BaseDriver reads at runtime (server/drivers/base.py):
@@ -18,6 +18,16 @@ CURRENT_VERSION = "0.5.0"
 CONNECTION_FIELDS = {
     "host", "port", "baudrate", "username", "password",
     "base_url", "ssl",
+    # Serial line params (match BaseDriver._coerce_serial_params): they live
+    # with the connection alongside `baudrate` so a template deployment swaps
+    # the whole serial config per site instead of leaving some in device.config.
+    "bytesize", "parity", "stopbits", "flow_control",
+    # Bridge binding (v0.6.0): a downstream device routes its bytes through
+    # another device's typed port. `bridge` is the bridge device id,
+    # `bridge_port` the port id it advertises (e.g. "serial:1"). The bridge
+    # resolver (engine.resolved_device_config) reads these to rewrite the
+    # downstream's effective transport to the bridge's pass-through endpoint.
+    "bridge", "bridge_port",
 }
 
 
@@ -122,12 +132,28 @@ def migrate_0_4_to_0_5(data: dict) -> dict:
     return data
 
 
+def migrate_0_5_to_0_6(data: dict) -> dict:
+    """
+    Migrate from 0.5.0 to 0.6.0:
+    - Introduces the device-bridge connection model: a downstream device can
+      route its bytes through another device's typed port (serial / IR / relay)
+      via ``bridge`` + ``bridge_port`` keys in its ``connections[<id>]`` entry.
+      The connections table is already a free-form ``dict[str, dict]``, so
+      existing files need no structural change — this is a version-stamp
+      migration that records the new capability and keeps the chain explicit.
+    - Bump version.
+    """
+    data["openavc_version"] = "0.6.0"
+    return data
+
+
 # Ordered list of migrations: (source_version, target_version, transform_fn)
 MIGRATIONS = [
     ("0.1.0", "0.2.0", migrate_0_1_to_0_2),
     ("0.2.0", "0.3.0", migrate_0_2_to_0_3),
     ("0.3.0", "0.4.0", migrate_0_3_to_0_4),
     ("0.4.0", "0.5.0", migrate_0_4_to_0_5),
+    ("0.5.0", "0.6.0", migrate_0_5_to_0_6),
 ]
 
 

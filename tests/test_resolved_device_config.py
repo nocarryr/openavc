@@ -287,3 +287,178 @@ async def test_discovery_add_device_pulls_in_driver_defaults_on_first_add(
     assert saved_conn["port"] == 5000
     assert saved_device.config["machine_number"] == "01"
     assert saved_device.config["poll_interval"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Bridge binding resolution (v0.6.0 — device-through-device connection model)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_bridge_driver():
+    """Register a temporary YAML-style serial bridge driver.
+
+    Synthetic invented device (core-test rule): advertises one serial port
+    that other devices connect through, transparently piped on TCP 4999.
+    """
+    definition = {
+        "id": "fake_bridge_test",
+        "name": "Fake Serial Bridge (test)",
+        "manufacturer": "TestCo",
+        "category": "utility",
+        "version": "1.0.0",
+        "transport": "tcp",
+        "bridge": {
+            "ports": [
+                {
+                    "id": "serial:1",
+                    "kind": "serial",
+                    "passthrough_port": 4999,
+                    "label": "Serial Port 1",
+                },
+            ],
+        },
+        "default_config": {"host": "", "port": 4998},
+        "config_schema": {},
+        "state_variables": {},
+        "commands": {},
+        "responses": [],
+    }
+    cls = create_configurable_driver_class(definition)
+    register_driver(cls)
+    yield cls
+    unregister_driver("fake_bridge_test")
+
+
+@pytest.fixture
+def fake_serial_device_driver():
+    """Register a temporary dual-transport (tcp|serial) downstream driver."""
+    definition = {
+        "id": "fake_serial_display_test",
+        "name": "Fake Serial Display (test)",
+        "manufacturer": "TestCo",
+        "category": "display",
+        "version": "1.0.0",
+        "transport": "serial",
+        "transports": ["tcp", "serial"],
+        "default_config": {"baudrate": 9600, "port": ""},
+        "config_schema": {},
+        "state_variables": {},
+        "commands": {},
+        "responses": [],
+    }
+    cls = create_configurable_driver_class(definition)
+    register_driver(cls)
+    yield cls
+    unregister_driver("fake_serial_display_test")
+
+
+def test_get_driver_bridge_ports_reads_declaration(fake_bridge_driver):
+    from server.core.device_manager import get_driver_bridge_ports
+
+    ports = get_driver_bridge_ports("fake_bridge_test")
+    assert "serial:1" in ports
+    assert ports["serial:1"]["kind"] == "serial"
+    assert ports["serial:1"]["passthrough_port"] == 4999
+
+
+def test_get_driver_bridge_ports_non_bridge_returns_empty(fake_tcp_driver):
+    from server.core.device_manager import get_driver_bridge_ports
+
+    assert get_driver_bridge_ports("fake_kramer_test") == {}
+
+
+def test_yaml_bridge_and_transports_survive_into_driver_info(
+    fake_bridge_driver, fake_serial_device_driver
+):
+    """configurable.py must copy `bridge` + `transports` into DRIVER_INFO,
+    or the runtime can't see the declaration (the YAML->runtime parity trap)."""
+    assert fake_bridge_driver.DRIVER_INFO.get("bridge", {}).get("ports")
+    assert fake_serial_device_driver.DRIVER_INFO.get("transports") == ["tcp", "serial"]
+
+
+def _add_bridge_project(engine, bridge_host="192.0.2.40"):
+    """Append a bridge + a downstream serial device bound through it."""
+    bridge = DeviceConfig(
+        id="bridge1", driver="fake_bridge_test", name="Bridge", config={}
+    )
+    downstream = DeviceConfig(
+        id="disp1", driver="fake_serial_display_test", name="Display", config={}
+    )
+    engine.project.devices.extend([bridge, downstream])
+    engine.project.connections["bridge1"] = {"host": bridge_host}
+    engine.project.connections["disp1"] = {
+        "bridge": "bridge1",
+        "bridge_port": "serial:1",
+        "baudrate": 9600,
+    }
+    return bridge, downstream
+
+
+def test_serial_bridge_binding_rewrites_to_passthrough(
+    engine_with_project, fake_bridge_driver, fake_serial_device_driver
+):
+    """A bridge-bound serial device resolves to the bridge's transparent TCP
+    pass-through endpoint, reusing the existing TCP transport."""
+    engine = engine_with_project
+    _, downstream = _add_bridge_project(engine)
+
+    cfg = engine.resolved_device_config(downstream)["config"]
+    assert cfg["transport"] == "tcp"
+    assert cfg["host"] == "192.0.2.40"   # the bridge's host, not the device's
+    assert cfg["port"] == 4999           # serial:1 pass-through port
+    # serial params survive for the bridge's set_SERIAL push
+    assert cfg["baudrate"] == 9600
+    # binding markers survive so the connect path can find the bridge to prep it
+    assert cfg["bridge"] == "bridge1"
+    assert cfg["bridge_port"] == "serial:1"
+
+
+def test_bridge_unknown_device_leaves_binding_unresolved(
+    engine_with_project, fake_serial_device_driver
+):
+    engine = engine_with_project
+    downstream = DeviceConfig(
+        id="disp1", driver="fake_serial_display_test", name="Display", config={}
+    )
+    engine.project.devices.append(downstream)
+    engine.project.connections["disp1"] = {
+        "bridge": "ghost", "bridge_port": "serial:1",
+    }
+    cfg = engine.resolved_device_config(downstream)["config"]
+    assert cfg.get("host") is None
+    assert cfg.get("transport") != "tcp"
+
+
+def test_bridge_unknown_port_leaves_binding_unresolved(
+    engine_with_project, fake_bridge_driver, fake_serial_device_driver
+):
+    engine = engine_with_project
+    _, downstream = _add_bridge_project(engine)
+    engine.project.connections["disp1"]["bridge_port"] = "serial:99"
+    cfg = engine.resolved_device_config(downstream)["config"]
+    assert cfg.get("port") != 4999
+
+
+def test_bridge_missing_host_leaves_binding_unresolved(
+    engine_with_project, fake_bridge_driver, fake_serial_device_driver
+):
+    engine = engine_with_project
+    _, downstream = _add_bridge_project(engine, bridge_host="")
+    cfg = engine.resolved_device_config(downstream)["config"]
+    assert cfg.get("port") != 4999
+
+
+def test_direct_serial_device_unaffected_by_bridge_resolver(
+    engine_with_project, fake_serial_device_driver
+):
+    """A normal direct serial connection (no bridge) is left untouched."""
+    engine = engine_with_project
+    dev = DeviceConfig(
+        id="d2", driver="fake_serial_display_test", name="Direct", config={}
+    )
+    engine.project.devices.append(dev)
+    engine.project.connections["d2"] = {"port": "COM3", "baudrate": 19200}
+    cfg = engine.resolved_device_config(dev)["config"]
+    assert cfg["port"] == "COM3"
+    assert cfg.get("transport") != "tcp"
