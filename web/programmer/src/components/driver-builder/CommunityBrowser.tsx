@@ -93,15 +93,34 @@ function expandDriverToCards(driver: CommunityDriver): DisplayCard[] {
       isViaCard: false,
     }];
   }
-  // Multi-manufacturer driver — fan out, one card per compatible_models entry.
-  return cms.map((cm) => ({
-    driver,
-    brand: cm.manufacturer,
-    brandModels: cm.models,
-    brandConfidence: cm.confidence,
-    brandNotes: cm.notes,
-    isViaCard: cm.manufacturer !== driver.manufacturer,
-  }));
+  // Multi-manufacturer driver: one card per DISTINCT manufacturer, not per
+  // compatible_models entry. A brand split across several entries (e.g. a
+  // validated model at confidence:full plus a batch of untested siblings)
+  // collapses into a single card; the detail modal still lists every entry
+  // with its own confidence.
+  const confidenceRank: Record<string, number> = { full: 3, partial: 2, untested: 1 };
+  const byBrand = new Map<string, DisplayCard>();
+  for (const cm of cms) {
+    const card = byBrand.get(cm.manufacturer);
+    if (card) {
+      card.brandModels = [...card.brandModels, ...cm.models];
+      // Surface the strongest confidence the driver claims for this brand.
+      if ((confidenceRank[cm.confidence] ?? 0) > (confidenceRank[card.brandConfidence ?? ""] ?? 0)) {
+        card.brandConfidence = cm.confidence;
+        card.brandNotes = cm.notes;
+      }
+    } else {
+      byBrand.set(cm.manufacturer, {
+        driver,
+        brand: cm.manufacturer,
+        brandModels: [...cm.models],
+        brandConfidence: cm.confidence,
+        brandNotes: cm.notes,
+        isViaCard: cm.manufacturer !== driver.manufacturer,
+      });
+    }
+  }
+  return [...byBrand.values()];
 }
 
 /** Sort: alphabetical by brand, native cards before via cards within a brand,
