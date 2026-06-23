@@ -207,6 +207,38 @@ async def test_send_raw_not_connected_raises():
         await drv.send_raw("PWR ON")
 
 
+# ── Polling: commands flagged "poll" become poll queries ───────────────────
+
+
+def test_poll_flagged_command_builds_poll_queries():
+    """A command flagged poll contributes its send string (line ending
+    included) to polling.queries; unflagged commands don't."""
+    drv, _ = _make(
+        {
+            "delimiter": "\r",
+            "commands": {
+                "get_power": {"label": "Get Power", "send": "CR0", "poll": True},
+                "power_on": {"label": "Power On", "send": "C00"},
+            },
+        }
+    )
+    assert drv._definition["polling"]["queries"] == ["CR0\r"]
+
+
+def test_no_poll_flag_no_poll_queries():
+    drv, _ = _make({"commands": {"power_on": {"send": "C00"}}})
+    assert not drv._definition.get("polling", {}).get("queries")
+
+
+def test_http_poll_flag_uses_command_name():
+    """An HTTP-style command (no send string) is polled by name, which
+    ConfigurableDriver.poll() looks up."""
+    drv, _ = _make(
+        {"commands": {"get_status": {"method": "GET", "path": "/status", "poll": True}}}
+    )
+    assert drv._definition["polling"]["queries"] == ["get_status"]
+
+
 # ── Responses: regex-free simple modes ─────────────────────────────────────
 
 

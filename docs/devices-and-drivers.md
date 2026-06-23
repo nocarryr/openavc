@@ -74,6 +74,15 @@ A response turns a reply from the device into a live value you can show on a pan
 
 The variable appears on the device right away and is usable everywhere as `$device.<id>.<name>`.
 
+### Polling for live status
+
+Most devices don't announce changes on their own. To keep a status value live (for example, the projector's real power state), you poll it: send a "get status" command on a timer and let its response rule update the variable.
+
+1. Set a **Poll Interval** (in seconds) when you add or edit the device, alongside the connection settings. 0 turns polling off.
+2. In the Commands table, check **Poll** on the commands you want sent on that interval (typically your status queries).
+
+For example, a "Get Power Status" command checked for polling, with an interval of 15, asks the device for its power state every 15 seconds, and your power response rule keeps the variable current. Leave Poll unchecked on action commands like Power On.
+
 ### Send raw
 
 Use the **Send raw** box to type a string and send it immediately, without saving it as a command. This is handy for trying a command from the manual before you add it, or for one-off diagnostics. The line ending is added automatically.

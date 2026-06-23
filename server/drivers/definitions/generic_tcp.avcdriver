@@ -45,6 +45,13 @@ config_schema:
     type: number
     default: 0.0
     label: Inter-Command Delay (sec)
+  poll_interval:
+    type: integer
+    default: 0
+    label: Poll Interval (sec)
+    description: >
+      How often to send the commands you mark "Poll" in Commands & Responses,
+      to keep status values live. 0 disables polling.
 
 # Commands, responses, and state variables are authored per-device in the
 # Commands & Responses editor and stored in the device config.

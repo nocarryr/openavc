@@ -291,6 +291,24 @@ class ConfigurableDriver(BaseDriver):
         derived_vars = _derive_state_vars_from_responses(merged_responses)
         merged_state_vars = {**file_state_vars, **derived_vars, **norm_state_vars}
 
+        # Commands the editor flagged "poll" are sent on the device's
+        # poll_interval to keep status values live (the device must be polled —
+        # most AV gear doesn't push). For a byte-stream command the query is the
+        # send string (line ending included); an HTTP/OSC command has no send
+        # string, so its name is used (poll() looks the name up). Appended after
+        # any file-defined poll queries.
+        poll_queries = [
+            cmd["send"] if isinstance(cmd.get("send"), str) else name
+            for name, cmd in norm_commands.items()
+            if cmd.get("poll")
+        ]
+        if poll_queries:
+            file_polling = merged.get("polling") or {}
+            merged["polling"] = {
+                **file_polling,
+                "queries": list(file_polling.get("queries", [])) + poll_queries,
+            }
+
         merged["commands"] = merged_commands
         merged["responses"] = merged_responses
         merged["state_variables"] = merged_state_vars

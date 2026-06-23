@@ -100,6 +100,13 @@ config_schema:
     type: number
     default: 10.0
     label: Request Timeout (sec)
+  poll_interval:
+    type: integer
+    default: 0
+    label: Poll Interval (sec)
+    description: >
+      How often to send the commands you mark "Poll" in Commands & Responses,
+      to keep status values live. 0 disables polling.
 
 # No built-in state variables — user adds device-specific ones
 state_variables: {}

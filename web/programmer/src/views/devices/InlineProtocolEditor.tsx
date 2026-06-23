@@ -22,6 +22,7 @@ type CommandRow = {
   method: string;
   path: string;
   body: string;
+  poll: boolean;
 };
 
 type RespMode = "contains" | "prefix_number" | "prefix_text" | "regex";
@@ -75,6 +76,7 @@ function parseCommands(raw: unknown): CommandRow[] {
       method: String(d.method ?? "GET").toUpperCase(),
       path: String(d.path ?? ""),
       body: String(d.body ?? ""),
+      poll: d.poll === true,
     };
   });
 }
@@ -132,9 +134,10 @@ function buildCommandsMap(
         method: r.method || "GET",
         path: r.path || "/",
         ...(r.body.trim() ? { body: r.body } : {}),
+        ...(r.poll ? { poll: true } : {}),
       };
     } else {
-      map[n] = { label: r.label || n, send: r.send };
+      map[n] = { label: r.label || n, send: r.send, ...(r.poll ? { poll: true } : {}) };
     }
   }
   return { map, names };
@@ -289,6 +292,7 @@ export function InlineProtocolEditor({
         method: "GET",
         path: "",
         body: "",
+        poll: false,
       },
     ]);
     touch();
@@ -353,6 +357,7 @@ export function InlineProtocolEditor({
         method: "GET",
         path: "",
         body: "",
+        poll: false,
       });
     }
     if (added.length) {
@@ -546,8 +551,8 @@ export function InlineProtocolEditor({
                 style={{
                   display: "grid",
                   gridTemplateColumns: isHttp
-                    ? "1.2fr 0.8fr 1.5fr 1.5fr auto"
-                    : "1fr 1.4fr 1.6fr auto",
+                    ? "1.2fr 0.8fr 1.5fr 1.5fr auto auto"
+                    : "1fr 1.4fr 1.6fr auto auto",
                   gap: "var(--space-sm)",
                   alignItems: "end",
                 }}
@@ -626,6 +631,16 @@ export function InlineProtocolEditor({
                     </div>
                   </>
                 )}
+                <div style={{ textAlign: "center" }}>
+                  <div style={cellLabel}>Poll</div>
+                  <input
+                    type="checkbox"
+                    checked={r.poll}
+                    onChange={(e) => setCommand(r.key, { poll: e.target.checked })}
+                    title="Send this command repeatedly on the device's poll interval (for status queries)"
+                    style={{ marginBottom: 8 }}
+                  />
+                </div>
                 <button
                   onClick={() => removeCommand(r.key)}
                   style={{ ...iconBtn, background: "transparent", border: "none", color: "var(--text-muted)" }}
@@ -635,6 +650,14 @@ export function InlineProtocolEditor({
                 </button>
               </div>
             ))}
+          </div>
+        )}
+
+        {commandRows.some((r) => r.poll) && (
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: "var(--space-sm)" }}>
+            Polled commands send on the device's <strong>Poll Interval</strong> — set it
+            when you add or edit the device (next to the connection settings). If it's 0,
+            polling is off.
           </div>
         )}
 
