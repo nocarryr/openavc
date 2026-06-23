@@ -11,6 +11,7 @@ import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins
 import { findDeviceReferences, validateSettingValue } from "./deviceUtils";
 import { ChildEntities } from "./ChildEntities";
 import { QuickActions } from "./QuickActions";
+import { InlineProtocolEditor } from "./InlineProtocolEditor";
 
 export function DeviceDetail({
   deviceId,
@@ -711,6 +712,18 @@ export function DeviceDetail({
 
       {/* Device Settings */}
       <DeviceSettingsSection deviceId={deviceId} connected={connected} />
+
+      {/* Commands & Responses — no-code protocol editor for the generic devices
+          (driver opts in via DRIVER_INFO.inline_protocol). Writes commands /
+          responses / state_variables into the device config. */}
+      {deviceInfo?.driver_info?.inline_protocol === true && (
+        <InlineProtocolEditor
+          deviceId={deviceId}
+          driverInfo={deviceInfo.driver_info as Record<string, unknown>}
+          connected={connected}
+          onSaved={refetchDeviceInfo}
+        />
+      )}
 
       {/* Send Command */}
       <div style={sectionStyle}>

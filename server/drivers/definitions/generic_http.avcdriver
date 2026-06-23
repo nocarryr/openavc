@@ -1,17 +1,12 @@
 # Generic HTTP/REST Device Driver
-# Use this as a template for any device that exposes a REST API.
 #
-# Many modern AV devices have HTTP APIs:
-#   - Panasonic PTZ cameras (CGI-based control)
-#   - Sony Bravia displays (REST API)
-#   - Crestron DM NVX endpoints
-#   - Barco ClickShare
-#   - Zoom Rooms (local REST API)
-#   - QSC Q-SYS (HTTP API)
-#   - Shure MXA microphones
-#   - Biamp Tesira (REST alongside serial)
+# Control any device with an HTTP/REST API — no driver file needed. Add the
+# device, then define its commands (method / path / body) and responses on the
+# device page (Commands & Responses). Many modern AV devices have HTTP APIs:
+# Panasonic PTZ cameras, Sony Bravia displays, Crestron DM NVX, Barco
+# ClickShare, Zoom Rooms, QSC Q-SYS, Shure MXA, Biamp Tesira (REST).
 #
-# Commands use method/path/body instead of raw protocol strings:
+# HTTP commands use method/path/body instead of raw protocol strings:
 #   method: GET, POST, PUT, DELETE (default: GET)
 #   path:   URL path (e.g., "/api/power")
 #   body:   JSON body string (optional, for POST/PUT)
@@ -24,10 +19,14 @@ category: utility
 version: 1.0.0
 author: OpenAVC
 description: >
-  Template driver for HTTP/REST-controlled devices. Supports JSON APIs
-  with configurable authentication (none, basic, bearer, API key, digest)
-  and optional HTTPS with self-signed certificate support.
+  Control any HTTP/REST device. Define commands and responses on the device
+  page — no driver file needed. Supports configurable authentication (none,
+  basic, bearer, API key, digest) and optional HTTPS with self-signed certs.
 transport: http
+
+# Enables the device-page Commands & Responses editor (commands / responses /
+# state_variables are read from the device config and merged into this driver).
+inline_protocol: true
 
 default_config:
   host: ""

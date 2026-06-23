@@ -35,6 +35,49 @@ After adding a device, click it in the device list to open the detail panel:
 
 Always test commands here before using them in macros. This confirms the device is responding and the driver is parsing responses correctly.
 
+## No-Code Commands and Responses
+
+Some devices don't have a dedicated driver yet but speak a simple text protocol you can read from their manual. For these, add one of the **Generic** devices and define its commands and responses right on the device page. No driver file required.
+
+The Generic devices are:
+
+- **Generic TCP Device**: any networked device with a text protocol.
+- **Generic Serial Device**: any RS-232/RS-485 device, directly on a serial port or [through a bridge](connecting-through-a-bridge.md).
+- **Generic HTTP/REST Device**: any device with an HTTP API.
+
+After adding a Generic device, open it and find the **Commands & Responses** section.
+
+### Commands
+
+Each command is a button you can fire from the device, use in a macro, or call from a script. Add a row for each one:
+
+- **Label**: the friendly name (for example, "Power On").
+- **ID**: the short name used in macros and scripts. It fills in automatically from the label.
+- **Send**: the exact string the device expects (for example, `PWR ON`).
+
+Set the **Line ending** once (CR, LF, or CRLF). It is added to every command, so you don't type it on each row, and it is used to split incoming replies.
+
+To enter a value when you fire a command, put a placeholder in curly braces. `VOL {level}` creates a command that asks for a level and sends `VOL 42`.
+
+For HTTP devices, a command is a method, a path, and an optional JSON body instead of a single string.
+
+**Pasting a list**: click **Paste** and enter one command per line as `Label = string to send`. This fills the table quickly when you're copying a handful of commands out of a manual.
+
+### Responses
+
+A response turns a reply from the device into a live value you can show on a panel or react to in a macro or trigger. Add a row, pick what the reply looks like, and name the variable to set:
+
+- **Contains text**: when the reply contains a fixed string, set the variable to a fixed value. A reply containing `PWR ON` sets `power` to `on`. Add one row per state.
+- **Has a number after**: grab the number that follows a prefix. `VOL=42` sets `volume` to `42`.
+- **Has text after**: grab the rest of the line after a prefix. `NAME=Main Stage` sets `name` to `Main Stage`.
+- **Matches (advanced)**: for anything else, write a regular expression and pick the capture group.
+
+The variable appears on the device right away and is usable everywhere as `$device.<id>.<name>`.
+
+### Send raw
+
+Use the **Send raw** box to type a string and send it immediately, without saving it as a command. This is handy for trying a command from the manual before you add it, or for one-off diagnostics. The line ending is added automatically.
+
 ## Quick Actions
 
 Some drivers promote the commands you reach for most to a row of **Quick Action** buttons at the top of the device detail panel, so you don't have to hunt through the full Send Command list. A button either fires its command immediately, opens a short dialog when the command needs values, or asks you to confirm first (for anything disruptive, like a reboot). The full Send Command list below still contains everything.

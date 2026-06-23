@@ -131,13 +131,10 @@ def get_driver_registry() -> list[dict[str, Any]]:
 
 def _load_builtin_drivers() -> None:
     """Import and register all built-in and community drivers."""
-    # GenericTCP is a built-in utility driver — always imported directly
-    from server.drivers.generic_tcp import GenericTCPDriver
-
-    register_driver(GenericTCPDriver)
-
     # Load .avcdriver YAML definitions and .py Python drivers from
-    # both the built-in definitions directory and driver_repo/
+    # both the built-in definitions directory and driver_repo/. The generic
+    # devices (generic_tcp / generic_serial / generic_http) ship as
+    # .avcdriver definitions in the built-in definitions directory.
     from server.drivers.driver_loader import load_all_drivers
     from server.system_config import DRIVER_DEFINITIONS_DIR, DRIVER_REPO_DIR
 

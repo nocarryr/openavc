@@ -1,6 +1,10 @@
 # Generic Serial Device Driver
-# Use this as a template for any RS-232/RS-485 controlled device.
-# Define your commands in the device config after adding the device.
+#
+# Control any RS-232/RS-485 device with a text protocol — directly on a serial
+# port or through an IP-to-serial bridge (e.g. a Global Caché iTach). Add the
+# device, then define its commands and responses with the friendly tables on
+# the device page (Commands & Responses). The line ending you choose there is
+# appended to every command automatically, so commands don't need a literal \r.
 
 id: generic_serial
 name: Generic Serial Device
@@ -9,10 +13,16 @@ category: utility
 version: 1.0.0
 author: OpenAVC
 description: >
-  Send raw serial commands to any RS-232/RS-485 device.
-  Define commands in the device config.
+  Control any RS-232/RS-485 device with a text protocol. Define commands and
+  responses on the device page — no driver file needed.
 transport: serial
-delimiter: "\r"
+
+# Enables the device-page Commands & Responses editor (commands / responses /
+# state_variables are read from the device config and merged into this driver).
+# The line ending lives in the device config (default_config.delimiter) so the
+# editor's Line Ending control drives both command terminators and reply
+# framing.
+inline_protocol: true
 
 default_config:
   port: ""
@@ -20,6 +30,7 @@ default_config:
   parity: "N"
   bytesize: 8
   stopbits: 1
+  delimiter: "\r"
   inter_command_delay: 0.1
   poll_interval: 0
 

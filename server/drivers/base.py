@@ -704,6 +704,32 @@ class BaseDriver(ABC):
         # Default
         return b"\r"
 
+    async def send_raw(self, data: str) -> None:
+        """Send a raw command string to the device immediately.
+
+        Encodes escape sequences (so a typed ``\\r`` becomes a CR) and appends
+        the device's line terminator unless the string already ends with it —
+        matching how saved commands are sent. Used by the device page's
+        "Send raw" box for quick one-offs and diagnostics; works on any
+        byte-stream transport (TCP / serial / UDP), not request/response HTTP.
+        """
+        from server.transport.binary_helpers import encode_escape_sequences
+
+        if not self.transport or not getattr(self.transport, "connected", False):
+            raise ConnectionError(f"[{self.device_id}] Not connected")
+        send = getattr(self.transport, "send", None)
+        if send is None:
+            raise NotImplementedError(
+                f"[{self.device_id}] this device's transport does not support "
+                f"raw send"
+            )
+        payload = encode_escape_sequences(str(data))
+        delim = self._resolve_delimiter()
+        if delim and not payload.endswith(delim):
+            payload += delim
+        await send(payload)
+        log.debug(f"[{self.device_id}] Sent raw: {payload!r}")
+
     async def _verify_reachable(
         self, host: str, port: int, timeout: float = 3.0
     ) -> bool:

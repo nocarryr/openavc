@@ -13,6 +13,14 @@ class CommandRequest(BaseModel):
     params: dict[str, Any] = {}
 
 
+class RawSendRequest(BaseModel):
+    """Body for ``POST /api/devices/{id}/send-raw`` — the device-page
+    "Send raw" box. ``data`` is the literal command string; the driver encodes
+    escape sequences and appends the device's line terminator on send."""
+
+    data: str
+
+
 class ActionInvokeRequest(BaseModel):
     """Body for ``POST /api/devices/{id}/actions/{action_id}``.
 

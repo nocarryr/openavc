@@ -1,0 +1,54 @@
+# Generic TCP Device Driver
+#
+# Send raw TCP commands to any device that speaks a text protocol, and turn its
+# replies into live state values — no driver file required. Add the device,
+# then define its commands and responses with the friendly tables on the device
+# page (Commands & Responses). The line ending you set below is appended to
+# every command automatically, so individual commands don't need a literal \r.
+
+id: generic_tcp
+name: Generic TCP Device
+manufacturer: Generic
+category: utility
+version: 1.0.0
+author: OpenAVC
+description: >
+  Control any TCP device with a text protocol. Define commands and responses
+  on the device page — no driver file needed.
+transport: tcp
+
+# Enables the device-page Commands & Responses editor (commands / responses /
+# state_variables are read from the device config and merged into this driver).
+# The line ending lives in the device config (default_config.delimiter) so the
+# editor's Line Ending control drives both command terminators and reply
+# framing.
+inline_protocol: true
+
+default_config:
+  host: ""
+  port: 23
+  delimiter: "\r\n"
+  inter_command_delay: 0.0
+  poll_interval: 0
+
+config_schema:
+  host:
+    type: string
+    required: true
+    label: IP Address
+    description: "Device IP address or hostname."
+  port:
+    type: integer
+    default: 23
+    label: Port
+  inter_command_delay:
+    type: number
+    default: 0.0
+    label: Inter-Command Delay (sec)
+
+# Commands, responses, and state variables are authored per-device in the
+# Commands & Responses editor and stored in the device config.
+state_variables: {}
+commands: {}
+responses: []
+polling: {}

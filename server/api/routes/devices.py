@@ -15,6 +15,7 @@ from server.api.models import (
     DeviceUpdateRequest,
     InstallMissingDriversRequest,
     PendingSettingsRequest,
+    RawSendRequest,
 )
 from server.core.project_loader import ChildEntityConfig, DeviceConfig, save_project
 from server.core.project_migration import CONNECTION_FIELDS
@@ -431,6 +432,38 @@ async def send_command(device_id: str, body: CommandRequest) -> dict[str, Any]:
         raise _api_error(503, f"Device '{device_id}' is not connected", e)
     except Exception as e:
         raise _api_error(500, f"Failed to send command '{body.command}' to device '{device_id}'", e)
+
+
+@router.post("/devices/{device_id}/send-raw")
+async def send_raw(device_id: str, body: RawSendRequest) -> dict[str, Any]:
+    """Send a raw command string to a device immediately (one-off / diagnostics).
+
+    Backs the device page's "Send raw" box. The driver encodes escape sequences
+    and appends the device's line terminator, so the user types the command as
+    they would in a saved row.
+    """
+    engine = _get_engine()
+    driver = engine.devices.get_driver(device_id)
+    if driver is None:
+        raise _api_error(
+            404,
+            f"Device '{device_id}' not found or has no live driver "
+            f"(orphaned or disabled)",
+            ValueError(device_id),
+        )
+    try:
+        await driver.send_raw(body.data)
+        return {"status": "sent", "device_id": device_id}
+    except ConnectionError as e:
+        raise _api_error(503, f"Device '{device_id}' is not connected", e)
+    except NotImplementedError as e:
+        raise _api_error(
+            422, f"Device '{device_id}' does not support raw send", e
+        )
+    except Exception as e:
+        raise _api_error(
+            500, f"Failed to send raw data to device '{device_id}'", e
+        )
 
 
 # --- Device Actions (Quick Action strip) ---

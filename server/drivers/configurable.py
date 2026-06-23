@@ -88,6 +88,244 @@ def _warn_legacy_keys_in_definition(driver_def: dict[str, Any]) -> None:
             break
 
 
+def _build_commands_meta(commands_def: dict[str, Any]) -> dict[str, Any]:
+    """Build the DRIVER_INFO ``commands`` UI metadata from a commands map.
+
+    Shared by the driver-class factory (file-authored commands) and the
+    per-instance inline-protocol merge (device-config-authored commands) so
+    both present identically in the IDE — same label, params, and
+    transport-specific fields (HTTP method/path/body, OSC address/args).
+    """
+    commands_meta: dict[str, Any] = {}
+    for cmd_name, cmd_def in (commands_def or {}).items():
+        if not isinstance(cmd_def, dict):
+            continue
+        cmd_meta: dict[str, Any] = {
+            "label": cmd_def.get("label", cmd_name),
+            "params": cmd_def.get("params", {}),
+        }
+        for key in ("method", "path", "body", "address", "args", "help"):
+            if key in cmd_def:
+                cmd_meta[key] = cmd_def[key]
+        commands_meta[cmd_name] = cmd_meta
+    return commands_meta
+
+
+# ── Inline protocol (no-code device commands + responses) ──────────────────
+# A generic device can carry its own commands / responses / state_variables in
+# its project-file config; these are merged over the (usually empty) file
+# definition at driver init so the existing ConfigurableDriver engine runs a
+# config-authored protocol. The helpers below coerce the friendly,
+# possibly-hand-or-AI-authored config shapes into the engine's canonical forms.
+
+# Capture pattern for the "after a prefix, take the number" response mode:
+# optional sign, integer part, optional decimal part. Matches 42, -3, 21.5 —
+# the shapes AV gear reports for volume/levels/counts.
+_NUMBER_CAPTURE = r"(-?\d+(?:\.\d+)?)"
+
+
+def _as_dict(raw: Any) -> dict[str, Any]:
+    """Coerce a config value that should be a dict.
+
+    Accepts a dict, or a JSON object string (hand- or AI-edited configs
+    sometimes store the map as text). Anything else → ``{}`` so a malformed
+    value degrades to "no inline protocol" instead of crashing driver init.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _as_list(raw: Any) -> list[Any]:
+    """Coerce a config value that should be a list (dict/JSON-string tolerant)."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _normalize_config_commands(raw: Any, line_ending: str = "") -> dict[str, Any]:
+    """Normalize device-config ``commands`` into the canonical command map.
+
+    Tolerates the flat ``{name: "raw string"}`` shape (what the legacy Generic
+    TCP driver used) by promoting a string value to ``{"send": <string>}``, so
+    a migrated config and the friendly editor produce identical runtime
+    behavior.
+
+    ``line_ending`` is the device's shared line terminator (the ``delimiter``
+    config). When set, it is appended to every send-style command so the user
+    authors clean strings and never types ``\\r`` per row. HTTP/OSC commands
+    (``path`` / ``method`` / ``address``) carry no send string and are left
+    untouched.
+    """
+    out: dict[str, Any] = {}
+    for name, val in _as_dict(raw).items():
+        if isinstance(val, str):
+            cmd: dict[str, Any] = {"send": val}
+        elif isinstance(val, dict):
+            cmd = dict(val)  # copy so the line-ending append never mutates config
+        else:
+            log.warning(
+                "inline command %r has an unsupported shape (%s); skipped",
+                name, type(val).__name__,
+            )
+            continue
+        send = cmd.get("send")
+        if line_ending and isinstance(send, str) and not send.endswith(line_ending):
+            cmd["send"] = send + line_ending
+        out[str(name)] = cmd
+    return out
+
+
+def _derive_command_params(
+    send: str, config_keys: set[str], existing: Any,
+) -> dict[str, Any]:
+    """Auto-declare a string param for each ``{placeholder}`` in a send string.
+
+    So a friendly-editor command like ``VOL {level}`` prompts for ``level`` in
+    the Send Command card and substitutes it at send time — without the user
+    authoring a params table. Placeholders that name a config field (e.g.
+    ``{host}``) are skipped: those resolve from config, not a prompt. Explicit
+    params already declared on the command are preserved.
+    """
+    params: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    for ph in re.findall(r"\{(\w+)(?::[^{}]*)?\}", send):
+        if ph in config_keys or ph in params:
+            continue
+        params[ph] = {"type": "string"}
+    return params
+
+
+def _normalize_config_state_vars(raw: Any) -> dict[str, Any]:
+    """Normalize device-config ``state_variables`` into the canonical schema.
+
+    Accepts a ``{name: {type: ...}}`` map or a ``{name: "type"}`` shorthand.
+    """
+    out: dict[str, Any] = {}
+    for name, val in _as_dict(raw).items():
+        if isinstance(val, dict):
+            out[str(name)] = val
+        elif isinstance(val, str):
+            out[str(name)] = {"type": val}
+    return out
+
+
+def _normalize_one_response(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Translate one friendly response row into the engine's canonical
+    ``{match, mappings}`` shape.
+
+    Regex-free modes, keyed by ``mode``:
+      - ``contains``:      reply contains ``text`` → set ``state`` = ``value``
+      - ``prefix_number``: number after ``prefix`` → ``state`` (numeric)
+      - ``prefix_text``:   text after ``prefix`` (rest of line) → ``state``
+      - ``regex``:         raw ``pattern`` + capture ``group`` → ``state``
+
+    A row already in canonical form (carrying ``mappings`` or set-shorthand
+    ``set``) passes straight through, so hand- or AI-authored configs and the
+    file definition keep working unchanged. Returns ``None`` for an
+    unrecognized / incomplete row (skipped by the caller).
+    """
+    # Already canonical (detailed mappings or set-shorthand) — trust the engine.
+    if "mappings" in entry or "set" in entry:
+        return entry
+
+    mode = entry.get("mode")
+    state = entry.get("state")
+    vtype = entry.get("type") or "string"
+
+    # Infer the mode when omitted (hand/AI-authored rows) from whichever
+    # friendly field is present. The frontend always writes an explicit mode.
+    if not mode:
+        if "contains" in entry or "text" in entry:
+            mode = "contains"
+        elif "after" in entry or "prefix" in entry:
+            mode = "prefix_number" if entry.get("number") else "prefix_text"
+        elif "pattern" in entry or "match" in entry:
+            mode = "regex"
+
+    if mode == "contains":
+        text = entry.get("text") or entry.get("contains")
+        if not text or not state:
+            return None
+        return {
+            "match": re.escape(str(text)),
+            "mappings": [
+                {"state": str(state), "value": entry.get("value", ""), "type": vtype}
+            ],
+        }
+
+    if mode in ("prefix_number", "prefix_text"):
+        prefix = entry.get("prefix", entry.get("after", ""))
+        if not state:
+            return None
+        if mode == "prefix_number":
+            capture = _NUMBER_CAPTURE
+            rtype = entry.get("type") or "number"
+        else:
+            capture = r"(.+)"
+            rtype = entry.get("type") or "string"
+        return {
+            "match": re.escape(str(prefix)) + capture,
+            "mappings": [{"group": 1, "state": str(state), "type": rtype}],
+        }
+
+    if mode == "regex":
+        pattern = entry.get("pattern") or entry.get("match")
+        if not pattern or not state:
+            return None
+        mapping: dict[str, Any] = {
+            "group": int(entry.get("group", 1)), "state": str(state), "type": vtype,
+        }
+        if isinstance(entry.get("map"), dict):
+            mapping["map"] = entry["map"]
+        return {"match": str(pattern), "mappings": [mapping]}
+
+    return None
+
+
+def _normalize_config_responses(raw: Any) -> list[dict[str, Any]]:
+    """Normalize a device-config ``responses`` list into canonical entries."""
+    out: list[dict[str, Any]] = []
+    for entry in _as_list(raw):
+        if not isinstance(entry, dict):
+            continue
+        canon = _normalize_one_response(entry)
+        if canon is not None:
+            out.append(canon)
+    return out
+
+
+def _derive_state_vars_from_responses(
+    responses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Auto-declare a state variable for every ``state`` a response writes.
+
+    So the var seeds an initial value and shows on the device card before the
+    first matching reply arrives. Explicit ``state_variables`` config wins over
+    these derived defaults.
+    """
+    out: dict[str, Any] = {}
+    for resp in responses:
+        for m in resp.get("mappings", []):
+            if not isinstance(m, dict):
+                continue
+            s = m.get("state")
+            if s and str(s) not in out:
+                out[str(s)] = {"type": m.get("type", "string")}
+    return out
+
+
 class ConfigurableDriver(BaseDriver):
     """
     A driver that interprets a JSON driver definition at runtime.
@@ -109,6 +347,13 @@ class ConfigurableDriver(BaseDriver):
         # _definition is set on the class by the factory function
         self._definition: dict[str, Any] = getattr(self.__class__, "_definition", {})
         super().__init__(*args, **kwargs)
+
+        # Inline protocol: merge any commands / responses / state_variables the
+        # device authored in its project-file config over the file definition,
+        # producing a per-instance _definition + DRIVER_INFO. Runs before the
+        # response compile + derived-config below so the config-authored
+        # responses are compiled and config commands are visible to the IDE.
+        self._merge_config_protocol()
 
         # Compute declarative derived config values (e.g. an optional address
         # prefix) into self.config, so every downstream substitution path —
@@ -191,6 +436,84 @@ class ConfigurableDriver(BaseDriver):
                     f"[{self.device_id}] Invalid response pattern "
                     f"'{resp.get('match', resp.get('pattern', ''))}': {e}"
                 )
+
+    def _merge_config_protocol(self) -> None:
+        """Merge device-config-authored ``commands`` / ``responses`` /
+        ``state_variables`` over the file definition (the inline-protocol
+        feature) into a per-instance ``_definition`` and ``DRIVER_INFO``.
+
+        Config *extends/overrides* the file: commands merge by name (config
+        wins), responses append after the file's (so a file driver's base
+        behavior still matches first — first-match-wins), and state variables
+        merge (explicit config + those auto-derived from the responses). A
+        no-op when the device authors none of the three keys, so file-only
+        drivers keep sharing the immutable class definition unchanged.
+
+        The per-instance ``DRIVER_INFO`` shadow is what surfaces config
+        commands + state vars to the device page (``get_device_info`` reads the
+        live instance), the macro command picker, and state-var seeding — the
+        class attribute is shared across every device of this driver type, so
+        a per-device protocol must not write to it.
+        """
+        # The shared line terminator: the device's configured delimiter, else
+        # the driver default (DRIVER_INFO/def). Appended to each send command
+        # so commands authored in the editor don't each need a literal \r.
+        line_ending = self.config.get("delimiter")
+        if not line_ending:
+            line_ending = self.DRIVER_INFO.get("delimiter") or self._definition.get(
+                "delimiter", ""
+            )
+
+        norm_commands = _normalize_config_commands(
+            self.config.get("commands"), line_ending
+        )
+        norm_responses = _normalize_config_responses(self.config.get("responses"))
+        norm_state_vars = _normalize_config_state_vars(
+            self.config.get("state_variables")
+        )
+
+        if not (norm_commands or norm_responses or norm_state_vars):
+            return
+
+        # Auto-declare params for {placeholder} tokens so parameterized commands
+        # prompt in the Send Command card. config_keys are excluded — a {host}
+        # token resolves from config, not a prompt. Scans the send string
+        # (byte-stream) plus path/body (HTTP) where placeholders can appear.
+        config_keys = set(self.config.keys())
+        for cmd in norm_commands.values():
+            ph_src = " ".join(
+                str(cmd[f]) for f in ("send", "path", "body") if isinstance(cmd.get(f), str)
+            )
+            if "{" in ph_src:
+                cmd["params"] = _derive_command_params(
+                    ph_src, config_keys, cmd.get("params")
+                )
+
+        merged = dict(self._definition)
+        file_commands = merged.get("commands") or {}
+        file_responses = merged.get("responses") or []
+        file_state_vars = merged.get("state_variables") or {}
+
+        merged_commands = {**file_commands, **norm_commands}
+        merged_responses = list(file_responses) + norm_responses
+        derived_vars = _derive_state_vars_from_responses(merged_responses)
+        merged_state_vars = {**file_state_vars, **derived_vars, **norm_state_vars}
+
+        merged["commands"] = merged_commands
+        merged["responses"] = merged_responses
+        merged["state_variables"] = merged_state_vars
+        self._definition = merged
+
+        info = dict(self.DRIVER_INFO)
+        info["commands"] = _build_commands_meta(merged_commands)
+        info["state_variables"] = merged_state_vars
+        self.DRIVER_INFO = info
+
+        # Re-seed state variables now that the config-added ones exist.
+        # super().__init__() already seeded the file vars; re-seeding pre-poll
+        # is harmless (same defaults) and gives the new vars an initial value
+        # so they appear on the device card before the first matching reply.
+        self._init_state_variables()
 
     def _compute_derived_config(self) -> None:
         """Populate self.config with values derived from other config fields.
@@ -1304,36 +1627,22 @@ def create_configurable_driver_class(
     if "transports" in driver_def:
         driver_info["transports"] = driver_def["transports"]
 
+    # Copy the inline-protocol opt-in. When true, the device page surfaces the
+    # friendly Commands & Responses editor that writes commands / responses /
+    # state_variables into the device config (the generic drivers set it).
+    if "inline_protocol" in driver_def:
+        driver_info["inline_protocol"] = driver_def["inline_protocol"]
+
     # Copy help from each state variable
     state_vars = driver_info.get("state_variables", {})
     for var_name, var_def in state_vars.items():
         if isinstance(var_def, dict) and "help" in var_def:
             state_vars[var_name] = {**var_def}
 
-    # Build commands metadata for DRIVER_INFO
-    commands_meta: dict[str, Any] = {}
-    for cmd_name, cmd_def in driver_def.get("commands", {}).items():
-        cmd_meta: dict[str, Any] = {
-            "label": cmd_def.get("label", cmd_name),
-            "params": cmd_def.get("params", {}),
-        }
-        # Include HTTP-specific fields if present (for Driver Builder UI)
-        if "method" in cmd_def:
-            cmd_meta["method"] = cmd_def["method"]
-        if "path" in cmd_def:
-            cmd_meta["path"] = cmd_def["path"]
-        if "body" in cmd_def:
-            cmd_meta["body"] = cmd_def["body"]
-        # Include OSC-specific fields
-        if "address" in cmd_def:
-            cmd_meta["address"] = cmd_def["address"]
-        if "args" in cmd_def:
-            cmd_meta["args"] = cmd_def["args"]
-        # Copy help from command definition
-        if "help" in cmd_def:
-            cmd_meta["help"] = cmd_def["help"]
-        commands_meta[cmd_name] = cmd_meta
-    driver_info["commands"] = commands_meta
+    # Build commands metadata for DRIVER_INFO (shared with the inline-protocol
+    # per-instance merge so file- and config-authored commands look identical
+    # in the IDE).
+    driver_info["commands"] = _build_commands_meta(driver_def.get("commands", {}))
 
     # Copy the Quick Action declarations (promoted-command buttons + setup
     # wizards). Stored raw on DRIVER_INFO; resolve_device_actions folds

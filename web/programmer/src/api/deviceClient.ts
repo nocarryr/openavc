@@ -29,6 +29,16 @@ export async function sendCommand(
   });
 }
 
+export async function sendRaw(
+  deviceId: string,
+  data: string
+): Promise<{ status: string; device_id: string }> {
+  return request(`/devices/${deviceId}/send-raw`, {
+    method: "POST",
+    body: JSON.stringify({ data }),
+  });
+}
+
 export async function invokeDeviceAction(
   deviceId: string,
   actionId: string,
