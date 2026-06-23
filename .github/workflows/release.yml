@@ -53,9 +53,21 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
+      - uses: actions/checkout@v4
       - id: ver
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
+          # Fail the release if the tag and the bundled pyproject version
+          # disagree. The installer filename/AppVersion is named from the tag,
+          # but the running server reports pyproject's [project].version
+          # (version.py -> /api/health, tray tooltip, system.version, cloud), so
+          # a mismatch ships a build whose advertised version differs from what
+          # it reports. get-version.py is the same reader the installer uses.
+          PYPROJECT_VERSION=$(python3 installer/get-version.py)
+          if [ "$TAG" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Release tag v$TAG does not match pyproject.toml version $PYPROJECT_VERSION. Bump pyproject.toml to $TAG (or fix the tag) and re-release."
+            exit 1
+          fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           if [[ "$TAG" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
@@ -414,10 +426,12 @@ jobs:
       - name: Notify Discord
         if: ${{ needs.version.outputs.prerelease == 'false' }}
         run: |
-          NOTES=$(jq -Rs . < .github/RELEASE_NOTES.md)
           DOWNLOAD_URL="https://openavc.com/download"
-          EMBED_DESC=$(echo "$NOTES" | jq -r '.' | head -c 4000)
-          EMBED_DESC_JSON=$(echo "$EMBED_DESC" | jq -Rs '.')
+          # Character-aware truncation: jq -Rs reads the file as one raw string
+          # and .[0:4000] slices by codepoint, so we never cut a multibyte UTF-8
+          # char mid-sequence (head -c truncates by bytes and can emit invalid
+          # UTF-8 that breaks the JSON). One encode pass, no decode/re-encode.
+          EMBED_DESC_JSON=$(jq -Rs '.[0:4000]' < .github/RELEASE_NOTES.md)
           jq -n --arg title "OpenAVC v${VERSION} Released" \
                 --arg url "$DOWNLOAD_URL" \
                 --argjson color 5682323 \
