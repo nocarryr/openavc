@@ -157,6 +157,8 @@ def _normalize_one_response(entry: dict[str, Any]) -> dict[str, Any] | None:
             mode = "contains"
         elif "after" in entry or "prefix" in entry:
             mode = "prefix_number" if entry.get("number") else "prefix_text"
+        elif "json" in entry or "field" in entry:
+            mode = "json"
         elif "pattern" in entry or "match" in entry:
             mode = "regex"
 
@@ -197,6 +199,19 @@ def _normalize_one_response(entry: dict[str, Any]) -> dict[str, Any] | None:
             mapping["map"] = entry["map"]
         return {"match": str(pattern), "mappings": [mapping]}
 
+    if mode == "json":
+        # Pull one field out of a JSON-object body by key (dot path allowed).
+        # One row = one field; multiple json rows are additive at runtime, so
+        # several fields from the same response body each populate. The engine
+        # parses the whole body once and never stops at the first match.
+        key = entry.get("key") or entry.get("field")
+        if not key or not state:
+            return None
+        spec: dict[str, Any] = {"key": str(key), "type": vtype}
+        if isinstance(entry.get("map"), dict):
+            spec["map"] = entry["map"]
+        return {"json": True, "set": {str(state): spec}}
+
     return None
 
 
@@ -229,4 +244,13 @@ def _derive_state_vars_from_responses(
             s = m.get("state")
             if s and str(s) not in out:
                 out[str(s)] = {"type": m.get("type", "string")}
+        # Set-shorthand rows (incl. json: true) name their state vars as the
+        # keys of `set`; seed those too so the var shows before the first reply.
+        set_map = resp.get("set")
+        if isinstance(set_map, dict):
+            for state_key, spec in set_map.items():
+                if str(state_key) in out:
+                    continue
+                vtype = spec.get("type", "string") if isinstance(spec, dict) else "string"
+                out[str(state_key)] = {"type": vtype}
     return out

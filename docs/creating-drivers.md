@@ -693,6 +693,20 @@ The shorthand `set` format is recommended (cleaner, matches community driver con
 
 Responses are checked in order. The first matching pattern wins.
 
+**Reading many fields from one JSON reply.** A regex response stops at the first match, so it can't fill several state variables from a single JSON body. When a reply is a JSON object (common with HTTP/REST devices), use a `json: true` response instead — it parses the body once and applies every mapping:
+
+```yaml
+responses:
+  - json: true
+    set:
+      in_use:      { key: inUse, type: boolean }
+      sessions:    { key: sessions, type: integer }
+      status_text: { key: status }                  # type taken from the state variable
+      mode:        { key: video.mode, map: { "1": Extended, "2": Clone } }
+```
+
+Each `set` value is the JSON field to read: a plain key, a dot path (`video.mode`), or a `{ key, type, map }` object. Missing keys are left alone, and a key that lands on a list or object yields its length. You can add several `json: true` responses — they all run against every reply — and a body that isn't JSON falls through to your regex patterns. In the no-code Commands & Responses editor this is the "has a JSON field" response mode (one field per row).
+
 Response patterns (and the `auth` prompt regexes) are validated when the driver loads: an invalid regex, or one with nested/overlapping quantifiers that can cause catastrophic backtracking against hostile device input (for example `(.+)+`, `(a|a)+`, `(foo|foobar)*`), is rejected and the driver won't load. Anchor and bound your patterns instead.
 
 **Config values in patterns**: You can use config value placeholders like `{level_control}` in response patterns. They are resolved when the driver connects. This is useful for protocols like QSC Q-SYS where responses include user-configured control names.
@@ -1006,6 +1020,8 @@ polling:
   queries:
     - "/cgi-bin/aw_ptz?cmd=%23O&res=1"
 ```
+
+When the device answers with a JSON object instead of plain text like this, use a `json: true` response (see the `responses` entry section above) so one reply fills every state variable, rather than writing a regex per field.
 
 #### HTTP command fields
 

@@ -25,7 +25,7 @@ type CommandRow = {
   poll: boolean;
 };
 
-type RespMode = "contains" | "prefix_number" | "prefix_text" | "regex";
+type RespMode = "contains" | "prefix_number" | "prefix_text" | "regex" | "json";
 
 type ResponseRow = {
   key: string;
@@ -37,6 +37,7 @@ type ResponseRow = {
   prefix: string; // prefix_number / prefix_text
   pattern: string; // regex
   group: number; // regex
+  field: string; // json — the JSON field name (dot path allowed)
 };
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "DELETE"];
@@ -87,6 +88,7 @@ function inferMode(r: Record<string, unknown>): RespMode {
     return "contains";
   if ("after" in r || "prefix" in r)
     return r.number ? "prefix_number" : "prefix_text";
+  if ("json" in r || "field" in r) return "json";
   return "regex";
 }
 
@@ -107,6 +109,7 @@ function parseResponses(raw: unknown): ResponseRow[] {
         prefix: String(r.prefix ?? r.after ?? ""),
         pattern: String(r.pattern ?? r.match ?? ""),
         group: Number(r.group ?? 1),
+        field: String(r.field ?? ""),
       };
     });
 }
@@ -171,6 +174,14 @@ function buildResponses(rows: ResponseRow[]): unknown[] {
         prefix: r.prefix,
         state: r.state,
         type: "string",
+      });
+    } else if (r.mode === "json") {
+      if (!r.field.trim()) continue;
+      out.push({
+        mode: "json",
+        field: r.field,
+        state: r.state,
+        type: r.type || "string",
       });
     } else {
       if (!r.pattern.trim()) continue;
@@ -322,6 +333,7 @@ export function InlineProtocolEditor({
         prefix: "",
         pattern: "",
         group: 1,
+        field: "",
       },
     ]);
     touch();
@@ -733,6 +745,7 @@ export function InlineProtocolEditor({
                     <option value="contains">contains text</option>
                     <option value="prefix_number">has a number after</option>
                     <option value="prefix_text">has text after</option>
+                    <option value="json">has a JSON field</option>
                     <option value="regex">matches (advanced)</option>
                   </select>
                 </div>
@@ -781,6 +794,17 @@ export function InlineProtocolEditor({
                       />
                     </div>
                   </>
+                )}
+                {r.mode === "json" && (
+                  <div style={{ flex: "1 1 160px" }}>
+                    <div style={cellLabel}>JSON field</div>
+                    <input
+                      value={r.field}
+                      onChange={(e) => setResponse(r.key, { field: e.target.value })}
+                      placeholder="status.power"
+                      style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+                    />
+                  </div>
                 )}
 
                 <div style={{ width: 16, textAlign: "center", color: "var(--text-muted)", paddingBottom: 6 }}>

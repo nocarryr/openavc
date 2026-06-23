@@ -159,6 +159,9 @@ class ConfigurableDriver(BaseDriver):
         # 2. OSC address patterns for OSC responses
         self._compiled_responses: list[tuple[re.Pattern[str], list[dict[str, Any]]]] = []
         self._osc_responses: list[tuple[str, list[dict[str, Any]]]] = []
+        # JSON-body responses: each entry is a list of {state, key, type, map}
+        # mappings applied together from one parsed JSON object (multi-field).
+        self._json_responses: list[list[dict[str, Any]]] = []
 
         # Telnet/serial login handshake state. Active only during
         # _perform_auth_handshake() — outside that window on_data_received
@@ -179,6 +182,12 @@ class ConfigurableDriver(BaseDriver):
                 # into every instance of this driver type.
                 mappings = list(resp.get("mappings", []))
                 self._osc_responses.append((addr, mappings))
+                continue
+
+            # JSON-body response: parse the whole body once and map many keys
+            # at a time. Additive — does not change the regex first-match path.
+            if resp.get("json"):
+                self._json_responses.append(self._build_json_mappings(resp))
                 continue
 
             try:
@@ -470,9 +479,7 @@ class ConfigurableDriver(BaseDriver):
             else:
                 for raw in on_connect:
                     try:
-                        formatted = self._safe_substitute(raw, self.config) if "{" in raw else raw
-                        data = _safe_encode_escapes(formatted)
-                        await self.transport.send(data)
+                        await self._dispatch_query(raw)
                         if delay:
                             await asyncio.sleep(delay)
                     except Exception as e:
@@ -480,6 +487,35 @@ class ConfigurableDriver(BaseDriver):
 
         if saved_poll_interval > 0:
             await self.start_polling(saved_poll_interval)
+
+    async def _dispatch_query(self, query: str) -> None:
+        """Send one query string for the active (non-OSC) transport.
+
+        Shared by on_connect and poll() so the two resolve queries identically.
+        For HTTP/UDP a query that names a command runs as that command, so its
+        response goes through the matcher; any other string is a raw path /
+        payload (and an HTTP raw path's response is fed to the matcher too).
+        TCP/serial send the raw protocol string. OSC is handled by the callers.
+        """
+        transport_type = self._definition.get("transport")
+        commands = self._definition.get("commands", {})
+        if transport_type == "http":
+            if query in commands:
+                await self.send_command(query)
+            else:
+                formatted = self._safe_substitute(query, self.config) if "{" in query else query
+                response = await self.transport.get(formatted)
+                if response.text:
+                    await self.on_data_received(response.text.encode("utf-8"))
+        elif transport_type == "udp":
+            if query in commands:
+                await self.send_command(query)
+            else:
+                formatted = self._safe_substitute(query, self.config) if "{" in query else query
+                await self.transport.send(_safe_encode_escapes(formatted))
+        else:  # tcp / serial
+            formatted = self._safe_substitute(query, self.config) if "{" in query else query
+            await self.transport.send(_safe_encode_escapes(formatted))
 
     def _auth_should_run(self, auth_def: dict[str, Any]) -> bool:
         """Quick gate used by connect() to decide whether to buffer
@@ -950,6 +986,12 @@ class ConfigurableDriver(BaseDriver):
         if not text:
             return
 
+        # JSON-body responses (multi-field): parse once, apply every json rule
+        # key-scoped. Additive — if the body isn't a JSON object or none of the
+        # declared keys are present, fall through to regex matching below.
+        if self._json_responses and self._apply_json_responses(text):
+            return
+
         for pattern, mappings in self._compiled_responses:
             match = pattern.search(text)
             if match:
@@ -1116,6 +1158,112 @@ class ConfigurableDriver(BaseDriver):
             return len(obj)
         return obj
 
+    def _build_json_mappings(self, resp: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build {state, key, type, map} mappings for a ``json: true`` response.
+
+        Accepts the detailed ``mappings`` list or the friendly ``set`` map. In a
+        json rule a ``set`` value is the JSON key to read (string shorthand) or a
+        ``{key/path, type, map}`` spec — not a regex capture ref. Types default
+        to the matching state variable's declared type.
+        """
+        mappings: list[dict[str, Any]] = list(resp.get("mappings", []))
+        set_map = resp.get("set")
+        if not mappings and isinstance(set_map, dict):
+            state_vars = self._definition.get("state_variables", {})
+            for state_key, spec in set_map.items():
+                var_def = state_vars.get(state_key, {})
+                default_type = (
+                    var_def.get("type", "string") if isinstance(var_def, dict) else "string"
+                )
+                if isinstance(spec, dict):
+                    mappings.append({
+                        "state": state_key,
+                        "key": spec.get("key", spec.get("path", state_key)),
+                        "type": spec.get("type", default_type),
+                        "map": spec.get("map"),
+                    })
+                else:
+                    mappings.append({
+                        "state": state_key, "key": str(spec), "type": default_type,
+                    })
+        return mappings
+
+    def _apply_json_responses(self, text: str) -> bool:
+        """Apply all JSON-body response rules to one response/message body.
+
+        Parses ``text`` as a JSON object and, for every json rule mapping whose
+        key resolves, coerces and stores the value. Returns True if at least one
+        state was set (so the caller stops before regex matching). json rules are
+        additive: a rule whose keys are absent from this body just sets nothing.
+        """
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(obj, dict):
+            return False
+        applied = False
+        for mappings in self._json_responses:
+            for mapping in mappings:
+                state_key = mapping.get("state")
+                key = mapping.get("key")
+                if not state_key or not key:
+                    continue
+                value = self._extract_json_path(obj, key)
+                if value is _JSON_PATH_MISSING:
+                    continue
+                value_map = mapping.get("map")
+                if value_map and str(value) in value_map:
+                    coerced = self._coerce_value(
+                        str(value_map[str(value)]), mapping.get("type", "string")
+                    )
+                else:
+                    coerced = self._coerce_json_value(value, mapping.get("type", "string"))
+                self.set_state(state_key, coerced)
+                applied = True
+        if applied:
+            log.debug(
+                f"[{self.device_id}] JSON response applied "
+                f"({len(self._json_responses)} rule(s))"
+            )
+        return applied
+
+    @staticmethod
+    def _coerce_json_value(value: Any, value_type: str) -> Any:
+        """Coerce a native JSON value to the declared state type.
+
+        Unlike ``_coerce_value`` (string in), this keeps real JSON bools / ints /
+        floats instead of round-tripping through ``str`` (which would turn JSON
+        ``true`` into the string ``"True"``). Non-primitive values have already
+        been collapsed to a length by ``_extract_json_path``.
+        """
+        if value is None:
+            return None
+        if value_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in ("1", "true", "yes", "on")
+        if value_type == "integer":
+            if isinstance(value, bool):
+                return int(value)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                try:
+                    return int(float(value))
+                except (TypeError, ValueError):
+                    log.warning("Cannot coerce %r to integer, returning string", value)
+                    return str(value)
+        if value_type in ("float", "number"):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                log.warning("Cannot coerce %r to %s, returning string", value, value_type)
+                return str(value)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
     @staticmethod
     def _coerce_osc_value(value: Any, value_type: str) -> Any:
         """Convert an already-typed OSC value to the declared state type."""
@@ -1260,8 +1408,6 @@ class ConfigurableDriver(BaseDriver):
         queries = polling.get("queries", [])
 
         transport_type = self._definition.get("transport")
-        is_http = transport_type == "http"
-        is_udp = transport_type == "udp"
         is_osc = transport_type == "osc"
 
         for query in queries:
@@ -1275,31 +1421,11 @@ class ConfigurableDriver(BaseDriver):
                         address = self._safe_substitute(query, self.config) if "{" in query else query
                         msg = osc_encode_message(address)
                         await self.transport.send(msg)
-                elif is_http:
-                    # For HTTP: query can be a command name or a raw path
-                    commands = self._definition.get("commands", {})
-                    if query in commands:
-                        await self.send_command(query)
-                    else:
-                        # Treat as a raw GET path
-                        formatted = self._safe_substitute(query, self.config) if "{" in query else query
-                        response = await self.transport.get(formatted)
-                        if response.text:
-                            await self.on_data_received(response.text.encode("utf-8"))
-                elif is_udp:
-                    # For UDP: query can be a command name or a raw JSON string
-                    commands = self._definition.get("commands", {})
-                    if query in commands:
-                        await self.send_command(query)
-                    else:
-                        formatted = self._safe_substitute(query, self.config) if "{" in query else query
-                        data = _safe_encode_escapes(formatted)
-                        await self.transport.send(data)
                 else:
-                    # TCP/serial: raw protocol string
-                    formatted = self._safe_substitute(query, self.config) if "{" in query else query
-                    data = _safe_encode_escapes(formatted)
-                    await self.transport.send(data)
+                    # HTTP/UDP resolve command names (so the response is matched);
+                    # TCP/serial send the raw string. Shared with on_connect via
+                    # _dispatch_query so the two paths can't drift apart.
+                    await self._dispatch_query(query)
             except (ConnectionError, TimeoutError, OSError):
                 # Transport-level failure: propagate so BaseDriver._poll_loop's
                 # missed-poll watchdog counts it and can eventually mark the

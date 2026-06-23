@@ -816,6 +816,13 @@ class YAMLAutoSimulator(TCPSimulator):
         responses = self._driver_def.get("responses", [])
 
         for resp_def in responses:
+            # JSON-body responses populate state from a parsed object, not a
+            # regex template, so there's no literal to reconstruct here.
+            # Auto-generating JSON query replies is a separate follow-on;
+            # drivers that need JSON simulation ship an explicit simulator:
+            # section. Skip so json rules don't create empty response entries.
+            if resp_def.get("json"):
+                continue
             match_pattern = resp_def.get("match", "")
             set_dict = resp_def.get("set", {})
 
