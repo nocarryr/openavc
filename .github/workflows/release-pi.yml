@@ -86,7 +86,8 @@ jobs:
             plugin_repo/ \
             themes/ \
             requirements.txt \
-            pyproject.toml
+            pyproject.toml \
+            LICENSE
 
       - name: Stage update-helper.sh
         run: cp installer/update-helper.sh installer/pi-image/stage-openavc/01-install-openavc/files/update-helper.sh
@@ -142,18 +143,17 @@ jobs:
         run: |
           PI_IMAGE="openavc-${SEMVER}-pi.img.xz"
 
-          # Download existing checksums, append Pi image, re-upload
-          gh release download "$VERSION" --pattern "SHA256SUMS.txt" --dir . || true
-          if [ -f SHA256SUMS.txt ]; then
-            sha256sum "$PI_IMAGE" >> SHA256SUMS.txt
-            gh release upload "$VERSION" SHA256SUMS.txt --clobber
-          else
-            sha256sum "$PI_IMAGE" > SHA256SUMS.txt
-            gh release upload "$VERSION" SHA256SUMS.txt
-          fi
-
-          # Upload the Pi image
-          gh release upload "$VERSION" "$PI_IMAGE"
+          # Publish the image with its own checksum sidecar. The Pi image is
+          # built minutes-to-hours after release.yml has already published the
+          # release, so this job must NOT mutate the shared SHA256SUMS.txt that
+          # the in-app updater verifies against: a non-atomic delete-then-upload
+          # (gh --clobber) could destroy every artifact's checksum on failure,
+          # and a client checking for updates mid-rewrite would race a missing
+          # file. A per-image sidecar keeps the shared checksums immutable after
+          # publish; --clobber on the upload makes a re-triggered build
+          # idempotent (the un-clobbered image upload used to fail on re-run).
+          sha256sum "$PI_IMAGE" > "${PI_IMAGE}.sha256"
+          gh release upload "$VERSION" "$PI_IMAGE" "${PI_IMAGE}.sha256" --clobber
 
       - name: Trigger marketing site rebuild
         run: |
