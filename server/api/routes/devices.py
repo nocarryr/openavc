@@ -205,25 +205,26 @@ async def update_device(device_id: str, body: DeviceUpdateRequest) -> dict[str, 
     else:
         new_config = existing.config
 
-    updated = DeviceConfig(
-        id=device_id,
-        driver=new_driver,
-        name=new_name,
-        config=new_config,
-        enabled=existing.enabled if body.enabled is None else body.enabled,
-        # Preserve queued device settings — re-connect applies them via
-        # _apply_pending_settings(). Constructing a fresh DeviceConfig from
-        # the request body alone would silently drop them on every edit.
-        pending_settings=existing.pending_settings,
-        # Same for child-entity metadata (user labels / per-child config):
-        # keep the existing map unless the request explicitly supplies a new
-        # one. A plain name/driver/config edit must not wipe it on disk or
-        # re-seed the live driver with an empty map.
-        child_entities=(
-            body.child_entities if body.child_entities is not None
-            else existing.child_entities
-        ),
-    )
+    # Rebuild by re-validating the existing record's full dump rather than
+    # constructing a fresh DeviceConfig(...) that enumerates only the known
+    # fields. The base model is extra='allow', so a from-scratch rebuild drops
+    # any forward-compat top-level field a newer platform version wrote
+    # (__pydantic_extra__) on every routine edit — defeating the round-trip the
+    # base model exists to guarantee. Dumping then re-validating preserves
+    # those, and also carries pending_settings (re-connect applies them via
+    # _apply_pending_settings()) and child-entity metadata (user labels /
+    # per-child config) unless the request explicitly replaces them — a plain
+    # name/driver/config edit must wipe neither.
+    merged = existing.model_dump()
+    merged.update({
+        "driver": new_driver,
+        "name": new_name,
+        "config": new_config,
+        "enabled": existing.enabled if body.enabled is None else body.enabled,
+    })
+    if body.child_entities is not None:
+        merged["child_entities"] = body.child_entities
+    updated = DeviceConfig.model_validate(merged)
 
     # Update project config, save, and hot-swap device
     engine.project.devices[device_idx] = updated
@@ -285,13 +286,21 @@ async def test_device_connection(device_id: str) -> dict[str, Any]:
     start = _time.monotonic()
 
     if transport == "serial":
-        # Test serial port open/close
+        # Test serial port open/close. pyserial's open is a synchronous,
+        # blocking syscall — a locked port or slow USB-serial adapter would
+        # freeze the whole event loop (every other request, WS state push,
+        # device poll, reconnect) for its full duration. Run it in a worker
+        # thread, the same way the HTTP/TCP branches below use async I/O.
         serial_port = cfg.get("port", "")
         baud = cfg.get("baudrate", 9600)
-        try:
+
+        def _probe_serial() -> None:
             import serial
             ser = serial.Serial(serial_port, baud, timeout=2)
             ser.close()
+
+        try:
+            await _asyncio.to_thread(_probe_serial)
             latency = round((_time.monotonic() - start) * 1000, 1)
             return {"success": True, "error": None, "latency_ms": latency}
         except (OSError, ValueError) as e:
@@ -885,6 +894,23 @@ async def refresh_child_entities(device_id: str) -> dict[str, Any]:
 # --- Connections (Site Config) ---
 
 
+def _split_known_connection_ids(
+    engine, table: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Partition a connection table into entries for devices that exist in the
+    project and a list of unknown ids.
+
+    The single-device ``PUT /connections/{id}`` 404s on an unknown id. The
+    bulk replace + import paths instead keep the known entries and report the
+    unknown ones, so importing a partial site config still works without
+    persisting orphaned/garbage connection rows that no device will ever read.
+    """
+    known = {d.id for d in engine.project.devices}
+    kept = {did: conn for did, conn in table.items() if did in known}
+    skipped = [did for did in table if did not in known]
+    return kept, skipped
+
+
 @router.get("/connections")
 async def get_connections() -> dict[str, dict[str, Any]]:
     """Get the full connection table (site-specific device connection overrides)."""
@@ -931,12 +957,13 @@ async def update_connections_bulk(request: Request) -> dict[str, Any]:
     table = await request.json()
     if not isinstance(table, dict) or not all(isinstance(v, dict) for v in table.values()):
         raise HTTPException(status_code=422, detail="Connection table must be a JSON object of objects")
-    engine.project.connections = table
+    kept, skipped = _split_known_connection_ids(engine, table)
+    engine.project.connections = kept
     save_project(engine.project_path, engine.project)
 
     # Hot-reload devices with new connections
     await engine.reload_project()
-    return {"status": "updated", "count": len(table)}
+    return {"status": "updated", "count": len(kept), "skipped": skipped}
 
 
 @router.delete("/connections/{device_id}")
@@ -998,7 +1025,8 @@ async def import_connections(request: Request) -> dict[str, Any]:
     for device_id, conn in table.items():
         cleaned[device_id] = {k: v for k, v in conn.items() if not k.startswith("_")}
 
-    engine.project.connections = cleaned
+    kept, skipped = _split_known_connection_ids(engine, cleaned)
+    engine.project.connections = kept
     save_project(engine.project_path, engine.project)
     await engine.reload_project()
-    return {"status": "imported", "count": len(cleaned)}
+    return {"status": "imported", "count": len(kept), "skipped": skipped}

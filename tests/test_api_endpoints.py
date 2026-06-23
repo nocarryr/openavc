@@ -191,6 +191,143 @@ def test_device_update_preserves_pending_settings(client, tmp_path):
     )
 
 
+def test_device_update_preserves_forward_compat_extra_fields(client, tmp_path):
+    """M-160: PUT /devices/{id} must preserve forward-compat top-level extra
+    fields. DeviceConfig is extra='allow', so an unknown top-level field a
+    newer platform version wrote must round-trip through a routine edit, not be
+    silently dropped by rebuilding a fresh DeviceConfig from known fields only.
+    """
+    from unittest.mock import patch
+    from server.core.project_loader import DeviceConfig
+
+    c, engine = client
+    # extra='allow' parks an unknown top-level field in __pydantic_extra__.
+    existing = DeviceConfig(
+        id="dev1",
+        driver="generic_tcp",
+        name="Original",
+        config={"host": "10.0.0.1"},
+        enabled=True,
+        future_field="keep-me",
+    )
+    assert existing.model_dump().get("future_field") == "keep-me"
+    engine.project.devices = [existing]
+    engine.project.connections = {}
+    engine.project_path = str(tmp_path / "test.avc")
+    engine.resolved_device_config = MagicMock(
+        return_value={"id": "dev1", "config": {"host": "10.0.0.1"}}
+    )
+    engine.devices.update_device = AsyncMock()
+
+    with patch("server.api.routes.devices.save_project"):
+        resp = c.put("/api/devices/dev1", json={"name": "Renamed"})
+
+    assert resp.status_code == 200
+    updated = engine.project.devices[0]
+    assert updated.name == "Renamed"
+    assert updated.model_dump().get("future_field") == "keep-me", (
+        "forward-compat top-level field was dropped on edit — M-160 regressed"
+    )
+
+
+def test_serial_connection_test_runs_off_event_loop(client, monkeypatch):
+    """H-109: the blocking pyserial open must be dispatched through
+    asyncio.to_thread so a stuck/locked serial port can't freeze the event
+    loop (and with it every other request, WS push, and device poll).
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    c, engine = client
+    engine.project.devices = [
+        SimpleNamespace(
+            id="serdev",
+            config={"transport": "serial", "port": "COM_TEST", "baudrate": 9600},
+        )
+    ]
+    engine.project.connections = {}
+
+    class _FakeSerial:
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("serial.Serial", _FakeSerial)
+
+    used: dict[str, bool] = {}
+    real_to_thread = asyncio.to_thread
+
+    async def _spy(fn, *a, **k):
+        used["called"] = True
+        return await real_to_thread(fn, *a, **k)
+
+    monkeypatch.setattr("asyncio.to_thread", _spy)
+
+    resp = c.post("/api/devices/serdev/test")
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert used.get("called"), (
+        "serial open did not go through asyncio.to_thread — H-109 regressed"
+    )
+
+
+def test_bulk_connections_drops_unknown_device_ids(client, tmp_path):
+    """L-097: PUT /connections keeps entries for existing devices and reports
+    unknown ids in `skipped` instead of persisting orphaned connection rows.
+    """
+    from unittest.mock import patch
+    from types import SimpleNamespace
+
+    c, engine = client
+    engine.project.devices = [SimpleNamespace(id="real1"), SimpleNamespace(id="real2")]
+    engine.project.connections = {}
+    engine.project_path = str(tmp_path / "test.avc")
+    engine.reload_project = AsyncMock()
+
+    table = {
+        "real1": {"host": "10.0.0.1"},
+        "real2": {"host": "10.0.0.2"},
+        "ghost": {"host": "10.0.0.9"},
+    }
+    with patch("server.api.routes.devices.save_project"):
+        resp = c.put("/api/connections", json=table)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 2
+    assert body["skipped"] == ["ghost"]
+    assert set(engine.project.connections.keys()) == {"real1", "real2"}
+
+
+def test_import_connections_drops_unknown_device_ids(client, tmp_path):
+    """L-097: POST /connections/import strips `_` metadata, keeps known device
+    ids, and reports unknown ids in `skipped`.
+    """
+    from unittest.mock import patch
+    from types import SimpleNamespace
+
+    c, engine = client
+    engine.project.devices = [SimpleNamespace(id="real1")]
+    engine.project.connections = {}
+    engine.project_path = str(tmp_path / "test.avc")
+    engine.reload_project = AsyncMock()
+
+    table = {
+        "real1": {"host": "10.0.0.1", "_device_name": "Projector"},
+        "stale": {"host": "10.0.0.9"},
+    }
+    with patch("server.api.routes.devices.save_project"):
+        resp = c.post("/api/connections/import", json=table)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["skipped"] == ["stale"]
+    assert engine.project.connections == {"real1": {"host": "10.0.0.1"}}
+
+
 # ── Macro endpoints ──
 
 

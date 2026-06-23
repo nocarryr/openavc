@@ -243,6 +243,34 @@ async def test_update_device_honors_enabled(device_engine) -> None:
     assert dev.enabled is False
 
 
+async def test_update_device_preserves_forward_compat_extra_fields(device_engine) -> None:
+    """M-160: the cloud AI device-update tool must preserve forward-compat
+    top-level extra fields (extra='allow' / __pydantic_extra__) instead of
+    dropping them by rebuilding a fresh DeviceConfig from known fields only.
+    """
+    handler, engine = device_engine
+    idx = next(i for i, d in enumerate(engine.project.devices) if d.id == "dev1")
+    old = engine.project.devices[idx]
+    # A field a newer platform version wrote that this build doesn't model.
+    engine.project.devices[idx] = DeviceConfig(
+        id=old.id,
+        driver=old.driver,
+        name=old.name,
+        config=old.config,
+        enabled=old.enabled,
+        future_field="keep-me",
+    )
+
+    await handler._update_device({"device_id": "dev1", "name": "Renamed"})
+
+    reloaded = load_project(engine.project_path)
+    dev = next(d for d in reloaded.devices if d.id == "dev1")
+    assert dev.name == "Renamed"
+    assert dev.model_dump().get("future_field") == "keep-me", (
+        "cloud _update_device dropped a forward-compat top-level field — M-160"
+    )
+
+
 async def test_update_device_bumps_revision(device_engine) -> None:
     """H-042: a device update advances the project revision so a stale IDE
     can't silently overwrite it."""

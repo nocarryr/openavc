@@ -63,21 +63,23 @@ class DeviceToolsMixin:
         else:
             new_config = existing.config
 
-        updated = DeviceConfig(
-            id=device_id,
-            driver=input.get("driver", existing.driver),
-            name=input.get("name", existing.name),
-            config=new_config,
-            # Honor an `enabled` toggle from the AI (the schema declares it);
-            # the old code pinned existing.enabled so disable/enable no-op'd.
-            enabled=input.get("enabled", existing.enabled),
-            # Preserve queued device settings and child-entity metadata
-            # (user labels / per-child config). Rebuilding from the tool
-            # input alone would drop them on every edit — both on disk and
-            # in the re-seeded live driver.
-            pending_settings=existing.pending_settings,
-            child_entities=existing.child_entities,
-        )
+        # Re-validate the existing record's full dump instead of building a
+        # fresh DeviceConfig from scratch. The base model is extra='allow', so
+        # a from-scratch rebuild drops any forward-compat top-level field a
+        # newer platform version wrote (__pydantic_extra__) on every AI edit.
+        # Dumping then re-validating preserves those and keeps pending_settings
+        # + child-entity metadata (user labels / per-child config) — rebuilding
+        # from the tool input alone would drop them on disk and in the
+        # re-seeded live driver. Honor an `enabled` toggle (the schema declares
+        # it); the old code pinned existing.enabled so disable/enable no-op'd.
+        merged = existing.model_dump()
+        merged.update({
+            "driver": input.get("driver", existing.driver),
+            "name": input.get("name", existing.name),
+            "config": new_config,
+            "enabled": input.get("enabled", existing.enabled),
+        })
+        updated = DeviceConfig.model_validate(merged)
         engine.project.devices[device_idx] = updated
         save_project(engine.project_path, engine.project)
         # Merge the connection table (host/port live in project.connections,

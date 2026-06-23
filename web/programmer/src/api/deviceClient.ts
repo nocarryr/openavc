@@ -137,7 +137,10 @@ export async function updateConnection(
 
 export async function updateConnectionsBulk(
   table: Record<string, Record<string, unknown>>
-): Promise<{ status: string; count: number }> {
+): Promise<{ status: string; count: number; skipped: string[] }> {
+  // `skipped` lists device ids in the table that don't exist in the project —
+  // the server keeps the known entries and drops these rather than persisting
+  // orphaned connection rows.
   return request("/connections", {
     method: "PUT",
     body: JSON.stringify(table),
@@ -156,7 +159,10 @@ export async function exportConnections(): Promise<Record<string, Record<string,
 
 export async function importConnections(
   table: Record<string, Record<string, unknown>>
-): Promise<{ status: string; count: number }> {
+): Promise<{ status: string; count: number; skipped: string[] }> {
+  // `skipped` lists imported ids that match no device in the project (e.g. a
+  // site config exported from a different room) — kept entries are applied,
+  // these are reported rather than written as orphaned rows.
   return request("/connections/import", {
     method: "POST",
     body: JSON.stringify(table),
