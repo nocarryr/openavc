@@ -27,6 +27,12 @@ from urllib.parse import unquote
 
 import yaml
 
+from server.drivers.inline_protocol import (
+    _derive_state_vars_from_responses,
+    _normalize_config_commands,
+    _normalize_config_responses,
+    _normalize_config_state_vars,
+)
 from simulator.tcp_simulator import TCPSimulator
 
 logger = logging.getLogger(__name__)
@@ -70,6 +76,60 @@ def _as_number(value: Any) -> float | None:
         return None
 
 
+def _mappings_to_set(mappings: list[dict]) -> dict[str, Any]:
+    """Convert canonical response mappings to the simulator's ``set`` shorthand.
+
+    ``_build_state_responses`` understands ``match`` + ``set`` (state → a
+    literal value or a ``$N`` capture), so an inline response (which normalizes
+    to ``match`` + ``mappings``) is remapped here: a fixed ``value`` becomes the
+    literal, a ``group`` becomes ``$<n>``.
+    """
+    out: dict[str, Any] = {}
+    for m in mappings:
+        if not isinstance(m, dict):
+            continue
+        state = m.get("state")
+        if not state:
+            continue
+        out[str(state)] = m["value"] if "value" in m else f"${m.get('group', 1)}"
+    return out
+
+
+def _merge_inline_protocol(driver_def: dict, config: dict | None) -> tuple[dict, bool]:
+    """Merge a Generic device's inline protocol (config-authored commands /
+    responses / state_variables) into the definition the auto-simulator builds
+    from. Returns ``(merged_def, had_inline)``.
+
+    Responses are translated to the simulator's ``match`` + ``set`` shorthand so
+    the existing auto-sim machinery (state responses, query handlers) drives
+    them. Commands keep their ``send`` templates with NO line ending appended —
+    the simulator matches the incoming command line after the delimiter is
+    stripped.
+    """
+    cfg = config or {}
+    norm_cmds = _normalize_config_commands(cfg.get("commands"))  # no line-ending
+    canonical = _normalize_config_responses(cfg.get("responses"))
+    norm_vars = _normalize_config_state_vars(cfg.get("state_variables"))
+
+    if not (norm_cmds or canonical or norm_vars):
+        return driver_def, False
+
+    merged = dict(driver_def)
+    merged["commands"] = {**(driver_def.get("commands") or {}), **norm_cmds}
+    sim_responses = [
+        {"match": r["match"], "set": _mappings_to_set(r.get("mappings", []))}
+        for r in canonical
+    ]
+    merged["responses"] = list(driver_def.get("responses") or []) + sim_responses
+    derived = _derive_state_vars_from_responses(canonical)
+    merged["state_variables"] = {
+        **(driver_def.get("state_variables") or {}), **derived, **norm_vars,
+    }
+    if isinstance(cfg.get("delimiter"), str):
+        merged["delimiter"] = cfg["delimiter"]
+    return merged, True
+
+
 class YAMLAutoSimulator(TCPSimulator):
     """Auto-generated simulator from a .avcdriver definition.
 
@@ -88,6 +148,12 @@ class YAMLAutoSimulator(TCPSimulator):
         *,
         driver_def: dict,
     ):
+        # Inline protocol: a Generic device authors its commands / responses /
+        # state_variables in the device config (the no-code Commands & Responses
+        # editor). Merge them into the definition the simulator builds from so
+        # the auto-sim machinery drives a config-authored protocol.
+        driver_def, self._inline_protocol = _merge_inline_protocol(driver_def, config)
+
         # Build SIMULATOR_INFO from driver definition before calling super().__init__
         self.SIMULATOR_INFO = self._build_info(driver_def)
         super().__init__(device_id, config)
@@ -118,6 +184,14 @@ class YAMLAutoSimulator(TCPSimulator):
         self._build_command_handlers()
         self._build_query_handlers()
 
+        # Inline (Generic) devices: also match an incoming command against the
+        # response patterns and apply their state changes. Many such devices use
+        # the same string to set and to report a value (e.g. "PWR ON"), so the
+        # string the panel sends is also the device's status string.
+        self._inline_response_handlers: list[tuple[re.Pattern, dict]] = []
+        if self._inline_protocol:
+            self._build_inline_response_handlers()
+
         # OSC-specific: build address-based handlers from responses
         self._osc_address_handlers: list[tuple[str, list[dict]]] = []
         self._osc_script_handlers: list[OSCScriptHandler] = []
@@ -140,7 +214,9 @@ class YAMLAutoSimulator(TCPSimulator):
 
         # push_state: whether this simulator pushes state changes to connected
         # drivers (matching real device behavior). Set in simulator: section.
-        self._push_state = sim_section.get("push_state", False)
+        # Inline (Generic) devices push by default so driving a variable from
+        # the simulator UI emits the matching string to the panel.
+        self._push_state = sim_section.get("push_state", False) or self._inline_protocol
 
         logger.info(
             "Auto-gen simulator for %s: %d command handlers, %d query handlers, %d state responses",
@@ -603,6 +679,13 @@ class YAMLAutoSimulator(TCPSimulator):
             if m:
                 return self._execute_script_handler(handler, m)
 
+        # Inline (Generic) devices: match the incoming string against the
+        # response patterns and apply their state changes + echo a confirmation.
+        for pattern, set_dict in self._inline_response_handlers:
+            m = pattern.match(text)
+            if m:
+                return self._apply_inline_response(text, m, set_dict)
+
         # Try auto-generated command handlers
         for handler in self._command_handlers:
             m = handler.pattern.match(text)
@@ -870,6 +953,43 @@ class YAMLAutoSimulator(TCPSimulator):
                     pattern=pattern,
                     response_var=response_var,
                 ))
+
+    def _build_inline_response_handlers(self) -> None:
+        """Compile (pattern, set) handlers from the merged inline responses.
+
+        Used only by Generic (inline-protocol) devices to react to an incoming
+        command that matches one of the device's own response patterns.
+        """
+        for resp in self._driver_def.get("responses", []):
+            match_pattern = resp.get("match", "")
+            set_dict = resp.get("set", {})
+            if not match_pattern or not set_dict:
+                continue
+            try:
+                pattern = re.compile(f"^{match_pattern}$")
+            except re.error:
+                logger.warning(
+                    "%s: skipping bad inline response pattern %r",
+                    self.driver_id, match_pattern,
+                )
+                continue
+            self._inline_response_handlers.append((pattern, set_dict))
+
+    def _apply_inline_response(
+        self, text: str, m: re.Match, set_dict: dict
+    ) -> bytes | None:
+        """Apply an inline response's state changes for an incoming command and
+        echo the command back as the device's confirmation."""
+        for state_key, src in set_dict.items():
+            if isinstance(src, str) and src.startswith("$"):
+                try:
+                    value: Any = m.group(int(src[1:]))
+                except (ValueError, IndexError):
+                    continue
+            else:
+                value = src
+            self.set_state(state_key, self._coerce_value(state_key, value))
+        return (text + self._get_delimiter()).encode()
 
     def _build_osc_address_handlers(self) -> None:
         """Build OSC address → state mapping from responses with 'address' key."""

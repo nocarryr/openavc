@@ -78,6 +78,10 @@ The variable appears on the device right away and is usable everywhere as `$devi
 
 Use the **Send raw** box to type a string and send it immediately, without saving it as a command. This is handy for trying a command from the manual before you add it, or for one-off diagnostics. The line ending is added automatically.
 
+### Testing with the simulator
+
+A Generic device works with the [Device Simulator](simulator.md): start simulation and the simulator stands in for the real device using the commands and responses you defined. Drive a variable from the simulator's controls and your panel and macros react to it. Commands that echo a status string (for example, a device that replies `PWR ON` to confirm power) round-trip automatically. Commands that trigger some other reply on the real device won't be answered by the simulator, since the device-side behavior isn't part of what you defined. Drive those values from the simulator controls instead.
+
 ## Quick Actions
 
 Some drivers promote the commands you reach for most to a row of **Quick Action** buttons at the top of the device detail panel, so you don't have to hunt through the full Send Command list. A button either fires its command immediately, opens a short dialog when the command needs values, or asks you to confirm first (for anything disruptive, like a reboot). The full Send Command list below still contains everything.
