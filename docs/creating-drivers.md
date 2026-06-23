@@ -8,6 +8,8 @@ OpenAVC supports three ways to create device drivers, from easiest to most power
 
 All three methods produce drivers that work identically at runtime. Choose the simplest method that covers your device's protocol.
 
+> **You may not need a driver at all.** If you only have a handful of commands for a single device, add a **Generic** device (TCP, Serial, or HTTP) and define its commands and responses with the tables on the device page. See [No-Code Commands and Responses](devices-and-drivers.md#no-code-commands-and-responses). Create a driver when you want to reuse it across projects, share it with the community, or handle a protocol that needs real logic.
+
 Python drivers can be created and edited directly in the **Code** view of the Programmer IDE with hot-reload support, so you can write, test, and iterate without restarting the server.
 
 | Method | Skill Level | Best For |

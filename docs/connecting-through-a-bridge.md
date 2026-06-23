@@ -14,7 +14,7 @@ This is the same model professional control systems use for IR and serial ports:
 
 - A serial bridge on the network with a known IP address (set a static IP or a DHCP reservation so it does not move).
 - The bridge's driver installed (for the iTach IP2SL, install it from **Browse Community** in the Driver Library, or let Discovery add it for you).
-- The serial device wired to the bridge with the correct RS-232 cable, and a driver for that device.
+- The serial device wired to the bridge with the correct RS-232 cable, and a driver for that device. If the device has no driver and you only need a few commands, add a **Generic Serial Device** and define its commands and responses on the device page instead. See [No-Code Commands and Responses](devices-and-drivers.md#no-code-commands-and-responses).
 
 ## Step 1: Add the bridge
 
