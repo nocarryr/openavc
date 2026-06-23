@@ -5,11 +5,10 @@
  * (PluginExtensions), so a control surface's settings are editable from the
  * same view its layout is edited in.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { VariableKeyPicker } from "../shared/VariableKeyPicker";
 import { InlineColorPicker } from "../shared/InlineColorPicker";
-import { useProjectStore } from "../../store/projectStore";
-import * as api from "../../api/restClient";
+import { MacroRefPicker, DeviceRefPicker, CommandRefPicker } from "../shared/RefPickers";
 import type { SchemaField } from "../../api/types";
 
 export function SchemaFormRenderer({
@@ -386,94 +385,6 @@ function SchemaFieldMappingList({
         </button>
       </div>
     </div>
-  );
-}
-
-// ──── Ref Pickers (macro, device, command) ────
-
-function MacroRefPicker({
-  value,
-  onChange,
-  style,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  style?: React.CSSProperties;
-}) {
-  const project = useProjectStore((s) => s.project);
-  const macros = project?.macros ?? [];
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      style={style ?? { width: "100%", padding: "var(--space-sm) var(--space-md)", borderRadius: "var(--border-radius)", border: "1px solid var(--border-color)", background: "var(--bg-surface)", color: "var(--text-primary)", fontSize: "var(--font-size-base)" }}
-    >
-      <option value="">Select macro...</option>
-      {macros.map((m) => (
-        <option key={m.id} value={m.id}>{m.name}</option>
-      ))}
-    </select>
-  );
-}
-
-function DeviceRefPicker({
-  value,
-  onChange,
-  style,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  style?: React.CSSProperties;
-}) {
-  const project = useProjectStore((s) => s.project);
-  const devices = project?.devices ?? [];
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      style={style ?? { width: "100%", padding: "var(--space-sm) var(--space-md)", borderRadius: "var(--border-radius)", border: "1px solid var(--border-color)", background: "var(--bg-surface)", color: "var(--text-primary)", fontSize: "var(--font-size-base)" }}
-    >
-      <option value="">Select device...</option>
-      {devices.map((d) => (
-        <option key={d.id} value={d.id}>{d.name}</option>
-      ))}
-    </select>
-  );
-}
-
-function CommandRefPicker({
-  value,
-  deviceId,
-  onChange,
-  style,
-}: {
-  value: string;
-  deviceId: string;
-  onChange: (v: string) => void;
-  style?: React.CSSProperties;
-}) {
-  const [commands, setCommands] = useState<string[]>([]);
-  useEffect(() => {
-    if (!deviceId) {
-      setCommands([]);
-      return;
-    }
-    api.getDevice(deviceId)
-      .then((info) => setCommands(Object.keys(info?.commands ?? {})))
-      .catch(() => setCommands([]));
-  }, [deviceId]);
-
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      style={style ?? { width: "100%", padding: "var(--space-sm) var(--space-md)", borderRadius: "var(--border-radius)", border: "1px solid var(--border-color)", background: "var(--bg-surface)", color: "var(--text-primary)", fontSize: "var(--font-size-base)" }}
-    >
-      <option value="">{deviceId ? "Select command..." : "Select device first"}</option>
-      {commands.map((cmd) => (
-        <option key={cmd} value={cmd}>{cmd}</option>
-      ))}
-    </select>
   );
 }
 

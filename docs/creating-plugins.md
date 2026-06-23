@@ -51,13 +51,12 @@ EXTENSIONS = {
             "type": "status_display",
             "label": "Status Display",
             "renderer": "iframe",
-            "renderer_url": "index.html",
             "default_size": {"col_span": 3, "row_span": 2},
             "config_schema": [
                 {
                     "key": "title",
                     "label": "Title",
-                    "type": "text",
+                    "type": "string",
                     "default": "System Status"
                 },
                 {
@@ -81,14 +80,28 @@ EXTENSIONS = {
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | Yes | Unique element type name within this plugin |
+| `type` | Yes | Unique element type name within this plugin. **This also names the renderer file** — the panel loads `panel/<type>.html` (see note below). |
 | `label` | Yes | Human-readable name shown in the Element Palette |
 | `renderer` | Yes | Always `"iframe"` |
-| `renderer_url` | Yes | Path to the HTML file (relative to the plugin's `panel/` directory) |
 | `default_size` | Yes | Default grid size when dragged onto the canvas: `{"col_span": N, "row_span": N}`. The UI Builder uses this on drop and on click-to-add; if you omit it the element falls back to 4×3 cells. |
-| `config_schema` | No | Array of configuration fields for the IDE Properties panel (same field types as plugin config: `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `macro_ref`, `device_ref`). See "Select options" below for static vs. dynamic dropdowns. |
+| `config_schema` | No | Array of configuration fields shown in the UI Builder Properties panel. Field types match plugin config (see "Config field types" below): `string`, `text`, `integer`, `float`, `boolean`, `select`, `state_key`, `device_ref`, `macro_ref`. See "Select options" below for static vs. dynamic dropdowns. |
 | `sandbox_permissions` | No | Extra `iframe.sandbox` tokens beyond the default `allow-scripts`. See "Iframe Permissions" below for the whitelist. |
 | `allow_features` | No | Permissions-Policy tokens applied via the iframe's `allow` attribute. See "Iframe Permissions" below for the whitelist. |
+
+**Renderer file:** the panel loads `panel/<type>.html` for each element — an element with `type: "status_display"` loads `panel/status_display.html` from your plugin directory. Name the HTML file to match the element's `type`. (There is no separate URL field; the file name is the contract.)
+
+**Config field types:** the Properties panel renders each `config_schema` field by its `type`, the same way the plugin CONFIG_SCHEMA form does:
+
+| Type | Control |
+|------|---------|
+| `string` | Single-line text input |
+| `text` | Multi-line textarea |
+| `integer` / `float` | Number input |
+| `boolean` | Checkbox |
+| `select` | Dropdown (see "Select options" below) |
+| `state_key` | State-key picker |
+| `device_ref` | Device picker |
+| `macro_ref` | Macro picker |
 
 ### Select Options
 

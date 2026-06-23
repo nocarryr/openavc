@@ -5,6 +5,9 @@ import { CopyButton } from "../../shared/CopyButton";
 import { IconPicker } from "../IconPicker";
 import { AssetPicker } from "../AssetPicker";
 import { InlineColorPicker } from "../../shared/InlineColorPicker";
+import { VariableKeyPicker } from "../../shared/VariableKeyPicker";
+import { MacroRefPicker, DeviceRefPicker } from "../../shared/RefPickers";
+import { panelElementFieldKind } from "./panelElementConfig";
 import { usePluginStore } from "../../../store/pluginStore";
 import { useConnectionStore } from "../../../store/connectionStore";
 import { showInfo } from "../../../store/toastStore";
@@ -1431,6 +1434,89 @@ function SubSection({ label }: { label: string }) {
   );
 }
 
+type PanelConfigField = {
+  key: string;
+  label: string;
+  type: string;
+  default?: unknown;
+  options?: string[];
+  options_source?: string;
+};
+
+/**
+ * Renders one panel-element config_schema field. Routes ref types to the same
+ * pickers the plugin CONFIG_SCHEMA form uses (see panelElementFieldKind), so an
+ * author declaring `state_key`/`device_ref`/`macro_ref` gets a picker instead
+ * of a raw text box, and `text` is a textarea while `string` is single-line.
+ */
+function PanelFieldControl({
+  field,
+  config,
+  onChange,
+}: {
+  field: PanelConfigField;
+  config: Record<string, unknown>;
+  onChange: (cfg: Record<string, unknown>) => void;
+}) {
+  const set = (v: unknown) => onChange({ ...config, [field.key]: v });
+  const strVal = String(config[field.key] ?? field.default ?? "");
+
+  switch (panelElementFieldKind(field)) {
+    case "boolean":
+      return (
+        <input
+          type="checkbox"
+          checked={config[field.key] != null ? !!config[field.key] : !!field.default}
+          onChange={(e) => set(e.target.checked)}
+        />
+      );
+    case "select":
+      return (
+        <PluginConfigSelect
+          value={strVal}
+          staticOptions={field.options}
+          optionsSource={field.options_source}
+          onChange={set}
+        />
+      );
+    case "number":
+      return (
+        <input
+          type="number"
+          value={config[field.key] != null ? Number(config[field.key]) : (field.default != null ? Number(field.default) : "")}
+          onChange={(e) => set(field.type === "integer" ? parseInt(e.target.value) || 0 : parseFloat(e.target.value) || 0)}
+          step={field.type === "float" ? 0.1 : 1}
+          style={{ flex: 1 }}
+        />
+      );
+    case "state_key":
+      return <VariableKeyPicker value={strVal} onChange={set} style={{ flex: 1 }} />;
+    case "macro_ref":
+      return <MacroRefPicker value={strVal} onChange={set} style={{ flex: 1 }} />;
+    case "device_ref":
+      return <DeviceRefPicker value={strVal} onChange={set} style={{ flex: 1 }} />;
+    case "textarea":
+      return (
+        <textarea
+          value={strVal}
+          onChange={(e) => set(e.target.value)}
+          placeholder={field.default != null ? String(field.default) : ""}
+          rows={4}
+          style={{ flex: 1, resize: "vertical", fontFamily: "var(--font-mono, monospace)", fontSize: "var(--font-size-sm)" }}
+        />
+      );
+    default:
+      return (
+        <input
+          value={strVal}
+          onChange={(e) => set(e.target.value)}
+          placeholder={field.default != null ? String(field.default) : ""}
+          style={{ flex: 1 }}
+        />
+      );
+  }
+}
+
 function PluginElementConfig({
   pluginId,
   pluginType,
@@ -1463,35 +1549,7 @@ function PluginElementConfig({
         <>
           {schema.map((field) => (
             <FieldRow key={field.key} label={field.label}>
-              {field.type === "boolean" ? (
-                <input
-                  type="checkbox"
-                  checked={config[field.key] != null ? !!config[field.key] : !!field.default}
-                  onChange={(e) => onChange({ ...config, [field.key]: e.target.checked })}
-                />
-              ) : field.type === "select" && (field.options || field.options_source) ? (
-                <PluginConfigSelect
-                  value={String(config[field.key] ?? field.default ?? "")}
-                  staticOptions={field.options}
-                  optionsSource={field.options_source}
-                  onChange={(v) => onChange({ ...config, [field.key]: v })}
-                />
-              ) : field.type === "integer" || field.type === "float" ? (
-                <input
-                  type="number"
-                  value={config[field.key] != null ? Number(config[field.key]) : (field.default != null ? Number(field.default) : "")}
-                  onChange={(e) => onChange({ ...config, [field.key]: field.type === "integer" ? parseInt(e.target.value) || 0 : parseFloat(e.target.value) || 0 })}
-                  step={field.type === "float" ? 0.1 : 1}
-                  style={{ flex: 1 }}
-                />
-              ) : (
-                <input
-                  value={String(config[field.key] ?? field.default ?? "")}
-                  onChange={(e) => onChange({ ...config, [field.key]: e.target.value })}
-                  placeholder={field.default != null ? String(field.default) : ""}
-                  style={{ flex: 1 }}
-                />
-              )}
+              <PanelFieldControl field={field} config={config} onChange={onChange} />
             </FieldRow>
           ))}
           <button
