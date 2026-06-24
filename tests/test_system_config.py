@@ -35,11 +35,19 @@ class TestDeepMerge:
         assert result["network"]["http_port"] == 9090
         assert result["network"]["bind_address"] == "127.0.0.1"
 
-    def test_ignores_unknown_keys(self):
+    def test_preserves_unknown_keys(self):
+        # Unknown keys — a whole new section, or a new field inside a known
+        # section — must survive load/save so a setting written by a newer
+        # build isn't stripped after a rollback to an older one.
         base = {"network": {"http_port": 8080}}
-        override = {"network": {"http_port": 9090}, "unknown_section": {"foo": "bar"}}
+        override = {
+            "network": {"http_port": 9090, "new_field": True},
+            "unknown_section": {"foo": "bar"},
+        }
         result = _deep_merge(base, override)
-        assert "unknown_section" not in result
+        assert result["unknown_section"] == {"foo": "bar"}
+        assert result["network"]["new_field"] is True
+        assert result["network"]["http_port"] == 9090
 
     def test_empty_override(self):
         base = {"network": {"http_port": 8080}}
