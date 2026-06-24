@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenAVC server LaunchDaemon.
+
+  Installed to /Library/LaunchDaemons/ by the .pkg postinstall script and
+  loaded with `launchctl bootstrap system`. Runs at boot (before login) as
+  root so it can self-update the bundle under /Applications. The macOS analog
+  of the Windows NSSM service and the Linux systemd unit.
+
+  ProgramArguments is the run wrapper (not the server directly): launchd has no
+  ExecStartPre, so the wrapper applies any pending update/rollback before
+  exec'ing the server. KeepAlive gives Restart=always; a clean exit 0 update
+  restart and a crash both relaunch.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openavc.server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/OpenAVC.app/Contents/MacOS/openavc-macos-run.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENAVC_DATA_DIR</key>
+        <string>/Library/Application Support/OpenAVC</string>
+        <key>OPENAVC_LOG_DIR</key>
+        <string>/Library/Logs/OpenAVC</string>
+        <key>OPENAVC_PROJECT</key>
+        <string>/Library/Application Support/OpenAVC/projects/default/project.avc</string>
+        <key>OPENAVC_BIND</key>
+        <string>0.0.0.0</string>
+        <!-- Secure by default: reachable by panels, but the admin/Programmer
+             surface requires a credential set on first visit. -->
+        <key>OPENAVC_ALLOW_ANONYMOUS</key>
+        <string>false</string>
+        <!-- Tells main.py the service manager relaunches us, so cloud-restart
+             can exit cleanly instead of self-spawning. -->
+        <key>OPENAVC_SERVICE_MANAGED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/OpenAVC/server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/OpenAVC/server.err.log</string>
+</dict>
+</plist>

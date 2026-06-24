@@ -1,0 +1,14 @@
+#!/bin/bash
+# OpenAVC .pkg preinstall — runs as root before files are laid down.
+#
+# On an upgrade the daemon is running and holds the old binary + the HTTP
+# port. Stop it first so the installer can replace /Applications/OpenAVC.app
+# cleanly (the macOS analog of the Inno Setup PrepareToInstall service stop).
+# Tolerate a fresh install where nothing is loaded yet.
+
+launchctl bootout system/com.openavc.server 2>/dev/null || true
+
+# Give launchd a moment to release the listening socket and file handles.
+sleep 1
+
+exit 0

@@ -1,0 +1,41 @@
+#!/bin/bash
+# OpenAVC .pkg postinstall — runs as root after OpenAVC.app is in /Applications.
+#
+# Creates the data + log dirs, seeds the default project, installs the
+# LaunchDaemon, and starts the server. This is the step that makes the .pkg a
+# one-double-click install for a background service: the user never touches a
+# plist or a sudo command.
+
+set -u
+
+APP="/Applications/OpenAVC.app"
+DATA_DIR="/Library/Application Support/OpenAVC"
+LOG_DIR="/Library/Logs/OpenAVC"
+DAEMON_PLIST="/Library/LaunchDaemons/com.openavc.server.plist"
+SEED="$APP/Contents/MacOS/_internal/projects/default/project.avc"
+DEST="$DATA_DIR/projects/default"
+
+mkdir -p "$DATA_DIR" "$LOG_DIR"
+
+# Seed the default project only if the user doesn't already have one (an
+# upgrade or reinstall must never clobber a live project).
+if [ ! -f "$DEST/project.avc" ] && [ -f "$SEED" ]; then
+    mkdir -p "$DEST"
+    cp "$SEED" "$DEST/project.avc"
+fi
+
+# Install the LaunchDaemon and (re)load it.
+cp "$APP/Contents/Resources/com.openavc.server.plist" "$DAEMON_PLIST"
+chown root:wheel "$DAEMON_PLIST"
+chmod 644 "$DAEMON_PLIST"
+launchctl bootout system "$DAEMON_PLIST" 2>/dev/null || true
+launchctl bootstrap system "$DAEMON_PLIST"
+launchctl enable system/com.openavc.server 2>/dev/null || true
+
+# Best-effort: open the Programmer IDE in the installing user's browser.
+CONSOLE_UID="$(stat -f %u /dev/console 2>/dev/null)"
+if [ -n "${CONSOLE_UID:-}" ] && [ "$CONSOLE_UID" != "0" ]; then
+    launchctl asuser "$CONSOLE_UID" open "http://localhost:8080/programmer" 2>/dev/null || true
+fi
+
+exit 0
