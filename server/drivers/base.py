@@ -210,6 +210,12 @@ class BaseDriver(ABC):
             port = self._required_port()
             delay = self.config.get("inter_command_delay", 0.0)
 
+            # Forward TLS + connect-timeout from config so a declarative driver
+            # can talk to a device on TLS-wrapped TCP with `ssl: true` instead
+            # of overriding connect(). Same config vocabulary as the http
+            # branch (`ssl` to enable, `verify_ssl` for cert checking); the
+            # defaults match TCPTransport.create() so plain-TCP devices that
+            # set none of these are unaffected.
             self.transport = await TCPTransport.create(
                 host=host,
                 port=port,
@@ -220,6 +226,9 @@ class BaseDriver(ABC):
                 inter_command_delay=delay,
                 name=self.device_id,
                 local_addr=(control_ip, 0) if control_ip else None,
+                timeout=self.config.get("timeout", 5.0),
+                ssl=self.config.get("ssl", False),
+                ssl_verify=self.config.get("verify_ssl", True),
             )
         elif transport_type == "serial":
             from server.transport.serial_transport import SerialTransport
