@@ -19,7 +19,7 @@ from server.core.project_loader import (
     PluginConfig,
     build_default_plugin_config,
     get_plugin_setup_fields,
-    save_project,
+    save_project_async,
 )
 from server.utils.logger import get_logger
 
@@ -251,7 +251,7 @@ async def enable_plugin(plugin_id: str) -> dict[str, Any]:
         # Roll back enabled flag so it won't retry on next restart
         engine.project.plugins[plugin_id].enabled = False
 
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     engine.bump_project_revision()
 
     return {
@@ -272,7 +272,7 @@ async def disable_plugin(plugin_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
 
     engine.project.plugins[plugin_id].enabled = False
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     engine.bump_project_revision()
     await engine.plugin_loader.stop_plugin(plugin_id)
 
@@ -309,7 +309,7 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
     new_config = await request.json()
 
     engine.project.plugins[plugin_id].config = new_config
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     engine.bump_project_revision()
 
     # Hot-apply when the plugin supports it, else restart
@@ -551,7 +551,7 @@ async def uninstall_plugin_endpoint(
                 d for d in engine.project.plugin_dependencies
                 if d.plugin_id != plugin_id
             ]
-            save_project(engine.project_path, engine.project)
+            await save_project_async(engine.project_path, engine.project)
             # Like enable/disable/config-save, this server-side project mutation
             # must bump the revision. Otherwise an open editor's stale full-project
             # PUT (still holding this plugin entry) is accepted instead of 409'd,

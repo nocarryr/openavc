@@ -618,3 +618,36 @@ class TestBundledDriverIdDedup:
         assert _DRIVER_REGISTRY["dup_id"] is existing  # not overwritten
         assert "dup_id" not in installed
         assert not (repo / "renamed.py").exists()  # the colliding file was removed
+
+
+class TestFindDriverFilesById:
+    def test_resolves_by_declared_id_when_stem_differs(self, tmp_path, monkeypatch):
+        """An uploaded driver keeps its original filename, so its stem can
+        differ from its declared id. The export bundler must still find it
+        (by declared id) — a stem-only match would drop it from the .zip and
+        produce a broken handoff."""
+        from server.core.project_library import _find_driver_files
+
+        repo = tmp_path / "driver_repo"
+        repo.mkdir()
+        monkeypatch.setattr(plib, "_DRIVER_REPO_DIR", repo)
+
+        (repo / "uploaded_file.avcdriver").write_text(
+            "id: acme_widget\nname: Acme\ntransport: tcp\n", encoding="utf-8"
+        )
+        deps = [{"driver_id": "acme_widget", "source": "community"}]
+        found = _find_driver_files(deps)
+        assert found == [("uploaded_file.avcdriver", repo / "uploaded_file.avcdriver")]
+
+    def test_skips_builtin_source(self, tmp_path, monkeypatch):
+        from server.core.project_library import _find_driver_files
+
+        repo = tmp_path / "driver_repo"
+        repo.mkdir()
+        monkeypatch.setattr(plib, "_DRIVER_REPO_DIR", repo)
+
+        (repo / "uploaded_file.avcdriver").write_text(
+            "id: acme_widget\nname: Acme\ntransport: tcp\n", encoding="utf-8"
+        )
+        deps = [{"driver_id": "acme_widget", "source": "builtin"}]
+        assert _find_driver_files(deps) == []

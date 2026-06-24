@@ -24,7 +24,7 @@ class DeviceToolsMixin:
         if not engine or not engine.project:
             return {"error": "No project loaded"}
         device_id = input.get("device_id", "")
-        from server.core.project_loader import DeviceConfig, save_project
+        from server.core.project_loader import DeviceConfig, save_project_async
         device_idx = None
         for i, d in enumerate(engine.project.devices):
             if d.id == device_id:
@@ -81,7 +81,7 @@ class DeviceToolsMixin:
         })
         updated = DeviceConfig.model_validate(merged)
         engine.project.devices[device_idx] = updated
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         # Merge the connection table (host/port live in project.connections,
         # not device.config) before re-adding the runtime device — matching
         # _add_device. Passing model_dump() alone re-adds the device with no
@@ -104,8 +104,8 @@ class DeviceToolsMixin:
             return {"error": f"Device '{device_id}' not found"}
         # Collect impact before saving
         impact = self._find_references("device", device_id)
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
         await engine.devices.remove_device(device_id)
         # Bump the revision + notify the IDE so a stale tab can't resurrect the
         # deleted device on its next save (highest-impact mutation, no signal
@@ -135,7 +135,7 @@ class DeviceToolsMixin:
                 log = get_logger(__name__)
                 log.warning("add_device: driver '%s' not in registry (may not be loaded yet)", driver_id)
 
-        from server.core.project_loader import DeviceConfig, save_project
+        from server.core.project_loader import DeviceConfig, save_project_async
         from server.core.project_migration import CONNECTION_FIELDS
 
         # Split config into connection fields and protocol fields
@@ -158,7 +158,7 @@ class DeviceToolsMixin:
         engine.project.devices.append(new_device)
         if conn_overrides:
             engine.project.connections[device_id] = conn_overrides
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         # Hot-add via device manager with merged config
         await engine.devices.add_device(engine.resolved_device_config(new_device))
@@ -182,14 +182,14 @@ class DeviceToolsMixin:
             if unknown:
                 return {"error": f"Device(s) not found in project: {', '.join(unknown)}"}
 
-        from server.core.project_loader import DeviceGroup, save_project
+        from server.core.project_loader import DeviceGroup, save_project_async
         new_group = DeviceGroup(
             id=group_id,
             name=input.get("name", group_id),
             device_ids=device_ids,
         )
         engine.project.device_groups.append(new_group)
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         # Reload groups in macro engine
         engine.macros.load_groups([g.model_dump() for g in engine.project.device_groups])
         await self._notify_project_changed()
@@ -207,7 +207,7 @@ class DeviceToolsMixin:
                 break
         if group_idx is None:
             return {"error": f"Group '{group_id}' not found"}
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
         existing = engine.project.device_groups[group_idx]
         if "device_ids" in input:
             project_device_ids = {d.id for d in engine.project.devices}
@@ -218,7 +218,7 @@ class DeviceToolsMixin:
             existing.name = input["name"]
         if "device_ids" in input:
             existing.device_ids = input["device_ids"]
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         engine.macros.load_groups([g.model_dump() for g in engine.project.device_groups])
         await self._notify_project_changed()
         return {"status": "updated", "id": group_id}
@@ -232,8 +232,8 @@ class DeviceToolsMixin:
         engine.project.device_groups = [g for g in engine.project.device_groups if g.id != group_id]
         if len(engine.project.device_groups) == original_count:
             return {"error": f"Group '{group_id}' not found"}
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
         engine.macros.load_groups([g.model_dump() for g in engine.project.device_groups])
         await self._notify_project_changed()
         return {"status": "deleted", "id": group_id}
@@ -863,10 +863,10 @@ class DeviceToolsMixin:
         scripts_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
 
-        from server.core.project_loader import ScriptConfig, save_project
+        from server.core.project_loader import ScriptConfig, save_project_async
         new_script = ScriptConfig(id=script_id, file=filename, enabled=enabled, description=description)
         engine.project.scripts.append(new_script)
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         if self._reload_fn:
             await self._reload_fn()
         return {"status": "created", "id": script_id}
@@ -912,9 +912,9 @@ class DeviceToolsMixin:
             return {"error": "Invalid script filename"}
         if path.exists():
             path.unlink()
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
         engine.project.scripts = [s for s in engine.project.scripts if s.id != script_id]
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         if self._reload_fn:
             await self._reload_fn()
         return {"status": "deleted"}

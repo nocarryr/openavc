@@ -20,7 +20,13 @@ from server.core.device_manager import DeviceManager
 from server.core.event_bus import EventBus
 from server.core.macro_engine import MacroEngine
 from server.core.plugin_loader import PluginLoader
-from server.core.project_loader import ProjectConfig, ProjectMeta, load_project, save_project
+from server.core.project_loader import (
+    ProjectConfig,
+    ProjectMeta,
+    load_project,
+    save_project,
+    save_project_async,
+)
 from server.core.script_engine import ScriptEngine
 from server.core.state_persister import StatePersister
 from server.core.state_store import StateStore
@@ -921,7 +927,7 @@ class Engine:
             previous = self.project.plugins[plugin_id].config
             self.project.plugins[plugin_id].config = config
             try:
-                save_project(self.project_path, self.project)
+                await save_project_async(self.project_path, self.project)
                 self.bump_project_revision()
             except Exception as e:
                 # Revert the in-memory project so it matches disk. Otherwise a
@@ -1446,7 +1452,7 @@ class Engine:
                 dev.pending_settings = remaining
                 break
 
-        save_project(self.project_path, self.project)
+        await save_project_async(self.project_path, self.project)
         log.info(f"[{device_id}] Project saved after applying pending settings")
 
     async def _on_script_error(self, event: str, payload: dict[str, Any]) -> None:

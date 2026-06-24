@@ -34,6 +34,24 @@ def _get_result_payload(mock_agent):
     return mock_agent.send_message.call_args[0][1]
 
 
+async def _drain():
+    """Drain the background tool task that handle() spawns via create_task.
+
+    The write tools now persist via save_project_async (asyncio.to_thread),
+    so a single `await asyncio.sleep(0)` no longer settles the task before it
+    has hopped to the worker thread and back. Wait for the spawned task(s) to
+    actually finish so the result has been sent."""
+    for _ in range(10):
+        await asyncio.sleep(0)  # noqa: ASYNC110 — bounded drain, not a busy-wait
+        others = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        if not others:
+            return
+        await asyncio.wait(others, timeout=2.0)
+
+
 def _make_project():
     """Create a mock ProjectConfig with realistic data."""
     from server.core.project_loader import (
@@ -139,7 +157,7 @@ async def test_get_project_summary(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("get_project_summary")
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -184,7 +202,7 @@ async def test_get_project_summary_no_project(handler, mock_agent):
     with patch.object(handler, "_get_engine", return_value=None):
         msg = _make_tool_call_msg("get_project_summary")
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -196,7 +214,7 @@ async def test_get_macro(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("get_macro", {"macro_id": "all_off"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -212,7 +230,7 @@ async def test_get_macro_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("get_macro", {"macro_id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -224,7 +242,7 @@ async def test_get_ui_page(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("get_ui_page", {"page_id": "main"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -240,7 +258,7 @@ async def test_get_ui_page_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("get_ui_page", {"page_id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -261,7 +279,7 @@ async def test_add_device(handler, mock_agent, mock_engine):
                 "config": {"host": "192.168.1.30", "port": 1515},
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -284,7 +302,7 @@ async def test_add_device_duplicate(handler, mock_agent, mock_engine):
             "name": "Duplicate",
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -306,7 +324,7 @@ async def test_add_variable(handler, mock_agent, mock_engine):
                 "dashboard": True,
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -324,7 +342,7 @@ async def test_add_variable_duplicate(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("add_variable", {"id": "room_mode"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -341,7 +359,7 @@ async def test_update_variable(handler, mock_agent, mock_engine):
                 "dashboard": True,
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -360,7 +378,7 @@ async def test_update_variable_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("update_variable", {"id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -373,7 +391,7 @@ async def test_delete_variable(handler, mock_agent, mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("delete_variable", {"id": "is_occupied"})
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -386,7 +404,7 @@ async def test_delete_variable_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("delete_variable", {"id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -410,7 +428,7 @@ async def test_add_macro(handler, mock_agent, mock_engine):
                 "stop_on_error": True,
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -438,7 +456,7 @@ async def test_add_macro_with_cancel_group(handler, mock_agent, mock_engine):
                 "cancel_group": "system_power",
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -461,7 +479,7 @@ async def test_add_macro_with_ui_navigate_step(handler, mock_agent, mock_engine)
                 ],
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -476,7 +494,7 @@ async def test_add_macro_duplicate(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("add_macro", {"id": "all_off", "name": "Duplicate"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -495,7 +513,7 @@ async def test_update_macro(handler, mock_agent, mock_engine):
                 ],
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -523,7 +541,7 @@ async def test_update_macro_preserves_existing_cancel_group(handler, mock_agent,
                 "name": "Everything Off",
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -541,7 +559,7 @@ async def test_update_macro_sets_cancel_group(handler, mock_agent, mock_engine):
                 "cancel_group": "system_power",
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -554,7 +572,7 @@ async def test_update_macro_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("update_macro", {"macro_id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -567,7 +585,7 @@ async def test_delete_macro(handler, mock_agent, mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("delete_macro", {"macro_id": "presentation"})
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -580,7 +598,7 @@ async def test_delete_macro_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("delete_macro", {"macro_id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -600,7 +618,7 @@ async def test_add_ui_page(handler, mock_agent, mock_engine):
                 "grid": {"columns": 6, "rows": 4},
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -616,7 +634,7 @@ async def test_add_ui_page_duplicate(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("add_ui_page", {"id": "main", "name": "Duplicate"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -629,7 +647,7 @@ async def test_delete_ui_page(handler, mock_agent, mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("delete_ui_page", {"page_id": "settings"})
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -642,7 +660,7 @@ async def test_delete_ui_page_not_found(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("delete_ui_page", {"page_id": "nonexistent"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -666,7 +684,7 @@ async def test_add_ui_elements(handler, mock_agent, mock_engine):
                 ],
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -688,7 +706,7 @@ async def test_add_ui_elements_duplicate(handler, mock_agent, mock_engine):
             ],
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -703,7 +721,7 @@ async def test_add_ui_elements_page_not_found(handler, mock_agent, mock_engine):
             "elements": [{"id": "btn1", "type": "button"}],
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -721,7 +739,7 @@ async def test_update_ui_element(handler, mock_agent, mock_engine):
                 "bindings": {"press": [{"action": "macro", "macro": "all_on"}]},
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -744,7 +762,7 @@ async def test_update_ui_element_grid_area(handler, mock_agent, mock_engine):
                 "grid_area": {"col": 5, "row": 2, "col_span": 3, "row_span": 2},
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -764,7 +782,7 @@ async def test_update_ui_element_not_found(handler, mock_agent, mock_engine):
             "label": "Nope",
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -779,7 +797,7 @@ async def test_delete_ui_elements(handler, mock_agent, mock_engine):
                 "element_ids": ["btn_on", "btn_off"],
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -799,7 +817,7 @@ async def test_delete_ui_elements_not_found(handler, mock_agent, mock_engine):
             "element_ids": ["nonexistent1", "nonexistent2"],
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -950,7 +968,7 @@ async def test_variable_tools_no_reload(handler, mock_agent, mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("add_variable", {"id": "test_var"})
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     handler._reload_fn.assert_not_called()
 
@@ -966,7 +984,7 @@ async def test_device_add_no_reload(handler, mock_agent, mock_engine):
                 "name": "Test Device",
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     handler._reload_fn.assert_not_called()
 
@@ -978,7 +996,7 @@ async def test_macro_tools_trigger_reload(handler, mock_agent, mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("add_macro", {"id": "test_macro", "name": "Test"})
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     handler._reload_fn.assert_called_once()
 
@@ -993,7 +1011,7 @@ async def test_ui_tools_trigger_reload(handler, mock_agent, mock_engine):
                 "elements": [{"id": "new_btn", "type": "button", "grid_area": {"col": 1, "row": 7}}],
             })
             await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     handler._reload_fn.assert_called_once()
 
@@ -1033,7 +1051,7 @@ async def test_set_state_value_rejects_non_primitive(handler, mock_agent):
         mock_agent.state.set.reset_mock()
         msg = _make_tool_call_msg("set_state_value", {"key": "var.x", "value": bad})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
         payload = _get_result_payload(mock_agent)
         assert payload["success"] is False
         assert "flat primitive" in payload["result"]["error"]
@@ -1046,7 +1064,7 @@ async def test_set_state_value_accepts_primitives(handler, mock_agent):
         mock_agent.state.set.reset_mock()
         msg = _make_tool_call_msg("set_state_value", {"key": "var.x", "value": good})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
         payload = _get_result_payload(mock_agent)
         assert payload["success"] is True
         mock_agent.state.set.assert_called_once_with("var.x", good, source="ai")
@@ -1107,7 +1125,7 @@ async def test_update_macro_preserves_forward_compat_fields(handler, mock_agent,
             "name": "Renamed Mode",
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -1137,7 +1155,7 @@ async def test_plugin_config_update_bumps_revision(handler, mock_agent, mock_eng
             "config": {"volume": 5},
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -1159,7 +1177,7 @@ async def test_disable_plugin_bumps_revision(handler, mock_agent, mock_engine):
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("disable_plugin", {"plugin_id": "some_plugin"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -1199,7 +1217,7 @@ async def test_enable_plugin_rolls_back_on_start_failure(handler, mock_agent, mo
          patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("enable_plugin", {"plugin_id": "stub_plugin"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     # The failure is reported as a failure (error key -> is_error classifier)
@@ -1226,7 +1244,7 @@ async def test_enable_plugin_first_time_failure_keeps_entry_disabled(
          patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("enable_plugin", {"plugin_id": "stub_plugin"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -1247,7 +1265,7 @@ async def test_enable_plugin_success_persists_enabled(handler, mock_agent, mock_
          patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("enable_plugin", {"plugin_id": "stub_plugin"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
@@ -1268,7 +1286,7 @@ async def test_update_plugin_config_rejects_missing_config(handler, mock_agent, 
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         msg = _make_tool_call_msg("update_plugin_config", {"plugin_id": "some_plugin"})
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -1294,7 +1312,7 @@ async def test_update_plugin_config_rejects_non_dict_config(handler, mock_agent,
             "config": "not-an-object",
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
@@ -1321,7 +1339,7 @@ async def test_update_plugin_config_allows_explicit_empty_object(
             "config": {},
         })
         await handler.handle(msg)
-        await asyncio.sleep(0)
+        await _drain()
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True

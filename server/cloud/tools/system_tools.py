@@ -185,7 +185,7 @@ class SystemToolsMixin:
 
     async def _apply_theme(self, input: dict) -> Any:
         from server.api.themes import BUILTIN_THEMES_DIR, _custom_themes_dir
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
 
         engine = self._get_engine()
         if not engine or not engine.project:
@@ -217,7 +217,7 @@ class SystemToolsMixin:
         engine.project.ui.settings.theme = (
             "light" if ("light" in theme_id or theme_id == "minimal") else "dark"
         )
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()

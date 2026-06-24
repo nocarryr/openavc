@@ -566,3 +566,53 @@ def test_regex_search_fast_pattern_within_budget():
 
     safe = re.compile(r"PWR=(\d)")
     assert _regex_search_exceeds(safe, "PWR=1", 0.5) is False
+
+
+# --- driver_id_from_file: declared id without importing the module --------
+
+
+def test_driver_id_from_file_yaml(tmp_path):
+    from server.drivers.driver_loader import driver_id_from_file
+
+    f = tmp_path / "weird_name.avcdriver"
+    f.write_text("id: acme_widget\nname: Acme\ntransport: tcp\n", encoding="utf-8")
+    assert driver_id_from_file(f) == "acme_widget"
+
+
+def test_driver_id_from_file_python(tmp_path):
+    from server.drivers.driver_loader import driver_id_from_file
+
+    f = tmp_path / "weird_name.py"
+    f.write_text(
+        "from server.drivers.base import BaseDriver\n\n"
+        "class AcmeDriver(BaseDriver):\n"
+        "    DRIVER_INFO = {'id': 'acme_widget', 'name': 'Acme'}\n",
+        encoding="utf-8",
+    )
+    assert driver_id_from_file(f) == "acme_widget"
+
+
+def test_driver_id_from_file_python_does_not_execute_module(tmp_path):
+    """The id is read via AST — a .py whose import would raise still yields
+    its declared id (we never exec it)."""
+    from server.drivers.driver_loader import driver_id_from_file
+
+    f = tmp_path / "boom.py"
+    f.write_text(
+        "raise RuntimeError('importing me explodes')\n"
+        "DRIVER_INFO = {'id': 'safe_id'}\n",
+        encoding="utf-8",
+    )
+    assert driver_id_from_file(f) == "safe_id"
+
+
+def test_driver_id_from_file_returns_none_on_garbage(tmp_path):
+    from server.drivers.driver_loader import driver_id_from_file
+
+    bad_py = tmp_path / "bad.py"
+    bad_py.write_text("this is (not valid python\n", encoding="utf-8")
+    assert driver_id_from_file(bad_py) is None
+
+    no_info = tmp_path / "noinfo.avcdriver"
+    no_info.write_text("name: No Id Here\ntransport: tcp\n", encoding="utf-8")
+    assert driver_id_from_file(no_info) is None

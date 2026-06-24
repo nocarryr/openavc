@@ -350,7 +350,7 @@ def test_patch_label_persists_to_project_and_state(child_client):
     c, _engine, driver, device_cfg = child_client
     driver.register_child("encoder", 7, initial_state={"name": "Original"})
 
-    with patch("server.api.routes.devices.save_project") as save:
+    with patch("server.core.project_loader.save_project") as save:
         resp = c.patch(
             "/api/devices/ctrl1/children/encoder/7",
             json={"label": "Stage Right TX"},
@@ -373,7 +373,7 @@ def test_patch_label_persists_to_project_and_state(child_client):
 def test_patch_config_only_preserves_existing_label(child_client):
     c, _engine, _driver, device_cfg = child_client
     # Project pre-seeds encoder 005 with label "Lobby TX" + room=Lobby.
-    with patch("server.api.routes.devices.save_project"):
+    with patch("server.core.project_loader.save_project"):
         resp = c.patch(
             "/api/devices/ctrl1/children/encoder/5",
             json={"config": {"room": "Stage", "tag": "primary"}},
@@ -395,7 +395,7 @@ def test_patch_label_works_on_unregistered_child(child_client):
     c, _engine, driver, device_cfg = child_client
     assert not driver.is_child_registered("encoder", 42)
 
-    with patch("server.api.routes.devices.save_project"):
+    with patch("server.core.project_loader.save_project"):
         resp = c.patch(
             "/api/devices/ctrl1/children/encoder/42",
             json={"label": "Future TX"},

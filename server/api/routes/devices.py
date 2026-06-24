@@ -17,7 +17,7 @@ from server.api.models import (
     PendingSettingsRequest,
     RawSendRequest,
 )
-from server.core.project_loader import ChildEntityConfig, DeviceConfig, save_project
+from server.core.project_loader import ChildEntityConfig, DeviceConfig, save_project_async
 from server.core.project_migration import CONNECTION_FIELDS
 
 router = APIRouter()
@@ -228,7 +228,7 @@ async def update_device(device_id: str, body: DeviceUpdateRequest) -> dict[str, 
 
     # Update project config, save, and hot-swap device
     engine.project.devices[device_idx] = updated
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     # Pass merged config (protocol + connection) to the device manager
     resolved = engine.resolved_device_config(updated)
     await engine.devices.update_device(device_id, resolved)
@@ -251,7 +251,7 @@ async def delete_device(device_id: str) -> dict[str, Any]:
     # Clean up connections table entry
     engine.project.connections.pop(device_id, None)
 
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     await engine.devices.remove_device(device_id)
     return {"status": "deleted", "device_id": device_id}
 
@@ -601,7 +601,7 @@ async def store_pending_settings(
     if not found:
         raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found in project")
 
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     return {"status": "pending", "device_id": device_id, "settings": body.settings}
 
 
@@ -842,7 +842,7 @@ async def update_child_entity(
     )
     type_map[padded] = ChildEntityConfig(label=new_label, config=new_config)
 
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
 
     # Sync the new project metadata back into the driver so future
     # register_child calls (re-registration after deregister, etc.) seed
@@ -935,7 +935,7 @@ async def update_connection(device_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(overrides, dict):
         raise HTTPException(status_code=422, detail="Connection overrides must be a JSON object")
     engine.project.connections[device_id] = overrides
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
 
     # Hot-swap device with new connection info
     for i, d in enumerate(engine.project.devices):
@@ -959,7 +959,7 @@ async def update_connections_bulk(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="Connection table must be a JSON object of objects")
     kept, skipped = _split_known_connection_ids(engine, table)
     engine.project.connections = kept
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
 
     # Hot-reload devices with new connections
     await engine.reload_project()
@@ -977,7 +977,7 @@ async def delete_connection(device_id: str) -> dict[str, Any]:
     if removed is None:
         raise HTTPException(status_code=404, detail=f"No connection overrides for '{device_id}'")
 
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
 
     # Re-sync the device with config defaults only
     for d in engine.project.devices:
@@ -1027,6 +1027,6 @@ async def import_connections(request: Request) -> dict[str, Any]:
 
     kept, skipped = _split_known_connection_ids(engine, cleaned)
     engine.project.connections = kept
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     await engine.reload_project()
     return {"status": "imported", "count": len(kept), "skipped": skipped}

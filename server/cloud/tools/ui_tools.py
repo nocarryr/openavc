@@ -54,7 +54,7 @@ class UIToolsMixin:
         # call yields bindings that were never validated (buttons silently do
         # nothing), while the identical elements added via add_ui_elements work.
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-        from server.core.project_loader import UIPage, save_project
+        from server.core.project_loader import UIPage, save_project_async
         elements = input.get("elements", [])
         for el_data in elements:
             if isinstance(el_data, dict) and isinstance(el_data.get("bindings"), dict):
@@ -70,7 +70,7 @@ class UIToolsMixin:
             elements=elements,
         )
         engine.project.ui.pages.append(new_page)
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -116,8 +116,8 @@ class UIToolsMixin:
         if not changed:
             return {"error": "No fields to update"}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -142,8 +142,8 @@ class UIToolsMixin:
         if len(engine.project.ui.pages) == original_count:
             return {"error": f"UI page '{page_id}' not found"}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -179,7 +179,7 @@ class UIToolsMixin:
                 return {"error": f"Element '{el_id}' already exists on page '{page_id}'"}
 
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-        from server.core.project_loader import UIElement, save_project
+        from server.core.project_loader import UIElement, save_project_async
         for el_data in elements:
             if "bindings" in el_data and isinstance(el_data["bindings"], dict):
                 el_data["bindings"] = _normalize_bindings(el_data["bindings"])
@@ -187,7 +187,7 @@ class UIToolsMixin:
                 if err:
                     return {"error": f"Element '{el_data.get('id', '?')}': {err}"}
             page.elements.append(UIElement(**el_data))
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -246,8 +246,8 @@ class UIToolsMixin:
         if "bindings" in input:
             target_el.bindings = bindings
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -273,8 +273,8 @@ class UIToolsMixin:
         if not deleted_ids:
             return {"error": "No matching elements found"}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -298,7 +298,7 @@ class UIToolsMixin:
             return {"error": f"Master element '{element_id}' already exists"}
 
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-        from server.core.project_loader import MasterElement, save_project
+        from server.core.project_loader import MasterElement, save_project_async
         el_data = {k: v for k, v in input.items() if k != "id"}
         el_data["id"] = element_id
         if "bindings" in el_data and isinstance(el_data["bindings"], dict):
@@ -308,7 +308,7 @@ class UIToolsMixin:
                 return {"error": f"Master element '{element_id}': {err}"}
         new_el = MasterElement(**el_data)
         engine.project.ui.master_elements.append(new_el)
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -328,8 +328,8 @@ class UIToolsMixin:
         if len(engine.project.ui.master_elements) == original_count:
             return {"error": f"Master element '{element_id}' not found"}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()

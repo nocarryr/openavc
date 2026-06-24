@@ -633,3 +633,86 @@ def test_ids_accept_normal_names():
     DeviceConfig(id="encoder_5", driver="x", name="X")
     VariableConfig(id="room_active", type="boolean")
     UIElement(id="vol_slider", type="slider")
+
+
+# --- ScriptConfig.id validation parity with the REST create path ----------
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["My Script", "scripts/evil", "room.logic", "UPPER", "", "has-dash", "a b"],
+)
+def test_script_config_id_rejects_unsafe(bad_id):
+    """The project-load path must reject script ids the REST create path
+    forbids (api/models.py ScriptCreateRequest: ^[a-z0-9_]+$). Pre-fix the
+    loader only rejected dots, so an imported project could smuggle ids with
+    slashes/spaces/uppercase/dashes that become odd sys.modules keys and
+    thread names."""
+    from server.core.project_loader import ScriptConfig
+
+    with pytest.raises(ValidationError):
+        ScriptConfig(id=bad_id, file="x.py")
+
+
+def test_script_config_id_accepts_safe():
+    from server.core.project_loader import ScriptConfig
+
+    s = ScriptConfig(id="room_logic_2", file="room_logic_2.py")
+    assert s.id == "room_logic_2"
+
+
+# --- save_project_async offloads the blocking save to a worker thread ------
+
+
+@pytest.mark.asyncio
+async def test_save_project_async_persists(tmp_path):
+    """The async wrapper writes the same file the sync save_project does
+    (it runs the blocking body via asyncio.to_thread)."""
+    from server.core.project_loader import save_project_async
+
+    proj = ProjectConfig(**TEST_PROJECT)
+    path = tmp_path / "p.avc"
+    await save_project_async(path, proj)
+    assert path.exists()
+    assert load_project(path).project.id == "test_room"
+
+
+# --- driver source classification resolves by declared id, not stem -------
+
+
+def test_driver_source_resolves_by_declared_id_not_stem(tmp_path, monkeypatch):
+    """A repo driver whose filename stem differs from its declared id must
+    be classified 'community', not mis-stamped 'builtin' (which would drop
+    it from the export bundle). Uploads keep their original filename, so
+    stem != id is a real case."""
+    import server.system_config as sc
+    from server.core.project_loader import _get_driver_source
+
+    defs = tmp_path / "definitions"
+    defs.mkdir()
+    repo = tmp_path / "driver_repo"
+    repo.mkdir()
+    monkeypatch.setattr(sc, "DRIVER_DEFINITIONS_DIR", defs)
+    monkeypatch.setattr(sc, "DRIVER_REPO_DIR", repo)
+
+    (repo / "uploaded_file.avcdriver").write_text(
+        "id: acme_widget\nname: Acme Widget\ntransport: tcp\n", encoding="utf-8"
+    )
+    assert _get_driver_source("acme_widget") == "community"
+
+
+def test_driver_source_stem_match_still_classifies_community(tmp_path, monkeypatch):
+    import server.system_config as sc
+    from server.core.project_loader import _get_driver_source
+
+    defs = tmp_path / "definitions"
+    defs.mkdir()
+    repo = tmp_path / "driver_repo"
+    repo.mkdir()
+    monkeypatch.setattr(sc, "DRIVER_DEFINITIONS_DIR", defs)
+    monkeypatch.setattr(sc, "DRIVER_REPO_DIR", repo)
+
+    (repo / "acme_widget.avcdriver").write_text(
+        "id: acme_widget\nname: Acme Widget\ntransport: tcp\n", encoding="utf-8"
+    )
+    assert _get_driver_source("acme_widget") == "community"

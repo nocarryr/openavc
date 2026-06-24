@@ -93,8 +93,8 @@ class ProjectToolsMixin:
         if not changed:
             return {"error": "No fields to update. Provide 'name' and/or 'description'."}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
         await self._notify_project_changed()
 
         return {"status": "updated", "changed": changed}

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from server.api._engine import _get_engine
 from server.api.auth import require_claimed_auth
 from server.api.models import ScriptCreateRequest
-from server.core.project_loader import save_project
+from server.core.project_loader import save_project_async
 from server.utils.paths import safe_path_within
 
 router = APIRouter()
@@ -148,7 +148,7 @@ async def create_script(data: ScriptCreateRequest) -> dict[str, Any]:
         description=data.description,
     )
     engine.project.scripts.append(new_script)
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     await engine.reload_project()
     return {"status": "created", "id": data.id}
 
@@ -172,7 +172,7 @@ async def delete_script(script_id: str) -> dict[str, Any]:
 
     # Remove from project config and save
     engine.project.scripts = [s for s in engine.project.scripts if s.id != script_id]
-    save_project(engine.project_path, engine.project)
+    await save_project_async(engine.project_path, engine.project)
     await engine.reload_project()
     return {"status": "deleted"}
 

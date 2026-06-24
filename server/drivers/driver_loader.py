@@ -15,6 +15,7 @@ Each valid driver is registered in the global driver registry.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
 import os
@@ -386,6 +387,55 @@ def load_driver_file(filepath: Path) -> dict[str, Any] | None:
             return None
 
     return driver_def
+
+
+def _python_driver_id(filepath: Path) -> str | None:
+    """Extract ``DRIVER_INFO['id']`` from a .py driver via AST (no import)."""
+    tree = ast.parse(filepath.read_text(encoding="utf-8"))
+    # DRIVER_INFO may be a module-level assignment or a class attribute;
+    # ast.walk covers both. First declared id wins.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(t, ast.Name) and t.id == "DRIVER_INFO" for t in node.targets
+        ):
+            continue
+        if isinstance(node.value, ast.Dict):
+            for k, v in zip(node.value.keys, node.value.values):
+                if (
+                    isinstance(k, ast.Constant) and k.value == "id"
+                    and isinstance(v, ast.Constant) and isinstance(v.value, str)
+                ):
+                    return v.value or None
+    return None
+
+
+def driver_id_from_file(filepath: Path) -> str | None:
+    """Return the driver id a file *declares*, without importing it.
+
+    Drivers are registered under their declared id, which may differ from the
+    filename stem (uploads keep their original filename — routes/drivers.py
+    does not rename). Resolving a repo file by stem alone therefore misses
+    such drivers; callers that map an id back to its file (export bundling,
+    builtin/community source classification) use this instead.
+
+    - ``.py``: the ``id`` key of the module/class ``DRIVER_INFO`` dict, read
+      via ``ast`` so the module is never executed.
+    - everything else (``.avcdriver`` YAML): the top-level ``id`` field.
+
+    Returns the declared id, or None if it can't be determined.
+    """
+    try:
+        if filepath.suffix == ".py":
+            return _python_driver_id(filepath)
+        data = yaml.safe_load(filepath.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            did = data.get("id")
+            return did if isinstance(did, str) and did else None
+    except (OSError, yaml.YAMLError, SyntaxError, ValueError) as e:
+        log.debug(f"Could not read driver id from {filepath}: {e}")
+    return None
 
 
 def load_driver_files(directories: Sequence[Path | str]) -> int:

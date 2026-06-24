@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from server.api._engine import _get_engine
 from server.api.errors import api_error as _api_error
-from server.core.project_loader import ProjectConfig, save_project
+from server.core.project_loader import ProjectConfig, save_project_async
 from server.utils.log_buffer import get_log_buffer
 
 router = APIRouter()
@@ -89,7 +89,7 @@ async def save_project_config(request: Request) -> dict[str, Any]:
         project = ProjectConfig(**body)
     except Exception as e:
         raise _api_error(422, "Invalid project configuration", e)
-    save_project(engine.project_path, project)
+    await save_project_async(engine.project_path, project)
     await engine.reload_project()
     return JSONResponse(
         content={"status": "saved"},
@@ -319,7 +319,7 @@ async def create_blank(request: Request) -> dict[str, Any]:
     await asyncio.to_thread(create_backup, engine.project_path.parent, "Before creating blank project")
 
     project = create_blank_project(project_id, project_name)
-    save_project(engine.project_path, project)
+    await save_project_async(engine.project_path, project)
 
     scripts_dir = engine.project_path.parent / "scripts"
     replace_scripts(scripts_dir, {})

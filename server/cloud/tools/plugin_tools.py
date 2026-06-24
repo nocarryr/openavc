@@ -74,8 +74,8 @@ class PluginToolsMixin:
                 d for d in engine.project.plugin_dependencies
                 if d.plugin_id != plugin_id
             ]
-            from server.core.project_loader import save_project
-            save_project(engine.project_path, engine.project)
+            from server.core.project_loader import save_project_async
+            await save_project_async(engine.project_path, engine.project)
             await self._notify_project_changed()
 
         # Clear missing plugin state if tracked
@@ -93,7 +93,7 @@ class PluginToolsMixin:
             return {"error": "plugin_id is required"}
 
         from server.core.plugin_loader import _PLUGIN_CLASS_REGISTRY
-        from server.core.project_loader import PluginConfig, build_default_plugin_config, save_project
+        from server.core.project_loader import PluginConfig, build_default_plugin_config, save_project_async
 
         plugin_class = _PLUGIN_CLASS_REGISTRY.get(plugin_id)
         if plugin_class is None:
@@ -118,7 +118,7 @@ class PluginToolsMixin:
         if not success:
             engine.project.plugins[plugin_id].enabled = False
 
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         await self._notify_project_changed()
 
         if not success:
@@ -152,10 +152,10 @@ class PluginToolsMixin:
         if plugin_id not in engine.project.plugins:
             return {"error": f"Plugin '{plugin_id}' not in project"}
 
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
 
         engine.project.plugins[plugin_id].enabled = False
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         await self._notify_project_changed()
         await engine.plugin_loader.stop_plugin(plugin_id)
 
@@ -246,10 +246,10 @@ class PluginToolsMixin:
                 if err:
                     return {"error": f"Plugin '{plugin_id}': {err}"}
 
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
 
         engine.project.plugins[plugin_id].config = new_config
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         await self._notify_project_changed()
 
         # Hot-apply when the plugin supports it, else restart

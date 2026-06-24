@@ -527,17 +527,27 @@ def _find_driver_files(driver_deps: list[dict]) -> list[tuple[str, Path]]:
     if not driver_repo.exists():
         return []
 
+    from server.drivers.driver_loader import driver_id_from_file
+
     files = []
     for dep in driver_deps:
         if dep.get("source") == "builtin":
             continue
         driver_id = dep.get("driver_id", "")
-        # Search driver_repo for matching files
+        # Search driver_repo for matching files. Match by the driver's
+        # DECLARED id (the way the loader registers it) as well as the
+        # filename stem — an uploaded driver keeps its original filename, so
+        # the stem can differ from its id. A stem-only match would drop such
+        # a driver from the export bundle, producing a broken handoff.
         for ext in ("*.avcdriver", "*.py"):
             for f in driver_repo.glob(ext):
                 if f.name.startswith("_"):
                     continue
-                if f.stem == driver_id or f.stem.replace("-", "_") == driver_id:
+                if (
+                    f.stem == driver_id
+                    or f.stem.replace("-", "_") == driver_id
+                    or driver_id_from_file(f) == driver_id
+                ):
                     files.append((f.name, f))
                     break
     return files

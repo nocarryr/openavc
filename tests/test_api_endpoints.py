@@ -180,7 +180,7 @@ def test_device_update_preserves_pending_settings(client, tmp_path):
     )
     engine.devices.update_device = AsyncMock()
 
-    with patch("server.api.routes.devices.save_project"):
+    with patch("server.core.project_loader.save_project"):
         resp = c.put("/api/devices/dev1", json={"name": "Renamed"})
 
     assert resp.status_code == 200
@@ -219,7 +219,7 @@ def test_device_update_preserves_forward_compat_extra_fields(client, tmp_path):
     )
     engine.devices.update_device = AsyncMock()
 
-    with patch("server.api.routes.devices.save_project"):
+    with patch("server.core.project_loader.save_project"):
         resp = c.put("/api/devices/dev1", json={"name": "Renamed"})
 
     assert resp.status_code == 200
@@ -291,7 +291,7 @@ def test_bulk_connections_drops_unknown_device_ids(client, tmp_path):
         "real2": {"host": "10.0.0.2"},
         "ghost": {"host": "10.0.0.9"},
     }
-    with patch("server.api.routes.devices.save_project"):
+    with patch("server.core.project_loader.save_project"):
         resp = c.put("/api/connections", json=table)
 
     assert resp.status_code == 200
@@ -318,7 +318,7 @@ def test_import_connections_drops_unknown_device_ids(client, tmp_path):
         "real1": {"host": "10.0.0.1", "_device_name": "Projector"},
         "stale": {"host": "10.0.0.9"},
     }
-    with patch("server.api.routes.devices.save_project"):
+    with patch("server.core.project_loader.save_project"):
         resp = c.post("/api/connections/import", json=table)
 
     assert resp.status_code == 200

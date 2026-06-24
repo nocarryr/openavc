@@ -16,7 +16,7 @@ from server.core.project_loader import PluginConfig, ProjectConfig, ProjectMeta
 
 def _engine(tmp_path, monkeypatch):
     # Don't touch disk; we only care about the in-memory revision counter.
-    monkeypatch.setattr("server.core.engine.save_project", lambda *a, **k: None)
+    monkeypatch.setattr("server.core.project_loader.save_project", lambda *a, **k: None)
     engine = Engine(str(tmp_path / "t.avc"))
     engine.project = ProjectConfig(
         project=ProjectMeta(id="t", name="Test"),
@@ -76,7 +76,7 @@ async def test_save_plugin_config_reverts_on_save_failure(tmp_path, monkeypatch)
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr("server.core.engine.save_project", _boom)
+    monkeypatch.setattr("server.core.project_loader.save_project", _boom)
     engine.broadcast_ws = AsyncMock()
 
     with pytest.raises(OSError):
@@ -114,8 +114,9 @@ async def test_uninstall_endpoint_removes_plugin_and_bumps_revision(tmp_path, mo
     from server.api import plugins as plugins_api
     from server.core import plugin_installer
 
-    # The endpoint persists via server.api.plugins.save_project; keep it off disk.
-    monkeypatch.setattr(plugins_api, "save_project", lambda *a, **k: None)
+    # The endpoint persists via save_project_async -> to_thread(save_project);
+    # patch the underlying sync save so nothing hits disk.
+    monkeypatch.setattr("server.core.project_loader.save_project", lambda *a, **k: None)
 
     # Stand in for the installer's file removal (skip real files / enabled-guard).
     async def _fake_uninstall(plugin_id, project_plugins, *, remove_data=False):

@@ -457,13 +457,13 @@ async def add_device(req: AddDeviceRequest) -> dict[str, Any]:
 
     # Save to project with connection table separation
     try:
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
         if _app_engine.project:
             from server.core.project_loader import DeviceConfig
             _app_engine.project.devices.append(DeviceConfig(**device_config))
             if conn_overrides:
                 _app_engine.project.connections[device_id] = conn_overrides
-            save_project(_app_engine.project_path, _app_engine.project)
+            await save_project_async(_app_engine.project_path, _app_engine.project)
     except Exception as e:
         # Device was added to runtime but project save failed
         raise _api_error(500, f"Device '{device_id}' added but project save failed", e)

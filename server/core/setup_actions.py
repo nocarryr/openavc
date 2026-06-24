@@ -71,7 +71,7 @@ class SetupActionContext:
         if project is None:
             raise RuntimeError("No project loaded")
 
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
         from server.core.project_migration import CONNECTION_FIELDS
 
         device_id = self._device_id
@@ -92,7 +92,7 @@ class SetupActionContext:
         else:
             project.connections.pop(device_id, None)
         dev.config = protocol
-        save_project(engine.project_path, project)
+        await save_project_async(engine.project_path, project)
 
         driver = engine.devices.get_driver(device_id)
         if driver is not None:

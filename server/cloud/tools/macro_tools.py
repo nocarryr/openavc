@@ -44,7 +44,7 @@ class MacroToolsMixin:
         if err:
             return {"error": f"Variable '{var_id}': {err}"}
 
-        from server.core.project_loader import VariableConfig, save_project
+        from server.core.project_loader import VariableConfig, save_project_async
         new_var = VariableConfig(
             id=var_id,
             type=var_type,
@@ -54,7 +54,7 @@ class MacroToolsMixin:
             persist=input.get("persist", False),
         )
         engine.project.variables.append(new_var)
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         # Set initial state directly (no reload needed)
         if new_var.default is not None:
@@ -77,7 +77,7 @@ class MacroToolsMixin:
         if var_idx is None:
             return {"error": f"Variable '{var_id}' not found"}
 
-        from server.core.project_loader import save_project
+        from server.core.project_loader import save_project_async
         from server.cloud.ai_tool_handler import _validate_variable
         existing = engine.project.variables[var_idx]
 
@@ -100,7 +100,7 @@ class MacroToolsMixin:
         if "persist" in input:
             existing.persist = input["persist"]
 
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
         await self._notify_project_changed()
 
         return {"status": "updated", "id": var_id}
@@ -119,8 +119,8 @@ class MacroToolsMixin:
         if len(engine.project.variables) == original_count:
             return {"error": f"Variable '{var_id}' not found"}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
         await self._notify_project_changed()
 
         result: dict = {"status": "deleted", "id": var_id}
@@ -146,7 +146,7 @@ class MacroToolsMixin:
         if err:
             return {"error": f"Macro '{macro_id}': {err}"}
 
-        from server.core.project_loader import MacroConfig, save_project
+        from server.core.project_loader import MacroConfig, save_project_async
         new_macro = MacroConfig(
             id=macro_id,
             name=input.get("name", macro_id),
@@ -156,7 +156,7 @@ class MacroToolsMixin:
             cancel_group=input.get("cancel_group"),
         )
         engine.project.macros.append(new_macro)
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -177,7 +177,7 @@ class MacroToolsMixin:
         if macro_idx is None:
             return {"error": f"Macro '{macro_id}' not found"}
 
-        from server.core.project_loader import MacroConfig, save_project
+        from server.core.project_loader import MacroConfig, save_project_async
         from server.cloud.ai_tool_handler import _validate_macro
         from server.cloud.tools.ui_tools import _merge_forward_compat
         existing = engine.project.macros[macro_idx]
@@ -201,7 +201,7 @@ class MacroToolsMixin:
         }
         updated = _merge_forward_compat(existing, MacroConfig, patch)
         engine.project.macros[macro_idx] = updated
-        save_project(engine.project_path, engine.project)
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()
@@ -222,8 +222,8 @@ class MacroToolsMixin:
         if len(engine.project.macros) == original_count:
             return {"error": f"Macro '{macro_id}' not found"}
 
-        from server.core.project_loader import save_project
-        save_project(engine.project_path, engine.project)
+        from server.core.project_loader import save_project_async
+        await save_project_async(engine.project_path, engine.project)
 
         if self._reload_fn:
             await self._reload_fn()

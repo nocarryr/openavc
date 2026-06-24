@@ -145,7 +145,7 @@ class CommandHandler:
         if self._reload_fn and self._project_path:
             try:
                 from pathlib import Path
-                from server.core.project_loader import ProjectConfig, save_project
+                from server.core.project_loader import ProjectConfig, save_project_async
                 from server.core.backup_manager import create_backup
 
                 project_path = Path(self._project_path)
@@ -171,7 +171,7 @@ class CommandHandler:
                     # Create backup before overwriting
                     import asyncio
                     await asyncio.to_thread(create_backup, project_path.parent, "Before cloud config push")
-                    save_project(project_path, project)
+                    await save_project_async(project_path, project)
 
                 await self._reload_fn()
 

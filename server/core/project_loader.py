@@ -5,8 +5,10 @@ Loads and validates project.avc using Pydantic models.
 All downstream code works with typed ProjectConfig objects, never raw dicts.
 """
 
+import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -371,6 +373,9 @@ class UIConfig(_ForwardCompatModel):
     page_groups: list[PageGroup] = Field(default_factory=list)
 
 
+_SCRIPT_ID_RE = re.compile(r"^[a-z0-9_]+$")
+
+
 class ScriptConfig(_ForwardCompatModel):
     id: str
     file: str
@@ -379,9 +384,17 @@ class ScriptConfig(_ForwardCompatModel):
 
     @field_validator("id")
     @classmethod
-    def id_no_dots(cls, v: str) -> str:
-        if "." in v:
-            raise ValueError(f"Script ID '{v}' must not contain dots (used as state key separator)")
+    def id_is_safe(cls, v: str) -> str:
+        # Align the project-load path with the REST create path
+        # (api/models.py ScriptCreateRequest). The id is used as a state-key
+        # segment, a sys.modules key, and a thread name, so an imported
+        # project must not carry ids the API would reject (slashes, spaces,
+        # dots, uppercase). Lowercase alphanumeric + underscore only.
+        if not v or not _SCRIPT_ID_RE.match(v):
+            raise ValueError(
+                f"Script ID '{v}' must be lowercase alphanumeric with underscores "
+                f"(^[a-z0-9_]+$)"
+            )
         return v
 
 
@@ -540,12 +553,21 @@ def _get_driver_source(driver_id: str) -> str:
         except Exception as e:
             log.warning(f"Failed to parse driver definition '{f.name}': {e}")
 
-    # Check driver_repo (community/user)
+    # Check driver_repo (community/user). Resolve by the driver's DECLARED
+    # id (the way the loader registers it), not just the filename stem: an
+    # uploaded driver keeps its original filename, so the stem can differ
+    # from its id. A stem-only match here would mis-stamp such a driver
+    # 'builtin', and the export bundler would then silently omit it.
+    from server.drivers.driver_loader import driver_id_from_file
     for ext in ("*.avcdriver", "*.py"):
         for f in driver_repo_dir.glob(ext):
             if f.name.startswith("_"):
                 continue
-            if f.stem == driver_id or f.stem.replace("-", "_") == driver_id:
+            if (
+                f.stem == driver_id
+                or f.stem.replace("-", "_") == driver_id
+                or driver_id_from_file(f) == driver_id
+            ):
                 return "community"
 
     return "builtin"  # fallback for GenericTCP and similar
@@ -690,3 +712,22 @@ def save_project(path: str | Path, project: ProjectConfig) -> None:
                     pass
 
     log.info(f"Saved project to {path}")
+
+
+async def save_project_async(path: str | Path, project: ProjectConfig) -> None:
+    """Async-safe save: run the blocking save_project() in a worker thread.
+
+    save_project() does sync disk I/O (a full-file backup copy + a
+    write-temp-then-rename) under a threading.Lock, and it's called from
+    ~50 async REST/WS/cloud handlers (add/edit/delete device, plugin config,
+    applying pending settings, AI/cloud config push). Calling it directly on
+    the event loop stalls the entire async server — no request, WS broadcast,
+    device poll, or cloud message progresses — for the duration of two
+    full-file writes on a potentially large project. Offloading to a thread
+    keeps the loop responsive; the threading.Lock inside save_project() still
+    serializes concurrent writers, now across worker threads.
+
+    Async callers should use this. The sync save_project() remains for sync
+    contexts (startup load/migrate, project-library open).
+    """
+    await asyncio.to_thread(save_project, path, project)
