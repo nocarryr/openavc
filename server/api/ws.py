@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from server.api._engine import get_engine_optional
 from server.api.auth import check_ws_auth, get_ws_auth_subprotocol
 from server.api.error_messages import friendly_error
 from server.utils.log_buffer import get_log_buffer, LogEntry
@@ -23,16 +24,12 @@ from server.utils.logger import get_logger
 router = APIRouter()
 log = get_logger(__name__)
 
-# Engine reference, set by main.py
-_engine = None
+# The engine lives in a single shared slot in server.api._engine (set by
+# main.py via rest.set_engine). This handler reads it through
+# get_engine_optional() so there's no second slot to keep in sync.
 
 # Per-client log subscriptions: ws -> (sub_id, task)
 _log_subscriptions: dict[int, tuple[str, asyncio.Task]] = {}
-
-
-def set_engine(engine) -> None:
-    global _engine
-    _engine = engine
 
 
 @router.websocket("/ws")
@@ -59,7 +56,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     subprotocol = get_ws_auth_subprotocol(headers)
     await ws.accept(subprotocol=subprotocol)
 
-    if _engine is None:
+    engine = get_engine_optional()
+    if engine is None:
         await ws.close(code=1011, reason="Engine not started")
         return
 
@@ -80,7 +78,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         # so the client has a baseline before receiving incremental updates
         namespaces_param = query_params.get("namespaces", "")
         ns_prefixes: tuple[str, ...] | None = None
-        full_state = _engine.state.snapshot()
+        full_state = engine.state.snapshot()
         if namespaces_param:
             ns_prefixes = tuple(ns.strip() + "." for ns in namespaces_param.split(",") if ns.strip())
             state_snapshot = {k: v for k, v in full_state.items() if k.startswith(ns_prefixes)}
@@ -92,14 +90,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         })
 
         # Send UI definition
-        if _engine.project:
+        if engine.project:
             await ws.send_json({
                 "type": "ui.definition",
-                "ui": _engine.project.ui.model_dump(mode="json"),
+                "ui": engine.project.ui.model_dump(mode="json"),
             })
 
         # Now subscribe to broadcasts — client has its baseline
-        _engine.add_ws_client(ws, ns_prefixes=ns_prefixes)
+        engine.add_ws_client(ws, ns_prefixes=ns_prefixes)
 
         # Start heartbeat
         ping_task = asyncio.create_task(_ping_loop())
@@ -141,7 +139,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         if ping_task and not ping_task.done():
             ping_task.cancel()
         _cleanup_log_subscription(ws_id)
-        _engine.remove_ws_client(ws)
+        engine.remove_ws_client(ws)
 
 
 def _cleanup_log_subscription(ws_id: int) -> None:
@@ -215,6 +213,7 @@ async def _handle_message(
 ) -> None:
     """Dispatch a WebSocket message by type."""
     msg_type = msg.get("type", "")
+    engine = get_engine_optional()
 
     # Restrict panel clients to UI interactions only
     if client_type == "panel" and msg_type not in _PANEL_ALLOWED_TYPES:
@@ -227,7 +226,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Missing element_id")
             return
         try:
-            await _engine.handle_ui_event("press", element_id)
+            await engine.handle_ui_event("press", element_id)
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.press failed: {e}")
@@ -239,7 +238,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Missing element_id")
             return
         try:
-            await _engine.handle_ui_event("release", element_id)
+            await engine.handle_ui_event("release", element_id)
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.release failed: {e}")
@@ -251,7 +250,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Missing element_id")
             return
         try:
-            await _engine.handle_ui_event("hold", element_id)
+            await engine.handle_ui_event("hold", element_id)
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.hold failed: {e}")
@@ -263,7 +262,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Missing element_id")
             return
         try:
-            await _engine.handle_ui_event("toggle_off", element_id)
+            await engine.handle_ui_event("toggle_off", element_id)
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.toggle_off failed: {e}")
@@ -279,7 +278,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Value must be a flat primitive (str, int, float, bool, or null)")
             return
         try:
-            await _engine.handle_ui_event("change", element_id, {"value": value})
+            await engine.handle_ui_event("change", element_id, {"value": value})
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.change failed: {e}")
@@ -297,7 +296,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Value must be a flat primitive (str, int, float, bool, or null)")
             return
         try:
-            await _engine.handle_ui_event("select", element_id, {"value": value})
+            await engine.handle_ui_event("select", element_id, {"value": value})
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.select failed: {e}")
@@ -330,7 +329,7 @@ async def _handle_message(
             event_type = "route"
             data = {"input": input_idx, "output": output_idx}
         try:
-            await _engine.handle_ui_event(event_type, element_id, data)
+            await engine.handle_ui_event(event_type, element_id, data)
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.route failed: {e}")
@@ -343,7 +342,7 @@ async def _handle_message(
             return
         value = msg.get("value")
         try:
-            await _engine.handle_ui_event("submit", element_id, {"value": value})
+            await engine.handle_ui_event("submit", element_id, {"value": value})
         except Exception as e:
             # Catch-all: UI events dispatch to scripts/macros/drivers which can raise anything
             log.error(f"ui.submit failed: {e}")
@@ -354,7 +353,7 @@ async def _handle_message(
         if not page_id:
             await _send_ws_error(ws, msg_type, "Missing page_id")
             return
-        await _engine.events.emit(f"ui.page.{page_id}")
+        await engine.events.emit(f"ui.page.{page_id}")
         # Confirm navigation to sender only — each panel manages its own page
         await ws.send_json({"type": "ui.navigate", "page_id": page_id})
 
@@ -366,7 +365,7 @@ async def _handle_message(
             return
         params = msg.get("params", {})
         try:
-            await _engine.devices.send_command(device_id, command, params)
+            await engine.devices.send_command(device_id, command, params)
             await _send_ws(ws, {
                 "type": "command.ack",
                 "device_id": device_id,
@@ -376,8 +375,8 @@ async def _handle_message(
         except Exception as e:
             # Catch-all: driver command handlers can raise arbitrary exceptions
             log.error(f"Command failed: {e}")
-            device_name = _engine.state.get(f"device.{device_id}.name") or device_id
-            host = _engine.state.get(f"device.{device_id}.host") or ""
+            device_name = engine.state.get(f"device.{device_id}.name") or device_id
+            host = engine.state.get(f"device.{device_id}.host") or ""
             error_msg = friendly_error(e, device=device_name, host=host)
             await _send_ws(ws, {
                 "type": "command.ack",
@@ -401,7 +400,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, f"Panel clients can only set keys under: {allowed}")
             return
         try:
-            _engine.state.set(key, value, source="ws")
+            engine.state.set(key, value, source="ws")
             await _send_ws(ws, {
                 "type": "state.set.ack",
                 "key": key,
@@ -423,7 +422,7 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Missing macro_id")
             return
         try:
-            await _engine.macros.execute(macro_id)
+            await engine.macros.execute(macro_id)
         except Exception as e:
             # Catch-all: macro steps run arbitrary actions (commands, scripts, state changes)
             log.error(f"macro.execute failed: {e}")
@@ -431,7 +430,7 @@ async def _handle_message(
 
     elif msg_type == "project.reload":
         try:
-            await _engine.reload_project()
+            await engine.reload_project()
         except Exception as e:
             # Catch-all: reload involves file I/O, JSON parsing, driver init, plugin loading
             log.error(f"project.reload failed: {e}")
@@ -460,7 +459,7 @@ async def _handle_message(
 
     elif msg_type == "isc.send":
         # Send event to a specific ISC peer
-        if _engine.isc:
+        if engine.isc:
             instance_id = msg.get("instance_id", "")
             event = msg.get("event", "")
             payload = msg.get("payload", {})
@@ -468,21 +467,21 @@ async def _handle_message(
                 await _send_ws_error(ws, msg_type, "Missing instance_id or event")
                 return
             try:
-                await _engine.isc.send_to(instance_id, event, payload)
+                await engine.isc.send_to(instance_id, event, payload)
             except (ConnectionError, OSError) as e:
                 log.warning(f"ISC send failed: {e}")
                 await _send_ws_error(ws, msg_type, f"ISC send failed: {e}")
 
     elif msg_type == "isc.broadcast":
         # Broadcast event to all ISC peers
-        if _engine.isc:
+        if engine.isc:
             event = msg.get("event", "")
             payload = msg.get("payload", {})
             if not event:
                 await _send_ws_error(ws, msg_type, "Missing event")
                 return
             try:
-                await _engine.isc.broadcast(event, payload)
+                await engine.isc.broadcast(event, payload)
             except (ConnectionError, OSError) as e:
                 log.warning(f"ISC broadcast failed: {e}")
                 await _send_ws_error(ws, msg_type, f"ISC broadcast failed: {e}")
