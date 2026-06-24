@@ -1047,6 +1047,21 @@ commands:
       level: { type: integer, required: true, default: 50, min: 0, max: 100 }
 ```
 
+#### TCP config fields
+
+These fields in `config_schema` (or `default_config`) are recognized by the TCP transport:
+
+| Field | Description |
+|-------|-------------|
+| `host` | Device IP or hostname (required) |
+| `port` | TCP port (required) |
+| `ssl` | Wrap the connection in TLS (default: false). Use for a device that exposes its control port over TLS. |
+| `verify_ssl` | Verify the device's TLS certificate (default: true; set false for a self-signed cert) |
+| `timeout` | Connection timeout in seconds (default: 5) |
+| `inter_command_delay` | Minimum seconds between sends (default: 0). Use for gear that drops back-to-back commands. |
+
+`ssl` / `verify_ssl` mirror the HTTP transport's fields, so a single `transport: tcp` driver reaches a plaintext or a TLS-wrapped device just by toggling `ssl` in config — no Python `connect()` override needed.
+
 #### HTTP config fields
 
 These fields in `config_schema` are recognized by the HTTP transport:

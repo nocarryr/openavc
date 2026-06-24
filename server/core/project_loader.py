@@ -421,7 +421,7 @@ class DriverDependency(_ForwardCompatModel):
     driver_id: str
     driver_name: str = ""
     version: str = ""
-    source: Literal["builtin", "community", "user", "unknown", ""] = ""
+    source: Literal["builtin", "community", "unknown", ""] = ""
 
 
 class PluginDependency(_ForwardCompatModel):
@@ -429,7 +429,7 @@ class PluginDependency(_ForwardCompatModel):
     plugin_id: str
     plugin_name: str = ""
     version: str = ""
-    source: Literal["community", "user", "unknown", ""] = ""
+    source: Literal["community", "unknown", ""] = ""
     platforms: list[str] = Field(default_factory=lambda: ["all"])
 
 

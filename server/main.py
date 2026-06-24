@@ -215,9 +215,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Wire engine into API modules
+# Wire engine into API modules. rest.set_engine() populates the single shared
+# slot in server.api._engine; ws.py reads that same slot, so it isn't wired
+# separately here.
 rest.set_engine(engine)
-ws.set_engine(engine)
 plugins_api.set_engine(engine)
 assets_api.set_engine(engine)
 themes_api.set_engine(engine)

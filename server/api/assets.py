@@ -97,6 +97,23 @@ def _assets_dir() -> Path:
     return assets_dir
 
 
+def _assets_dir_for(project_id: str) -> Path:
+    """Resolve the assets directory addressed by a ``project_id`` URL segment.
+
+    The panel and IDE address the live project as ``default`` (and some older
+    links omit it); that maps to the active project's assets dir — the
+    long-standing behavior. Any other id names a saved library project and
+    resolves to *its* assets dir, so a library-project asset URL serves that
+    project's bytes instead of silently returning the active project's. The
+    dir may legitimately not exist (a library project with no assets); the
+    caller's existence check then yields a clean 404.
+    """
+    if project_id in ("", "default"):
+        return _assets_dir()
+    from server.core.project_library import _lib_dir, sanitize_id
+    return _lib_dir() / sanitize_id(project_id) / "assets"
+
+
 def _list_assets_metadata(assets_dir: Path) -> list[dict[str, Any]]:
     """Build the asset metadata list shared between the API and state publishing."""
     out: list[dict[str, Any]] = []
@@ -178,8 +195,14 @@ def _get_total_size(assets_dir: Path) -> int:
 
 @open_router.get("/projects/{project_id}/assets/{filename:path}")
 async def serve_asset(project_id: str, filename: str):
-    """Serve an asset file (with caching headers). No auth required for panel access."""
-    assets_dir = _assets_dir()
+    """Serve an asset file (with caching headers). No auth required for panel access.
+
+    Honors ``project_id``: ``default`` serves the active project, any other id
+    serves that saved library project's assets. (The authenticated list/upload/
+    delete endpoints below always act on the active project — the one being
+    edited — so library templates aren't mutated through this surface.)
+    """
+    assets_dir = _assets_dir_for(project_id)
     # Prevent directory traversal
     safe_path = (assets_dir / filename).resolve()
     try:

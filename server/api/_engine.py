@@ -30,6 +30,17 @@ def _get_engine():
     return _engine
 
 
+def get_engine_optional():
+    """Return the engine, or None if not started yet, without raising.
+
+    For non-HTTP callers (the WebSocket handler) that need to decide their
+    own not-ready behavior — e.g. close the socket with a status code rather
+    than surface an HTTPException. Lets ws.py share this single engine slot
+    instead of holding its own, so main.py can't set one and miss the other.
+    """
+    return _engine
+
+
 # --- Rate limiting for expensive test endpoints ---
 
 _test_endpoint_last_call: dict[str, float] = {}
