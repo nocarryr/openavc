@@ -259,7 +259,11 @@ ENV_OVERRIDES: dict[tuple[str, str], tuple[str, type]] = {
 def _deep_merge(base: dict, override: dict) -> dict:
     """Merge override into base, recursively for nested dicts.
 
-    Only merges keys that exist in base (ignores unknown keys from file).
+    Keys in ``base`` (the DEFAULTS) win their default when absent from the
+    file. Keys present only in ``override`` are preserved verbatim — so a
+    setting written by a newer platform survives a rollback to an older one
+    that doesn't know the key (mirrors the project loader's forward-compat
+    intent). Without this, the next save() would silently strip it.
     """
     result = {}
     for key, default_value in base.items():
@@ -270,6 +274,11 @@ def _deep_merge(base: dict, override: dict) -> dict:
                 result[key] = override[key]
         else:
             result[key] = default_value
+    # Carry through unknown keys (sections or, within a section, fields) that
+    # aren't in DEFAULTS so a forward-compatible setting isn't dropped.
+    for key, value in override.items():
+        if key not in base:
+            result[key] = value
     return result
 
 
