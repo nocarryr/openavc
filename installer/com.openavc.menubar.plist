@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenAVC menu-bar LaunchAgent.
+
+  Installed to /Library/LaunchAgents/ by the .pkg postinstall and bootstrapped
+  into the installing user's GUI session. A menu-bar app must run inside a
+  logged-in user session, so unlike the server (a LaunchDaemon) this is a
+  per-user LaunchAgent — the macOS analog of the Windows tray app in the
+  Startup folder. It only shows status and quick links; the server runs
+  independently as the LaunchDaemon.
+
+  KeepAlive is intentionally absent: "Quit" should actually quit. RunAtLoad
+  brings it back at the next login.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openavc.menubar</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/OpenAVC.app/Contents/MacOS/openavc-menubar</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>

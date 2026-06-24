@@ -12,6 +12,7 @@ APP="/Applications/OpenAVC.app"
 DATA_DIR="/Library/Application Support/OpenAVC"
 LOG_DIR="/Library/Logs/OpenAVC"
 DAEMON_PLIST="/Library/LaunchDaemons/com.openavc.server.plist"
+AGENT_PLIST="/Library/LaunchAgents/com.openavc.menubar.plist"
 SEED="$APP/Contents/MacOS/_internal/projects/default/project.avc"
 DEST="$DATA_DIR/projects/default"
 
@@ -32,9 +33,17 @@ launchctl bootout system "$DAEMON_PLIST" 2>/dev/null || true
 launchctl bootstrap system "$DAEMON_PLIST"
 launchctl enable system/com.openavc.server 2>/dev/null || true
 
-# Best-effort: open the Programmer IDE in the installing user's browser.
+# Install the menu-bar LaunchAgent and load it into the logged-in user's GUI
+# session (a menu-bar app can't run as a daemon — it needs an Aqua session).
+cp "$APP/Contents/Resources/com.openavc.menubar.plist" "$AGENT_PLIST"
+chown root:wheel "$AGENT_PLIST"
+chmod 644 "$AGENT_PLIST"
+
 CONSOLE_UID="$(stat -f %u /dev/console 2>/dev/null)"
 if [ -n "${CONSOLE_UID:-}" ] && [ "$CONSOLE_UID" != "0" ]; then
+    launchctl bootout "gui/$CONSOLE_UID/com.openavc.menubar" 2>/dev/null || true
+    launchctl bootstrap "gui/$CONSOLE_UID" "$AGENT_PLIST" 2>/dev/null || true
+    # Best-effort: open the Programmer IDE in the installing user's browser.
     launchctl asuser "$CONSOLE_UID" open "http://localhost:8080/programmer" 2>/dev/null || true
 fi
 

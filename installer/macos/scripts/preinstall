@@ -8,6 +8,13 @@
 
 launchctl bootout system/com.openavc.server 2>/dev/null || true
 
+# Stop the menu-bar agent in the logged-in user's session too, so its binary
+# isn't locked while the bundle is replaced.
+CONSOLE_UID="$(stat -f %u /dev/console 2>/dev/null)"
+if [ -n "${CONSOLE_UID:-}" ] && [ "$CONSOLE_UID" != "0" ]; then
+    launchctl bootout "gui/$CONSOLE_UID/com.openavc.menubar" 2>/dev/null || true
+fi
+
 # Give launchd a moment to release the listening socket and file handles.
 sleep 1
 

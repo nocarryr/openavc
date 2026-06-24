@@ -11,8 +11,9 @@
 # script still emits a working *unsigned* .pkg — the pre-enrollment / dev path.
 #
 # Prereqs: macOS, Python 3.11+ as $PYTHON (default python3), the frontends
-# already built (web/programmer/dist, web/simulator/dist), pyinstaller
-# installed. Run from anywhere: installer/build-macos.sh
+# already built (web/programmer/dist, web/simulator/dist), and the build deps
+# installed: pyinstaller + rumps (rumps is needed to freeze the menu-bar app).
+# Run from anywhere: installer/build-macos.sh
 #
 # Fast iteration: set OPENAVC_PREBUILT_DIST=/path/to/dist/openavc to reuse an
 # existing PyInstaller bundle instead of re-freezing.
@@ -50,14 +51,30 @@ else
 fi
 [ -x "$FROZEN/openavc-server" ] || { echo "FAILED: frozen server not at $FROZEN/openavc-server"; exit 1; }
 
+# --- 1b. Freeze the menu-bar app (rumps) ------------------------------------
+MENUBAR_FROZEN="${OPENAVC_PREBUILT_MENUBAR:-$DIST/openavc-menubar}"
+if [ -n "${OPENAVC_PREBUILT_MENUBAR:-}" ]; then
+    echo "[1b ] Using prebuilt menubar dist: $MENUBAR_FROZEN"
+else
+    echo "[1b ] Freezing menu-bar app with PyInstaller"
+    "$PYTHON" -m PyInstaller installer/menubar.spec --noconfirm --clean \
+        --distpath "$DIST" --workpath "$BUILD/work-menubar"
+fi
+[ -x "$MENUBAR_FROZEN/openavc-menubar" ] || { echo "FAILED: frozen menubar not at $MENUBAR_FROZEN/openavc-menubar"; exit 1; }
+
 # --- 2. Assemble OpenAVC.app ------------------------------------------------
 echo "[2/5] Assembling OpenAVC.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -a "$FROZEN/." "$APP/Contents/MacOS/"
+# Merge the menu-bar bundle into the same MacOS dir (shared Python libs are
+# identical from the same env; this adds openavc-menubar + the pyobjc/rumps
+# libs alongside the server, the way the Windows installer merges tray + server).
+cp -a "$MENUBAR_FROZEN/." "$APP/Contents/MacOS/"
 cp installer/openavc-macos-run.sh "$APP/Contents/MacOS/openavc-macos-run.sh"
 chmod 755 "$APP/Contents/MacOS/openavc-macos-run.sh"
 cp installer/com.openavc.server.plist "$APP/Contents/Resources/com.openavc.server.plist"
+cp installer/com.openavc.menubar.plist "$APP/Contents/Resources/com.openavc.menubar.plist"
 [ -f installer/openavc.icns ] && cp installer/openavc.icns "$APP/Contents/Resources/openavc.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -89,6 +106,8 @@ if [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_SIGNING_IDENTITY:-}" ]; then
         done
     codesign --force --timestamp --options runtime --entitlements "$ENT" \
         --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP/Contents/MacOS/openavc-server"
+    codesign --force --timestamp --options runtime --entitlements "$ENT" \
+        --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP/Contents/MacOS/openavc-menubar"
     codesign --force --timestamp --options runtime --entitlements "$ENT" \
         --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP"
 else
