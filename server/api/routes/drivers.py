@@ -1121,7 +1121,12 @@ async def create_driver_definition(body: DriverDefinitionRequest) -> dict:
     driver_class = create_configurable_driver_class(driver_def)
     register_driver(driver_class)
 
-    return {"status": "created", "id": driver_def["id"]}
+    # Reconnect any devices orphaned while waiting for this driver id, so a
+    # device that referenced a not-yet-created driver comes online as soon as
+    # it's authored (mirrors the Python hot-reload path; no full reload needed).
+    reconnected = await _get_engine().devices.reload_driver(driver_def["id"])
+
+    return {"status": "created", "id": driver_def["id"], "devices_reconnected": reconnected}
 
 
 @router.put("/driver-definitions/{driver_id}")
@@ -1175,11 +1180,18 @@ async def update_driver_definition(driver_id: str, body: DriverDefinitionRequest
     save_dir = dirs[1]  # driver_repo/
     save_driver_definition(driver_def, save_dir)
 
-    # Re-register
+    # Re-register, then reconnect live devices so they pick up the new class
+    # without a full project reload (mirrors the Python hot-reload path).
     driver_class = create_configurable_driver_class(driver_def)
     register_driver(driver_class)
 
-    return {"status": "updated", "id": driver_def["id"]}
+    engine = _get_engine()
+    reconnected = await engine.devices.reload_driver(driver_def["id"])
+    # A renamed driver id leaves devices on the old id orphaned — retry those too.
+    if driver_def.get("id") != driver_id:
+        reconnected = reconnected + await engine.devices.reload_driver(driver_id)
+
+    return {"status": "updated", "id": driver_def["id"], "devices_reconnected": reconnected}
 
 
 @router.patch("/driver-definitions/{driver_id}")
@@ -1231,11 +1243,13 @@ async def patch_driver_definition(driver_id: str, body: dict) -> dict:
     save_dir = dirs[1]  # driver_repo/
     save_driver_definition(merged, save_dir)
 
-    # Re-register
+    # Re-register, then reconnect live devices so they pick up the new class
+    # without a full project reload (mirrors the Python hot-reload path).
     driver_class = create_configurable_driver_class(merged)
     register_driver(driver_class)
+    reconnected = await _get_engine().devices.reload_driver(driver_id)
 
-    return {"status": "updated", "id": driver_id}
+    return {"status": "updated", "id": driver_id, "devices_reconnected": reconnected}
 
 
 @router.delete("/driver-definitions/{driver_id}")
