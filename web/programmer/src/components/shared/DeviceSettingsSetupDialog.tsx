@@ -1,6 +1,7 @@
 import { useState } from "react";
 import * as api from "../../api/restClient";
 import type { DriverInfo } from "../../api/types";
+import { validateSettingValue } from "../driver-builder/deviceSettingsHelpers";
 
 /** Generate a non-clashing default value for a unique device setting. */
 function generateUniqueDefault(
@@ -61,6 +62,23 @@ export function DeviceSettingsSetupDialog({
   }
 
   const handleApply = async () => {
+    // Enforce the driver-declared min/max (numeric) and regex (string)
+    // constraints before pushing anything to hardware.
+    const validationResults: Record<string, { success: boolean; error?: string }> = {};
+    let anyInvalid = false;
+    for (const key of setupKeys) {
+      const check = validateSettingValue(values[key] ?? "", deviceSettings[key]);
+      if (!check.ok) {
+        validationResults[key] = { success: false, error: check.error };
+        anyInvalid = true;
+      }
+    }
+    if (anyInvalid) {
+      setResults(validationResults);
+      setError("Fix the highlighted values before continuing.");
+      return;
+    }
+
     setSaving(true);
     setError("");
     const newResults: Record<string, { success: boolean; error?: string; pending?: boolean }> = {};
@@ -222,6 +240,17 @@ export function DeviceSettingsSetupDialog({
                         ? "number"
                         : "text"
                   }
+                  min={
+                    (fieldType === "integer" || fieldType === "number") && def?.min !== undefined
+                      ? def.min
+                      : undefined
+                  }
+                  max={
+                    (fieldType === "integer" || fieldType === "number") && def?.max !== undefined
+                      ? def.max
+                      : undefined
+                  }
+                  pattern={fieldType === "string" && def?.regex ? def.regex : undefined}
                   autoComplete="new-password"
                   style={{ width: "100%" }}
                 />

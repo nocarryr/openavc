@@ -572,11 +572,15 @@ export interface DriverDeviceSettingDef {
   setup?: boolean;
   unique?: boolean;
   values?: string[];
+  min?: number;
+  max?: number;
+  regex?: string;
   write?: {
     send?: string;
     method?: string;
     path?: string;
     body?: string;
+    headers?: Record<string, string>;
     address?: string;
     args?: { type: string; value: string }[];
   };

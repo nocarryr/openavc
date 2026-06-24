@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight } from "lucide-react";
 import type {
   DriverChildEntityType,
@@ -13,8 +13,8 @@ import {
   nextChildTypeId,
   sanitizeFieldId,
   sanitizeTypeId,
-  type RenameResult,
 } from "./childEntityTypesHelpers";
+import { IdRenameInput, type RenameResult } from "./IdRenameInput";
 
 interface ChildEntityTypesEditorProps {
   draft: DriverDefinition;
@@ -33,75 +33,6 @@ const helpStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   marginTop: "var(--space-xs)",
 };
-
-// An id input that buffers keystrokes locally and commits the rename on blur
-// (or Enter). Renaming on every keystroke remounts the row — the parent keys
-// rows by the id being edited — which drops focus and swallows intermediate
-// collisions/empties. Committing on blur keeps the row mounted while typing.
-// Mirrors CommandBuilder's draftName pattern.
-function IdRenameInput({
-  value,
-  sanitize,
-  onCommit,
-  style,
-  "data-testid": testid,
-}: {
-  value: string;
-  sanitize: (raw: string) => string;
-  onCommit: (next: string) => RenameResult;
-  style?: React.CSSProperties;
-  "data-testid"?: string;
-}) {
-  const [draft, setDraft] = useState(value);
-  const [error, setError] = useState<string | null>(null);
-
-  // Re-sync if the canonical value changes from outside (e.g. parent rename).
-  useEffect(() => {
-    setDraft(value);
-    setError(null);
-  }, [value]);
-
-  const commit = () => {
-    if (draft === value) {
-      setError(null);
-      return;
-    }
-    const result = onCommit(draft);
-    if (result.ok) {
-      setError(null);
-      setDraft(value); // re-sync no-op renames (sanitized === current)
-    } else {
-      setError(result.reason ?? "Invalid id.");
-    }
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <input
-        data-testid={testid}
-        value={draft}
-        onChange={(e) => setDraft(sanitize(e.target.value))}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          if (e.key === "Escape") {
-            setDraft(value);
-            setError(null);
-            (e.target as HTMLInputElement).blur();
-          }
-        }}
-        style={{
-          width: "100%",
-          ...style,
-          borderColor: error ? "var(--color-error)" : style?.borderColor,
-        }}
-      />
-      {error && (
-        <div style={{ fontSize: 11, color: "var(--color-error)" }}>{error}</div>
-      )}
-    </div>
-  );
-}
 
 export function ChildEntityTypesEditor({
   draft,
