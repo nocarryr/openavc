@@ -4,6 +4,8 @@ Platform detection for the update system.
 Detects how OpenAVC was installed to determine update behavior:
 - windows_installer: Silent installer re-run
 - linux_package: Archive extraction + systemd restart
+- macos_app: Archive extraction + LaunchDaemon restart (.pkg-installed .app;
+  the root launchd wrapper swaps the app bundle on the next launch)
 - android_appliance: Archive extraction + supervised-process restart
   (pre-provisioned appliance hardware; the device supervisor applies the
   staged update on the next launch)
@@ -24,6 +26,7 @@ from server.system_config import INSTALL_DIR, _is_docker
 class DeploymentType(str, Enum):
     WINDOWS_INSTALLER = "windows_installer"
     LINUX_PACKAGE = "linux_package"
+    MACOS_APP = "macos_app"
     ANDROID_APPLIANCE = "android_appliance"
     DOCKER = "docker"
     GIT_DEV = "git_dev"
@@ -70,6 +73,21 @@ def _is_linux_package(app_dir: Path) -> bool:
     return str(app_dir).startswith("/opt/openavc") and (app_dir / "venv").is_dir()
 
 
+def _is_macos_app(app_dir: Path) -> bool:
+    """Detect a frozen macOS .app bundle install (shipped in the .pkg).
+
+    The frozen server binary lives at OpenAVC.app/Contents/MacOS/openavc-server,
+    so the install dir sits inside a *.app bundle. A plain `python -m
+    server.main` run on macOS (dev/source) is not frozen and won't match — it
+    falls through to git_dev/unknown like any other source run.
+    """
+    if sys.platform != "darwin":
+        return False
+    if not getattr(sys, "frozen", False):
+        return False
+    return any(part.endswith(".app") for part in app_dir.parts)
+
+
 def get_install_dir() -> Path:
     """Get the installation directory.
 
@@ -102,6 +120,9 @@ def detect_deployment_type(app_dir: Path | None = None) -> DeploymentType:
     if _is_linux_package(app_dir):
         return DeploymentType.LINUX_PACKAGE
 
+    if _is_macos_app(app_dir):
+        return DeploymentType.MACOS_APP
+
     if _is_git_checkout(app_dir):
         return DeploymentType.GIT_DEV
 
@@ -113,6 +134,7 @@ def can_self_update(deployment_type: DeploymentType) -> bool:
     return deployment_type in (
         DeploymentType.WINDOWS_INSTALLER,
         DeploymentType.LINUX_PACKAGE,
+        DeploymentType.MACOS_APP,
         DeploymentType.ANDROID_APPLIANCE,
     )
 

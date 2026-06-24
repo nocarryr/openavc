@@ -85,7 +85,8 @@ def get_data_dir() -> Path:
     1. OPENAVC_DATA_DIR environment variable (explicit override)
     2. Docker: /data
     3. Development: ./data relative to repo root
-    4. Platform default: Windows -> C:\\ProgramData\\OpenAVC, Linux -> /var/lib/openavc
+    4. Platform default: Windows -> C:\\ProgramData\\OpenAVC,
+       macOS -> /Library/Application Support/OpenAVC, Linux -> /var/lib/openavc
     """
     env_dir = os.environ.get("OPENAVC_DATA_DIR")
     if env_dir:
@@ -100,6 +101,12 @@ def get_data_dir() -> Path:
     if sys.platform == "win32":
         return Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData")) / "OpenAVC"
 
+    # macOS: the server runs as a system LaunchDaemon (boot, pre-login, as
+    # root), so data lives in the system-wide Application Support, not a
+    # per-user ~/Library that wouldn't exist before anyone logs in.
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/OpenAVC")
+
     return Path("/var/lib/openavc")
 
 
@@ -110,7 +117,8 @@ def get_log_dir() -> Path:
     1. OPENAVC_LOG_DIR environment variable
     2. Docker: /data/logs
     3. Development: ./data/logs
-    4. Platform default: Windows -> data_dir/logs, Linux -> /var/log/openavc
+    4. Platform default: Windows -> data_dir/logs, macOS -> /Library/Logs/OpenAVC,
+       Linux -> /var/log/openavc
     """
     env_dir = os.environ.get("OPENAVC_LOG_DIR")
     if env_dir:
@@ -124,6 +132,10 @@ def get_log_dir() -> Path:
 
     if sys.platform == "win32":
         return get_data_dir() / "logs"
+
+    # macOS standard system-wide log location.
+    if sys.platform == "darwin":
+        return Path("/Library/Logs/OpenAVC")
 
     return Path("/var/log/openavc")
 

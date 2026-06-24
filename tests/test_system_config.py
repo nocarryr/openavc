@@ -21,6 +21,8 @@ from server.system_config import (
     _parse_env_value,
     _resolve_app_dir,
     _resolve_install_dir,
+    get_data_dir,
+    get_log_dir,
     get_system_config,
     migrate_legacy_project_dir,
     reset_system_config,
@@ -597,3 +599,31 @@ class TestMigrateLegacyProjectDir:
         shared = self._make_legacy(tmp_path)
         migrate_legacy_project_dir(shared, shared)
         assert (shared / "default" / "project.avc").exists()
+
+
+class TestPlatformDirDefaults:
+    """Platform-default data/log dirs (the non-env, non-docker, non-dev path)."""
+
+    def _force_platform_default(self, monkeypatch, platform):
+        import server.system_config as sc
+        monkeypatch.delenv("OPENAVC_DATA_DIR", raising=False)
+        monkeypatch.delenv("OPENAVC_LOG_DIR", raising=False)
+        monkeypatch.setattr(sc, "_is_docker", lambda: False)
+        monkeypatch.setattr(sc, "_is_dev_environment", lambda: False)
+        monkeypatch.setattr(sys, "platform", platform)
+
+    def test_data_dir_macos(self, monkeypatch):
+        self._force_platform_default(monkeypatch, "darwin")
+        assert get_data_dir() == Path("/Library/Application Support/OpenAVC")
+
+    def test_log_dir_macos(self, monkeypatch):
+        self._force_platform_default(monkeypatch, "darwin")
+        assert get_log_dir() == Path("/Library/Logs/OpenAVC")
+
+    def test_data_dir_linux_unchanged(self, monkeypatch):
+        self._force_platform_default(monkeypatch, "linux")
+        assert get_data_dir() == Path("/var/lib/openavc")
+
+    def test_log_dir_linux_unchanged(self, monkeypatch):
+        self._force_platform_default(monkeypatch, "linux")
+        assert get_log_dir() == Path("/var/log/openavc")

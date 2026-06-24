@@ -184,6 +184,21 @@ def _installer_version(installer: Path) -> tuple[int, int, int, str]:
     return parse_semver(installer.stem.removeprefix("OpenAVC-Setup-"))
 
 
+def _macos_previous_bundle(app_dir: Path) -> Path | None:
+    """The ``OpenAVC.app.previous`` snapshot the macOS rollback restores.
+
+    The launchd update wrapper snapshots the whole ``.app`` bundle to
+    ``<bundle>.previous`` before swapping in an update, so rollback restores
+    that. ``app_dir`` resolves *inside* the bundle (``sys._MEIPASS``), so walk
+    up to the enclosing ``.app`` and name its sibling snapshot. Returns None
+    when not running from a ``.app`` (e.g. source/dev).
+    """
+    for parent in (app_dir, *app_dir.parents):
+        if parent.name.endswith(".app"):
+            return parent.parent / f"{parent.name}.previous"
+    return None
+
+
 def can_rollback(app_dir: Path) -> bool:
     """Check if a previous version is available for rollback."""
     if sys.platform == "win32":
@@ -201,10 +216,13 @@ def can_rollback(app_dir: Path) -> bool:
             _installer_version(inst) != current_ver
             for inst in cache_dir.glob("OpenAVC-Setup-*.exe")
         )
-    else:
-        # Linux: check for /opt/openavc.previous/
-        previous = app_dir.parent / f"{app_dir.name}.previous"
-        return previous.is_dir()
+    if sys.platform == "darwin":
+        # macOS: the wrapper snapshots the whole .app to OpenAVC.app.previous.
+        previous = _macos_previous_bundle(app_dir)
+        return previous is not None and previous.is_dir()
+    # Linux: check for /opt/openavc.previous/
+    previous = app_dir.parent / f"{app_dir.name}.previous"
+    return previous.is_dir()
 
 
 def perform_rollback(data_dir: Path) -> bool:
@@ -316,6 +334,14 @@ def rollback_target_version(app_dir: Path) -> str:
             return ""
         best = max(candidates, key=_installer_version)
         return best.stem.removeprefix("OpenAVC-Setup-")
+
+    if sys.platform == "darwin":
+        # Display-only. The .app.previous snapshot does carry a bundled
+        # pyproject.toml, but its path inside the frozen bundle isn't pinned
+        # until the .app layout is finalized (Phase 3/8). Rollback availability
+        # is reported separately by can_rollback(); leave the label blank rather
+        # than read a guessed path.
+        return ""
 
     # Linux: read the version recorded in the .previous install tree if present.
     previous = app_dir.parent / f"{app_dir.name}.previous"

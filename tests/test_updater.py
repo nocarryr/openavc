@@ -20,6 +20,8 @@ from server.updater.rollback import (
     increment_marker_attempts,
     clear_pending_marker,
     check_rollback_needed,
+    can_rollback,
+    _macos_previous_bundle,
 )
 from server.updater.manager import UpdateManager
 
@@ -231,11 +233,46 @@ class TestPlatformDetection:
     def test_can_self_update_installer(self):
         assert can_self_update(DeploymentType.WINDOWS_INSTALLER) is True
         assert can_self_update(DeploymentType.LINUX_PACKAGE) is True
+        assert can_self_update(DeploymentType.MACOS_APP) is True
         assert can_self_update(DeploymentType.ANDROID_APPLIANCE) is True
 
     def test_cannot_self_update_docker(self):
         assert can_self_update(DeploymentType.DOCKER) is False
         assert can_self_update(DeploymentType.GIT_DEV) is False
+
+    def test_is_macos_app_detects_frozen_bundle(self, monkeypatch):
+        import sys
+        import server.updater.platform as platform_mod
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        inside = Path("/Applications/OpenAVC.app/Contents/MacOS/_internal")
+        assert platform_mod._is_macos_app(inside) is True
+
+    def test_is_macos_app_false_when_not_frozen(self, monkeypatch):
+        import sys
+        import server.updater.platform as platform_mod
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        # A source/dev run on macOS is not an .app install.
+        inside = Path("/Applications/OpenAVC.app/Contents/MacOS/_internal")
+        assert platform_mod._is_macos_app(inside) is False
+
+    def test_is_macos_app_false_off_darwin(self, monkeypatch):
+        import sys
+        import server.updater.platform as platform_mod
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        assert platform_mod._is_macos_app(Path("/x/OpenAVC.app/y")) is False
+
+    def test_detects_macos_app_end_to_end(self, tmp_path, monkeypatch):
+        import sys
+        import server.updater.platform as platform_mod
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(platform_mod, "_is_docker", lambda: False)
+        monkeypatch.setattr(platform_mod, "_DEPLOYMENT_MARKER", tmp_path / "absent")
+        app_dir = Path("/Applications/OpenAVC.app/Contents/MacOS/_internal")
+        assert detect_deployment_type(app_dir) == DeploymentType.MACOS_APP
 
     def test_explicit_marker_wins(self, tmp_path, monkeypatch):
         """A provisioning-time /etc/openavc-deployment marker beats every
@@ -270,6 +307,34 @@ class TestPlatformDetection:
     def test_update_instructions_git(self):
         msg = update_instructions(DeploymentType.GIT_DEV, "1.0.0")
         assert "git pull" in msg
+
+
+class TestMacosRollbackBundle:
+    def test_previous_bundle_resolves_app_sibling(self):
+        inside = Path("/Applications/OpenAVC.app/Contents/MacOS/_internal")
+        assert _macos_previous_bundle(inside) == Path(
+            "/Applications/OpenAVC.app.previous"
+        )
+
+    def test_previous_bundle_none_outside_app(self):
+        assert _macos_previous_bundle(Path("/opt/openavc")) is None
+
+    def test_can_rollback_macos_true_when_previous_exists(self, tmp_path, monkeypatch):
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        bundle = tmp_path / "OpenAVC.app"
+        (bundle / "Contents" / "MacOS" / "_internal").mkdir(parents=True)
+        (tmp_path / "OpenAVC.app.previous").mkdir()
+        app_dir = bundle / "Contents" / "MacOS" / "_internal"
+        assert can_rollback(app_dir) is True
+
+    def test_can_rollback_macos_false_without_previous(self, tmp_path, monkeypatch):
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        bundle = tmp_path / "OpenAVC.app"
+        app_dir = bundle / "Contents" / "MacOS" / "_internal"
+        app_dir.mkdir(parents=True)
+        assert can_rollback(app_dir) is False
 
 
 # --- Backup ---

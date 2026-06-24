@@ -156,9 +156,14 @@ class UpdateManager:
         """Determine the platform-specific artifact name for this release."""
         if self._deployment_type == DeploymentType.WINDOWS_INSTALLER:
             return f"OpenAVC-Setup-{release.version}.exe"
-        # Linux: detect architecture
         import platform
         machine = platform.machine().lower()
+        # macOS self-updates swap a tarball of the .app (the .pkg is
+        # first-install only). Arch labels match the CI runners: arm64 / x86_64.
+        if self._deployment_type == DeploymentType.MACOS_APP:
+            arch = "arm64" if machine in ("aarch64", "arm64") else "x86_64"
+            return f"openavc-{release.version}-macos-{arch}.tar.gz"
+        # Linux: detect architecture
         if machine in ("x86_64", "amd64"):
             arch = "amd64"
         elif machine in ("aarch64", "arm64"):
@@ -438,6 +443,7 @@ class UpdateManager:
             if self._deployment_type == DeploymentType.WINDOWS_INSTALLER:
                 self._apply_windows(artifact_path, release.version)
             elif self._deployment_type in (DeploymentType.LINUX_PACKAGE,
+                                           DeploymentType.MACOS_APP,
                                            DeploymentType.ANDROID_APPLIANCE):
                 self._apply_linux(artifact_path, release.version)
 
@@ -542,6 +548,7 @@ class UpdateManager:
             if self._deployment_type == DeploymentType.WINDOWS_INSTALLER:
                 self._apply_windows(artifact_path, target_version)
             elif self._deployment_type in (DeploymentType.LINUX_PACKAGE,
+                                           DeploymentType.MACOS_APP,
                                            DeploymentType.ANDROID_APPLIANCE):
                 self._apply_linux(artifact_path, target_version)
 
@@ -663,13 +670,18 @@ class UpdateManager:
             raise RuntimeError("Failed to schedule installer task")
 
     def _apply_linux(self, artifact_path: Path, to_version: str) -> None:
-        """Write update instruction for the ExecStartPre helper script.
+        """Write the update instruction for the privileged pre-start helper.
 
-        The helper script (update-helper.sh) runs as root before the service
-        starts, bypassing ProtectSystem=strict. It reads the instruction file,
-        backs up the current install, extracts the tarball, and rebuilds the
-        venv. After this method returns, the caller exits the process so
-        systemd restarts the service and triggers the helper script.
+        Shared by the Linux and macOS self-update paths — both drop a tarball
+        and a root-run helper swaps it in before the server relaunches:
+        - Linux: update-helper.sh (systemd ExecStartPre=-+, bypasses
+          ProtectSystem=strict) backs up /opt/openavc, extracts, rebuilds venv.
+        - macOS: openavc-macos-apply.sh (the LaunchDaemon's wrapper, runs as
+          root) snapshots OpenAVC.app -> OpenAVC.app.previous and swaps in the
+          new app tree.
+        Both read this same apply-update.json. After this method returns, the
+        caller exits the process so the service manager relaunches and the
+        helper applies the staged update.
         """
         instruction = {
             "artifact": str(artifact_path),
@@ -716,6 +728,8 @@ class UpdateManager:
 
         Windows: exit code 42 tells NSSM not to restart (installer handles it).
         Linux: exit code 0 triggers systemd restart; ExecStartPre applies the update.
+        macOS: exit code 0 lets launchd (KeepAlive) relaunch; the daemon's root
+            wrapper applies the staged update before re-exec'ing the server.
         """
         import os
         if self._deployment_type == DeploymentType.WINDOWS_INSTALLER:
@@ -723,6 +737,9 @@ class UpdateManager:
             os._exit(42)
         elif self._deployment_type == DeploymentType.LINUX_PACKAGE:
             log.info("Exiting for update — systemd will apply and restart (exit 0)")
+            os._exit(0)
+        elif self._deployment_type == DeploymentType.MACOS_APP:
+            log.info("Exiting for update — launchd wrapper will apply and restart (exit 0)")
             os._exit(0)
         elif self._deployment_type == DeploymentType.ANDROID_APPLIANCE:
             log.info("Exiting for update — appliance supervisor will apply and restart (exit 0)")
