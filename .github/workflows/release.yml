@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -173,6 +173,93 @@ jobs:
         with:
           name: windows-installer
           path: dist/OpenAVC-Setup-*.exe
+
+  # ── macOS installer (.pkg) ─────────────────────────────────────────
+  # One native build per arch (macos-14 = Apple Silicon, macos-13 = Intel).
+  # Signing + notarization gate on APPLE_TEAM_ID; with no Apple secrets the job
+  # still produces a working *unsigned* .pkg (pre-enrollment / fork builds).
+  macos:
+    name: macOS installer (${{ matrix.arch }})
+    needs: [test, version]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      SIGNING_ENABLED: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build Programmer UI
+        working-directory: web/programmer
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Simulator UI
+        working-directory: web/simulator
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Python build deps
+        run: pip install pyinstaller rumps -r requirements.txt
+
+      - name: Import signing certificates
+        if: env.SIGNING_ENABLED != ''
+        env:
+          APPLE_APP_CERT_P12_BASE64: ${{ secrets.APPLE_APP_CERT_P12_BASE64 }}
+          APPLE_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_CERT_P12_PASSWORD: ${{ secrets.APPLE_CERT_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/openavc-signing.keychain-db"
+          KEYCHAIN_PWD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          echo "$APPLE_APP_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/app.p12"
+          echo "$APPLE_INSTALLER_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/installer.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/installer.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+          # Put our keychain first in the search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12"
+
+      - name: Write notarization key
+        if: env.SIGNING_ENABLED != ''
+        run: echo "${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}" | base64 -d > "$RUNNER_TEMP/notary.p8"
+
+      - name: Build .pkg + update tarball
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SIGNING_IDENTITY: ${{ secrets.APPLE_APP_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_PATH: ${{ runner.temp }}/notary.p8
+        run: bash installer/build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/OpenAVC-*-macos-*.pkg
+            dist/openavc-*-macos-*.tar.gz
 
   # ── Linux archive (amd64) ──────────────────────────────────────────
   linux-amd64:
@@ -371,7 +458,7 @@ jobs:
   # ── Create GitHub Release ──────────────────────────────────────────
   release:
     name: Create release
-    needs: [version, windows, linux-amd64, linux-arm64, docker]
+    needs: [version, windows, macos, linux-amd64, linux-arm64, docker]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -381,6 +468,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: windows-installer
+          path: release/
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64
+          path: release/
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-x86_64
           path: release/
       - uses: actions/download-artifact@v4
         with:
