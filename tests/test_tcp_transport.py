@@ -906,3 +906,113 @@ async def test_on_data_exception_does_not_disconnect(echo_server):
     assert transport.connected
 
     await transport.close()
+
+
+# --- Response-queue overflow does not tear down the connection ---
+
+
+async def test_response_queue_overflow_does_not_disconnect():
+    """A burst of >100 framed responses while a send_and_wait waiter is active
+    must not let QueueFull escape the reader loop and disconnect the device.
+
+    The producer is _deliver_message (the only writer into the response queue),
+    so exercising it directly is faithful: pre-fix the 101st put_nowait raises
+    QueueFull; post-fix the overflow frame is dropped and the earliest frames
+    (likely the real response) are kept.
+    """
+    disconnected = []
+    transport = TCPTransport(
+        "127.0.0.1", 1234,
+        on_data=lambda d: None,
+        on_disconnect=lambda: disconnected.append(True),
+        delimiter=b"\r",
+        timeout=5.0,
+        inter_command_delay=0.0,
+    )
+    transport._connected = True
+    transport._waiting_for_response = True
+
+    # maxsize is 100; deliver 150. Must not raise and must not disconnect.
+    for i in range(150):
+        transport._deliver_message(f"frame{i}".encode())
+
+    assert transport.connected
+    assert not disconnected
+    # Drop-newest on overflow: the earliest frame is preserved for the waiter.
+    assert transport._response_queue.get_nowait() == b"frame0"
+
+
+# --- send_and_wait fails fast on disconnect / close (no full-timeout hang) ---
+
+
+async def test_send_and_wait_wakes_on_remote_disconnect():
+    """A link drop while send_and_wait is parked fails fast with ConnectionError,
+    not after the full response timeout."""
+
+    async def handle(reader, writer):
+        # Consume the query, then drop the link without responding.
+        await reader.read(1024)
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    transport = await TCPTransport.create(
+        "127.0.0.1", port,
+        on_data=lambda d: None,
+        on_disconnect=lambda: None,
+        delimiter=b"\r",
+    )
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    with pytest.raises(ConnectionError):
+        # 5s timeout: pre-fix this blocks the full 5s; post-fix it returns as
+        # soon as the reader loop detects EOF and wakes the waiter.
+        await transport.send_and_wait(b"query\r", timeout=5.0)
+    assert loop.time() - start < 2.0
+
+    await transport.close()
+    server.close()
+    await server.wait_closed()
+
+
+async def test_send_and_wait_wakes_on_close():
+    """Closing the transport while send_and_wait is parked fails it fast."""
+
+    async def handle(reader, writer):
+        # Accept the query but never respond; keep the link open.
+        try:
+            while await reader.read(1024):
+                pass
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            try:
+                writer.close()
+            except (ConnectionError, OSError):
+                pass
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    transport = await TCPTransport.create(
+        "127.0.0.1", port,
+        on_data=lambda d: None,
+        on_disconnect=lambda: None,
+        delimiter=b"\r",
+    )
+
+    loop = asyncio.get_running_loop()
+    waiter = asyncio.create_task(transport.send_and_wait(b"query\r", timeout=5.0))
+    await asyncio.sleep(0.1)  # let the waiter park on the response queue
+
+    start = loop.time()
+    await transport.close()
+    with pytest.raises(ConnectionError):
+        await waiter
+    assert loop.time() - start < 2.0
+
+    server.close()
+    await server.wait_closed()

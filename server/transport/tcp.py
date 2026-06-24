@@ -23,8 +23,22 @@ from .types import Callback
 log = get_logger(__name__)
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget on_data tasks: surface failures that
+    would otherwise vanish as a 'Task exception was never retrieved' GC warning."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        log.error("Unhandled exception in TCP on_data task: %s", exc, exc_info=exc)
+
+
 class TCPTransport:
     """Async TCP transport with pluggable message framing."""
+
+    # Posted to the response queue to wake a parked send_and_wait when the link
+    # drops or is closed, so it fails fast instead of blocking the full timeout.
+    _DISCONNECT_SENTINEL = object()
 
     def __init__(
         self,
@@ -70,9 +84,14 @@ class TCPTransport:
         # Last connect/IO error string, for the connection-fault classifier.
         self._last_error = ""
 
-        # For send_and_wait: a queue to capture the next response
-        self._response_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        # For send_and_wait: a queue to capture the next response. May also
+        # carry _DISCONNECT_SENTINEL to wake a parked waiter on disconnect.
+        self._response_queue: asyncio.Queue[bytes | object] = asyncio.Queue(maxsize=100)
         self._waiting_for_response = False
+
+        # Strong refs to fire-and-forget async on_data tasks so they aren't
+        # garbage-collected mid-flight; cleared by their own done-callback.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @classmethod
     async def create(
@@ -202,6 +221,11 @@ class TCPTransport:
                 response = await asyncio.wait_for(
                     self._response_queue.get(), timeout=timeout
                 )
+                if response is self._DISCONNECT_SENTINEL:
+                    raise ConnectionError(
+                        f"Connection lost while waiting for response "
+                        f"from {self.host}:{self.port}"
+                    )
                 return response
             except asyncio.TimeoutError:
                 log.warning(f"TCP send_and_wait timeout for {self.host}:{self.port}")
@@ -212,6 +236,7 @@ class TCPTransport:
     async def close(self) -> None:
         """Close the connection gracefully."""
         self._connected = False
+        self._wake_response_waiter()
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
             try:
@@ -277,21 +302,47 @@ class TCPTransport:
 
         # If someone is waiting for a response, put it in the queue
         if self._waiting_for_response:
-            self._response_queue.put_nowait(data)
+            try:
+                self._response_queue.put_nowait(data)
+            except asyncio.QueueFull:
+                # A burst of >100 frames arrived while a send_and_wait waiter is
+                # active (chatty/misbehaving gear, or a slow consumer). Keep the
+                # earliest frames — the real response is most likely among them —
+                # and drop this overflow frame. Letting QueueFull escape here
+                # would unwind the reader loop and wrongly disconnect the device.
+                log.debug(f"[{self._name}] response queue full — dropping overflow RX frame")
 
         # Always call the data callback
         try:
             result = self._on_data(data)
             if asyncio.iscoroutine(result):
-                asyncio.create_task(result)
+                # Hold a strong ref (GC-safety) and log any failure that an
+                # async handler would otherwise swallow.
+                task = asyncio.create_task(result)
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+                task.add_done_callback(_log_task_exception)
         except Exception:
             log.exception("Error in TCP on_data callback — continuing (transport still connected)")
+
+    def _wake_response_waiter(self) -> None:
+        """Wake a parked send_and_wait so it fails fast on disconnect/close
+        instead of blocking for the full response timeout."""
+        if not self._waiting_for_response:
+            return
+        try:
+            self._response_queue.put_nowait(self._DISCONNECT_SENTINEL)
+        except asyncio.QueueFull:
+            # The queue already holds frames the waiter will consume and wake
+            # on; dropping the sentinel is harmless. Never raise from here.
+            pass
 
     async def _handle_disconnect(self) -> None:
         """Handle an unexpected disconnection."""
         if not self._connected:
             return
         self._connected = False
+        self._wake_response_waiter()
         log.warning(f"TCP connection lost to {self.host}:{self.port}")
         try:
             self._on_disconnect()
