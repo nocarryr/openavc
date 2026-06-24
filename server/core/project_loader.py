@@ -52,6 +52,22 @@ def _reject_glob_metachars(value: str, label: str) -> None:
         )
 
 
+def _validate_id(value: str, label: str) -> str:
+    """Reject IDs that would break state-key parsing or fnmatch dispatch.
+
+    Every config ID becomes a segment of state keys (``<ns>.<id>.<property>``)
+    and of the per-key ``state.changed.<key>`` events. A dot would split the
+    key; a glob metacharacter would break fnmatch subscription matching. Shared
+    by every ID-bearing model so the rule can't drift between them.
+    """
+    if "." in value:
+        raise ValueError(
+            f"{label} '{value}' must not contain dots (used as state key separator)"
+        )
+    _reject_glob_metachars(value, label)
+    return value
+
+
 # --- Pydantic Models ---
 
 
@@ -95,10 +111,7 @@ class DeviceConfig(_ForwardCompatModel):
     @field_validator("id")
     @classmethod
     def id_no_dots(cls, v: str) -> str:
-        if "." in v:
-            raise ValueError(f"Device ID '{v}' must not contain dots (used as state key separator)")
-        _reject_glob_metachars(v, "Device ID")
-        return v
+        return _validate_id(v, "Device ID")
 
 
 class DeviceGroup(_ForwardCompatModel):
@@ -109,9 +122,7 @@ class DeviceGroup(_ForwardCompatModel):
     @field_validator("id")
     @classmethod
     def id_no_dots(cls, v: str) -> str:
-        if "." in v:
-            raise ValueError(f"Device group ID '{v}' must not contain dots")
-        return v
+        return _validate_id(v, "Device group ID")
 
 
 class VariableValidation(_ForwardCompatModel):
@@ -128,10 +139,7 @@ class VariableConfig(_ForwardCompatModel):
     @field_validator("id")
     @classmethod
     def id_no_dots(cls, v: str) -> str:
-        if "." in v:
-            raise ValueError(f"Variable ID '{v}' must not contain dots (used as state key separator)")
-        _reject_glob_metachars(v, "Variable ID")
-        return v
+        return _validate_id(v, "Variable ID")
     default: Any = None
     label: str = ""
     description: str = ""  # freeform text explaining the variable's purpose
@@ -191,9 +199,7 @@ class TriggerConfig(_ForwardCompatModel):
     @field_validator("id")
     @classmethod
     def id_no_dots(cls, v: str) -> str:
-        if "." in v:
-            raise ValueError(f"Trigger ID '{v}' must not contain dots (used as state key separator)")
-        return v
+        return _validate_id(v, "Trigger ID")
     enabled: bool = True
 
     # Schedule
@@ -224,9 +230,7 @@ class MacroConfig(_ForwardCompatModel):
     @field_validator("id")
     @classmethod
     def id_no_dots(cls, v: str) -> str:
-        if "." in v:
-            raise ValueError(f"Macro ID '{v}' must not contain dots (used as state key separator)")
-        return v
+        return _validate_id(v, "Macro ID")
     steps: list[MacroStep] = Field(default_factory=list)
     triggers: list[TriggerConfig] = Field(default_factory=list)
     stop_on_error: bool = False
@@ -299,11 +303,8 @@ class UIElement(_ForwardCompatModel):
 
     @field_validator("id")
     @classmethod
-    def id_no_glob(cls, v: str) -> str:
-        # The element id forms ui.<id>.<property> state keys and their
-        # per-key state.changed events; a glob metachar breaks fnmatch dispatch.
-        _reject_glob_metachars(v, "UI element ID")
-        return v
+    def id_no_dots(cls, v: str) -> str:
+        return _validate_id(v, "UI element ID")
 
 
 class GridConfig(_ForwardCompatModel):
@@ -338,6 +339,11 @@ class UIPage(_ForwardCompatModel):
     background: PageBackground | None = None
     grid: GridConfig = Field(default_factory=GridConfig)
     elements: list[UIElement] = Field(default_factory=list)
+
+    @field_validator("id")
+    @classmethod
+    def id_no_dots(cls, v: str) -> str:
+        return _validate_id(v, "UI page ID")
 
 
 class UISettings(_ForwardCompatModel):

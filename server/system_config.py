@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -525,16 +526,42 @@ class SystemConfig:
         self._loaded = True
 
     def save(self) -> None:
-        """Write the current config (minus env overrides) to system.json."""
+        """Write the current config (minus env overrides) to system.json.
+
+        Atomic write (temp file + os.replace), mirroring state_persister. A
+        crash or power loss mid-write can't leave a truncated system.json,
+        which the layered-config loader would silently fall back to defaults
+        for — losing the operator's settings.
+        """
+        fd = None
+        tmp_path = None
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
-            self._file_path.write_text(
-                json.dumps(self._data, indent=4) + "\n",
-                encoding="utf-8",
+            content = json.dumps(self._data, indent=4) + "\n"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._data_dir),
+                suffix=".tmp",
+                prefix=".system_",
             )
+            os.write(fd, content.encode("utf-8"))
+            os.close(fd)
+            fd = None
+            os.replace(tmp_path, str(self._file_path))
+            tmp_path = None
             log.info("Saved system config to %s", self._file_path)
         except OSError as e:
             log.error("Failed to save system.json to %s: %s", self._file_path, e)
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def ensure_file(self) -> None:
         """Create system.json with defaults if it doesn't exist."""

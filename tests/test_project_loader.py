@@ -627,12 +627,38 @@ def test_ui_element_id_rejects_glob_metachars(bad_id):
 
 def test_ids_accept_normal_names():
     """Ordinary identifiers (incl. the numeric/underscore child-style names)
-    still validate — the guard only rejects glob metachars."""
+    still validate — the guard only rejects dots and glob metachars."""
     from server.core.project_loader import DeviceConfig, UIElement, VariableConfig
 
     DeviceConfig(id="encoder_5", driver="x", name="X")
     VariableConfig(id="room_active", type="boolean")
     UIElement(id="vol_slider", type="slider")
+
+
+@pytest.mark.parametrize("bad_id", [".", "a.b", "grp*", "t?", "m[1]"])
+def test_all_state_key_models_reject_dots_and_glob(bad_id):
+    """Every id that becomes a state-key segment rejects both dots and glob
+    metachars, through the one shared validator, so the rule can't drift
+    between models. UIPage previously had no id guard and UIElement rejected
+    glob but not dots."""
+    from server.core.project_loader import (
+        DeviceGroup,
+        MacroConfig,
+        TriggerConfig,
+        UIElement,
+        UIPage,
+    )
+
+    with pytest.raises(ValidationError):
+        DeviceGroup(id=bad_id, name="X")
+    with pytest.raises(ValidationError):
+        TriggerConfig(id=bad_id, type="event")
+    with pytest.raises(ValidationError):
+        MacroConfig(id=bad_id, name="X")
+    with pytest.raises(ValidationError):
+        UIElement(id=bad_id, type="button")
+    with pytest.raises(ValidationError):
+        UIPage(id=bad_id, name="X")
 
 
 # --- ScriptConfig.id validation parity with the REST create path ----------
