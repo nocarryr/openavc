@@ -34,6 +34,7 @@ dependencies = [
 test = [
     "pytest==8.3.5",             # MIT - Testing framework
     "pytest-asyncio==0.26.0",    # Apache-2.0 - Async test support
+    "pytest-timeout==2.3.1",     # MIT - Per-test timeout: a hung test fails fast (with a stack dump) instead of stalling CI to its 6h ceiling
     "ruff>=0.6.0",               # MIT - Fast Python linter/formatter (unpinned, linter updates are safe)
 ]
 # Full local dev environment: the test tools plus the Playwright E2E stack.
@@ -59,7 +60,13 @@ testpaths = ["tests"]
 # for the default run so `pytest` is the same clean unit run everywhere.
 # Run the e2e suite on demand (needs `python -m playwright install chromium`):
 #   pytest tests/e2e -o addopts=""
-addopts = "-p no:playwright --ignore=tests/e2e"
+#
+# --timeout caps any single test so a deadlock (e.g. a blocking socket/await
+# that never returns) fails in a couple of minutes with a dumped traceback,
+# instead of stalling the whole job to GitHub's 6h ceiling. The method is left
+# to pytest-timeout's per-platform default: SIGALRM on Linux (fails just that
+# test, suite continues), thread-based on Windows (dumps stacks, ends the run).
+addopts = "-p no:playwright --ignore=tests/e2e --timeout=120"
 
 [tool.ruff]
 line-length = 100

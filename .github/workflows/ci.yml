@@ -10,6 +10,9 @@ jobs:
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Backstop for anything a per-test timeout can't catch (a hung install or
+    # collection): fail in minutes, never run to GitHub's 6h job ceiling.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +44,7 @@ jobs:
   build-frontend:
     name: Build frontends
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4

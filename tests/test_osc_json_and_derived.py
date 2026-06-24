@@ -210,10 +210,21 @@ def test_no_config_derived_leaves_config_untouched():
 
 async def _start_slip_osc_echo_server():
     """A localhost TCP server that SLIP-deframes incoming OSC and replies with
-    one SLIP-framed OSC packet per message received."""
+    one SLIP-framed OSC packet per message received.
+
+    Returns ``(port, received, aclose)``. Call ``await aclose()`` to tear it
+    down. We deliberately do not use ``asyncio.Server.wait_closed()``: on
+    Python 3.12 it hangs forever when the client connection has already drained
+    before it is awaited (a CPython bug the stdlib's own docstring records being
+    mis-fixed across 3.11/3.12.0/3.12.1; fixed in 3.13). Instead we close the
+    accepted connections ourselves and await each ``StreamWriter.wait_closed()``,
+    which is sound on every version.
+    """
     received: list[bytes] = []
+    conns: list[asyncio.StreamWriter] = []
 
     async def handle(reader, writer):
+        conns.append(writer)
         parser = SlipFrameParser()
         try:
             while True:
@@ -232,12 +243,23 @@ async def _start_slip_osc_echo_server():
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    return server, port, received
+
+    async def aclose():
+        server.close()
+        for writer in conns:
+            writer.close()
+        for writer in conns:
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+
+    return port, received, aclose
 
 
 @pytest.mark.asyncio
 async def test_osc_over_tcp_slip_round_trip():
-    server, port, received = await _start_slip_osc_echo_server()
+    port, received, aclose = await _start_slip_osc_echo_server()
     got: list[bytes] = []
     transport = OSCTransport(
         host="127.0.0.1", port=port, on_data=lambda d: got.append(d), tcp=True
@@ -263,18 +285,16 @@ async def test_osc_over_tcp_slip_round_trip():
         assert args == [("s", '{"data":"5.4.5"}')]
     finally:
         await transport.close()
-        server.close()
-        await server.wait_closed()
+        await aclose()
 
 
 @pytest.mark.asyncio
 async def test_osc_tcp_verify_true_when_connected():
-    server, port, _ = await _start_slip_osc_echo_server()
+    port, _received, aclose = await _start_slip_osc_echo_server()
     transport = OSCTransport(host="127.0.0.1", port=port, tcp=True)
     try:
         await transport.open()
         assert await transport.verify(timeout=1.0) is True
     finally:
         await transport.close()
-        server.close()
-        await server.wait_closed()
+        await aclose()
