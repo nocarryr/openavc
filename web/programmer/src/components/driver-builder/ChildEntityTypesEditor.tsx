@@ -1,17 +1,25 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight } from "lucide-react";
 import type {
   DriverChildEntityType,
   DriverChildStateVarDef,
   DriverDefinition,
 } from "../../api/types";
+import {
+  CHILD_TYPE_ID_RE,
+  applyChildVarTypeChange,
+  checkRename,
+  nextChildFieldId,
+  nextChildTypeId,
+  sanitizeFieldId,
+  sanitizeTypeId,
+  type RenameResult,
+} from "./childEntityTypesHelpers";
 
 interface ChildEntityTypesEditorProps {
   draft: DriverDefinition;
   onUpdate: (partial: Partial<DriverDefinition>) => void;
 }
-
-const TYPE_ID_RE = /^[a-z][a-z0-9_]*$/;
 
 const labelStyle: React.CSSProperties = {
   display: "block",
@@ -25,6 +33,75 @@ const helpStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   marginTop: "var(--space-xs)",
 };
+
+// An id input that buffers keystrokes locally and commits the rename on blur
+// (or Enter). Renaming on every keystroke remounts the row — the parent keys
+// rows by the id being edited — which drops focus and swallows intermediate
+// collisions/empties. Committing on blur keeps the row mounted while typing.
+// Mirrors CommandBuilder's draftName pattern.
+function IdRenameInput({
+  value,
+  sanitize,
+  onCommit,
+  style,
+  "data-testid": testid,
+}: {
+  value: string;
+  sanitize: (raw: string) => string;
+  onCommit: (next: string) => RenameResult;
+  style?: React.CSSProperties;
+  "data-testid"?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-sync if the canonical value changes from outside (e.g. parent rename).
+  useEffect(() => {
+    setDraft(value);
+    setError(null);
+  }, [value]);
+
+  const commit = () => {
+    if (draft === value) {
+      setError(null);
+      return;
+    }
+    const result = onCommit(draft);
+    if (result.ok) {
+      setError(null);
+      setDraft(value); // re-sync no-op renames (sanitized === current)
+    } else {
+      setError(result.reason ?? "Invalid id.");
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <input
+        data-testid={testid}
+        value={draft}
+        onChange={(e) => setDraft(sanitize(e.target.value))}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") {
+            setDraft(value);
+            setError(null);
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        style={{
+          width: "100%",
+          ...style,
+          borderColor: error ? "var(--color-error)" : style?.borderColor,
+        }}
+      />
+      {error && (
+        <div style={{ fontSize: 11, color: "var(--color-error)" }}>{error}</div>
+      )}
+    </div>
+  );
+}
 
 export function ChildEntityTypesEditor({
   draft,
@@ -41,12 +118,7 @@ export function ChildEntityTypesEditor({
   };
 
   const addType = () => {
-    let counter = typeNames.length + 1;
-    let name = `child_type_${counter}`;
-    while (name in types) {
-      counter++;
-      name = `child_type_${counter}`;
-    }
+    const name = nextChildTypeId(typeNames);
     const initial: DriverChildEntityType = {
       label: "New Child Type",
       label_plural: "",
@@ -66,15 +138,17 @@ export function ChildEntityTypesEditor({
     if (expanded === name) setExpanded(null);
   };
 
-  const renameType = (oldName: string, newName: string) => {
-    const cleaned = newName.replace(/[^a-z0-9_]/gi, "").toLowerCase();
-    if (!cleaned || cleaned === oldName || cleaned in types) return;
+  const renameType = (oldName: string, newName: string): RenameResult => {
+    const cleaned = sanitizeTypeId(newName);
+    const check = checkRename(cleaned, oldName, typeNames);
+    if (!check.ok || cleaned === oldName) return check;
     const next: typeof types = {};
     for (const [k, v] of Object.entries(types)) {
       next[k === oldName ? cleaned : k] = v;
     }
     writeTypes(next);
     if (expanded === oldName) setExpanded(cleaned);
+    return { ok: true };
   };
 
   const updateType = (
@@ -241,7 +315,7 @@ function IdentitySection({
 }: {
   name: string;
   type: DriverChildEntityType;
-  onRename: (next: string) => void;
+  onRename: (next: string) => RenameResult;
   onUpdate: (partial: Partial<DriverChildEntityType>) => void;
 }) {
   return (
@@ -254,12 +328,12 @@ function IdentitySection({
     >
       <div>
         <label style={labelStyle}>Type ID</label>
-        <input
+        <IdRenameInput
           data-testid={`child-type-id-${name}`}
           value={name}
-          onChange={(e) => onRename(e.target.value)}
-          placeholder="e.g. encoder"
-          style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+          sanitize={sanitizeTypeId}
+          onCommit={onRename}
+          style={{ fontFamily: "var(--font-mono)" }}
         />
         <div style={helpStyle}>
           Lowercase, underscores. Becomes the third segment in state keys
@@ -414,7 +488,7 @@ function StateVarsSection({
   };
 
   const addVar = () => {
-    const name = `field_${varNames.length + 1}`;
+    const name = nextChildFieldId(varNames);
     writeVars({
       ...vars,
       [name]: { type: "string", label: "New Field" },
@@ -427,14 +501,16 @@ function StateVarsSection({
     writeVars(next);
   };
 
-  const renameVar = (oldName: string, newName: string) => {
-    const cleaned = newName.replace(/[^a-zA-Z0-9_]/g, "").toLowerCase();
-    if (!cleaned || cleaned === oldName || cleaned in vars) return;
+  const renameVar = (oldName: string, newName: string): RenameResult => {
+    const cleaned = sanitizeFieldId(newName);
+    const check = checkRename(cleaned, oldName, varNames);
+    if (!check.ok || cleaned === oldName) return check;
     const next: typeof vars = {};
     for (const [k, v] of Object.entries(vars)) {
       next[k === oldName ? cleaned : k] = v;
     }
     writeVars(next);
+    return { ok: true };
   };
 
   const updateVar = (
@@ -448,6 +524,13 @@ function StateVarsSection({
       ...vars,
       [name]: merged as unknown as DriverChildStateVarDef,
     });
+  };
+
+  // Atomic replace of a var def — used when several fields change together (a
+  // type switch clears min/max/step/values). Writing them as separate updateVar
+  // calls would each read the same stale `vars` snapshot and clobber the type.
+  const updateVarDef = (name: string, def: DriverChildStateVarDef) => {
+    writeVars({ ...vars, [name]: def });
   };
 
   return (
@@ -505,10 +588,11 @@ function StateVarsSection({
                 alignItems: "center",
               }}
             >
-              <input
+              <IdRenameInput
                 data-testid={`child-field-id-${name}`}
                 value={name}
-                onChange={(e) => renameVar(name, e.target.value)}
+                sanitize={sanitizeFieldId}
+                onCommit={(next) => renameVar(name, next)}
                 style={{
                   fontSize: "var(--font-size-sm)",
                   fontFamily: "var(--font-mono)",
@@ -530,18 +614,9 @@ function StateVarsSection({
               />
               <select
                 value={v.type}
-                onChange={(e) => {
-                  const tt = e.target.value;
-                  updateVar(name, "type", tt);
-                  if (tt !== "integer" && tt !== "number") {
-                    updateVar(name, "min", undefined);
-                    updateVar(name, "max", undefined);
-                    updateVar(name, "step", undefined);
-                  }
-                  if (tt !== "enum") {
-                    updateVar(name, "values", undefined);
-                  }
-                }}
+                onChange={(e) =>
+                  updateVarDef(name, applyChildVarTypeChange(v, e.target.value))
+                }
                 style={{ width: 100, fontSize: "var(--font-size-sm)" }}
               >
                 <option value="string">String</option>
@@ -823,4 +898,4 @@ function PresentationSection({
   );
 }
 
-export { TYPE_ID_RE as CHILD_TYPE_ID_RE };
+export { CHILD_TYPE_ID_RE };
