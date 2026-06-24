@@ -30,7 +30,11 @@ from server.discovery.mdns_scanner import (
     decode_dns_name,
     encode_dns_name,
 )
-from server.discovery.multicast import ANY_INTERFACE, join_group_on_interfaces
+from server.discovery.multicast import (
+    ANY_INTERFACE,
+    join_group_on_interfaces,
+    set_shared_port_reuse,
+)
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -231,7 +235,7 @@ def _create_advertiser_socket() -> tuple[socket.socket, list[str]]:
     group could not be joined on any interface (e.g. no network yet).
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    set_shared_port_reuse(sock)
 
     try:
         sock.bind(("", MDNS_PORT))

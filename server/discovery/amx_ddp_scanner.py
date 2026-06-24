@@ -37,7 +37,7 @@ import socket
 from dataclasses import dataclass
 from typing import Any
 
-from server.discovery.multicast import join_group_on_interfaces
+from server.discovery.multicast import join_group_on_interfaces, set_shared_port_reuse
 from server.discovery.result import Evidence
 from server.discovery.tier_matcher import evidence_amx_ddp
 
@@ -251,7 +251,7 @@ def _create_ddp_socket(control_ip: str = "") -> socket.socket:
     could not be joined on any interface.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    set_shared_port_reuse(sock)
 
     try:
         # Bind to receive on the well-known port.

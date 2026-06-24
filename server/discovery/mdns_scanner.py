@@ -18,7 +18,11 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any
 
-from server.discovery.multicast import join_group_on_interfaces, send_per_interface
+from server.discovery.multicast import (
+    join_group_on_interfaces,
+    send_per_interface,
+    set_shared_port_reuse,
+)
 
 log = logging.getLogger("discovery.mdns")
 
@@ -722,8 +726,8 @@ def _create_mdns_socket(control_ip: str = "") -> tuple[socket.socket, list[str]]
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
-    # Allow multiple processes to bind to the same port
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Allow multiple processes to bind the same port (incl. macOS mDNSResponder)
+    set_shared_port_reuse(sock)
 
     try:
         sock.bind(("", MDNS_PORT))

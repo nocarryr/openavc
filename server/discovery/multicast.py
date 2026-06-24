@@ -34,6 +34,20 @@ log = logging.getLogger("discovery.multicast")
 ANY_INTERFACE = "0.0.0.0"
 
 
+def set_shared_port_reuse(sock: socket.socket) -> None:
+    """Allow a multicast socket to share a fixed port already held by another process.
+
+    SO_REUSEADDR is enough on Linux and Windows, but BSD-derived stacks
+    (macOS) also require SO_REUSEPORT to bind a port another process is
+    already using — without it, binding e.g. mDNS 5353 alongside macOS's
+    mDNSResponder fails with EADDRINUSE. SO_REUSEPORT does not exist on
+    Windows, where SO_REUSEADDR already grants the same sharing.
+    """
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+
 def _join(sock: socket.socket, group: str, interface_ip: str) -> None:
     mreq = struct.pack(
         "4s4s",
