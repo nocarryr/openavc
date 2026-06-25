@@ -189,9 +189,13 @@ export function Canvas({
     : screenHeight;
 
   const tunnelPrefix = getTunnelPrefix();
+  // Trailing slash on /panel/ so the StaticFiles mount serves index.html
+  // directly. Without it the mount 307-redirects /panel -> /panel/, and that
+  // redirect's absolute localhost Location does not survive the cloud tunnel
+  // (the iframe ends up pointing at http://localhost and fails to load).
   const iframeSrc = previewMode
-    ? `${tunnelPrefix}/panel?page=${encodeURIComponent(page.id)}`
-    : `${tunnelPrefix}/panel?page=${encodeURIComponent(page.id)}&edit=1`;
+    ? `${tunnelPrefix}/panel/?page=${encodeURIComponent(page.id)}`
+    : `${tunnelPrefix}/panel/?page=${encodeURIComponent(page.id)}&edit=1`;
 
   // dnd-kit reads the bounding rect of the element carrying data-canvas-grid for drop math.
   // In edit mode we attach it to the overlay grid; in preview mode there's no drop target.

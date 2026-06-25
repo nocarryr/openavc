@@ -647,7 +647,7 @@ function StudioPreview({
           <iframe
             key={pageId}
             ref={iframeRef}
-            src={`${getTunnelPrefix()}/panel?page=${encodeURIComponent(pageId)}&edit=1`}
+            src={`${getTunnelPrefix()}/panel/?page=${encodeURIComponent(pageId)}&edit=1`}
             onLoad={handleLoad}
             title="Theme preview"
             style={{
