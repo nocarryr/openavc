@@ -7,6 +7,7 @@ Usage:
     python -m server.main
 """
 
+import os
 import sys
 
 # In frozen (PyInstaller) builds, this exe doubles as the simulator entry point.
@@ -17,9 +18,29 @@ if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == '--sim
     _sim_main()
     sys.exit(0)
 
+# CA trust store for stdlib `ssl` in the frozen macOS app. A PyInstaller .app has
+# no OpenSSL-readable CA bundle, and macOS keeps its roots in the Keychain rather
+# than in files OpenSSL reads. So `ssl.create_default_context()`, used by the
+# `websockets` client for the cloud agent and the remote-UI tunnel, fails every
+# wss:// handshake with CERTIFICATE_VERIFY_FAILED. (httpx is unaffected because it
+# trusts certifi directly, which is why pairing's REST call succeeds while the
+# agent stays disconnected.) Point stdlib ssl at the bundled certifi store so the
+# default context can verify cloud.openavc.com. Linux reads /etc/ssl/certs and
+# Windows reads its system store, so this is scoped to frozen macOS. An explicit
+# SSL_CERT_FILE already in the environment always wins.
+if (
+    getattr(sys, 'frozen', False)
+    and sys.platform == 'darwin'
+    and not os.environ.get('SSL_CERT_FILE')
+):
+    try:
+        import certifi
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+    except Exception:  # pragma: no cover - never let CA setup block startup
+        pass
+
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 
 import uvicorn
