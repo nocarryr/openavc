@@ -3,6 +3,7 @@ import { ChevronRight, ExternalLink, X, Zap, Layout, FileCode } from "lucide-rea
 import { useNavigationStore, type FocusTarget } from "../../store/navigationStore";
 import type { ProjectConfig, ScriptReference } from "../../api/types";
 import type { ViewId } from "../../components/layout/Sidebar";
+import { scanBindingForVars, scanBindingForAllKeys, collectWildcardMatches } from "./variablesShared.helpers";
 
 // ==========================================================================
 // Shared types
@@ -70,15 +71,11 @@ export function UsageRow({ usage }: { usage: VariableUsage }) {
 
 // ==========================================================================
 // Cross-reference logic
+//
+// The pure binding-scan + glob helpers (scanBindingForVars,
+// scanBindingForAllKeys, collectWildcardMatches) live in
+// variablesShared.helpers.ts so they can be unit-tested without React.
 // ==========================================================================
-
-/** Simple glob matcher for patterns like "device.*.power" */
-function globMatch(pattern: string, key: string): boolean {
-  if (pattern === key) return true;
-  if (!pattern.includes("*")) return false;
-  const regex = new RegExp("^" + pattern.replace(/\./g, "\\.").replace(/\*/g, "[^.]+") + "$");
-  return regex.test(key);
-}
 
 /** Recursively scan macro steps for var.* references */
 function scanStepsForVarUsages(
@@ -247,8 +244,11 @@ function scanStepsForAllKeyUsages(
   }
 }
 
-/** Build usage map for ALL state keys (var.*, device.*, system.*) — used in Device States sub-tab */
-export function buildStateUsageMap(project: ProjectConfig, scriptRefs: ScriptReference[] = []): Map<string, VariableUsage[]> {
+/** Build usage map for ALL state keys (var.*, device.*, system.*) — used in Device States sub-tab.
+ *  `knownKeys` lists state keys that exist independently of macro/UI references
+ *  (device keys derived from driver state_variables + live state) so a wildcard
+ *  script reference can annotate device-only keys, not just keys already seeded. */
+export function buildStateUsageMap(project: ProjectConfig, scriptRefs: ScriptReference[] = [], knownKeys: string[] = []): Map<string, VariableUsage[]> {
   const map = new Map<string, VariableUsage[]>();
 
   const addUsage = (key: string, usage: VariableUsage) => {
@@ -304,11 +304,11 @@ export function buildStateUsageMap(project: ProjectConfig, scriptRefs: ScriptRef
       nav: scriptNav,
     };
     if (ref.key.includes("*")) {
-      // Wildcard pattern — add to all matching existing keys
-      for (const existingKey of map.keys()) {
-        if (globMatch(ref.key, existingKey)) {
-          map.get(existingKey)!.push(entry);
-        }
+      // Wildcard pattern — annotate every matching key, including device-only
+      // keys that macros/UI never referenced (seeded via knownKeys).
+      const candidates = new Set<string>([...map.keys(), ...knownKeys]);
+      for (const matchKey of collectWildcardMatches(ref.key, candidates)) {
+        addUsage(matchKey, entry);
       }
     } else {
       addUsage(ref.key, entry);
@@ -316,80 +316,6 @@ export function buildStateUsageMap(project: ProjectConfig, scriptRefs: ScriptRef
   }
 
   return map;
-}
-
-function scanBindingForVars(
-  bindings: Record<string, unknown>,
-  onFound: (varId: string, detail: string) => void,
-) {
-  if (!bindings) return;
-
-  const checkKey = (obj: any, context: string) => {
-    if (!obj || typeof obj !== "object") return;
-    const key = obj.key as string | undefined;
-    if (key?.startsWith("var.")) {
-      onFound(key.slice(4), context);
-    }
-  };
-
-  if (bindings.variable) checkKey(bindings.variable, "Two-way variable binding");
-  if (bindings.text) checkKey(bindings.text, "Text display binding");
-  if (bindings.feedback) checkKey(bindings.feedback, "Feedback/color binding");
-
-  for (const eventType of ["press", "release", "change"]) {
-    const binding = bindings[eventType] as Record<string, unknown> | undefined;
-    if (!binding) continue;
-    if (binding.action === "state.set" && typeof binding.key === "string" && binding.key.startsWith("var.")) {
-      onFound(binding.key.slice(4), `${eventType} → Set Variable`);
-    }
-    if (binding.action === "value_map" && binding.map) {
-      const actionMap = binding.map as Record<string, any>;
-      for (const [optVal, subAction] of Object.entries(actionMap)) {
-        if (subAction?.action === "state.set" && typeof subAction.key === "string" && subAction.key.startsWith("var.")) {
-          onFound(subAction.key.slice(4), `${eventType} → ${optVal} → Set Variable`);
-        }
-      }
-    }
-  }
-
-  if (bindings.value) checkKey(bindings.value, "Slider value source");
-}
-
-/** Scan bindings for ALL state key references (not just var.*) */
-function scanBindingForAllKeys(
-  bindings: Record<string, unknown>,
-  onFound: (key: string, detail: string) => void,
-) {
-  if (!bindings) return;
-
-  const checkKey = (obj: any, context: string) => {
-    if (!obj || typeof obj !== "object") return;
-    const key = obj.key as string | undefined;
-    if (key) onFound(key, context);
-  };
-
-  if (bindings.variable) checkKey(bindings.variable, "Two-way binding");
-  if (bindings.text) checkKey(bindings.text, "Text display binding");
-  if (bindings.feedback) checkKey(bindings.feedback, "Feedback binding");
-  if (bindings.color) checkKey(bindings.color, "Color binding");
-
-  for (const eventType of ["press", "release", "change"]) {
-    const binding = bindings[eventType] as Record<string, unknown> | undefined;
-    if (!binding) continue;
-    if (binding.action === "state.set" && typeof binding.key === "string") {
-      onFound(binding.key, `${eventType} → Set state`);
-    }
-    if (binding.action === "value_map" && binding.map) {
-      const actionMap = binding.map as Record<string, any>;
-      for (const [optVal, subAction] of Object.entries(actionMap)) {
-        if (subAction?.action === "state.set" && typeof subAction.key === "string") {
-          onFound(subAction.key, `${eventType} → ${optVal} → Set state`);
-        }
-      }
-    }
-  }
-
-  if (bindings.value) checkKey(bindings.value, "Slider value source");
 }
 
 export function usageColor(type: string): string {

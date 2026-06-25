@@ -37,11 +37,27 @@ export function DeviceStatesSubTab() {
     return () => { cancelled = true; };
   }, []);
 
+  // All device state keys (driver-declared + any live ones), as a stable newline
+  // signature so the usage map only rebuilds when the SET of keys changes, not on
+  // every live-value tick. Lets wildcard script refs annotate device-only keys.
+  const deviceKeySig = useMemo(() => {
+    const keys = new Set<string>();
+    for (const d of devices) {
+      const driverDef = driverRegistry.find((dr) => dr.id === d.driver);
+      const declaredVars = (driverDef?.state_variables ?? {}) as Record<string, unknown>;
+      for (const prop of Object.keys(declaredVars)) keys.add(`device.${d.id}.${prop}`);
+    }
+    for (const k of Object.keys(liveState)) {
+      if (k.startsWith("device.")) keys.add(k);
+    }
+    return Array.from(keys).sort().join("\n");
+  }, [devices, driverRegistry, liveState]);
+
   // Cross-reference map for all state keys
   const usageMap = useMemo(() => {
     if (!project) return new Map<string, import("./variablesShared").VariableUsage[]>();
-    return buildStateUsageMap(project, scriptRefs);
-  }, [project, scriptRefs]);
+    return buildStateUsageMap(project, scriptRefs, deviceKeySig ? deviceKeySig.split("\n") : []);
+  }, [project, scriptRefs, deviceKeySig]);
 
   // Group devices by device_groups
   const projGroups = project?.device_groups ?? [];
