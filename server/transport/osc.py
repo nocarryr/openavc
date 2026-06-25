@@ -32,6 +32,16 @@ from .types import Callback
 log = get_logger(__name__)
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget on_data tasks: surface failures that
+    would otherwise vanish as a 'Task exception was never retrieved' GC warning."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        log.error("Unhandled exception in OSC on_data task: %s", exc, exc_info=exc)
+
+
 class OSCTransport:
     """Async OSC transport over UDP (default) or TCP+SLIP."""
 
@@ -282,6 +292,9 @@ class _OSCListenProtocol(asyncio.DatagramProtocol):
         self._on_data = on_data
         self._name = name
         self._parent = parent
+        # Strong refs to fire-and-forget async on_data tasks so they aren't
+        # garbage-collected mid-flight; cleared by their own done-callback.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         import time
@@ -292,7 +305,12 @@ class _OSCListenProtocol(asyncio.DatagramProtocol):
             try:
                 result = self._on_data(data)
                 if asyncio.iscoroutine(result):
-                    asyncio.create_task(result)
+                    # Hold a strong ref (GC-safety) and log any failure that an
+                    # async handler would otherwise swallow.
+                    task = asyncio.create_task(result)
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
+                    task.add_done_callback(_log_task_exception)
             except Exception:
                 log.exception("Error in OSC listen on_data callback")
 

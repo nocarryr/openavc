@@ -163,3 +163,67 @@ def test_format_data_mixed_nonprintable():
 
 def test_format_data_empty():
     assert _format_data(b"") == ""
+
+
+# --- Async on_data tasks are strong-reffed (not GC'd mid-flight) ---
+
+
+async def test_async_on_data_task_held_until_done(udp_receiver):
+    """An async on_data handler's task is strong-reffed while in flight (so it
+    can't be GC'd mid-await) and cleared by its done-callback when finished."""
+    _, port = udp_receiver
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def handler(data):
+        started.set()
+        await release.wait()
+
+    transport = UDPTransport(host="127.0.0.1", port=port, on_data=handler, name="t")
+    await transport.open()
+    # _deliver_message is the producer the real socket calls — exercise it directly.
+    transport._deliver_message(b"hello", ("127.0.0.1", 5005))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(transport._bg_tasks) == 1  # strong ref held while awaiting
+    release.set()
+    await asyncio.sleep(0.05)
+    assert transport._bg_tasks == set()  # cleared by the done-callback
+    await transport.close()
+
+
+# --- send_and_wait fails fast on close / socket loss (no full-timeout hang) ---
+
+
+async def test_send_and_wait_wakes_on_close(udp_receiver):
+    """Closing the socket while send_and_wait is parked fails it fast instead
+    of blocking the full response timeout. The receiver never replies."""
+    _, port = udp_receiver
+    transport = UDPTransport(host="127.0.0.1", port=port, name="t")
+    await transport.open()
+    loop = asyncio.get_running_loop()
+    waiter = asyncio.create_task(transport.send_and_wait(b"q", timeout=5.0))
+    await asyncio.sleep(0.1)  # let the waiter park on the response queue
+
+    start = loop.time()
+    await transport.close()
+    with pytest.raises(ConnectionError):
+        await waiter
+    assert loop.time() - start < 2.0
+
+
+async def test_send_and_wait_wakes_on_socket_loss(udp_receiver):
+    """A socket lost underneath a parked send_and_wait (connection_lost) fails
+    it fast rather than blocking the full timeout."""
+    _, port = udp_receiver
+    transport = UDPTransport(host="127.0.0.1", port=port, name="t")
+    await transport.open()
+    loop = asyncio.get_running_loop()
+    waiter = asyncio.create_task(transport.send_and_wait(b"q", timeout=5.0))
+    await asyncio.sleep(0.1)  # let the waiter park on the response queue
+
+    start = loop.time()
+    transport._protocol.connection_lost(OSError("socket gone"))
+    with pytest.raises(ConnectionError):
+        await waiter
+    assert loop.time() - start < 2.0
+    await transport.close()

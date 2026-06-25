@@ -31,8 +31,22 @@ except ImportError:
     HAS_SERIAL = False
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget on_data tasks: surface failures that
+    would otherwise vanish as a 'Task exception was never retrieved' GC warning."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        log.error("Unhandled exception in serial on_data task: %s", exc, exc_info=exc)
+
+
 class SerialTransport:
     """Async serial transport with pluggable message framing."""
+
+    # Posted to the response queue to wake a parked send_and_wait when the link
+    # drops or is closed, so it fails fast instead of blocking the full timeout.
+    _DISCONNECT_SENTINEL = object()
 
     def __init__(
         self,
@@ -80,9 +94,14 @@ class SerialTransport:
         # Last open/IO error string, for the connection-fault classifier.
         self._last_error = ""
 
-        # For send_and_wait
-        self._response_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        # For send_and_wait. May also carry _DISCONNECT_SENTINEL to wake a
+        # parked waiter on disconnect/close.
+        self._response_queue: asyncio.Queue[bytes | object] = asyncio.Queue(maxsize=100)
         self._waiting_for_response = False
+
+        # Strong refs to fire-and-forget async on_data tasks so they aren't
+        # garbage-collected mid-flight; cleared by their own done-callback.
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # Simulation state
         self._sim_rx_queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -224,6 +243,10 @@ class SerialTransport:
                 response = await asyncio.wait_for(
                     self._response_queue.get(), timeout=timeout,
                 )
+                if response is self._DISCONNECT_SENTINEL:
+                    raise ConnectionError(
+                        f"Connection lost while waiting for response on {self.port}"
+                    )
                 return response
             except asyncio.TimeoutError:
                 log.warning(f"Serial send_and_wait timeout on {self.port}")
@@ -234,6 +257,7 @@ class SerialTransport:
     async def close(self) -> None:
         """Close the serial port gracefully."""
         self._connected = False
+        self._wake_response_waiter()
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
             try:
@@ -322,15 +346,33 @@ class SerialTransport:
         try:
             result = self._on_data(data)
             if asyncio.iscoroutine(result):
-                asyncio.create_task(result)
+                # Hold a strong ref (GC-safety) and log any failure that an
+                # async handler would otherwise swallow.
+                task = asyncio.create_task(result)
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+                task.add_done_callback(_log_task_exception)
         except Exception:
             log.exception("Error in serial on_data callback — continuing (transport still connected)")
+
+    def _wake_response_waiter(self) -> None:
+        """Wake a parked send_and_wait so it fails fast on disconnect/close
+        instead of blocking for the full response timeout."""
+        if not self._waiting_for_response:
+            return
+        try:
+            self._response_queue.put_nowait(self._DISCONNECT_SENTINEL)
+        except asyncio.QueueFull:
+            # The queue already holds frames the waiter will consume and wake
+            # on; dropping the sentinel is harmless. Never raise from here.
+            pass
 
     async def _handle_disconnect(self) -> None:
         """Handle unexpected disconnection."""
         if not self._connected:
             return
         self._connected = False
+        self._wake_response_waiter()
         log.warning(f"Serial connection lost on {self.port}")
         try:
             self._on_disconnect()

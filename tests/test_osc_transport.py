@@ -178,3 +178,32 @@ async def test_verify_dual_socket_ignores_baseline_traffic(silent_remote):
         assert await osc.verify(timeout=0.3) is False
     finally:
         await osc.close()
+
+
+# --- Listen-socket async on_data tasks are strong-reffed (not GC'd mid-flight) ---
+#
+# OSCTransport has no send_and_wait of its own — verify() delegates to the
+# underlying UDP (or TCP+SLIP) transport, so the disconnect-wake fix is covered
+# by the UDP/TCP transport tests. The OSC-specific gap is the dedicated listen
+# socket spawning fire-and-forget on_data tasks; that is exercised here.
+
+
+async def test_listen_async_on_data_task_held_until_done():
+    """The dedicated OSC listen socket strong-refs an async on_data task while
+    it is in flight (so it can't be GC'd mid-await) and clears it when done."""
+    from server.transport.osc import _OSCListenProtocol
+
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def handler(data):
+        started.set()
+        await release.wait()
+
+    proto = _OSCListenProtocol(on_data=handler, name="t")
+    proto.datagram_received(osc_encode_message("/ping"), ("127.0.0.1", 9000))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(proto._bg_tasks) == 1  # strong ref held while awaiting
+    release.set()
+    await asyncio.sleep(0.05)
+    assert proto._bg_tasks == set()  # cleared by the done-callback

@@ -154,3 +154,74 @@ async def test_sim_async_callback():
 
     assert b"async_msg" in received
     await transport.close()
+
+
+# --- Async on_data tasks are strong-reffed (not GC'd mid-flight) ---
+
+
+async def test_async_on_data_task_held_until_done():
+    """An async on_data handler's task is strong-reffed while in flight (so it
+    can't be GC'd mid-await) and cleared by its done-callback when finished."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def handler(data):
+        started.set()
+        await release.wait()
+
+    transport = await SerialTransport.create(
+        "SIM:test", baudrate=9600,
+        on_data=handler,
+        on_disconnect=lambda: None,
+        delimiter=b"\r",
+    )
+
+    transport.sim_receive(b"hello\r")
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(transport._bg_tasks) == 1  # strong ref held while awaiting
+    release.set()
+    await asyncio.sleep(0.05)
+    assert transport._bg_tasks == set()  # cleared by the done-callback
+    await transport.close()
+
+
+# --- send_and_wait fails fast on disconnect / close (no full-timeout hang) ---
+
+
+async def test_send_and_wait_wakes_on_close():
+    """Closing the transport while send_and_wait is parked fails it fast
+    instead of blocking the full response timeout."""
+    transport = await SerialTransport.create(
+        "SIM:test", baudrate=9600,
+        on_data=lambda d: None,
+        on_disconnect=lambda: None,
+    )
+    loop = asyncio.get_running_loop()
+    waiter = asyncio.create_task(transport.send_and_wait(b"query\r", timeout=5.0))
+    await asyncio.sleep(0.1)  # let the waiter park on the response queue
+
+    start = loop.time()
+    await transport.close()
+    with pytest.raises(ConnectionError):
+        await waiter
+    assert loop.time() - start < 2.0
+
+
+async def test_send_and_wait_wakes_on_disconnect():
+    """A link drop while send_and_wait is parked fails fast with ConnectionError,
+    not after the full response timeout."""
+    transport = await SerialTransport.create(
+        "SIM:test", baudrate=9600,
+        on_data=lambda d: None,
+        on_disconnect=lambda: None,
+    )
+    loop = asyncio.get_running_loop()
+    waiter = asyncio.create_task(transport.send_and_wait(b"query\r", timeout=5.0))
+    await asyncio.sleep(0.1)  # let the waiter park on the response queue
+
+    start = loop.time()
+    await transport._handle_disconnect()
+    with pytest.raises(ConnectionError):
+        await waiter
+    assert loop.time() - start < 2.0
+    await transport.close()

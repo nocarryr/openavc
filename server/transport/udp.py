@@ -24,8 +24,22 @@ from .types import Callback
 log = get_logger(__name__)
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget on_data tasks: surface failures that
+    would otherwise vanish as a 'Task exception was never retrieved' GC warning."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        log.error("Unhandled exception in UDP on_data task: %s", exc, exc_info=exc)
+
+
 class UDPTransport:
     """Async UDP transport for datagram-based AV protocols."""
+
+    # Posted to the response queue to wake a parked send_and_wait when the
+    # socket is closed or lost, so it fails fast instead of blocking the timeout.
+    _DISCONNECT_SENTINEL = object()
 
     def __init__(
         self,
@@ -63,9 +77,14 @@ class UDPTransport:
         # port-unreachable surfaces via the protocol's error_received.
         self._last_error = ""
 
-        # For send_and_wait: queue to capture the next response
-        self._response_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        # For send_and_wait: queue to capture the next response. May also
+        # carry _DISCONNECT_SENTINEL to wake a parked waiter on close/loss.
+        self._response_queue: asyncio.Queue[bytes | object] = asyncio.Queue(maxsize=100)
         self._waiting_for_response = False
+
+        # Strong refs to fire-and-forget async on_data tasks so they aren't
+        # garbage-collected mid-flight; cleared by their own done-callback.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def open(
         self,
@@ -85,6 +104,7 @@ class UDPTransport:
                 name=self._name,
                 on_data=self._deliver_message,
                 on_error=self._record_error,
+                on_lost=self._wake_response_waiter,
             ),
             local_addr=(bind_addr, 0),
             allow_broadcast=allow_broadcast,
@@ -168,6 +188,11 @@ class UDPTransport:
                 response = await asyncio.wait_for(
                     self._response_queue.get(), timeout=timeout
                 )
+                if response is self._DISCONNECT_SENTINEL:
+                    raise ConnectionError(
+                        f"UDP socket closed while waiting for response "
+                        f"from {self.host}:{self.port}"
+                    )
                 if self._inter_command_delay > 0:
                     await asyncio.sleep(self._inter_command_delay)
                 return response
@@ -187,6 +212,7 @@ class UDPTransport:
     async def close(self) -> None:
         """Close the UDP socket."""
         self._connected = False
+        self._wake_response_waiter()
         if self._transport:
             self._transport.close()
             self._transport = None
@@ -211,6 +237,18 @@ class UDPTransport:
         """Record a socket error (e.g. ICMP port-unreachable) for classification."""
         self._last_error = str(exc) or type(exc).__name__
 
+    def _wake_response_waiter(self) -> None:
+        """Wake a parked send_and_wait so it fails fast on close/socket loss
+        instead of blocking for the full response timeout."""
+        if not self._waiting_for_response:
+            return
+        try:
+            self._response_queue.put_nowait(self._DISCONNECT_SENTINEL)
+        except asyncio.QueueFull:
+            # The queue already holds a datagram the waiter will consume and
+            # wake on; dropping the sentinel is harmless. Never raise from here.
+            pass
+
     def _deliver_message(self, data: bytes, addr: tuple[str, int]) -> None:
         """Route an incoming datagram to the response queue and/or callback."""
         import time
@@ -226,7 +264,12 @@ class UDPTransport:
             try:
                 result = self._on_data(data)
                 if asyncio.iscoroutine(result):
-                    asyncio.create_task(result)
+                    # Hold a strong ref (GC-safety) and log any failure that an
+                    # async handler would otherwise swallow.
+                    task = asyncio.create_task(result)
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
+                    task.add_done_callback(_log_task_exception)
             except Exception:
                 log.exception(
                     "Error in UDP on_data callback — "
@@ -253,10 +296,12 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         name: str = "udp",
         on_data: Callable[[bytes, tuple[str, int]], None] | None = None,
         on_error: Callable[[Exception], None] | None = None,
+        on_lost: Callable[[], None] | None = None,
     ) -> None:
         self._name = name
         self._on_data = on_data
         self._on_error = on_error
+        self._on_lost = on_lost
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         if self._on_data is not None:
@@ -270,3 +315,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
     def connection_lost(self, exc: Exception | None) -> None:
         if exc:
             log.debug(f"[{self._name}] UDP connection lost: {exc}")
+        # Wake any parked send_and_wait so a socket lost mid-query fails fast
+        # instead of blocking the full response timeout.
+        if self._on_lost is not None:
+            self._on_lost()
