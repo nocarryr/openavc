@@ -11,6 +11,7 @@ OpenAVC runs on any hardware with Python 3.11+. Choose the deployment mode that 
 | Mode | Description | Best For |
 |------|-------------|----------|
 | **Windows PC** | Install on a rack PC or mini PC using the Windows installer (.exe). Runs as a Windows service with a system tray app. | AV racks with a Windows PC, smaller installations |
+| **Mac** | Install with the macOS installer (.pkg). Runs as a background service with a menu-bar app. | Mac-based spaces (churches, schools, studios) |
 | **Linux Server** | Install via script on any Linux machine. Runs as a system service. | IT-managed infrastructure, dedicated AV servers |
 | **Docker** | One container per space, orchestrated with docker-compose. | Enterprise IT, multi-space servers |
 | **VM** | Install in a virtual machine. One or many instances per VM. | Organizations with virtualization infrastructure |
@@ -25,6 +26,7 @@ See [Getting Started](getting-started.md) for detailed installation steps coveri
 | Method | Install Command / Action |
 |--------|--------------------------|
 | **Windows Installer** | Download from [GitHub Releases](https://github.com/open-avc/openavc/releases) and run the `.exe` |
+| **macOS Installer** | Download the `.pkg` from [GitHub Releases](https://github.com/open-avc/openavc/releases) (Apple Silicon or Intel) and double-click it |
 | **Docker** | `curl -fsSL https://raw.githubusercontent.com/open-avc/openavc/main/installer/docker-compose.yml -o docker-compose.yml && docker compose up -d` |
 | **Linux** | `curl -sSL https://get.openavc.com \| sudo bash` |
 | **From Source** | `git clone`, `pip install`, `npm run build`, `python -m server.main` |
@@ -54,6 +56,7 @@ OpenAVC separates application code from user data. The application directory con
 |----------|---------------|
 | Linux | `/var/lib/openavc` |
 | Windows | `C:\ProgramData\OpenAVC` |
+| macOS | `/Library/Application Support/OpenAVC` |
 | Docker | `/data` (volume mount) |
 | Development | `./data` (relative to repo root) |
 
@@ -179,6 +182,7 @@ When an update is available, the response includes the version, changelog, and w
 | Deployment | Self-Update | What Happens |
 |---|---|---|
 | Windows installer | Yes | Downloads and runs new installer silently |
+| macOS installer | Yes | Downloads an archive, writes an instruction file, restarts. The launchd wrapper swaps the app bundle before the server starts. |
 | Linux package | Yes | Downloads archive, writes instruction file, restarts. A helper script applies the update before the service starts. |
 | Docker | No | Shows notification with `docker compose pull` command |
 | Git/dev | No | Shows notification with `git pull` instructions |
@@ -226,6 +230,34 @@ Enable and start the service:
 sudo systemctl enable openavc
 sudo systemctl start openavc
 ```
+
+## macOS Service
+
+On macOS, the `.pkg` installer sets everything up for you. The server runs as a
+system LaunchDaemon (`com.openavc.server`) that starts at boot, and a menu-bar
+app runs as a per-user LaunchAgent (`com.openavc.menubar`) that starts at login.
+The installer also creates the data directory at `/Library/Application Support/OpenAVC`
+and seeds the default project.
+
+The menu-bar app shows server status and device count and provides quick links
+to the Programmer IDE and Panel, an update check, and start/stop/restart
+controls (which prompt for your password, since the server runs as root).
+
+To control the service manually from Terminal:
+
+```bash
+# Status
+sudo launchctl print system/com.openavc.server
+# Restart
+sudo launchctl kickstart -k system/com.openavc.server
+# Stop / start
+sudo launchctl bootout system/com.openavc.server
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.openavc.server.plist
+```
+
+Updates and rollback work the same as on Windows and Linux: the server downloads
+the new build, and on restart the daemon's wrapper swaps the app bundle in place
+(keeping the previous version for one-step rollback).
 
 ## Docker
 

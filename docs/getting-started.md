@@ -7,6 +7,7 @@ OpenAVC is an open-source control platform for AV spaces. Install it on a PC, mi
 | Method | Best For | Time |
 |--------|----------|------|
 | [Windows Installer](#windows-installer) | AV rack PCs, mini PCs, laptops | 2 minutes |
+| [macOS Installer](#macos-installer) | Macs and Mac minis | 2 minutes |
 | [Docker](#docker) | Servers, multi-room deployments | 2 minutes |
 | [Linux Install Script](#linux-install-script) | Dedicated Linux machines | 3 minutes |
 | [From Source](#install-from-source) | Development, contributing | 5 minutes |
@@ -33,6 +34,26 @@ The fastest way to get started on Windows.
 After installation, open **http://localhost:8080/programmer** in your browser to start building.
 
 > The Windows installer pre-configures OpenAVC to accept connections from other devices on the network (tablets, phones, other PCs). If you only need local access, no configuration changes are needed.
+
+## macOS Installer
+
+The fastest way to get started on a Mac.
+
+1. Download the `.pkg` from [GitHub Releases](https://github.com/open-avc/openavc/releases) — choose **Apple Silicon** (M-series) or **Intel** to match your Mac
+2. Double-click it and follow the installer, entering your password once when asked
+3. OpenAVC starts automatically in the background
+
+**What the installer does:**
+
+- Installs `OpenAVC.app` to `/Applications`
+- Stores project data in `/Library/Application Support/OpenAVC`
+- Runs the server as a background service (LaunchDaemon) that starts on boot
+- Adds a menu-bar app for quick access to the web interface and service controls
+- Opens the Programmer IDE in your browser when the install finishes
+
+After installation, open **http://localhost:8080/programmer** in your browser to start building.
+
+> Like the Windows installer, the macOS installer pre-configures OpenAVC to accept connections from other devices on the network. If you only need local access, no configuration changes are needed.
 
 ## Docker
 
