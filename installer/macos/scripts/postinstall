@@ -13,7 +13,7 @@ DATA_DIR="/Library/Application Support/OpenAVC"
 LOG_DIR="/Library/Logs/OpenAVC"
 DAEMON_PLIST="/Library/LaunchDaemons/com.openavc.server.plist"
 AGENT_PLIST="/Library/LaunchAgents/com.openavc.menubar.plist"
-SEED="$APP/Contents/MacOS/_internal/projects/default/project.avc"
+SEED="$APP/Contents/Resources/server/_internal/projects/default/project.avc"
 DEST="$DATA_DIR/projects/default"
 
 mkdir -p "$DATA_DIR" "$LOG_DIR"
@@ -43,7 +43,13 @@ CONSOLE_UID="$(stat -f %u /dev/console 2>/dev/null)"
 if [ -n "${CONSOLE_UID:-}" ] && [ "$CONSOLE_UID" != "0" ]; then
     launchctl bootout "gui/$CONSOLE_UID/com.openavc.menubar" 2>/dev/null || true
     launchctl bootstrap "gui/$CONSOLE_UID" "$AGENT_PLIST" 2>/dev/null || true
-    # Best-effort: open the Programmer IDE in the installing user's browser.
+    # Wait for the server to actually answer before opening the browser, so the
+    # user doesn't land on a "can't connect" page (the daemon needs a few
+    # seconds to boot). Bounded so a stuck server can't hang the installer.
+    for _ in $(seq 1 30); do
+        curl -sf -m 1 http://127.0.0.1:8080/api/health >/dev/null 2>&1 && break
+        sleep 1
+    done
     launchctl asuser "$CONSOLE_UID" open "http://localhost:8080/programmer" 2>/dev/null || true
 fi
 

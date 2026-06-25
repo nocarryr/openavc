@@ -19,15 +19,17 @@ set -u
 
 DATA_DIR="${OPENAVC_DATA_DIR:-/Library/Application Support/OpenAVC}"
 APP="${OPENAVC_APP:-/Applications/OpenAVC.app}"
-SERVER="$APP/Contents/MacOS/openavc-server"
+SERVER="$APP/Contents/Resources/server/openavc-server"
 UPDATE_FILE="$DATA_DIR/apply-update.json"
 ROLLBACK_FILE="$DATA_DIR/apply-rollback"
 LOG_TAG="openavc-macos-run"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 
 # A candidate bundle is usable only if it carries the server executable.
+# (Frozen binaries live in Contents/Resources/, not Contents/MacOS/ — see the
+# build script for why.)
 is_app_valid() {
-    [ -x "$1/Contents/MacOS/openavc-server" ]
+    [ -x "$1/Contents/Resources/server/openavc-server" ]
 }
 
 handle_update() {

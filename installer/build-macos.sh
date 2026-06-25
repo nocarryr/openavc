@@ -66,11 +66,14 @@ fi
 echo "[2/5] Assembling OpenAVC.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp -a "$FROZEN/." "$APP/Contents/MacOS/"
-# Merge the menu-bar bundle into the same MacOS dir (shared Python libs are
-# identical from the same env; this adds openavc-menubar + the pyobjc/rumps
-# libs alongside the server, the way the Windows installer merges tray + server).
-cp -a "$MENUBAR_FROZEN/." "$APP/Contents/MacOS/"
+# The frozen onedir bundles go in Contents/Resources/, NOT Contents/MacOS/.
+# PyInstaller's bootloader switches to .app-mode path resolution (it looks for
+# the Python runtime in Contents/Frameworks/) only when its executable lives in
+# Contents/MacOS/. From Contents/Resources/ it uses normal onedir mode and
+# finds its sibling _internal. Each binary keeps its own _internal (no risky
+# merge). Only the wrapper (a shell script, no bootloader) lives in MacOS.
+cp -a "$FROZEN" "$APP/Contents/Resources/server"
+cp -a "$MENUBAR_FROZEN" "$APP/Contents/Resources/menubar"
 cp installer/openavc-macos-run.sh "$APP/Contents/MacOS/openavc-macos-run.sh"
 chmod 755 "$APP/Contents/MacOS/openavc-macos-run.sh"
 cp installer/com.openavc.server.plist "$APP/Contents/Resources/com.openavc.server.plist"
@@ -87,7 +90,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>com.openavc.app</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
-    <key>CFBundleExecutable</key><string>openavc-server</string>
+    <key>CFBundleExecutable</key><string>openavc-macos-run.sh</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>LSBackgroundOnly</key><true/>
@@ -99,15 +102,15 @@ PLIST
 if [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_SIGNING_IDENTITY:-}" ]; then
     echo "[3/5] Code-signing app (hardened runtime)"
     ENT="$ROOT/installer/macos-entitlements.plist"
-    # Nested Mach-O first, then the main executable, then the bundle.
-    find "$APP/Contents/MacOS" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 |
+    # Nested Mach-O first, then the two main executables, then the bundle.
+    find "$APP/Contents/Resources" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 |
         while IFS= read -r -d '' lib; do
             codesign --force --timestamp --options runtime --sign "$APPLE_APP_SIGNING_IDENTITY" "$lib"
         done
     codesign --force --timestamp --options runtime --entitlements "$ENT" \
-        --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP/Contents/MacOS/openavc-server"
+        --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP/Contents/Resources/server/openavc-server"
     codesign --force --timestamp --options runtime --entitlements "$ENT" \
-        --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP/Contents/MacOS/openavc-menubar"
+        --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP/Contents/Resources/menubar/openavc-menubar"
     codesign --force --timestamp --options runtime --entitlements "$ENT" \
         --sign "$APPLE_APP_SIGNING_IDENTITY" "$APP"
 else
@@ -123,8 +126,28 @@ rm -rf "$PKG_ROOT"
 mkdir -p "$PKG_ROOT"
 cp -a "$APP" "$PKG_ROOT/OpenAVC.app"
 COMPONENT="$BUILD/OpenAVC-component.pkg"
+
+# App bundles are relocatable by default. That makes the installer Spotlight-
+# search for an existing OpenAVC.app by bundle id and install *there* instead
+# of /Applications — it finds this very build's staging copy and "installs"
+# nothing. Force non-relocatable via a component plist so it always lands in
+# /Applications.
+COMPONENT_PLIST="$BUILD/component.plist"
+pkgbuild --analyze --root "$PKG_ROOT" "$COMPONENT_PLIST"
+"$PYTHON" - "$COMPONENT_PLIST" <<'PY'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, "rb") as f:
+    comps = plistlib.load(f)
+for c in comps:
+    c["BundleIsRelocatable"] = False
+with open(path, "wb") as f:
+    plistlib.dump(comps, f)
+PY
+
 pkgbuild \
     --root "$PKG_ROOT" \
+    --component-plist "$COMPONENT_PLIST" \
     --install-location /Applications \
     --scripts installer/macos/scripts \
     --identifier com.openavc.pkg \

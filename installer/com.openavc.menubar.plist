@@ -20,7 +20,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/OpenAVC.app/Contents/MacOS/openavc-menubar</string>
+        <string>/Applications/OpenAVC.app/Contents/Resources/menubar/openavc-menubar</string>
     </array>
 
     <key>RunAtLoad</key>
