@@ -438,6 +438,28 @@ def driver_id_from_file(filepath: Path) -> str | None:
     return None
 
 
+def find_driver_file_by_id(
+    directories: Sequence[Path | str], driver_id: str
+) -> Path | None:
+    """Find the ``.avcdriver`` file on disk that declares ``driver_id``.
+
+    Scans the given directories (first match wins, so earlier dirs take
+    precedence) for a YAML driver whose declared id matches. Matches on the
+    declared id, not the filename stem, since uploads keep their original
+    name (see ``driver_id_from_file``). Returns the path, or None if no
+    ``.avcdriver`` declares that id. (Python ``.py`` drivers are out of
+    scope — they have their own reload path keyed by filename.)
+    """
+    for directory in directories:
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            continue
+        for filepath in sorted(dir_path.glob(f"*{DRIVER_EXTENSION}")):
+            if driver_id_from_file(filepath) == driver_id:
+                return filepath
+    return None
+
+
 def load_driver_files(directories: Sequence[Path | str]) -> int:
     """
     Scan directories for .avcdriver files, validate them,

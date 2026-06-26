@@ -2059,3 +2059,67 @@ async def reload_python_driver_endpoint(driver_id: str) -> dict:
 
     result["devices_reconnected"] = reconnected
     return result
+
+
+@router.post("/driver-definitions/{driver_id}/reload", dependencies=[Depends(require_claimed_auth)])
+async def reload_driver_definition(driver_id: str) -> dict:
+    """Re-read a YAML (``.avcdriver``) driver from disk and reconnect its devices.
+
+    The Driver Builder re-registers a driver when you save it, but a
+    ``.avcdriver`` file hand-edited on disk (outside the Builder — e.g. while
+    developing a driver in ``driver_repo/``) doesn't take effect until a full
+    project reload or restart. This mirrors the Python driver hot-reload route
+    for declarative YAML drivers.
+    """
+    import yaml as _yaml
+
+    from server.drivers.driver_loader import (
+        find_driver_file_by_id,
+        load_driver_file,
+        validate_driver_definition,
+    )
+    from server.drivers.configurable import create_configurable_driver_class
+    from server.core.device_manager import register_driver
+
+    filepath = find_driver_file_by_id(_get_driver_dirs(), driver_id)
+    if filepath is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No .avcdriver file declaring '{driver_id}' found on disk",
+        )
+
+    driver_def = load_driver_file(filepath)
+    if driver_def is None:
+        # load_driver_file logs the cause; surface the concrete validation
+        # errors when we can so a hand-edit mistake is correctable.
+        try:
+            raw = _yaml.safe_load(filepath.read_text(encoding="utf-8"))
+            errors = validate_driver_definition(raw) if isinstance(raw, dict) else ["not a YAML mapping"]
+        except (OSError, _yaml.YAMLError):
+            errors = []
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "errors": errors,
+                "message": f"Driver file '{filepath.name}' is invalid or its "
+                           f"discovery companion is missing (see server log)",
+            },
+        )
+
+    # Re-register, then reconnect live devices so they pick up the disk version
+    # without a full project reload (mirrors the Python hot-reload path).
+    driver_class = create_configurable_driver_class(driver_def)
+    register_driver(driver_class)
+
+    engine = _get_engine()
+    reconnected = await engine.devices.reload_driver(driver_def["id"])
+    # A renamed id on disk leaves devices on the requested id orphaned — retry.
+    if driver_def["id"] != driver_id:
+        reconnected = reconnected + await engine.devices.reload_driver(driver_id)
+
+    return {
+        "status": "reloaded",
+        "id": driver_def["id"],
+        "file": filepath.name,
+        "devices_reconnected": reconnected,
+    }

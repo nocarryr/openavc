@@ -10,6 +10,7 @@ from server.utils.regex_safety import _regex_search_exceeds
 from server.drivers.driver_loader import (
     DRIVER_EXTENSION,
     delete_driver_definition,
+    find_driver_file_by_id,
     is_builtin_driver,
     list_driver_definitions,
     list_python_drivers,
@@ -181,6 +182,40 @@ def test_load_driver_file_invalid_yaml(tmp_path):
     filepath.write_text("{{{{not yaml!!", encoding="utf-8")
     result = load_driver_file(filepath)
     assert result is None
+
+
+def test_find_driver_file_by_id_found(tmp_path):
+    filepath = tmp_path / "test.avcdriver"
+    _write_avcdriver(filepath, VALID_DEFINITION)
+    found = find_driver_file_by_id([tmp_path], "test_loader_driver")
+    assert found == filepath
+
+
+def test_find_driver_file_by_id_not_found(tmp_path):
+    _write_avcdriver(tmp_path / "test.avcdriver", VALID_DEFINITION)
+    assert find_driver_file_by_id([tmp_path], "no_such_driver") is None
+    # A missing directory is skipped, not an error.
+    assert find_driver_file_by_id([tmp_path / "nope"], "test_loader_driver") is None
+
+
+def test_find_driver_file_by_id_matches_declared_id_not_stem(tmp_path):
+    # An upload keeps its original filename, so the stem need not match the id.
+    filepath = tmp_path / "renamed-on-upload.avcdriver"
+    _write_avcdriver(filepath, VALID_DEFINITION)
+    found = find_driver_file_by_id([tmp_path], "test_loader_driver")
+    assert found == filepath
+
+
+def test_find_driver_file_by_id_first_directory_wins(tmp_path):
+    # Earlier directories take precedence (built-in dirs are scanned first).
+    builtin = tmp_path / "builtin"
+    user = tmp_path / "user"
+    builtin.mkdir()
+    user.mkdir()
+    _write_avcdriver(builtin / "d.avcdriver", VALID_DEFINITION)
+    _write_avcdriver(user / "d.avcdriver", VALID_DEFINITION)
+    found = find_driver_file_by_id([builtin, user], "test_loader_driver")
+    assert found == builtin / "d.avcdriver"
 
 
 def test_load_driver_file_missing_fields(tmp_path):
