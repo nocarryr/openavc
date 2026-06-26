@@ -10,7 +10,12 @@ import type {
 } from "../../api/types";
 
 const ROW_HEIGHT = 36;
-const EXPANDED_EXTRA = 220;
+// Initial estimate for an expanded row before it's measured: the collapsed
+// header plus one line per control in the child's schema (the real height is
+// then measured via virtualizer.measureElement, so this only needs to be close
+// enough to keep the scrollbar from jumping).
+const EXPANDED_ROW_HEIGHT = 22;
+const EXPANDED_PADDING = 18;
 const LIST_HEIGHT = 480;
 
 /**
@@ -463,19 +468,24 @@ function ChildEntityList({
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => {
       const entry = entries[index];
-      return entry && expanded.has(entry.local_id)
-        ? ROW_HEIGHT + EXPANDED_EXTRA
-        : ROW_HEIGHT;
+      if (!entry || !expanded.has(entry.local_id)) return ROW_HEIGHT;
+      // A child's expanded panel lists one row per declared control, which for
+      // dynamic children (e.g. a Q-SYS mixer) can be dozens — so size the
+      // estimate to the control count instead of a flat guess. measureElement
+      // corrects it to the real height once rendered.
+      const props = entry.schema ?? schema.state_variables;
+      const controlRows = props ? Object.keys(props).length : 0;
+      return ROW_HEIGHT + EXPANDED_PADDING + controlRows * EXPANDED_ROW_HEIGHT;
     },
     overscan: 6,
     // Key on padded id so virtualization survives list changes.
     getItemKey: (index) => entries[index]?.local_id_padded ?? index,
   });
 
-  // Re-measure when expanded set changes so row heights reflow.
-  useEffect(() => {
-    virtualizer.measure();
-  }, [expanded, virtualizer]);
+  // Row heights reflow on expand/collapse automatically: each row is measured
+  // via virtualizer.measureElement (below), whose ResizeObserver re-measures
+  // the real height when its expanded panel appears or disappears — so no
+  // manual virtualizer.measure() call is needed here.
 
   const toggleExpand = useCallback((localId: number | string) => {
     setExpanded((prev) => {
@@ -576,6 +586,8 @@ function ChildEntityList({
               <div
                 key={virtualItem.key}
                 data-testid={`child-row-${entry.local_id_padded}`}
+                data-index={virtualItem.index}
+                ref={virtualizer.measureElement}
                 style={{
                   position: "absolute",
                   top: 0,
