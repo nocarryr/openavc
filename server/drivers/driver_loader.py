@@ -59,6 +59,66 @@ def _validate_osc_args(where: str, arg_defs: Any, errors: list[str]) -> None:
                 f"(expected one of f/i/s/h/d/T/F/N)"
             )
 
+
+# Sources a param's option list can cascade from (`options_from.source`).
+_PARAM_OPTIONS_FROM_SOURCES = frozenset({"child_schema"})
+
+
+def _validate_param_option_providers(
+    where: str, params: Any, errors: list[str],
+) -> None:
+    """Validate the param-picker option providers (§69) on a param map:
+    ``options_state`` / ``options_source`` (state-key lists) and
+    ``options_from`` (cascade off a sibling param). Authoring-time aids — the
+    runtime still coerces/validates the submitted value — but a typo here
+    silently leaves a free-text box, so flag it at load.
+    """
+    if not isinstance(params, dict):
+        return
+    for pname, pdef in params.items():
+        if not isinstance(pdef, dict):
+            continue
+        for key in ("options_state", "options_source"):
+            val = pdef.get(key)
+            if val is not None and not (isinstance(val, str) and val):
+                errors.append(
+                    f"{where} param '{pname}': {key} must be a non-empty string"
+                )
+        ofrom = pdef.get("options_from")
+        if ofrom is None:
+            continue
+        if not isinstance(ofrom, dict):
+            errors.append(
+                f"{where} param '{pname}': options_from must be a mapping "
+                f"with 'param' and 'source'"
+            )
+            continue
+        source = ofrom.get("source")
+        if source not in _PARAM_OPTIONS_FROM_SOURCES:
+            errors.append(
+                f"{where} param '{pname}': options_from.source must be one of "
+                f"{sorted(_PARAM_OPTIONS_FROM_SOURCES)}"
+            )
+        ref = ofrom.get("param")
+        if not (isinstance(ref, str) and ref):
+            errors.append(
+                f"{where} param '{pname}': options_from.param must name a "
+                f"sibling param"
+            )
+        elif ref not in params:
+            errors.append(
+                f"{where} param '{pname}': options_from.param '{ref}' is not a "
+                f"param of this command"
+            )
+        elif source == "child_schema":
+            sibling = params.get(ref)
+            if isinstance(sibling, dict) and sibling.get("type") != "child_id":
+                errors.append(
+                    f"{where} param '{pname}': options_from.param '{ref}' must "
+                    f"be a child_id param for source 'child_schema'"
+                )
+
+
 # Required top-level fields in a driver definition
 REQUIRED_FIELDS = {"id", "name", "transport"}
 
@@ -157,6 +217,9 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             )
         if has_osc:
             _validate_osc_args(f"Command '{cmd_name}'", cmd_def.get("args"), errors)
+        _validate_param_option_providers(
+            f"Command '{cmd_name}'", cmd_def.get("params"), errors,
+        )
 
     # OSC device-setting writes share the same arg encoder — validate their arg
     # types too so a bad tag fails at load, not at write time.
@@ -242,6 +305,10 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                 f"actions[{i}]: kind 'setup' requires a Python driver "
                 f"(a run_setup_action handler); YAML drivers support "
                 f"kind 'command' only"
+            )
+        if isinstance(entry, dict) and isinstance(entry.get("params"), dict):
+            _validate_param_option_providers(
+                f"actions[{i}]", entry.get("params"), errors,
             )
 
     # Validate state_variables structure

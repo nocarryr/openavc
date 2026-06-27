@@ -129,6 +129,12 @@ class DriverDefinitionRequest(BaseModel):
     # provisioning wizard), quick_actions is the flat promote-these-commands sugar.
     actions: list[dict[str, Any]] = []
     quick_actions: list[str] = []
+    # Param-picker option providers (§69 Phase 2) — `options_state` /
+    # `options_source` / `options_from` on a command or action param — are
+    # nested inside the untyped `commands` / `actions` dicts above, so they ride
+    # through to disk and out to the IDE verbatim with no per-field model. (The
+    # execute path, CommandRequest / ActionInvokeRequest, carries only param
+    # *values*, so those models need nothing here.)
 
 
 class TestCommandRequest(BaseModel):

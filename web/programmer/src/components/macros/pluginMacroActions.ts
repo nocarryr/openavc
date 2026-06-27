@@ -6,6 +6,8 @@ import type {
 import { getPluginMacroActions } from "../../api/pluginClient";
 import { getState } from "../../api/stateClient";
 import type { MacroStep } from "../../api/types";
+import { parseStateOptionList } from "../shared/paramOptions";
+import type { ParamOption } from "../shared/paramOptions";
 
 // Module-level cache so multiple components share one fetch.
 let _cache: PluginMacroAction[] | null = null;
@@ -70,34 +72,15 @@ export async function invalidatePluginMacroActions(): Promise<void> {
 }
 
 /**
- * Read a plugin param's `options_source` state key and parse it as a list
- * of {value, label} dropdown options. Plugins publish this list as a
- * JSON-encoded string (state values must be flat primitives, not arrays).
- * Returns [] when the key is missing, malformed, or not yet loaded.
+ * Read a plugin param's `options_source` state key and parse it as a list of
+ * {value, label} dropdown options. Plugins publish this list as a JSON-encoded
+ * string (state values must be flat primitives, not arrays); both
+ * `["a","b"]` and `[{value,label}]` shapes are accepted. Returns [] when the
+ * key is missing, malformed, or not yet loaded. Shares the one option-list
+ * contract with every other state-sourced param dropdown (see paramOptions).
  */
-export function resolveOptionsSource(stateKey: string): Array<{ value: string | number | boolean; label: string }> {
-  const raw = getCachedState(stateKey);
-  if (typeof raw !== "string" || !raw) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const out: Array<{ value: string | number | boolean; label: string }> = [];
-  for (const item of parsed) {
-    if (item && typeof item === "object" && "value" in item) {
-      const value = (item as { value: unknown }).value;
-      const label = (item as { label?: unknown }).label;
-      if (
-        typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-      ) {
-        out.push({ value, label: typeof label === "string" ? label : String(value) });
-      }
-    }
-  }
-  return out;
+export function resolveOptionsSource(stateKey: string): ParamOption[] {
+  return parseStateOptionList(getCachedState(stateKey));
 }
 
 /**

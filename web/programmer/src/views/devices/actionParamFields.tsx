@@ -98,6 +98,8 @@ export function ActionParamFields({
               value={current}
               onChange={(val) => onChange(name, val)}
               deviceId={deviceId}
+              values={values}
+              params={params as Record<string, Partial<DriverParamDef>>}
               placeholder={name}
               style={{ width: "100%" }}
             />

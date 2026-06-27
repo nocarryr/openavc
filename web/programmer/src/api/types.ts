@@ -453,6 +453,29 @@ export interface DriverParamDef {
   // passed at command time is the integer local id (the runtime handles
   // padding when assembling the wire string).
   child_type?: string;
+  // Option providers (param pickers, §69 Phase 2) — make a free-text param a
+  // dropdown sourced from values the platform already knows. Authoring-time
+  // aids only; the runtime still validates the submitted value.
+  //   options_state  — a device-relative state key. The widget reads
+  //                    `device.<id>.<options_state>` (a JSON-encoded list) and
+  //                    offers it. e.g. `options_state: "snapshot_banks"`.
+  //   options_source — an absolute state key, read verbatim (the same
+  //                    primitive plugins already use for select params).
+  //   options_from   — cascade: source options from a sibling param's chosen
+  //                    value. `{ param, source: "child_schema" }` reads the
+  //                    control names of the child picked in a sibling
+  //                    `child_id` param.
+  options_state?: string;
+  options_source?: string;
+  options_from?: ParamOptionsFrom;
+}
+
+export interface ParamOptionsFrom {
+  // The sibling param whose chosen value selects the option set.
+  param: string;
+  // Where the options come from. Only "child_schema" is supported today (the
+  // chosen child's per-instance control schema).
+  source: string;
 }
 
 export interface DriverResponseMapping {
@@ -781,7 +804,7 @@ export type ActionVisibleWhen =
 /** A param field for an action's input dialog (subset of the command/config
  *  schema field shape the Send Command form already renders). */
 export interface ActionParam {
-  type?: string; // string, integer, number, boolean, enum, password
+  type?: string; // string, integer, number, boolean, enum, password, child_id
   label?: string;
   help?: string;
   required?: boolean;
@@ -790,6 +813,11 @@ export interface ActionParam {
   max?: number;
   default?: unknown;
   secret?: boolean;
+  child_type?: string;
+  // Option providers — see DriverParamDef for the full contract.
+  options_state?: string;
+  options_source?: string;
+  options_from?: ParamOptionsFrom;
 }
 
 /** A driver-declared action, resolved by the backend (quick_actions sugar
@@ -836,6 +864,13 @@ export interface ChildEntityStateVarDef {
   max?: number;
   step?: number;
   cloud_priority?: string;
+  // Marks this child state var as a settable control (not a read-only
+  // mirror or metadata). A command param that cascades off this child type
+  // (`options_from: { source: "child_schema" }`) offers only `control: true`
+  // vars when any are flagged, so the picker shows real controls rather than
+  // every state key. Optional — when no var on a child is flagged, the
+  // cascade offers all non-platform keys.
+  control?: boolean;
 }
 
 export interface ChildEntityIdFormat {

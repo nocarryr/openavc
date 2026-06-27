@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { CSSProperties } from "react";
 import * as api from "../../api/restClient";
 import type { ChildEntityEntry, DriverParamDef } from "../../api/types";
+import { useConnectionStore } from "../../store/connectionStore";
+import { childSchemaOptions, parseStateOptionList } from "./paramOptions";
+import type { ParamOption } from "./paramOptions";
 import { VariableKeyPicker } from "./VariableKeyPicker";
 
 /** The widget for a single command/action parameter — the part that varies by
@@ -17,6 +20,12 @@ import { VariableKeyPicker } from "./VariableKeyPicker";
  *   - boolean         -> Yes/No select
  *   - child_id        -> live dropdown of the device's registered children of
  *                        `child_type` (needs `deviceId`); falls back to text
+ *   - options_from    -> cascade: a combobox of the controls on the child
+ *                        chosen in a sibling `child_id` param (needs `deviceId`
+ *                        + `values` + `params`)
+ *   - options_state /
+ *     options_source  -> combobox sourced from a state-published list
+ *                        (device-relative or absolute state key)
  *   - integer/number/float -> number input (honors min/max)
  *   - password/secret -> masked input (never pre-filled)
  *   - everything else -> text input
@@ -30,8 +39,15 @@ export interface ParamInputProps {
   def: Partial<DriverParamDef> & { secret?: boolean };
   value: string;
   onChange: (value: string) => void;
-  /** Enables the child_id dropdown (fetches the device's live children). */
+  /** Enables the child_id dropdown (fetches the device's live children) and
+   *  resolves `options_state` keys (`device.<deviceId>.<key>`). */
   deviceId?: string;
+  /** The full param->value map of the command/action being authored. Lets a
+   *  cascading param (`options_from`) read the sibling value it depends on. */
+  values?: Record<string, unknown>;
+  /** The full param schema of the command/action. Lets a cascading param find
+   *  the sibling's `child_type` so it can offer that child's controls. */
+  params?: Record<string, Partial<DriverParamDef>>;
   /** Show the "$" toggle -> VariableKeyPicker for dynamic state references. */
   allowDynamic?: boolean;
   /** Pass-through to VariableKeyPicker (offer $trigger.<field> refs). */
@@ -66,25 +82,36 @@ export function ParamInput({
   value,
   onChange,
   deviceId,
+  values,
+  params,
   allowDynamic,
   showTriggerContext,
   placeholder,
   style,
 }: ParamInputProps) {
   const type = def.type || "string";
-  const childType = type === "child_id" ? def.child_type : undefined;
+  const optionsFrom =
+    def.options_from?.source === "child_schema" ? def.options_from : undefined;
 
-  // child_id renders a dropdown of the device's registered children. Fetched
-  // fresh per field — children register dynamically as the driver discovers
-  // them. `undefined` => still loading.
+  // The child type whose live children this field needs:
+  //  - a child_id field needs its own declared child_type;
+  //  - a cascading field needs the sibling child_id param's child_type.
+  const ownChildType = type === "child_id" ? def.child_type : undefined;
+  const siblingChildType = optionsFrom
+    ? params?.[optionsFrom.param]?.child_type
+    : undefined;
+  const fetchChildType = ownChildType ?? siblingChildType;
+
+  // Children register dynamically as the driver discovers them, so fetch fresh
+  // per field. `undefined` => still loading.
   const [children, setChildren] = useState<ChildEntityEntry[] | undefined>(
     undefined,
   );
   useEffect(() => {
-    if (!childType || !deviceId) return;
+    if (!fetchChildType || !deviceId) return;
     let cancelled = false;
     api
-      .listChildEntitiesByType(deviceId, childType)
+      .listChildEntitiesByType(deviceId, fetchChildType)
       .then((resp) => {
         if (!cancelled) setChildren(resp.children);
       })
@@ -94,7 +121,20 @@ export function ParamInput({
     return () => {
       cancelled = true;
     };
-  }, [childType, deviceId]);
+  }, [fetchChildType, deviceId]);
+
+  // State-sourced options: a device-relative key (`options_state`, resolved
+  // against this device) or an absolute key (`options_source`, verbatim).
+  const stateOptionKey = def.options_state
+    ? deviceId
+      ? `device.${deviceId}.${def.options_state}`
+      : undefined
+    : def.options_source || undefined;
+  const stateOptionRaw = useConnectionStore((s) =>
+    stateOptionKey ? s.liveState[stateOptionKey] : undefined,
+  );
+
+  const datalistId = useId();
 
   const rowStyle: CSSProperties = {
     display: "flex",
@@ -139,6 +179,34 @@ export function ParamInput({
     );
   }
 
+  // Resolve option-provider lists. A combobox (input + datalist) renders these
+  // so the user can pick a known value or type one the platform can't yet see
+  // (offline device, control not discovered, escape-hatch command).
+  let comboOptions: ParamOption[] | undefined;
+  let comboHint: string | undefined;
+  if (optionsFrom) {
+    if (!deviceId || !siblingChildType) {
+      comboOptions = []; // unresolvable here -> behaves as forgiving free text
+    } else {
+      const siblingValue = values?.[optionsFrom.param];
+      const sv = siblingValue == null ? "" : String(siblingValue);
+      if (!sv) {
+        comboOptions = [];
+        comboHint = `Pick ${optionsFrom.param} first to list its controls.`;
+      } else {
+        const chosen = (children ?? []).find(
+          (c) => String(c.local_id) === sv || c.local_id_padded === sv,
+        );
+        comboOptions = childSchemaOptions(chosen?.schema);
+        if (children !== undefined && !chosen) {
+          comboHint = `No "${sv}" found — type the control name.`;
+        }
+      }
+    }
+  } else if (stateOptionKey || def.options_state || def.options_source) {
+    comboOptions = parseStateOptionList(stateOptionRaw);
+  }
+
   let widget: React.ReactNode;
   if (type === "enum" && def.values) {
     widget = (
@@ -155,6 +223,37 @@ export function ParamInput({
         ))}
       </select>
     );
+  } else if (comboOptions !== undefined) {
+    const isNumberCombo =
+      type === "integer" || type === "number" || type === "float";
+    widget = (
+      <div style={{ flex: 1 }}>
+        <input
+          type={isNumberCombo ? "number" : "text"}
+          list={comboOptions.length > 0 ? datalistId : undefined}
+          value={value}
+          min={def.min}
+          max={def.max}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder ?? ""}
+          style={{ width: "100%" }}
+        />
+        {comboOptions.length > 0 && (
+          <datalist id={datalistId}>
+            {comboOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label !== o.value ? o.label : undefined}
+              </option>
+            ))}
+          </datalist>
+        )}
+        {comboHint && (
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+            {comboHint}
+          </div>
+        )}
+      </div>
+    );
   } else if (type === "boolean") {
     widget = (
       <select
@@ -166,7 +265,7 @@ export function ParamInput({
         <option value="false">No</option>
       </select>
     );
-  } else if (childType && deviceId) {
+  } else if (ownChildType && deviceId) {
     const registered = (children ?? []).filter((c) => c.registered);
     widget = (
       <div style={{ flex: 1 }}>
@@ -178,11 +277,11 @@ export function ParamInput({
           <option value="">
             {children === undefined
               ? "Loading children..."
-              : `(select ${childType})`}
+              : `(select ${ownChildType})`}
           </option>
           {registered.map((c) => (
             <option key={c.local_id} value={String(c.local_id)}>
-              {c.label ? `${c.label} (${c.local_id})` : `${childType} ${c.local_id}`}
+              {c.label ? `${c.label} (${c.local_id})` : `${ownChildType} ${c.local_id}`}
             </option>
           ))}
         </select>
@@ -190,8 +289,8 @@ export function ParamInput({
           <div
             style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}
           >
-            No registered {childType} entries on this device yet — see the Child
-            Entities tab.
+            No registered {ownChildType} entries on this device yet — see the
+            Child Entities tab.
           </div>
         )}
       </div>

@@ -312,6 +312,8 @@ function DeviceCommandEditor({
                   value={String(currentVal)}
                   onChange={(val) => handleParamChange(paramKey, val)}
                   deviceId={step.device}
+                  values={step.params as Record<string, unknown> | undefined}
+                  params={paramSchema as Record<string, Partial<DriverParamDef>>}
                   allowDynamic
                   showTriggerContext
                   placeholder={paramDef?.type ?? "text"}

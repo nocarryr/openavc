@@ -6,6 +6,7 @@ import { IconPicker } from "../IconPicker";
 import { AssetPicker } from "../AssetPicker";
 import { InlineColorPicker } from "../../shared/InlineColorPicker";
 import { VariableKeyPicker } from "../../shared/VariableKeyPicker";
+import { parseStateOptionList } from "../../shared/paramOptions";
 import { MacroRefPicker, DeviceRefPicker } from "../../shared/RefPickers";
 import { panelElementFieldKind } from "./panelElementConfig";
 import { usePluginStore } from "../../../store/pluginStore";
@@ -1612,7 +1613,7 @@ function PluginConfigSelect({
   if (staticOptions && staticOptions.length > 0) {
     options = staticOptions.map((o) => ({ value: o, label: o }));
   } else if (optionsSource) {
-    options = parseOptionsSourceValue(rawStateValue);
+    options = parseStateOptionList(rawStateValue);
   }
 
   return (
@@ -1647,27 +1648,8 @@ function PluginConfigSelect({
   );
 }
 
-function parseOptionsSourceValue(raw: unknown): Array<{ value: string; label: string }> {
-  if (typeof raw !== "string" || !raw) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const out: Array<{ value: string; label: string }> = [];
-  for (const item of parsed) {
-    if (item && typeof item === "object" && "value" in item) {
-      const v = (item as { value: unknown }).value;
-      const l = (item as { label?: unknown }).label;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
-        out.push({ value: String(v), label: typeof l === "string" ? l : String(v) });
-      }
-    }
-  }
-  return out;
-}
+// State-published select options share one contract across surfaces; see
+// parseStateOptionList in components/shared/paramOptions.
 
 function GaugeZonesEditor({
   zones,

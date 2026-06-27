@@ -283,6 +283,8 @@ function DeviceCommandConfig({
                       })
                     }
                     deviceId={selectedDevice}
+                    values={currentParams}
+                    params={commandDef?.params as Record<string, Partial<DriverParamDef>> | undefined}
                     placeholder={paramHelp || `Enter ${param}...`}
                     style={{ flex: 1 }}
                   />

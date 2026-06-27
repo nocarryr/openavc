@@ -651,3 +651,116 @@ def test_driver_id_from_file_returns_none_on_garbage(tmp_path):
     no_info = tmp_path / "noinfo.avcdriver"
     no_info.write_text("name: No Id Here\ntransport: tcp\n", encoding="utf-8")
     assert driver_id_from_file(no_info) is None
+
+
+# --- Param-picker option providers (§69 Phase 2) ---
+#
+# A command/action param can declare where its dropdown options come from:
+# options_state / options_source (state-key lists) and options_from (cascade
+# off a sibling param). validate_driver_definition flags a malformed provider
+# so an author sees the typo at load instead of getting a silent free-text box.
+
+
+def _def_with_command(params: dict) -> dict:
+    """A minimal valid driver whose one command carries `params`."""
+    return {
+        "id": "acme_widget",
+        "name": "Acme Widget",
+        "transport": "tcp",
+        "discovery": {"oui": ["aa:bb:cc"]},
+        "commands": {
+            "do_thing": {"label": "Do Thing", "string": "DO {bank}\r", "params": params},
+        },
+    }
+
+
+def test_options_state_and_source_accepted():
+    errors = validate_driver_definition(_def_with_command({
+        "bank": {"type": "string", "options_state": "snapshot_banks"},
+        "voice": {"type": "string", "options_source": "plugin.tts.voices"},
+    }))
+    assert errors == []
+
+
+def test_options_state_must_be_nonempty_string():
+    errors = validate_driver_definition(_def_with_command({
+        "bank": {"type": "string", "options_state": ""},
+    }))
+    assert any("options_state" in e for e in errors)
+
+    errors = validate_driver_definition(_def_with_command({
+        "bank": {"type": "string", "options_source": 5},
+    }))
+    assert any("options_source" in e for e in errors)
+
+
+def test_options_from_child_schema_accepted():
+    errors = validate_driver_definition(_def_with_command({
+        "component": {"type": "child_id", "child_type": "component"},
+        "control": {
+            "type": "string",
+            "options_from": {"param": "component", "source": "child_schema"},
+        },
+    }))
+    assert errors == []
+
+
+def test_options_from_must_be_mapping():
+    errors = validate_driver_definition(_def_with_command({
+        "control": {"type": "string", "options_from": "component"},
+    }))
+    assert any("options_from must be a mapping" in e for e in errors)
+
+
+def test_options_from_unknown_source_rejected():
+    errors = validate_driver_definition(_def_with_command({
+        "component": {"type": "child_id", "child_type": "component"},
+        "control": {
+            "type": "string",
+            "options_from": {"param": "component", "source": "made_up"},
+        },
+    }))
+    assert any("options_from.source" in e for e in errors)
+
+
+def test_options_from_unknown_sibling_rejected():
+    errors = validate_driver_definition(_def_with_command({
+        "control": {
+            "type": "string",
+            "options_from": {"param": "nope", "source": "child_schema"},
+        },
+    }))
+    assert any("is not a" in e and "param of this command" in e for e in errors)
+
+
+def test_options_from_child_schema_sibling_must_be_child_id():
+    errors = validate_driver_definition(_def_with_command({
+        "component": {"type": "string"},  # not a child_id
+        "control": {
+            "type": "string",
+            "options_from": {"param": "component", "source": "child_schema"},
+        },
+    }))
+    assert any("must be a child_id param" in e for e in errors)
+
+
+def test_options_from_validated_on_actions():
+    driver = _def_with_command({
+        "component": {"type": "child_id", "child_type": "component"},
+    })
+    driver["actions"] = [
+        {
+            "id": "bad_action",
+            "kind": "command",
+            "command": "do_thing",
+            "label": "Bad",
+            "params": {
+                "control": {
+                    "type": "string",
+                    "options_from": {"param": "missing", "source": "child_schema"},
+                },
+            },
+        },
+    ]
+    errors = validate_driver_definition(driver)
+    assert any("actions[0]" in e and "options_from" in e for e in errors)

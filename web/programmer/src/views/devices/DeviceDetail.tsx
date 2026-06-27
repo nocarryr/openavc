@@ -796,6 +796,8 @@ export function DeviceDetail({
                         value={current}
                         onChange={setParam}
                         deviceId={deviceId}
+                        values={commandParams}
+                        params={pDef as Record<string, Partial<DriverParamDef>> | undefined}
                         placeholder={paramName}
                         style={{ flex: 1 }}
                       />
