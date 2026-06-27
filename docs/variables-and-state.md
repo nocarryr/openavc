@@ -48,6 +48,16 @@ Browse all devices and their live state properties. Each property shows:
 
 Use this view to discover available state keys when building macros or UI bindings.
 
+## `$` references
+
+A `$`-prefixed value is a live reference that resolves to the current value when it runs, instead of a fixed value you type in:
+
+- `$var.<name>` reads a project variable (e.g. `$var.target_volume`).
+- `$device.<id>.<property>` reads a device's live state (e.g. `$device.dsp_1.output_level`).
+- `$system.<property>` reads a system value.
+
+These references work the same way in macro steps, triggers, and UI Builder bindings. Anywhere you can set a command parameter or a value, you can use one. You pick them from the `$` picker (the picker lists every variable and state key with its current value) rather than typing the key by hand, so there is nothing to misspell.
+
 ## Activity
 
 A live feed of recent state changes across the entire system (up to 500 entries). Each entry shows the timestamp, key, old and new values, and the source of the change (device, macro, script, UI, API). Use the filter buttons to narrow by namespace, or type a specific variable or device key in the search box to filter to just that key.

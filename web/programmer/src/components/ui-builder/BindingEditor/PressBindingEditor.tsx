@@ -10,6 +10,9 @@ interface PressBindingEditorProps {
   onChange: (value: Record<string, unknown>[]) => void;
   onClear: () => void;
   forChangeBinding?: boolean;
+  // UI-event tokens this binding slot can deliver ($value/$input/...), passed
+  // through to each command param's "$" picker.
+  eventTokens?: { key: string; label: string }[];
 }
 
 export function PressBindingEditor({
@@ -18,6 +21,7 @@ export function PressBindingEditor({
   onChange,
   onClear,
   forChangeBinding,
+  eventTokens,
 }: PressBindingEditorProps) {
   const actions = Array.isArray(value) ? value : [];
 
@@ -118,6 +122,7 @@ export function PressBindingEditor({
             project={project}
             onChange={(v) => updateAction(i, v)}
             forChangeBinding={forChangeBinding}
+            eventTokens={eventTokens}
           />
           {actions.length === 1 && String(action.action || "") && (
             <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-sm)" }}>
@@ -160,6 +165,7 @@ export function PressBindingEditor({
           project={project}
           onChange={(v) => onChange([v])}
           forChangeBinding={forChangeBinding}
+          eventTokens={eventTokens}
         />
       )}
 

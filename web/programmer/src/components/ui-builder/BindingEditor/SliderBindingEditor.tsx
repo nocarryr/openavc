@@ -8,6 +8,9 @@ interface SliderBindingEditorProps {
   project: ProjectConfig;
   onChange: (value: Record<string, unknown>) => void;
   onClear: () => void;
+  /** UI-event tokens this binding delivers (the slider's value), shown as the
+   *  "This control" group in each command param's "$" picker. */
+  eventTokens?: { key: string; label: string }[];
 }
 
 export function SliderBindingEditor({
@@ -15,6 +18,7 @@ export function SliderBindingEditor({
   project,
   onChange,
   onClear,
+  eventTokens,
 }: SliderBindingEditorProps) {
   const valueKey = String(value?.key || "");
   const liveValue = useConnectionStore((s) => valueKey ? s.liveState[valueKey] : undefined);
@@ -31,7 +35,7 @@ export function SliderBindingEditor({
         }}
       >
         <label style={labelStyle}>Change Action</label>
-        <ActionPicker value={value} project={project} onChange={onChange} />
+        <ActionPicker value={value} project={project} onChange={onChange} eventTokens={eventTokens} />
         {value && (
           <button
             onClick={onClear}

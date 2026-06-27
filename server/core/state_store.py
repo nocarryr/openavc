@@ -115,6 +115,15 @@ class StateStore:
         """Get a state value."""
         return self._store.get(key, default)
 
+    def has(self, key: str) -> bool:
+        """Return True if the key is present — even when its value is None.
+
+        Lets a caller distinguish "key absent" from "key set to None/False" (a
+        ``get()`` returning None can't), so a $-reference resolver only warns on
+        a genuinely missing key, not on a legitimately falsy one.
+        """
+        return key in self._store
+
     def get_namespace(self, prefix: str) -> dict[str, Any]:
         """
         Get all key-value pairs under a namespace prefix.

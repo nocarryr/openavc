@@ -19,11 +19,22 @@ interface VariableKeyPickerProps {
    *  snapshot of the trigger that fired the macro). Only meaningful in macro
    *  step/condition editors, where the macro may be run by a trigger. */
   showTriggerContext?: boolean;
+  /** UI-event tokens this binding can deliver ($value/$input/$output/$mute),
+   *  scoped to the binding slot. When non-empty, they appear as a top "This
+   *  control" group. Only meaningful on UI Builder bindings, where a UI press
+   *  carries an event value. The stored value is the bare token (e.g. "value"),
+   *  resolved against the event context at runtime. */
+  eventContext?: { key: string; label: string }[];
   /** Placeholder text */
   placeholder?: string;
   /** Style override for the outer container */
   style?: React.CSSProperties;
 }
+
+/** Stable empty default for eventContext, so callers that omit it keep a
+ *  constant reference (a fresh `[]` per render would defeat the allEntries
+ *  memo for every existing caller). */
+const NO_EVENT_CONTEXT: { key: string; label: string }[] = [];
 
 /** $trigger.<field> refs a macro can read when it is fired by a trigger. The
  *  available fields depend on the trigger type (event vs state-change); the
@@ -52,6 +63,7 @@ export function VariableKeyPicker({
   onChange,
   showDeviceState = true,
   showTriggerContext = false,
+  eventContext = NO_EVENT_CONTEXT,
   placeholder = "Select state key...",
   style,
 }: VariableKeyPickerProps) {
@@ -110,6 +122,19 @@ export function VariableKeyPicker({
   // Build grouped entries
   const allEntries = useMemo((): KeyEntry[] => {
     const entries: KeyEntry[] = [];
+
+    // "This control" — the UI-event tokens this binding slot can deliver
+    // ($value/$input/$output/$mute). Rendered first so the common case (the
+    // touched value) is at the top. No live value: the value arrives with the
+    // press at runtime.
+    for (const t of eventContext) {
+      entries.push({
+        key: t.key,
+        label: t.label,
+        group: "control",
+        groupDesc: "The value the user just touched on this control.",
+      });
+    }
 
     // Project Variables
     for (const v of variables) {
@@ -198,7 +223,7 @@ export function VariableKeyPicker({
     }
 
     return entries;
-  }, [variables, devices, pages, liveState, showDeviceState, showTriggerContext]);
+  }, [variables, devices, pages, liveState, showDeviceState, showTriggerContext, eventContext]);
 
   // Filter entries by search
   const filteredEntries = useMemo(() => {
@@ -218,7 +243,9 @@ export function VariableKeyPicker({
     for (const e of filteredEntries) {
       if (!map.has(e.group)) {
         let label = "Project Variables";
-        if (e.group.startsWith("device:")) {
+        if (e.group === "control") {
+          label = "This control";
+        } else if (e.group.startsWith("device:")) {
           label = `Device: ${e.deviceName}`;
         } else if (e.group === "system") {
           label = "System";

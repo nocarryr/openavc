@@ -377,6 +377,27 @@ async def test_trigger_ref_resolves_in_device_params(macro_engine):
     )
 
 
+async def test_unknown_state_ref_in_params_warns(macro_engine, caplog):
+    """An unknown $state key in a macro param resolves to None and warns (the
+    shared resolver's behavior — previously a silent None)."""
+    import logging
+
+    macro_engine.load_macros([{
+        "id": "m",
+        "name": "M",
+        "steps": [{
+            "action": "device.command", "device": "proj1", "command": "set_input",
+            "params": {"input": "$var.missing"},
+        }],
+    }])
+    with caplog.at_level(logging.WARNING):
+        await macro_engine.execute("m")
+    macro_engine.devices.send_command.assert_called_once_with(
+        "proj1", "set_input", {"input": None}
+    )
+    assert "var.missing" in caplog.text
+
+
 async def test_trigger_ref_is_none_without_context(macro_engine, core):
     """Run directly (no trigger context) -> $trigger.* resolves to None."""
     state, _ = core

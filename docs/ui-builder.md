@@ -93,6 +93,17 @@ What happens when the button is pressed. Five action types are available:
 
 A press binding can contain **multiple actions**. Click "Add another action" to stack actions on a single button press. For example, a "Laptop" source button can set `var.current_source` to "laptop" AND run the `apply_source` macro in one press, without needing a wrapper macro.
 
+### Dynamic Parameter Values (the `$` picker)
+
+When a binding sends a **Device Command**, each parameter has a `$` toggle. Turn it on and a grouped picker opens instead of the plain input. It offers, in one place:
+
+- **This control**: the value this binding delivers at the moment it fires. The choices depend on the binding type. A slider or keypad gives you `value` (the position or text the user just set), and a select gives you the chosen option's `value`. A matrix route gives you `input` and `output`. A mute button gives you `output` and `mute`. Plain button taps carry no value, so they skip this group. When the binding does deliver a value, turning the toggle on defaults to it, since that is the most common case.
+- **Project Variables**, **Device State**, and **System** values: any `$var.<name>`, `$device.<id>.<property>`, or `$system.<property>`. The picker lists the live value next to each one so you can confirm you have the right key, and you can search to narrow the list.
+
+This means a binding can read a project variable or another device's state directly. For example, a button can send a DSP `set_level` command using `$var.target_volume`, or a projector's "match source" button can send `$device.matrix_1.output_2_source`. You no longer need to route through a macro just to reference a variable or another device.
+
+The **Set Variable** action's value field has the same `$` toggle, so you can store a variable, device state, or system value into another variable. To store the value the user just touched on a slider or list instead, use the **Use element's selected value** option.
+
 ### Button Modes
 
 Each button has a **mode** that controls how presses are handled:

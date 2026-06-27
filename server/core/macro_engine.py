@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from server.core.condition_eval import eval_operator
 from server.core.event_bus import EventBus
 from server.core.state_store import StateStore
+from server.core.value_resolver import resolve_ref
 from server.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -429,15 +430,16 @@ class MacroEngine:
         payload or state-change snapshot passed into ``execute()`` — so a
         triggered macro can act on what arrived/changed (e.g. ``$trigger.data``
         for an event payload field, ``$trigger.new_value`` for a state change).
-        Any other ``$<state_key>`` reads from the state store as before. When a
-        macro runs directly (no trigger context), ``$trigger.*`` resolves to None.
+        Any other ``$<state_key>`` reads from the state store. When a macro runs
+        directly (no trigger context), ``$trigger.*`` resolves to None.
+
+        Delegates to the shared resolver (``server.core.value_resolver``) so the
+        $-namespaces and the unknown-state-key warning match the UI binding
+        resolver. A macro has no UI event, so no ``event_ctx`` is passed —
+        behavior is identical to before except an unknown state key now warns
+        (it used to resolve to None silently).
         """
-        if isinstance(value, str) and value.startswith("$"):
-            ref = value[1:]
-            if ref.startswith("trigger."):
-                return (context or {}).get(ref[len("trigger."):])
-            return self.state.get(ref)
-        return value
+        return resolve_ref(value, state=self.state, trigger_ctx=context)
 
     def _resolve_params(
         self, params: dict[str, Any], context: dict[str, Any] | None = None

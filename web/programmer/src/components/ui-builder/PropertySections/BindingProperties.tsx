@@ -23,6 +23,34 @@ interface BindingPropertiesProps {
   onChange: (patch: Partial<UIElement>) => void;
 }
 
+// The UI-event tokens each binding slot can deliver, surfaced as the "This
+// control" group in a command param's "$" picker. The runtime resolves these
+// from the firing event (engine._execute_action): $value (scaled), $input /
+// $output (matrix route), $output / $mute (mute route).
+const VALUE_TOKEN = [
+  { key: "value", label: "value — the value the user just touched (slider position, select choice, etc.)" },
+];
+const ROUTE_TOKENS = [
+  { key: "input", label: "input — the routed input number" },
+  { key: "output", label: "output — the routed output number" },
+];
+const MUTE_TOKENS = [
+  { key: "output", label: "output — the muted output number" },
+  { key: "mute", label: "mute — true when muting, false when unmuting" },
+];
+const EVENT_TOKENS_BY_SLOT: Record<string, { key: string; label: string }[]> = {
+  // Slots whose UI event delivers the touched value. press/release/hold are
+  // plain taps that carry no value, so they offer no "This control" token.
+  value: VALUE_TOKEN,
+  change: VALUE_TOKEN,
+  submit: VALUE_TOKEN,
+  select: VALUE_TOKEN,
+  route: ROUTE_TOKENS,
+  audio_route: ROUTE_TOKENS,
+  mute_route: MUTE_TOKENS,
+  audio_mute_route: MUTE_TOKENS,
+};
+
 export function BindingProperties({
   element,
   project,
@@ -162,6 +190,7 @@ export function BindingProperties({
             project={project}
             onChange={(v) => handleBindingChange(slot, v)}
             onClear={() => handleBindingChange(slot, null)}
+            eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
           />
         );
       }
@@ -175,6 +204,7 @@ export function BindingProperties({
               options={element.options ?? []}
               onChange={(v) => handleBindingChange(slot, v)}
               onClear={() => handleBindingChange(slot, null)}
+              eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
             />
           );
         }
@@ -187,6 +217,7 @@ export function BindingProperties({
               onChange={(v) => handleBindingChange(slot, v)}
               onClear={() => handleBindingChange(slot, null)}
               forChangeBinding
+              eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
             />
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
               Use <strong>$value</strong> in command parameters to reference the new value.
@@ -244,6 +275,7 @@ export function BindingProperties({
             project={project}
             onChange={(v) => handleBindingChange(slot, v)}
             onClear={() => handleBindingChange(slot, null)}
+            eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
           />
         );
       }
@@ -257,6 +289,7 @@ export function BindingProperties({
               project={project}
               onChange={(v) => handleBindingChange(slot, v)}
               onClear={() => handleBindingChange(slot, null)}
+              eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
             />
             {slot === "submit" && (
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
@@ -281,6 +314,7 @@ export function BindingProperties({
               project={project}
               onChange={(v) => handleBindingChange(slot, v)}
               onClear={() => handleBindingChange(slot, null)}
+              eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
             />
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
               Use $input and $output in command parameters to reference the routed input/output numbers.
@@ -298,6 +332,7 @@ export function BindingProperties({
               project={project}
               onChange={(v) => handleBindingChange(slot, v)}
               onClear={() => handleBindingChange(slot, null)}
+              eventTokens={EVENT_TOKENS_BY_SLOT[slot]}
             />
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
               Use $output and $mute in command parameters. $mute is true when muting, false when unmuting.

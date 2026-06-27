@@ -31,6 +31,7 @@ from server.core.script_engine import ScriptEngine
 from server.core.state_persister import StatePersister
 from server.core.state_store import StateStore
 from server.core.trigger_engine import TriggerEngine
+from server.core.value_resolver import resolve_ref
 from server.utils.logger import get_logger
 from server.version import __version__
 
@@ -1042,6 +1043,20 @@ class Engine:
         """Execute a single UI binding action."""
         action = action_def.get("action", "")
 
+        # The UI-event tokens a binding can reference. Built once so the
+        # device.command and state.set branches resolve them identically: $value
+        # is scaled to the element's output range; $input/$output come from
+        # matrix route bindings; $mute comes from mute_route / audio_mute_route
+        # bindings. Always all four keys so they resolve from the event, never
+        # from the state store. Any other $var/$device/$system ref falls through
+        # to the state store (the same shared resolver the macro engine uses).
+        event_ctx = {
+            "value": self._scale_value_forward(element, data.get("value")),
+            "input": data.get("input"),
+            "output": data.get("output"),
+            "mute": data.get("mute"),
+        }
+
         if action == "value_map":
             # Per-option action map (used by select elements).
             element_value = str(data.get("value", ""))
@@ -1061,19 +1076,11 @@ class Engine:
             device_id = action_def.get("device", "")
             command = action_def.get("command", "")
             params = dict(action_def.get("params", {}))
-            # Replace placeholders with actual values from the UI event,
-            # applying output range scaling if configured on the element.
-            # $input / $output come from matrix route / audio_route bindings;
-            # $mute comes from mute_route / audio_mute_route bindings.
+            # Resolve $-references in each param: the UI-event tokens above
+            # ($value scaled, $input/$output/$mute), then any $var/$device/
+            # $system ref from the state store.
             for k, v in params.items():
-                if v == "$value":
-                    params[k] = self._scale_value_forward(element, data.get("value"))
-                elif v == "$input":
-                    params[k] = data.get("input")
-                elif v == "$output":
-                    params[k] = data.get("output")
-                elif v == "$mute":
-                    params[k] = data.get("mute")
+                params[k] = resolve_ref(v, state=self.state, event_ctx=event_ctx)
             try:
                 await self.devices.send_command(device_id, command, params)
             except Exception:  # Catch-all: driver send_command may raise arbitrary errors
@@ -1085,7 +1092,13 @@ class Engine:
             if action_def.get("value_from") == "element":
                 value = data.get("value")
             else:
-                value = action_def.get("value")
+                # Resolve a $-reference in the literal value, with the same
+                # event context as device.command — so $value works in a
+                # state.set value and $var/$device/$system refs resolve like the
+                # macro state.set, not pass through as a literal "$..." string.
+                value = resolve_ref(
+                    action_def.get("value"), state=self.state, event_ctx=event_ctx
+                )
             # A hand-edited / AI-authored binding may carry a nested literal;
             # keep the store's flat-primitive invariant.
             value, coerced = _coerce_flat_primitive(value)

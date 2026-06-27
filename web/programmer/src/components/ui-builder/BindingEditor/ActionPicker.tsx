@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { Info } from "lucide-react";
 import type { ProjectConfig, DeviceInfo, DriverParamDef } from "../../../api/types";
-import { ParamInput } from "../../shared/ParamInput";
+import { ParamInput, isDynamicParamValue } from "../../shared/ParamInput";
+import { VariableKeyPicker } from "../../shared/VariableKeyPicker";
 import { useConnectionStore } from "../../../store/connectionStore";
 import * as api from "../../../api/restClient";
 
@@ -16,6 +17,10 @@ interface ActionPickerProps {
   // When provided, the Navigate picker offers these targets instead of the
   // project's panel pages (a control surface navigates its own deck pages).
   navigateOptions?: { value: string; label: string }[];
+  // The UI-event tokens this binding slot can deliver ($value/$input/...),
+  // scoped per slot by the parent. Threaded into each command param's "$"
+  // picker as its "This control" group.
+  eventTokens?: { key: string; label: string }[];
 }
 
 const ACTION_TYPES = [
@@ -26,7 +31,7 @@ const ACTION_TYPES = [
   { value: "script.call", label: "Script Function" },
 ];
 
-export function ActionPicker({ value, project, onChange, forChangeBinding, allowedActions, navigateOptions }: ActionPickerProps) {
+export function ActionPicker({ value, project, onChange, forChangeBinding, allowedActions, navigateOptions, eventTokens }: ActionPickerProps) {
   const actionType = String(value?.action || "");
   const actionTypes = allowedActions
     ? ACTION_TYPES.filter((t) => allowedActions.includes(t.value))
@@ -70,6 +75,7 @@ export function ActionPicker({ value, project, onChange, forChangeBinding, allow
           value={value}
           project={project}
           onChange={onChange}
+          eventTokens={eventTokens}
         />
       )}
       {actionType === "state.set" && (
@@ -122,10 +128,12 @@ function DeviceCommandConfig({
   value,
   project,
   onChange,
+  eventTokens,
 }: {
   value: Record<string, unknown> | null;
   project: ProjectConfig;
   onChange: (v: Record<string, unknown>) => void;
+  eventTokens?: { key: string; label: string }[];
 }) {
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
   const selectedDevice = String(value?.device || "");
@@ -285,28 +293,11 @@ function DeviceCommandConfig({
                     deviceId={selectedDevice}
                     values={currentParams}
                     params={commandDef?.params as Record<string, Partial<DriverParamDef>> | undefined}
+                    allowDynamic
+                    eventContext={eventTokens}
                     placeholder={paramHelp || `Enter ${param}...`}
                     style={{ flex: 1 }}
                   />
-                  {/* Dynamic value template buttons */}
-                  <button
-                    onClick={() =>
-                      onChange({
-                        action: "device.command",
-                        device: selectedDevice,
-                        command: selectedCommand,
-                        params: { ...currentParams, [param]: "$value" },
-                      })
-                    }
-                    title="Insert $value — resolves to the element's current value at runtime (slider position, select choice, etc.)"
-                    style={{
-                      padding: "2px 5px", fontSize: 10, borderRadius: 3, cursor: "pointer",
-                      background: "var(--bg-hover)", color: "var(--text-muted)", border: "1px solid var(--border-color)",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    $value
-                  </button>
                 </div>
               </div>
             );
@@ -375,28 +366,76 @@ function StateSetConfig({
         </label>
       )}
 
-      {!useElementValue && (
-        <div>
-          <label style={labelStyle}>Value</label>
-          <input
-            value={String(value?.value ?? "")}
-            onChange={(e) => {
-              let parsed: unknown = e.target.value;
-              if (parsed === "true") parsed = true;
-              else if (parsed === "false") parsed = false;
-              else if (parsed !== "" && !isNaN(Number(parsed)))
-                parsed = Number(parsed);
-              onChange({
-                action: "state.set",
-                key: value?.key,
-                value: parsed,
-              });
-            }}
-            placeholder="Value..."
-            style={{ width: "100%", padding: "4px 6px", fontSize: "var(--font-size-sm)" }}
-          />
-        </div>
-      )}
+      {!useElementValue && (() => {
+        // A fixed value (with true/false/number coercion) or a "$" reference to
+        // a variable / device state / system value, resolved at runtime — the
+        // same picker pattern as a command parameter. The "touched value" lives
+        // on the "Use element's selected value" option above, so this picker
+        // deliberately offers no "This control" group (no eventContext).
+        const isDynamic = isDynamicParamValue(value?.value);
+        return (
+          <div>
+            <label style={labelStyle}>Value</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              {isDynamic ? (
+                <VariableKeyPicker
+                  value={String(value?.value).slice(1)}
+                  onChange={(key) =>
+                    onChange({ action: "state.set", key: value?.key, value: `$${key}` })
+                  }
+                  showDeviceState
+                  placeholder="Select state key..."
+                  style={{ flex: 1 }}
+                />
+              ) : (
+                <input
+                  value={String(value?.value ?? "")}
+                  onChange={(e) => {
+                    let parsed: unknown = e.target.value;
+                    if (parsed === "true") parsed = true;
+                    else if (parsed === "false") parsed = false;
+                    else if (parsed !== "" && !isNaN(Number(parsed)))
+                      parsed = Number(parsed);
+                    onChange({ action: "state.set", key: value?.key, value: parsed });
+                  }}
+                  placeholder="Value..."
+                  style={{ flex: 1, padding: "4px 6px", fontSize: "var(--font-size-sm)" }}
+                />
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  onChange({
+                    action: "state.set",
+                    key: value?.key,
+                    value: isDynamic ? "" : "$var.",
+                  })
+                }
+                title={
+                  isDynamic
+                    ? "Switch to a fixed value"
+                    : "Use a dynamic value read from state at runtime"
+                }
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "3px 6px",
+                  borderRadius: "var(--border-radius)",
+                  border: `1px solid ${isDynamic ? "var(--accent)" : "var(--border-color)"}`,
+                  background: isDynamic ? "rgba(138,180,147,0.15)" : "transparent",
+                  color: isDynamic ? "var(--accent)" : "var(--text-muted)",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  flexShrink: 0,
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                $
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </>
   );
 }

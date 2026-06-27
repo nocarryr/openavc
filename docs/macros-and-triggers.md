@@ -135,6 +135,8 @@ For example, a volume slider on the touch panel writes to `var.volume_level`. A 
 
 Dynamic references also work on the **Set Variable** step's value field. This lets you copy one variable to another at runtime.
 
+The same `$` picker now appears on UI Builder bindings, so a touch panel button or slider can read a variable or device state the same way a macro step does. See [UI Builder](ui-builder.md) for the binding-side picker.
+
 ### Reading the trigger that fired the macro
 
 When a macro is run by a trigger, it can read what fired it through the **Trigger event** group in the dynamic-value picker:

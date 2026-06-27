@@ -7,6 +7,9 @@ interface SelectChangeEditorProps {
   options: UIElementOption[];
   onChange: (value: Record<string, unknown>) => void;
   onClear: () => void;
+  /** UI-event tokens this binding delivers (the selected option's value), shown
+   *  as the "This control" group in each command param's "$" picker. */
+  eventTokens?: { key: string; label: string }[];
 }
 
 export function SelectChangeEditor({
@@ -15,6 +18,7 @@ export function SelectChangeEditor({
   options,
   onChange,
   onClear,
+  eventTokens,
 }: SelectChangeEditorProps) {
   const actionMap = (value?.map as Record<string, Record<string, unknown>>) ?? {};
 
@@ -95,6 +99,7 @@ export function SelectChangeEditor({
                 value={optAction}
                 project={project}
                 onChange={(a) => handleOptionAction(opt.value, a)}
+                eventTokens={eventTokens}
               />
               {optAction && (
                 <button

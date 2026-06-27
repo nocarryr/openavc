@@ -59,6 +59,11 @@ export interface ParamInputProps {
   allowDynamic?: boolean;
   /** Pass-through to VariableKeyPicker (offer $trigger.<field> refs). */
   showTriggerContext?: boolean;
+  /** UI-event tokens this binding slot can deliver ($value/$input/...), shown
+   *  as a "This control" group in the picker. When non-empty, toggling "$" on
+   *  seeds the first token (e.g. $value) instead of $var. UI Builder bindings
+   *  only — a macro step has no UI event. */
+  eventContext?: { key: string; label: string }[];
   /** Placeholder for free-text inputs (defaults handled per-type). */
   placeholder?: string;
   /** Style for the widget row (e.g. { flex: 1 }). */
@@ -93,6 +98,7 @@ export function ParamInput({
   params,
   allowDynamic,
   showTriggerContext,
+  eventContext,
   placeholder,
   style,
 }: ParamInputProps) {
@@ -168,10 +174,16 @@ export function ParamInput({
   const canToggle = allowDynamic && type !== "child_id";
   const dynamic = canToggle && isDynamicParamValue(value);
 
+  // Toggling "$" on seeds the binding's own control token (e.g. $value) when
+  // this surface delivers a UI event, since that's the overwhelmingly common
+  // case; otherwise it seeds the $var. namespace.
+  const dynamicSeed =
+    eventContext && eventContext.length > 0 ? `$${eventContext[0].key}` : "$var.";
+
   const toggle = canToggle ? (
     <button
       type="button"
-      onClick={() => onChange(dynamic ? "" : "$var.")}
+      onClick={() => onChange(dynamic ? "" : dynamicSeed)}
       title={
         dynamic
           ? "Switch to a fixed value"
@@ -191,6 +203,7 @@ export function ParamInput({
           onChange={(key) => onChange(`$${key}`)}
           showDeviceState
           showTriggerContext={showTriggerContext}
+          eventContext={eventContext}
           placeholder="Select state key..."
           style={{ flex: 1 }}
         />

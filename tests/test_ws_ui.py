@@ -240,12 +240,11 @@ async def test_ws_press_sets_state(engine_and_client):
 # ---------------------------------------------------------------------------
 
 async def test_ws_submit_dispatches_event(engine_and_client):
-    """Keypad submit dispatches the submit event without error.
+    """Keypad submit dispatches the submit event and resolves $value.
 
-    Note: the $value placeholder in state.set bindings is resolved by
-    the macro engine for macro steps, not by the UI action executor.
-    The UI executor sets the literal binding value. This test verifies
-    the submit message is accepted and processed without error.
+    The state.set binding value $value now resolves through the shared
+    resolver against the submit event, so it lands the submitted value (the
+    keypad has no output range, so it passes through unscaled).
     """
     engine, client = engine_and_client
     with client.websocket_connect("/ws?client=panel") as websocket:
@@ -260,9 +259,8 @@ async def test_ws_submit_dispatches_event(engine_and_client):
 
         time.sleep(0.1)
 
-    # The binding has value: "$value" which is set literally
-    # (not substituted — that's a macro engine feature)
-    assert engine.state.get("var.channel") == "$value"
+    # The binding value "$value" resolves to the submitted value.
+    assert engine.state.get("var.channel") == "123"
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +295,9 @@ async def test_ws_select_fires_list_select_binding(engine_and_client):
 async def test_ws_route_dispatches_event(engine_and_client):
     """Matrix route dispatches the route event and sets state.
 
-    Note: the $output/$input placeholders in binding keys are resolved
-    by the WS handler before calling handle_ui_event for route messages.
-    The state.set action receives the literal key with $output unresolved.
+    The state.set key is not a $-reference target, so $output stays literal in
+    the key. The state.set value $input now resolves through the shared resolver
+    against the route event, landing the routed input number.
     """
     engine, client = engine_and_client
     with client.websocket_connect("/ws?client=panel") as websocket:
@@ -315,8 +313,8 @@ async def test_ws_route_dispatches_event(engine_and_client):
 
         time.sleep(0.1)
 
-    # The key has $output placeholder — set literally by the UI action executor
-    assert engine.state.get("device.sw.output_$output_source") == "$input"
+    # The key keeps its literal $output; the value $input resolves to the input.
+    assert engine.state.get("device.sw.output_$output_source") == 1
 
 
 async def test_ws_route_with_audio_fires_audio_route_binding(engine_and_client):
