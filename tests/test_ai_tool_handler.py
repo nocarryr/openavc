@@ -385,47 +385,148 @@ class TestValidatorOperatorAliases:
 
 
 class TestVisibleWhenBindingValidation:
-    """_validate_bindings accepts single, any:[] (OR) and all:[] (AND) visible_when."""
+    """_validate_bindings accepts single, any:[] (OR) and all:[] (AND)
+    show.visible_when forms in the show/do model."""
 
     def test_single_condition_valid(self):
         from server.cloud.ai_tool_handler import _validate_bindings
-        b = {"visible_when": {"key": "device.proj.power", "operator": "eq", "value": "on"}}
+        b = {"show": {"visible_when": {"key": "device.proj.power", "operator": "eq", "value": "on"}}}
         assert _validate_bindings(b) is None
 
     def test_any_group_valid(self):
         from server.cloud.ai_tool_handler import _validate_bindings
-        b = {"visible_when": {"any": [
+        b = {"show": {"visible_when": {"any": [
             {"key": "device.a.power", "operator": "eq", "value": "on"},
             {"key": "device.b.power", "operator": "truthy"},
-        ]}}
+        ]}}}
         assert _validate_bindings(b) is None
 
     def test_all_group_valid(self):
-        # The fix: the AND form used to be rejected as "missing key".
         from server.cloud.ai_tool_handler import _validate_bindings
-        b = {"visible_when": {"all": [
+        b = {"show": {"visible_when": {"all": [
             {"key": "device.a.power", "operator": "eq", "value": "on"},
             {"key": "device.b.online", "operator": "truthy"},
-        ]}}
+        ]}}}
         assert _validate_bindings(b) is None
 
     def test_all_group_bad_operator_rejected(self):
         from server.cloud.ai_tool_handler import _validate_bindings
-        b = {"visible_when": {"all": [{"key": "device.a.power", "operator": "snorgle"}]}}
+        b = {"show": {"visible_when": {"all": [{"key": "device.a.power", "operator": "snorgle"}]}}}
         err = _validate_bindings(b)
         assert err and "all[0]" in err
 
     def test_group_missing_key_rejected(self):
         from server.cloud.ai_tool_handler import _validate_bindings
-        b = {"visible_when": {"any": [{"operator": "truthy"}]}}
+        b = {"show": {"visible_when": {"any": [{"operator": "truthy"}]}}}
         err = _validate_bindings(b)
         assert err and "any[0]" in err
 
     def test_single_missing_key_rejected(self):
         from server.cloud.ai_tool_handler import _validate_bindings
-        b = {"visible_when": {"operator": "eq", "value": "on"}}
+        b = {"show": {"visible_when": {"operator": "eq", "value": "on"}}}
         err = _validate_bindings(b)
         assert err and "visible_when" in err
+
+
+class TestShowDoBindingValidation:
+    """The show/do binding model: do.<interaction> action lists, show.value /
+    show.look / show.items, and the device-two-way safety rule."""
+
+    def test_do_press_macro_valid(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"press": [{"action": "macro", "macro": "m1"}]}}
+        assert _validate_bindings(b) is None
+
+    def test_do_change_device_command_valid(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"change": [{"action": "device.command", "device": "amp",
+                                "command": "setVolume", "params": {"level": "$value"}}]}}
+        assert _validate_bindings(b) is None
+
+    def test_legacy_flat_press_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"press": [{"action": "macro", "macro": "m1"}]}
+        err = _validate_bindings(b)
+        assert err and "show/do model" in err and "press" in err
+
+    def test_unknown_interaction_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"wiggle": [{"action": "macro", "macro": "m1"}]}}
+        err = _validate_bindings(b)
+        assert err and "wiggle" in err
+
+    def test_state_set_to_device_rejected(self):
+        # The central device-safety rule: never write a device.* key directly.
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"change": [{"action": "state.set", "key": "device.amp.level", "value": "$value"}]}}
+        err = _validate_bindings(b)
+        assert err and "device.command" in err
+
+    def test_state_set_to_var_allowed(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"change": [{"action": "state.set", "key": "var.volume", "value": "$value"}]}}
+        assert _validate_bindings(b) is None
+
+    def test_value_map_inner_device_state_set_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"change": [{"action": "value_map", "map": {
+            "hi": {"action": "state.set", "key": "device.x.mode", "value": "h"},
+        }}]}}
+        err = _validate_bindings(b)
+        assert err and "device.command" in err
+
+    def test_show_value_two_way_var_valid(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"value": {"source": "state", "key": "var.vol", "write_back": True}}}
+        assert _validate_bindings(b) is None
+
+    def test_show_value_write_back_on_device_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"value": {"source": "state", "key": "device.amp.level", "write_back": True}}}
+        err = _validate_bindings(b)
+        assert err and "write_back" in err
+
+    def test_show_value_missing_key_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"value": {"source": "state"}}}
+        err = _validate_bindings(b)
+        assert err and "show.value" in err
+
+    def test_show_value_macro_progress_valid(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"value": {"source": "macro_progress", "macro": "m1", "idle_text": "Ready"}}}
+        assert _validate_bindings(b) is None
+
+    def test_show_look_feedback_valid(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"look": {"source": "state", "key": "device.x.power",
+                               "condition": {"equals": True},
+                               "style_active": {"bg_color": "#0f0"}}}}
+        assert _validate_bindings(b) is None
+
+    def test_show_look_nested_style_rejected(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"look": {"key": "var.s", "states": {"on": {"style": {"bg_color": "#0f0"}}}}}}
+        err = _validate_bindings(b)
+        assert err and "flat" in err
+
+    def test_show_items_key_pattern_valid(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"show": {"items": {"source": "state", "key_pattern": "device.m.input_*_name"}}}
+        assert _validate_bindings(b) is None
+
+    def test_do_toggle_requires_off_action(self):
+        from server.cloud.ai_tool_handler import _validate_bindings
+        b = {"do": {"press": [{"action": "macro", "macro": "m", "mode": "toggle",
+                               "toggle_key": "var.x"}]}}
+        err = _validate_bindings(b)
+        assert err and "off_action" in err
+
+    def test_normalize_wraps_do_single_action(self):
+        from server.cloud.ai_tool_handler import _normalize_bindings
+        b = {"do": {"press": {"action": "macro", "macro": "m1"}}}
+        out = _normalize_bindings(b)
+        assert out["do"]["press"] == [{"action": "macro", "macro": "m1"}]
 
 
 # ===========================================================================

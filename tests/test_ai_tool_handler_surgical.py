@@ -736,7 +736,7 @@ async def test_update_ui_element(handler, mock_agent, mock_engine):
                 "element_id": "btn_on",
                 "label": "Power On",
                 "style": {"bg_color": "#4CAF50"},
-                "bindings": {"press": [{"action": "macro", "macro": "all_on"}]},
+                "bindings": {"do": {"press": [{"action": "macro", "macro": "all_on"}]}},
             })
             await handler.handle(msg)
         await _drain()
@@ -750,7 +750,7 @@ async def test_update_ui_element(handler, mock_agent, mock_engine):
     el = next(e for e in page.elements if e.id == "btn_on")
     assert el.label == "Power On"
     assert el.style == {"bg_color": "#4CAF50"}
-    assert el.bindings["press"][0]["action"] == "macro"
+    assert el.bindings["do"]["press"][0]["action"] == "macro"
 
 
 @pytest.mark.asyncio
@@ -856,7 +856,7 @@ async def test_add_ui_page_validates_inline_element_bindings(handler, mock_engin
                 "name": "Bad",
                 "elements": [
                     {"id": "b1", "type": "button",
-                     "bindings": {"press": [{"action": "macro"}]}},  # missing 'macro'
+                     "bindings": {"do": {"press": [{"action": "macro"}]}}},  # missing 'macro'
                 ],
             })
 
@@ -875,14 +875,14 @@ async def test_add_ui_page_accepts_valid_inline_bindings(handler, mock_engine):
                 "name": "Good",
                 "elements": [
                     {"id": "b1", "type": "button",
-                     "bindings": {"press": [{"action": "navigate", "page": "main"}]}},
+                     "bindings": {"do": {"press": {"action": "navigate", "page": "main"}}}},
                 ],
             })
 
     assert result.get("status") == "created"
     page = next(p for p in mock_engine.project.ui.pages if p.id == "good_page")
-    # Bindings were normalized (press wrapped as a list of action objects).
-    assert isinstance(page.elements[0].bindings["press"], list)
+    # Bindings were normalized (do.press wrapped as a list of action objects).
+    assert isinstance(page.elements[0].bindings["do"]["press"], list)
 
 
 @pytest.mark.asyncio

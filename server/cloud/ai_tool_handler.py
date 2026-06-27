@@ -198,31 +198,42 @@ feedback). With no info_strip configured the screen shows a clock;
 
 # --- Binding normalization and validation ---
 
-_ACTION_SLOTS = frozenset(("press", "release", "hold", "change", "submit", "route", "select"))
+# Touch-panel element bindings use the show/do model: `show` is what the
+# element reflects from state (value / items / look / visible_when), `do` is the
+# action lists keyed by interaction kind. (Control-surface buttons keep their
+# own flat format — see SURFACE_BUTTONS_FORMAT.)
+_DO_INTERACTIONS = frozenset((
+    "press", "release", "hold", "change", "submit", "select",
+    "route", "audio_route", "mute_route", "audio_mute_route",
+))
+
+# v0.6 flat slot names. If any appear at the top level of an element's bindings
+# the AI is using the retired model; we reject and point it at show/do.
+_LEGACY_FLAT_KEYS = frozenset((
+    "press", "release", "hold", "change", "submit", "select", "route",
+    "audio_route", "mute_route", "audio_mute_route",
+    "value", "variable", "text", "feedback", "color", "items",
+    "selected", "visible_when", "meter",
+))
 
 
 def _normalize_bindings(bindings: dict) -> dict:
-    """Normalize UI element bindings to canonical format.
+    """Normalize a touch-panel element's show/do bindings to canonical format.
 
-    Action slots (press, release, hold) must be arrays of action objects.
-    The AI sometimes sends them as plain objects — wrap in an array.
+    Each ``do.<interaction>`` must be an array of action objects; the AI
+    sometimes sends a single action as a plain object — wrap it in an array.
     """
-    for slot in _ACTION_SLOTS:
-        val = bindings.get(slot)
-        if isinstance(val, dict):
-            bindings[slot] = [val]
+    do = bindings.get("do")
+    if isinstance(do, dict):
+        for interaction in _DO_INTERACTIONS:
+            val = do.get(interaction)
+            if isinstance(val, dict):
+                do[interaction] = [val]
     return bindings
-_NON_ACTION_SLOTS = frozenset((
-    "feedback", "text", "color", "variable", "value",
-    "visible_when", "selected", "items", "meter",
-))
+
+
 _VALID_VISIBLE_WHEN_OPS = frozenset((
     "eq", "ne", "gt", "lt", "gte", "lte", "truthy", "falsy",
-))
-_VALID_TEXT_SOURCES = frozenset(("state", "macro_progress", "conditional"))
-_VALID_FEEDBACK_STATE_PROPS = frozenset((
-    "label", "bg_color", "text_color", "icon", "icon_color",
-    "button_image", "opacity",
 ))
 _VALID_ACTION_TYPES = frozenset((
     "macro", "device.command", "state.set", "navigate", "page",
@@ -256,8 +267,32 @@ def _validate_action(action: dict, path: str) -> str | None:
     for field in required:
         if field not in action or action[field] is None or action[field] == "":
             return f"{path}: {action_type} action requires '{field}'"
-    if action_type == "value_map" and not isinstance(action.get("map"), dict):
-        return f"{path}: value_map action requires 'map' to be an object"
+    # Device state is read-only: never write a device.* key with state.set. To
+    # drive a device, use a device.command action with $value. This makes the
+    # device-two-way footgun unrepresentable.
+    if action_type == "state.set":
+        key = action.get("key", "")
+        if isinstance(key, str) and key.startswith("device."):
+            return (
+                f"{path}: state.set cannot target a device key ('{key}'). Device "
+                f"state is read-only — drive the device with a device.command "
+                f"action using $value instead."
+            )
+    if action_type == "value_map":
+        vmap = action.get("map")
+        if not isinstance(vmap, dict):
+            return f"{path}: value_map action requires 'map' to be an object"
+        # Each option maps to an action (or a list of actions). Recurse so the
+        # device-key rule and field checks apply to per-option actions too.
+        for opt, mapped in vmap.items():
+            sub_actions = mapped if isinstance(mapped, list) else [mapped]
+            for j, sub in enumerate(sub_actions):
+                if not isinstance(sub, dict):
+                    continue
+                suffix = f"[{j}]" if isinstance(mapped, list) else ""
+                err = _validate_action(sub, f"{path}.map[{opt}]{suffix}")
+                if err:
+                    return err
     return None
 
 
@@ -270,163 +305,90 @@ def _validate_bindings(bindings: dict, project: Any = None) -> str | None:
     errors: list[str] = []
     warnings: list[str] = []
 
-    for slot in _ACTION_SLOTS:
-        val = bindings.get(slot)
-        if val is None:
-            continue
-        if not isinstance(val, list):
-            errors.append(f"'{slot}' must be an array of action objects, got {type(val).__name__}")
-            continue
-        for i, item in enumerate(val):
-            if not isinstance(item, dict):
-                errors.append(f"{slot}[{i}]: expected an action object, got {type(item).__name__}")
-                continue
-            err = _validate_action(item, f"{slot}[{i}]")
-            if err:
-                errors.append(err)
+    # Steer the AI off the retired flat model: every interaction action belongs
+    # under `do`, every state read under `show`.
+    legacy = sorted(k for k in bindings if k in _LEGACY_FLAT_KEYS)
+    if legacy:
+        return (
+            "Binding validation failed: bindings use the show/do model. Put "
+            "interaction actions under 'do' (do.press, do.change, do.route, ...) "
+            "and state reads under 'show' (show.value, show.look, show.visible_when, "
+            "show.items). Remove top-level: " + ", ".join(legacy)
+        )
 
-    # Mode-specific validation on the first press action
-    press = bindings.get("press")
-    if isinstance(press, list) and press and isinstance(press[0], dict):
-        first = press[0]
-        mode = first.get("mode", "tap")
-        if mode and mode not in _VALID_MODES:
-            errors.append(
-                f"press[0]: mode '{mode}' is not valid. Use: tap, toggle, hold_repeat, tap_hold"
-            )
-        elif mode == "toggle":
-            if "toggle_key" not in first or not first["toggle_key"]:
-                errors.append("press[0]: toggle mode requires 'toggle_key'")
-            if "off_action" not in first or not isinstance(first.get("off_action"), dict):
-                errors.append("press[0]: toggle mode requires 'off_action' (an action object)")
-            elif first.get("off_action"):
-                err = _validate_action(first["off_action"], "press[0].off_action")
-                if err:
-                    errors.append(err)
-        elif mode == "tap_hold":
-            if "hold_action" not in first or not isinstance(first.get("hold_action"), dict):
-                errors.append("press[0]: tap_hold mode requires 'hold_action' (an action object)")
-            elif first.get("hold_action"):
-                err = _validate_action(first["hold_action"], "press[0].hold_action")
-                if err:
-                    errors.append(err)
+    for key in bindings:
+        if key not in ("show", "do"):
+            warnings.append(f"unknown top-level binding key '{key}' (expected 'show' or 'do')")
 
-    # Non-action slots: type check + content validation
-    for slot in _NON_ACTION_SLOTS:
-        val = bindings.get(slot)
-        if val is None:
-            continue
-        if isinstance(val, list):
-            errors.append(f"'{slot}' must be an object, not an array")
-            continue
-        if not isinstance(val, dict):
-            errors.append(f"'{slot}' must be an object, got {type(val).__name__}")
-            continue
-
-    # feedback: must have key; validate structure
-    fb = bindings.get("feedback")
-    if isinstance(fb, dict):
-        if not fb.get("key"):
-            errors.append("feedback: missing 'key' (state key to watch)")
-        if "states" in fb:
-            # Multi-state feedback
-            if not isinstance(fb["states"], dict):
-                errors.append("feedback.states must be an object mapping state values to style props")
-            else:
-                # Anti-pattern #8: properties nested in style object
-                for state_name, state_val in fb["states"].items():
-                    if isinstance(state_val, dict) and "style" in state_val:
-                        errors.append(
-                            f"feedback.states.{state_name}: properties (label, bg_color, etc.) "
-                            f"must be flat, not nested inside 'style'"
-                        )
-                        break
-        elif "condition" in fb:
-            # Binary feedback
-            if not isinstance(fb["condition"], dict):
-                errors.append("feedback.condition must be an object (e.g. {\"equals\": \"on\"})")
-
-    # text: must have source; validate per source type
-    txt = bindings.get("text")
-    if isinstance(txt, dict):
-        source = txt.get("source", "")
-        if not source:
-            errors.append("text: missing 'source' (state, macro_progress, or conditional)")
-        elif source not in _VALID_TEXT_SOURCES:
-            errors.append(
-                f"text: source '{source}' is not valid. "
-                f"Use: state, macro_progress, conditional"
-            )
-        elif source == "state" and not txt.get("key"):
-            errors.append("text: state source requires 'key'")
-        elif source == "macro_progress" and not txt.get("macro"):
-            errors.append("text: macro_progress source requires 'macro'")
-        elif source == "conditional":
-            for field in ("condition", "text_true", "text_false"):
-                if field not in txt:
-                    errors.append(f"text: conditional source requires '{field}'")
-
-    # color: must have key and map
-    clr = bindings.get("color")
-    if isinstance(clr, dict):
-        if not clr.get("key"):
-            errors.append("color: missing 'key' (state key to watch)")
-        if "map" not in clr or not isinstance(clr.get("map"), dict):
-            errors.append("color: missing 'map' (object mapping values to colors)")
-
-    # variable: must have key
-    var = bindings.get("variable")
-    if isinstance(var, dict) and not var.get("key"):
-        errors.append("variable: missing 'key' (state key for two-way binding)")
-
-    # value: must have key
-    val_binding = bindings.get("value")
-    if isinstance(val_binding, dict) and not val_binding.get("key"):
-        errors.append("value: missing 'key' (state key to display)")
-
-    # visible_when: single condition, or any:[] (OR) / all:[] (AND) groups
-    vw = bindings.get("visible_when")
-    if isinstance(vw, dict):
-        group_key = "any" if "any" in vw else ("all" if "all" in vw else None)
-        if group_key:
-            conditions = vw[group_key] if isinstance(vw[group_key], list) else []
-            for i, cond in enumerate(conditions):
-                if isinstance(cond, dict):
-                    if not cond.get("key"):
-                        errors.append(f"visible_when.{group_key}[{i}]: missing 'key'")
-                    op = cond.get("operator")
-                    if op and op not in _VALID_VISIBLE_WHEN_OPS:
-                        errors.append(
-                            f"visible_when.{group_key}[{i}]: operator '{op}' is not valid. "
-                            f"Use: eq, ne, gt, lt, gte, lte, truthy, falsy"
-                        )
-        else:
-            if not vw.get("key"):
-                errors.append("visible_when: missing 'key' (state key to evaluate)")
-            op = vw.get("operator")
-            if op and op not in _VALID_VISIBLE_WHEN_OPS:
+    do = bindings.get("do")
+    if do is not None and not isinstance(do, dict):
+        errors.append(f"'do' must be an object, got {type(do).__name__}")
+        do = None
+    if isinstance(do, dict):
+        for interaction, val in do.items():
+            if interaction not in _DO_INTERACTIONS:
                 errors.append(
-                    f"visible_when: operator '{op}' is not valid. "
-                    f"Use: eq, ne, gt, lt, gte, lte, truthy, falsy"
+                    f"do.{interaction}: not a valid interaction. Use: "
+                    + ", ".join(sorted(_DO_INTERACTIONS))
                 )
+                continue
+            if not isinstance(val, list):
+                errors.append(
+                    f"do.{interaction} must be an array of action objects, "
+                    f"got {type(val).__name__}"
+                )
+                continue
+            for i, item in enumerate(val):
+                if not isinstance(item, dict):
+                    errors.append(
+                        f"do.{interaction}[{i}]: expected an action object, "
+                        f"got {type(item).__name__}"
+                    )
+                    continue
+                err = _validate_action(item, f"do.{interaction}[{i}]")
+                if err:
+                    errors.append(err)
 
-    # selected: must have key
-    sel = bindings.get("selected")
-    if isinstance(sel, dict) and not sel.get("key"):
-        errors.append("selected: missing 'key' (state key for selection tracking)")
+        # Mode-specific validation on the first press action (button behavior).
+        press = do.get("press")
+        if isinstance(press, list) and press and isinstance(press[0], dict):
+            first = press[0]
+            mode = first.get("mode", "tap")
+            if mode and mode not in _VALID_MODES:
+                errors.append(
+                    f"do.press[0]: mode '{mode}' is not valid. "
+                    f"Use: tap, toggle, hold_repeat, tap_hold"
+                )
+            elif mode == "toggle":
+                if "toggle_key" not in first or not first["toggle_key"]:
+                    errors.append("do.press[0]: toggle mode requires 'toggle_key'")
+                if "off_action" not in first or not isinstance(first.get("off_action"), dict):
+                    errors.append("do.press[0]: toggle mode requires 'off_action' (an action object)")
+                elif first.get("off_action"):
+                    err = _validate_action(first["off_action"], "do.press[0].off_action")
+                    if err:
+                        errors.append(err)
+            elif mode == "tap_hold":
+                if "hold_action" not in first or not isinstance(first.get("hold_action"), dict):
+                    errors.append("do.press[0]: tap_hold mode requires 'hold_action' (an action object)")
+                elif first.get("hold_action"):
+                    err = _validate_action(first["hold_action"], "do.press[0].hold_action")
+                    if err:
+                        errors.append(err)
 
-    # items: must have key
-    itm = bindings.get("items")
-    if isinstance(itm, dict) and not itm.get("key"):
-        errors.append("items: missing 'key' (state key providing item data)")
+    show = bindings.get("show")
+    if show is not None and not isinstance(show, dict):
+        errors.append(f"'show' must be an object, got {type(show).__name__}")
+        show = None
+    if isinstance(show, dict):
+        _validate_show(show, errors)
 
-    # Soft reference checks — collect warnings but don't block
-    if project and not errors:
+    # Soft reference checks — collect warnings but don't block.
+    if project and not errors and isinstance(do, dict):
         macro_ids = {m.id for m in project.macros} if hasattr(project, "macros") else set()
         device_ids = {d.id for d in project.devices} if hasattr(project, "devices") else set()
 
-        for slot in _ACTION_SLOTS:
-            val = bindings.get(slot)
+        for interaction, val in do.items():
             if not isinstance(val, list):
                 continue
             for i, item in enumerate(val):
@@ -434,10 +396,14 @@ def _validate_bindings(bindings: dict, project: Any = None) -> str | None:
                     continue
                 if item.get("action") == "macro" and item.get("macro"):
                     if item["macro"] not in macro_ids:
-                        warnings.append(f"{slot}[{i}]: macro '{item['macro']}' not found in project")
+                        warnings.append(
+                            f"do.{interaction}[{i}]: macro '{item['macro']}' not found in project"
+                        )
                 if item.get("action") == "device.command" and item.get("device"):
                     if item["device"] not in device_ids:
-                        warnings.append(f"{slot}[{i}]: device '{item['device']}' not found in project")
+                        warnings.append(
+                            f"do.{interaction}[{i}]: device '{item['device']}' not found in project"
+                        )
 
     if errors:
         return "Binding validation failed: " + "; ".join(errors)
@@ -446,6 +412,106 @@ def _validate_bindings(bindings: dict, project: Any = None) -> str | None:
         log.warning("Binding reference warnings: %s", "; ".join(warnings))
 
     return None
+
+
+def _validate_show(show: dict, errors: list[str]) -> None:
+    """Validate the ``show`` half of an element's bindings (value / items / look /
+    visible_when). Appends any problems to ``errors`` in place."""
+    # value — the thing the control IS (numeric / selection / label text).
+    val = show.get("value")
+    if val is not None:
+        if not isinstance(val, dict):
+            errors.append(f"show.value must be an object, got {type(val).__name__}")
+        else:
+            source = val.get("source", "state")
+            if source == "macro_progress":
+                if not val.get("macro"):
+                    errors.append("show.value: macro_progress source requires 'macro'")
+            elif source in ("state", "conditional", ""):
+                if not val.get("key"):
+                    errors.append("show.value: requires 'key' (the state key to read)")
+                if "condition" in val:
+                    for field in ("text_true", "text_false"):
+                        if field not in val:
+                            errors.append(f"show.value: conditional text requires '{field}'")
+                if val.get("write_back"):
+                    key = val.get("key", "")
+                    if not (isinstance(key, str) and key.startswith("var.")):
+                        errors.append(
+                            "show.value: write_back (two-way) is only valid for var.* keys. "
+                            f"'{key}' is read-only — to drive a device add a do.change "
+                            "device.command using $value."
+                        )
+            else:
+                errors.append(
+                    f"show.value: source '{source}' is not valid. Use: state, macro_progress"
+                )
+
+    # items — list row population.
+    itm = show.get("items")
+    if itm is not None:
+        if not isinstance(itm, dict):
+            errors.append(f"show.items must be an object, got {type(itm).__name__}")
+        elif not (itm.get("key") or itm.get("key_pattern")):
+            errors.append("show.items: requires 'key' or 'key_pattern' (the state providing items)")
+
+    # look — state-driven appearance (feedback / LED color map / per-option style).
+    look = show.get("look")
+    if look is not None:
+        if not isinstance(look, dict):
+            errors.append(f"show.look must be an object, got {type(look).__name__}")
+        else:
+            if not look.get("key"):
+                errors.append("show.look: missing 'key' (state key to watch)")
+            if "states" in look:
+                if not isinstance(look["states"], dict):
+                    errors.append("show.look.states must be an object mapping state values to style props")
+                else:
+                    # Properties must be flat, not nested inside a 'style' object.
+                    for state_name, state_val in look["states"].items():
+                        if isinstance(state_val, dict) and "style" in state_val:
+                            errors.append(
+                                f"show.look.states.{state_name}: properties (label, bg_color, etc.) "
+                                f"must be flat, not nested inside 'style'"
+                            )
+                            break
+            elif "condition" in look:
+                if not isinstance(look["condition"], dict):
+                    errors.append("show.look.condition must be an object (e.g. {\"equals\": \"on\"})")
+            elif "map" in look:
+                if not isinstance(look["map"], dict):
+                    errors.append("show.look.map must be an object mapping values to colors")
+            elif "style_map" in look:
+                if not isinstance(look["style_map"], dict):
+                    errors.append("show.look.style_map must be an object mapping option values to styles")
+
+    # visible_when — single condition, or any:[] (OR) / all:[] (AND) groups.
+    vw = show.get("visible_when")
+    if vw is not None and not isinstance(vw, dict):
+        errors.append(f"show.visible_when must be an object, got {type(vw).__name__}")
+    elif isinstance(vw, dict):
+        group_key = "any" if "any" in vw else ("all" if "all" in vw else None)
+        if group_key:
+            conditions = vw[group_key] if isinstance(vw[group_key], list) else []
+            for i, cond in enumerate(conditions):
+                if isinstance(cond, dict):
+                    if not cond.get("key"):
+                        errors.append(f"show.visible_when.{group_key}[{i}]: missing 'key'")
+                    op = cond.get("operator")
+                    if op and op not in _VALID_VISIBLE_WHEN_OPS:
+                        errors.append(
+                            f"show.visible_when.{group_key}[{i}]: operator '{op}' is not valid. "
+                            f"Use: eq, ne, gt, lt, gte, lte, truthy, falsy"
+                        )
+        else:
+            if not vw.get("key"):
+                errors.append("show.visible_when: missing 'key' (state key to evaluate)")
+            op = vw.get("operator")
+            if op and op not in _VALID_VISIBLE_WHEN_OPS:
+                errors.append(
+                    f"show.visible_when: operator '{op}' is not valid. "
+                    f"Use: eq, ne, gt, lt, gte, lte, truthy, falsy"
+                )
 
 
 # --- Macro step and trigger validation ---
