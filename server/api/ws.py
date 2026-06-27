@@ -297,8 +297,8 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, friendly_error(e))
 
     elif msg_type == "ui.select":
-        # List item selection — drives the list element's `select` action
-        # binding (and its two-way `selected`/`variable` write in the engine).
+        # List item selection — drives the list element's do.select action
+        # binding (and its two-way show.value.write_back write in the engine).
         element_id = msg.get("element_id", "")
         if not element_id:
             await _send_ws_error(ws, msg_type, "Missing element_id")

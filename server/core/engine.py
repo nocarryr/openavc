@@ -978,35 +978,42 @@ class Engine:
             return
 
         bindings = element.bindings
+        show = bindings.get("show") if isinstance(bindings.get("show"), dict) else {}
+        do = bindings.get("do") if isinstance(bindings.get("do"), dict) else {}
 
-        # Two-way variable binding: on "change" events, set the variable
-        if event_type == "change":
-            variable_binding = bindings.get("variable")
-            if variable_binding and isinstance(variable_binding, dict):
-                var_key = variable_binding.get("key", "")
-                if var_key:
-                    raw = data.get("value")
-                    self.state.set(var_key, self._scale_value_forward(element, raw), source="ui")
+        # Two-way LINK: a control whose value is bound with write_back drives the
+        # state key it reflects. Only writable keys round-trip this way; a
+        # device.* value is read-only and must be driven by a do.<interaction>
+        # device.command with $value, never written to the state mirror directly
+        # (a state.set to device.* no-ops, overwritten on the next poll). The
+        # value source for both a slider/select/text_input ("change") and a list
+        # row ("select") is show.value; the device guard here is defensive
+        # against a hand-edited / AI-authored write_back on a device key.
+        value_binding = show.get("value") if isinstance(show.get("value"), dict) else None
+        if value_binding and value_binding.get("write_back"):
+            link_key = value_binding.get("key", "")
+            if link_key and not link_key.startswith("device."):
+                # change → scale the display value to the element's output range;
+                # select → write the tapped item's value as-is (a list has no
+                # output range). Value is already a flat primitive (validated at
+                # the WS boundary). The panel reads this same key to reflect the
+                # control, so the write closes the two-way loop and lets
+                # bindings/triggers/macros react to it.
+                if event_type == "change":
+                    self.state.set(
+                        link_key,
+                        self._scale_value_forward(element, data.get("value")),
+                        source="ui",
+                    )
+                elif event_type == "select":
+                    self.state.set(link_key, data.get("value"), source="ui")
 
-        # Two-way list selection: on "select" events, write the tapped item's
-        # value to the list's `selected` binding key. The panel reads this same
-        # key to highlight the active row, so without the write a
-        # selectable/multi_select list's selection never reaches state (and
-        # bindings/triggers/macros can't react to it). Value is already a flat
-        # primitive (validated at the WS boundary).
-        if event_type == "select":
-            selected_binding = bindings.get("selected")
-            if isinstance(selected_binding, dict):
-                sel_key = selected_binding.get("key", "")
-                if sel_key:
-                    self.state.set(sel_key, data.get("value"), source="ui")
-
-        # Look up the binding for this event type (always a list of actions)
-        binding = bindings.get(event_type)
+        # Look up the action list for this interaction (always a list of actions)
+        binding = do.get(event_type)
 
         # Toggle off: look for off_action inside the first press action that has one
         if not binding and event_type == "toggle_off":
-            press_actions = bindings.get("press")
+            press_actions = do.get("press")
             if isinstance(press_actions, dict) and "off_action" in press_actions:
                 binding = [press_actions["off_action"]]
             elif isinstance(press_actions, list):
@@ -1017,7 +1024,7 @@ class Engine:
 
         # Hold: look for hold_action inside the first press action that has one
         if not binding and event_type == "hold":
-            press_actions = bindings.get("press")
+            press_actions = do.get("press")
             if isinstance(press_actions, dict) and "hold_action" in press_actions:
                 binding = [press_actions["hold_action"]]
             elif isinstance(press_actions, list):

@@ -208,6 +208,13 @@ def _migrate_bindings_0_6_to_0_7(bindings: dict) -> dict:
     if bindings.get("visible_when") is not None:
         show["visible_when"] = bindings["visible_when"]
 
+    # Matrix preset buttons (a list of {name, macro}) were stored under
+    # bindings.presets in v0.6.0. They are matrix element configuration rather
+    # than a show/do binding, so they are carried over unchanged for now; a
+    # later pass relocates them to matrix_config alongside the other matrix
+    # settings. Preserve them so migrated projects keep their preset bar.
+    presets = bindings.get("presets")
+
     # do.<interaction> — normalize a single action object to a one-item list.
     for slot in _ACTION_SLOTS_0_7:
         if slot not in bindings:
@@ -227,9 +234,11 @@ def _migrate_bindings_0_6_to_0_7(bindings: dict) -> dict:
         out["show"] = show
     if do:
         out["do"] = do
-    # The orphan `meter` slot (never wired to an editor or runtime) and any
-    # other legacy key are intentionally dropped — v0.6.0 binding keys are a
-    # closed set, all handled above.
+    if isinstance(presets, list) and presets:
+        out["presets"] = presets
+    # The orphan `meter` slot (never wired to an editor or runtime) is dropped;
+    # every other v0.6.0 binding key is mapped above (action slots, the show
+    # sources) or carried over (matrix presets).
     return out
 
 

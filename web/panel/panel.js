@@ -977,7 +977,7 @@ class PanelApp {
      * Call this after renderElement() for every element placed on a page.
      */
     registerVisibleWhen(el, element) {
-        const vw = element.bindings?.visible_when;
+        const vw = element.bindings?.show?.visible_when;
         if (!vw) return;
 
         // Single condition, compound AND (all:[...]), or compound OR (any:[...])
@@ -1068,7 +1068,7 @@ class PanelApp {
 
         // Button mode: tap (default), toggle, hold_repeat, tap_hold
         // Press binding is an array of actions; mode properties come from the first action
-        const pressActions = element.bindings?.press || [];
+        const pressActions = element.bindings?.do?.press || [];
         const pressBinding = (Array.isArray(pressActions) ? pressActions[0] : pressActions) || {};
         const mode = pressBinding.mode || 'tap';
         const holdRepeatMs = pressBinding.hold_repeat_ms || 200;
@@ -1172,13 +1172,13 @@ class PanelApp {
         el.addEventListener('touchend', onRelease);
         el.addEventListener('touchcancel', onRelease);
 
-        // Feedback binding
-        if (element.bindings && element.bindings.feedback) {
+        // Appearance (state-driven look) binding
+        if (element.bindings?.show?.look) {
             this.bindings.push({
                 type: 'feedback',
                 element: el,
                 elementDef: element,
-                binding: element.bindings.feedback,
+                binding: element.bindings.show.look,
             });
         }
 
@@ -1201,9 +1201,9 @@ class PanelApp {
         this.applyStyle(el, this.getThemedStyle(element.type, element.style));
         this.renderElementContent(el, element);
 
-        // Text binding
-        if (element.bindings && element.bindings.text) {
-            const textBinding = element.bindings.text;
+        // Text binding (the label's value)
+        if (element.bindings?.show?.value) {
+            const textBinding = element.bindings.show.value;
             if (textBinding.source === 'macro_progress') {
                 // Macro progress label: show step descriptions while macro runs
                 this.bindings.push({
@@ -1247,13 +1247,13 @@ class PanelApp {
             el.appendChild(label);
         }
 
-        // Color binding
-        if (element.bindings && element.bindings.color) {
+        // Color binding (status LED look)
+        if (element.bindings?.show?.look) {
             this.bindings.push({
                 type: 'color',
                 element: dot,
                 elementDef: element,
-                binding: element.bindings.color,
+                binding: element.bindings.show.look,
             });
         }
 
@@ -1310,7 +1310,7 @@ class PanelApp {
         const sScaleToFull = element.scale_to_full !== false;
 
         // Set initial value from state if binding exists, else use min
-        const sliderBinding = element.bindings?.variable || element.bindings?.value;
+        const sliderBinding = element.bindings?.show?.value;
         const initialRaw = sliderBinding?.key ? this.state[sliderBinding.key] : undefined;
         if (initialRaw !== undefined && initialRaw !== null) {
             input.value = this._reverseScale(Number(initialRaw), sliderMin, sliderMax, sOutputMin, sOutputMax, sScaleToFull);
@@ -1381,8 +1381,8 @@ class PanelApp {
         el.appendChild(wrapper);
         if (valueDisplay) el.appendChild(valueDisplay);
 
-        // Variable binding (two-way) or value binding (read-only)
-        const valueBinding = (element.bindings && element.bindings.variable) || (element.bindings && element.bindings.value);
+        // Value binding (read; two-way when show.value.write_back)
+        const valueBinding = element.bindings?.show?.value;
         if (valueBinding) {
             this.bindings.push({
                 type: 'slider_value',
@@ -1461,8 +1461,8 @@ class PanelApp {
         el.appendChild(select);
         this.applyStyle(el, this.getThemedStyle(element.type, element.style));
 
-        // Variable binding (two-way) or value binding (read-only)
-        const valueBinding = (element.bindings && element.bindings.variable) || (element.bindings && element.bindings.value);
+        // Value binding (read; two-way when show.value.write_back)
+        const valueBinding = element.bindings?.show?.value;
         if (valueBinding) {
             this.bindings.push({
                 type: 'select_value',
@@ -1506,7 +1506,7 @@ class PanelApp {
         el.appendChild(input);
         this.applyStyle(el, this.getThemedStyle(element.type, element.style));
 
-        const valueBinding = (element.bindings && element.bindings.variable) || (element.bindings && element.bindings.value);
+        const valueBinding = element.bindings?.show?.value;
         if (valueBinding) {
             this.bindings.push({
                 type: 'text_input_value',
@@ -1603,12 +1603,12 @@ class PanelApp {
         el.addEventListener('touchstart', onPress);
         el.addEventListener('touchend', onRelease, { passive: false });
 
-        if (element.bindings && element.bindings.feedback) {
+        if (element.bindings?.show?.look) {
             this.bindings.push({
                 type: 'feedback',
                 element: el,
                 elementDef: element,
-                binding: element.bindings.feedback,
+                binding: element.bindings.show.look,
             });
         }
 
@@ -1652,7 +1652,7 @@ class PanelApp {
         let _lastSelVal = undefined;
         const renderItems = (items) => {
             // Skip full re-render if items and selection haven't changed
-            const selBinding = element.bindings?.selected;
+            const selBinding = element.bindings?.show?.value;
             const selKey = selBinding?.key;
             const currentSelVal = selKey ? this.state[selKey] : undefined;
             const itemsJson = JSON.stringify(items);
@@ -1719,7 +1719,7 @@ class PanelApp {
         this.elementMap[element.id] = { el, elementDef: element };
 
         // State-driven items binding
-        const itemsBinding = element.bindings?.items;
+        const itemsBinding = element.bindings?.show?.items;
         if (itemsBinding) {
             this.bindings.push({
                 type: 'list_items',
@@ -1730,8 +1730,8 @@ class PanelApp {
             });
         }
 
-        // Selection binding
-        const selBinding = element.bindings?.selected;
+        // Selection binding (the list's value)
+        const selBinding = element.bindings?.show?.value;
         if (selBinding) {
             this.bindings.push({
                 type: 'list_selected',
@@ -1812,7 +1812,7 @@ class PanelApp {
         // otherwise clicking them sends a route command the engine has no action
         // for. The Programmer surfaces a warning next to "Show Mute" when this
         // gate is keeping the buttons hidden.
-        const showMute = config.show_mute !== false && !!element.bindings?.mute_route;
+        const showMute = config.show_mute !== false && !!element.bindings?.do?.mute_route;
         // Merge theme element_defaults so crosspoint colors come from the
         // theme, not just per-element overrides.
         const style = this.getThemedStyle('matrix', element.style);
@@ -1902,7 +1902,7 @@ class PanelApp {
                         output: outputIdx,
                     });
                     // Audio follow video
-                    if (config.audio_follow_video && element.bindings?.audio_route) {
+                    if (config.audio_follow_video && element.bindings?.do?.audio_route) {
                         this.send({
                             type: 'ui.route',
                             element_id: element.id,
@@ -1957,7 +1957,7 @@ class PanelApp {
                         });
                         // Audio follow video: also send audio-mute when AFV is on
                         // and the element has an audio_mute_route binding.
-                        if (config.audio_follow_video && element.bindings?.audio_mute_route) {
+                        if (config.audio_follow_video && element.bindings?.do?.audio_mute_route) {
                             this.send({
                                 type: 'ui.route',
                                 element_id: element.id,
@@ -2067,7 +2067,7 @@ class PanelApp {
                             input: i + 1,
                             output: o + 1,
                         });
-                        if (config.audio_follow_video && element.bindings?.audio_route) {
+                        if (config.audio_follow_video && element.bindings?.do?.audio_route) {
                             this.send({
                                 type: 'ui.route',
                                 element_id: element.id,
@@ -2119,7 +2119,7 @@ class PanelApp {
                                     this.send({ type: 'ui.route', element_id: element.id, input: dragStartInput, output: dropOutput });
                                     // Audio follow video: mirror the click handler so the drag
                                     // gesture and tap gesture behave the same with AFV on.
-                                    if (config.audio_follow_video && element.bindings?.audio_route) {
+                                    if (config.audio_follow_video && element.bindings?.do?.audio_route) {
                                         this.send({
                                             type: 'ui.route',
                                             element_id: element.id,
@@ -2185,7 +2185,7 @@ class PanelApp {
                         this.send({ type: 'ui.route', element_id: element.id, output: outputIdx, mute: !isMuted });
                         // Audio follow video: also send audio-mute when AFV is on
                         // and the element has an audio_mute_route binding.
-                        if (config.audio_follow_video && element.bindings?.audio_mute_route) {
+                        if (config.audio_follow_video && element.bindings?.do?.audio_mute_route) {
                             this.send({ type: 'ui.route', element_id: element.id, output: outputIdx, mute: !isMuted, audio: true });
                         }
                     });
@@ -2425,12 +2425,12 @@ class PanelApp {
         this.elementMap[element.id] = { el, elementDef: element };
 
         // Value binding
-        if (element.bindings && element.bindings.value) {
+        if (element.bindings?.show?.value) {
             this.bindings.push({
                 type: 'gauge_value',
                 element: el,
                 elementDef: element,
-                binding: element.bindings.value,
+                binding: element.bindings.show.value,
                 _svg: { fgPath, valueText, startAngle, endAngle, radius, cx, cy, min, max, unit, gaugeColor, zones, showValue, arcPath: arcPath, polarToCart },
             });
         }
@@ -2532,12 +2532,12 @@ class PanelApp {
         this.elementMap[element.id] = { el, elementDef: element };
 
         // Value binding
-        if (element.bindings && element.bindings.value) {
+        if (element.bindings?.show?.value) {
             this.bindings.push({
                 type: 'level_meter_value',
                 element: el,
                 elementDef: element,
-                binding: element.bindings.value,
+                binding: element.bindings.show.value,
                 _meter: { segments, min, max, bar, showPeak, peakValue: -Infinity, peakTime: 0, peakHoldMs: style.peak_hold_ms || 1500 },
             });
         }
@@ -2685,7 +2685,7 @@ class PanelApp {
         }
 
         // Position handle — initial value from state or 0
-        const valueBinding = element.bindings?.value;
+        const valueBinding = element.bindings?.show?.value;
         let currentValue = 0;
         if (valueBinding?.key) {
             const sv = this.state[valueBinding.key];
@@ -2952,7 +2952,7 @@ class PanelApp {
                     // matching the builder help text. Both are validated as dates
                     // so a non-ISO / garbage value renders the placeholder, not
                     // NaN:NaN:NaN.
-                    const key = element.bindings?.value?.key || element.start_key;
+                    const key = element.bindings?.show?.value?.key || element.start_key;
                     const stateVal = key ? this.state[key] : null;
                     const targetStr = (stateVal !== undefined && stateVal !== null && stateVal !== '')
                         ? stateVal
@@ -3563,7 +3563,7 @@ class PanelApp {
     _updateMacroBusyState(macroId) {
         // Apply or remove busy state on buttons whose press binding triggers this macro
         for (const [elemId, entry] of Object.entries(this.elementMap)) {
-            const pressActions = entry.elementDef?.bindings?.press;
+            const pressActions = entry.elementDef?.bindings?.do?.press;
             if (!pressActions) continue;
             const actions = Array.isArray(pressActions) ? pressActions : [pressActions];
             const referencesMacro = actions.some(a => a.action === 'macro' && a.macro === macroId);
@@ -3754,7 +3754,7 @@ class PanelApp {
                 // Hand display back to a visible_when binding if one governs this
                 // element (it re-asserts on the next evaluation); otherwise
                 // restore the rendered base.
-                el.style.display = elementDef?.bindings?.visible_when ? '' : base.display;
+                el.style.display = elementDef?.bindings?.show?.visible_when ? '' : base.display;
                 applied.delete('visible');
             }
         }

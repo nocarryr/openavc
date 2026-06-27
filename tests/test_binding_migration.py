@@ -125,6 +125,23 @@ def test_empty_action_slot_dropped():
     assert "do" not in out
 
 
+def test_matrix_presets_carried_over():
+    # Matrix preset buttons (a list of {name, macro}) are element config, not a
+    # show/do binding; they are preserved so a migrated matrix keeps its bar.
+    presets = [{"name": "All HDMI 1", "macro": "m_all_1"}, {"name": "Off", "macro": "m_off"}]
+    out = _migrate_bindings_0_6_to_0_7({
+        "route": [{"action": "device.command", "device": "m", "command": "route", "params": {}}],
+        "presets": presets,
+    })
+    assert out["presets"] == presets
+    assert "route" in out["do"]
+
+
+def test_empty_presets_dropped():
+    out = _migrate_bindings_0_6_to_0_7({"presets": []})
+    assert "presets" not in out
+
+
 # --- whole-project / chain ----------------------------------------------
 
 def test_master_elements_are_migrated():
