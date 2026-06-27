@@ -809,3 +809,62 @@ def test_type_from_sibling_must_be_child_schema_cascade():
     }))
     assert any("must itself be an options_from child_schema cascade" in e
                for e in errors)
+
+
+# --- Param free-text validators (§69 Phase 3) ---
+#
+# A free-text param can declare `pattern` (a regex the value must match) and
+# numeric min/max. validate_driver_definition compiles the pattern (rejecting a
+# bad or ReDoS-prone one) and sanity-checks the bounds, so the author sees a
+# bad declaration at load instead of a surprise at command time.
+
+
+def test_param_pattern_accepted():
+    errors = validate_driver_definition(_def_with_command({
+        "host": {"type": "string", "pattern": r"^\d{1,3}(\.\d{1,3}){3}$"},
+        "level": {"type": "integer", "min": 0, "max": 100},
+    }))
+    assert errors == []
+
+
+def test_param_uncompilable_pattern_rejected():
+    errors = validate_driver_definition(_def_with_command({
+        "host": {"type": "string", "pattern": "([0-9"},  # unbalanced group
+    }))
+    assert any("pattern" in e and "host" in e for e in errors)
+
+
+def test_param_redos_pattern_rejected():
+    errors = validate_driver_definition(_def_with_command({
+        "host": {"type": "string", "pattern": "(a+)+$"},  # catastrophic
+    }))
+    assert any("pattern" in e and "host" in e for e in errors)
+
+
+def test_param_inverted_min_max_rejected():
+    errors = validate_driver_definition(_def_with_command({
+        "level": {"type": "integer", "min": 100, "max": 0},
+    }))
+    assert any("min" in e and "max" in e and "level" in e for e in errors)
+
+
+def test_param_non_numeric_bound_rejected():
+    errors = validate_driver_definition(_def_with_command({
+        "level": {"type": "integer", "min": "low"},
+    }))
+    assert any("min must be a number" in e for e in errors)
+
+
+def test_param_pattern_validated_on_actions():
+    driver = _def_with_command({})
+    driver["actions"] = [
+        {
+            "id": "bad_action",
+            "kind": "command",
+            "command": "do_thing",
+            "label": "Bad",
+            "params": {"host": {"type": "string", "pattern": "([0-9"}},
+        },
+    ]
+    errors = validate_driver_definition(driver)
+    assert any("actions[0]" in e and "pattern" in e for e in errors)

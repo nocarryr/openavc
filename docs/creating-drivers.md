@@ -135,7 +135,7 @@ Order matters here. Build them in the order they appear:
 - **HTTP**: method, path, body, headers, query params. Every field supports `{placeholders}`.
 - **OSC**: address + a typed argument list (`f`/`i`/`s`/`h`/`d`/`T`/`F`/`N`).
 
-**Parameters** for each command let users fill in what to send. Each parameter has a type, optional required flag, label, help, default, and (numeric) min/max bounds or (enum) allowed values.
+**Parameters** for each command let users fill in what to send. Each parameter has a type, optional required flag, label, help, default, and (numeric) min/max bounds, (enum) allowed values, or (free text) a `pattern` regex the value must match.
 
 **Escape sequences** in command strings: `\r`, `\n`, `\t`, `\\`, `\xHH` (hex byte, e.g. `\x1B` for ESC).
 
@@ -656,6 +656,22 @@ set_component_control:
     control:   { type: string, required: true, options_from: { param: component, source: child_schema } }
     value:     { type: string, required: true, type_from: { param: control } }   # follows the picked control's type
 ```
+
+**Forgiving free-text.** For a value that genuinely can't be listed, keep it a text box but constrain its shape so a typo can't silently go on the wire:
+
+- `min` / `max` on an `integer`/`number` parameter bound the value. Out-of-range values are rejected at command time, and the IDE shows an inline error and blocks the send/save.
+- `pattern` is a regex the value must fully match — a shape check for an IP, hostname, or fixed-length ID. Same enforcement, runtime and IDE.
+- Leading and trailing whitespace is trimmed before the value is sent.
+
+```yaml
+connect_host:
+  send: "CONNECT {host}\r"
+  params:
+    host:  { type: string, label: Host, pattern: '^\d{1,3}(\.\d{1,3}){3}$' }   # dotted-quad IPv4
+    level: { type: integer, label: Level, min: 0, max: 100 }
+```
+
+These constraints are checked by the runtime, so they hold no matter how the command is sent (Send Command, a macro, the API). The IDE mirrors them as you author so you catch a bad value before sending.
 
 #### `quick_actions` and `actions` (Quick Action buttons)
 

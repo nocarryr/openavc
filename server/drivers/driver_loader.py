@@ -70,7 +70,9 @@ def _validate_param_option_providers(
     """Validate the param-picker option/type providers (§69) on a param map:
     ``options_state`` / ``options_source`` (state-key lists), ``options_from``
     (cascade off a sibling param), and ``type_from`` (take the input type from a
-    sibling cascade's chosen control). Authoring-time aids — the runtime still
+    sibling cascade's chosen control). Also validates the Phase 3 free-text
+    aids — a ``pattern`` regex (compiles + isn't ReDoS-prone) and sane
+    ``min``/``max`` bounds. Authoring-time aids — the runtime still
     coerces/validates the submitted value — but a typo here silently leaves a
     free-text box, so flag it at load.
     """
@@ -79,6 +81,30 @@ def _validate_param_option_providers(
     for pname, pdef in params.items():
         if not isinstance(pdef, dict):
             continue
+
+        # Phase 3: a free-text param can declare a `pattern` (shape check) and
+        # numeric min/max. Validate them at load so a bad regex or inverted
+        # range errors here, not at command time.
+        pattern = pdef.get("pattern")
+        if pattern is not None:
+            err = _regex_redos_error(f"{where} param '{pname}': pattern", pattern)
+            if err:
+                errors.append(err)
+        mn, mx = pdef.get("min"), pdef.get("max")
+        for bound_name, bound in (("min", mn), ("max", mx)):
+            if bound is not None and not isinstance(bound, (int, float)):
+                errors.append(
+                    f"{where} param '{pname}': {bound_name} must be a number"
+                )
+        if (
+            isinstance(mn, (int, float))
+            and isinstance(mx, (int, float))
+            and mn > mx
+        ):
+            errors.append(
+                f"{where} param '{pname}': min ({mn}) must be <= max ({mx})"
+            )
+
         for key in ("options_state", "options_source"):
             val = pdef.get(key)
             if val is not None and not (isinstance(val, str) and val):

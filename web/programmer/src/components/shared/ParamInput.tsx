@@ -7,9 +7,11 @@ import type {
   DriverParamDef,
 } from "../../api/types";
 import { useConnectionStore } from "../../store/connectionStore";
+import { InlineError } from "./InlineError";
 import { ParamCombobox } from "./ParamCombobox";
 import { childSchemaOptions, findChildByValue, parseStateOptionList } from "./paramOptions";
 import type { ParamOption } from "./paramOptions";
+import { validateParam } from "./paramValidation";
 import { VariableKeyPicker } from "./VariableKeyPicker";
 
 /** The widget for a single command/action parameter — the part that varies by
@@ -353,10 +355,25 @@ export function ParamInput({
     );
   }
 
+  // Authoring-time validation: surface a clear inline error for a bad literal
+  // value (out of min/max range, wrong number, pattern mismatch) instead of
+  // letting it submit silently. The runtime re-validates regardless — this just
+  // catches it earlier. Dynamic refs and empty values return null (not checked
+  // here). Routed through ParamInput so every surface gets it once.
+  const error = validateParam(def, value);
+
   return (
-    <div style={rowStyle}>
-      {widget}
-      {toggle}
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, ...style }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        {widget}
+        {toggle}
+      </div>
+      {error && (
+        <InlineError
+          message={error}
+          style={{ padding: "2px 8px", marginTop: 0, fontSize: 11, borderRadius: 4 }}
+        />
+      )}
     </div>
   );
 }

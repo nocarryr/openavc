@@ -8,6 +8,7 @@ import { useLogStore } from "../../store/logStore";
 import * as api from "../../api/restClient";
 import type { BridgePort, DeviceConfig, DeviceInfo, DeviceSettingValue, DriverParamDef } from "../../api/types";
 import { ParamInput } from "../../components/shared/ParamInput";
+import { hasInvalidParams } from "../../components/shared/paramValidation";
 import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins/PluginExtensions";
 import { findDeviceReferences, validateSettingValue } from "./deviceUtils";
 import { ChildEntities } from "./ChildEntities";
@@ -188,7 +189,12 @@ export function DeviceDetail({
 
   // Get param fields for selected command
   const commandDef = commands[selectedCommand] as Record<string, unknown> | undefined;
-  const paramKeys = Object.keys((commandDef?.params as Record<string, unknown>) ?? {});
+  const commandParamDefs =
+    (commandDef?.params as Record<string, Partial<DriverParamDef>>) ?? {};
+  const paramKeys = Object.keys(commandParamDefs);
+  // Block Send on an invalid literal param (out of range / pattern mismatch) —
+  // the per-field inline error says which. Authoring aid; the runtime gates too.
+  const sendBlocked = hasInvalidParams(commandParamDefs, commandParams);
 
   // Bridge: when this device's driver advertises bridge ports, it's a bridge
   // other devices route through. The card below lists each port + what's bound
@@ -738,15 +744,15 @@ export function DeviceDetail({
                 />
                 <button
                   onClick={handleSendCommand}
-                  disabled={!selectedCommand || sending}
+                  disabled={!selectedCommand || sending || sendBlocked}
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: "var(--space-xs)",
                     padding: "var(--space-sm) var(--space-lg)",
                     borderRadius: "var(--border-radius)",
-                    background: selectedCommand ? "var(--accent-bg)" : "var(--bg-hover)",
-                    color: selectedCommand ? "var(--text-on-accent)" : "var(--text-muted)",
+                    background: selectedCommand && !sendBlocked ? "var(--accent-bg)" : "var(--bg-hover)",
+                    color: selectedCommand && !sendBlocked ? "var(--text-on-accent)" : "var(--text-muted)",
                     opacity: sending ? 0.6 : 1,
                   }}
                 >

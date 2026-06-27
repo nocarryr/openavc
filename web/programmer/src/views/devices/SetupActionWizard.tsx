@@ -10,6 +10,7 @@ import {
   hasMissingRequired,
   seedParamValues,
 } from "./actionParamFields";
+import { hasInvalidParams } from "../../components/shared/paramValidation";
 
 type Phase = "input" | "running" | "done" | "error";
 
@@ -49,7 +50,9 @@ export function SetupActionWizard({
   useEffect(() => () => unsubRef.current?.(), []);
 
   const hasParams = Object.keys(action.params).length > 0;
-  const missingRequired = hasMissingRequired(action.params, values);
+  const blocked =
+    hasMissingRequired(action.params, values) ||
+    hasInvalidParams(action.params, values);
   const confirmNote = typeof action.confirm === "string" ? action.confirm : null;
 
   const startRun = useCallback(async () => {
@@ -138,10 +141,10 @@ export function SetupActionWizard({
             </button>
             <button
               onClick={startRun}
-              disabled={missingRequired}
+              disabled={blocked}
               style={{
-                ...btnStyle(missingRequired ? "muted" : "primary"),
-                color: missingRequired ? "var(--text-muted)" : "var(--text-on-accent)",
+                ...btnStyle(blocked ? "muted" : "primary"),
+                color: blocked ? "var(--text-muted)" : "var(--text-on-accent)",
               }}
             >
               Start

@@ -19,6 +19,7 @@ from server.api.models import (
 )
 from server.core.project_loader import ChildEntityConfig, DeviceConfig, save_project_async
 from server.core.project_migration import CONNECTION_FIELDS
+from server.drivers.base import CommandParamError
 
 router = APIRouter()
 
@@ -435,6 +436,10 @@ async def send_command(device_id: str, body: CommandRequest) -> dict[str, Any]:
             device_id, body.command, body.params
         )
         return {"success": True, "result": result}
+    except CommandParamError as e:
+        # A bad parameter value (out of range / wrong type / pattern mismatch) —
+        # surface the actionable message, not a misleading "device not found".
+        raise _api_error(400, str(e), e)
     except ValueError as e:
         raise _api_error(404, f"Device '{device_id}' not found", e)
     except ConnectionError as e:

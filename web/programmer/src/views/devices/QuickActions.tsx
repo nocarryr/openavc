@@ -12,6 +12,7 @@ import {
   hasMissingRequired,
   seedParamValues,
 } from "./actionParamFields";
+import { hasInvalidParams } from "../../components/shared/paramValidation";
 import { SetupActionWizard } from "./SetupActionWizard";
 
 /**
@@ -209,6 +210,8 @@ function ActionParamDialog({
   );
 
   const missingRequired = hasMissingRequired(action.params, values);
+  const invalid = hasInvalidParams(action.params, values);
+  const blocked = missingRequired || invalid;
   const confirmNote = typeof action.confirm === "string" ? action.confirm : null;
 
   return (
@@ -245,12 +248,12 @@ function ActionParamDialog({
         </button>
         <button
           onClick={() => onRun(buildParams(action.params, values))}
-          disabled={running || missingRequired}
+          disabled={running || blocked}
           style={{
             padding: "var(--space-sm) var(--space-lg)",
             borderRadius: "var(--border-radius)",
-            background: missingRequired ? "var(--bg-hover)" : "var(--accent-bg)",
-            color: missingRequired ? "var(--text-muted)" : "var(--text-on-accent)",
+            background: blocked ? "var(--bg-hover)" : "var(--accent-bg)",
+            color: blocked ? "var(--text-muted)" : "var(--text-on-accent)",
             display: "flex",
             alignItems: "center",
             gap: "var(--space-xs)",

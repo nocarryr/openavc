@@ -441,8 +441,15 @@ export interface DriverParamDef {
   // write `help` (canonical) when introducing new params.
   description?: string;
   // Numeric bounds — only meaningful when type is integer or number.
+  // Enforced at command time by the runtime (the IDE also flags violations as
+  // an authoring aid).
   min?: number;
   max?: number;
+  // Regex (full-match) a free-text value must satisfy — a shape check for
+  // values that can't be enumerated (IP, hostname, fixed-length ID). The
+  // runtime validates it at command time; the IDE shows an inline error while
+  // authoring. (§69 Phase 3.)
+  pattern?: string;
   // Default value — type-coerced by the runtime against `type`.
   default?: unknown;
   // Allowed values for type='enum' — required for that type.
@@ -825,6 +832,7 @@ export interface ActionParam {
   values?: string[];
   min?: number;
   max?: number;
+  pattern?: string;
   default?: unknown;
   secret?: boolean;
   child_type?: string;

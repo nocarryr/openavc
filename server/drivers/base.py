@@ -30,6 +30,18 @@ from server.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+
+class CommandParamError(ValueError):
+    """A command parameter value failed the driver's declared validation
+    (wrong type, out of min/max range, or not matching a declared pattern).
+
+    Distinct from a generic ValueError so the API can map it to a 400 (bad
+    request) with the message instead of a misleading 404 "device not found".
+    Subclasses ValueError so existing ``except ValueError`` handlers still
+    catch it. The message is user-facing and actionable — surface it verbatim.
+    """
+
+
 # String child local IDs are embedded directly in a flat state key
 # (device.<id>.<type>.<local_id>.<prop>) and matched by fnmatch glob
 # subscriptions, so they're restricted to this charset — no dots (the key
