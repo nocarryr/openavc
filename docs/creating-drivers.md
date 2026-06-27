@@ -640,6 +640,7 @@ route_decoder:
 - `options_state: <key>` — a dropdown sourced from this device's state. The IDE reads `device.<id>.<key>`, whose value is a JSON-encoded list (plain strings or `{value, label}` objects), and offers it. The driver publishes the list as a state variable and keeps it current (snapshot banks, named controls, router inputs, mixer channels — anything it enumerates at runtime).
 - `options_source: <key>` — the same, but an absolute state key read as-is. Use `options_state` for per-device lists.
 - `options_from: { param: <sibling>, source: child_schema }` — a *cascading* dropdown: the options follow another parameter's choice. With `source: child_schema`, picking a component in a sibling `child_id` parameter populates this one with that component's controls. This is how a "control name" follows the chosen component instead of being free-typed.
+- `type_from: { param: <sibling> }` — make a parameter's *input type* follow the control chosen in a sibling cascade. The named sibling is itself an `options_from: { source: child_schema }` parameter; once a control is picked there, this parameter renders as that control's type (a number spinner with its range, a Yes/No for a boolean, etc.) instead of plain text. Until a control is picked, it stays a forgiving text box.
 
 ```yaml
 recall_snapshot:
@@ -647,6 +648,13 @@ recall_snapshot:
   send: "RECALL {bank}\r"
   params:
     bank: { type: string, required: true, label: Snapshot Bank, options_state: snapshot_banks }
+
+set_component_control:
+  label: Set Component Control
+  params:
+    component: { type: child_id, child_type: component, required: true }
+    control:   { type: string, required: true, options_from: { param: component, source: child_schema } }
+    value:     { type: string, required: true, type_from: { param: control } }   # follows the picked control's type
 ```
 
 #### `quick_actions` and `actions` (Quick Action buttons)

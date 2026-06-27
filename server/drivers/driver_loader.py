@@ -67,11 +67,12 @@ _PARAM_OPTIONS_FROM_SOURCES = frozenset({"child_schema"})
 def _validate_param_option_providers(
     where: str, params: Any, errors: list[str],
 ) -> None:
-    """Validate the param-picker option providers (§69) on a param map:
-    ``options_state`` / ``options_source`` (state-key lists) and
-    ``options_from`` (cascade off a sibling param). Authoring-time aids — the
-    runtime still coerces/validates the submitted value — but a typo here
-    silently leaves a free-text box, so flag it at load.
+    """Validate the param-picker option/type providers (§69) on a param map:
+    ``options_state`` / ``options_source`` (state-key lists), ``options_from``
+    (cascade off a sibling param), and ``type_from`` (take the input type from a
+    sibling cascade's chosen control). Authoring-time aids — the runtime still
+    coerces/validates the submitted value — but a typo here silently leaves a
+    free-text box, so flag it at load.
     """
     if not isinstance(params, dict):
         return
@@ -85,38 +86,71 @@ def _validate_param_option_providers(
                     f"{where} param '{pname}': {key} must be a non-empty string"
                 )
         ofrom = pdef.get("options_from")
-        if ofrom is None:
-            continue
-        if not isinstance(ofrom, dict):
-            errors.append(
-                f"{where} param '{pname}': options_from must be a mapping "
-                f"with 'param' and 'source'"
-            )
-            continue
-        source = ofrom.get("source")
-        if source not in _PARAM_OPTIONS_FROM_SOURCES:
-            errors.append(
-                f"{where} param '{pname}': options_from.source must be one of "
-                f"{sorted(_PARAM_OPTIONS_FROM_SOURCES)}"
-            )
-        ref = ofrom.get("param")
-        if not (isinstance(ref, str) and ref):
-            errors.append(
-                f"{where} param '{pname}': options_from.param must name a "
-                f"sibling param"
-            )
-        elif ref not in params:
-            errors.append(
-                f"{where} param '{pname}': options_from.param '{ref}' is not a "
-                f"param of this command"
-            )
-        elif source == "child_schema":
-            sibling = params.get(ref)
-            if isinstance(sibling, dict) and sibling.get("type") != "child_id":
+        if ofrom is not None:
+            if not isinstance(ofrom, dict):
                 errors.append(
-                    f"{where} param '{pname}': options_from.param '{ref}' must "
-                    f"be a child_id param for source 'child_schema'"
+                    f"{where} param '{pname}': options_from must be a mapping "
+                    f"with 'param' and 'source'"
                 )
+            else:
+                source = ofrom.get("source")
+                if source not in _PARAM_OPTIONS_FROM_SOURCES:
+                    errors.append(
+                        f"{where} param '{pname}': options_from.source must be "
+                        f"one of {sorted(_PARAM_OPTIONS_FROM_SOURCES)}"
+                    )
+                ref = ofrom.get("param")
+                if not (isinstance(ref, str) and ref):
+                    errors.append(
+                        f"{where} param '{pname}': options_from.param must name "
+                        f"a sibling param"
+                    )
+                elif ref not in params:
+                    errors.append(
+                        f"{where} param '{pname}': options_from.param '{ref}' is "
+                        f"not a param of this command"
+                    )
+                elif source == "child_schema":
+                    sibling = params.get(ref)
+                    if isinstance(sibling, dict) \
+                            and sibling.get("type") != "child_id":
+                        errors.append(
+                            f"{where} param '{pname}': options_from.param "
+                            f"'{ref}' must be a child_id param for source "
+                            f"'child_schema'"
+                        )
+
+        tfrom = pdef.get("type_from")
+        if tfrom is not None:
+            if not isinstance(tfrom, dict):
+                errors.append(
+                    f"{where} param '{pname}': type_from must be a mapping with "
+                    f"'param'"
+                )
+                continue
+            ref = tfrom.get("param")
+            if not (isinstance(ref, str) and ref):
+                errors.append(
+                    f"{where} param '{pname}': type_from.param must name a "
+                    f"sibling param"
+                )
+            elif ref not in params:
+                errors.append(
+                    f"{where} param '{pname}': type_from.param '{ref}' is not a "
+                    f"param of this command"
+                )
+            else:
+                # The named sibling must itself be a child_schema cascade — that
+                # is how type_from finds the component + control to read the
+                # type from.
+                sib = params.get(ref)
+                sib_from = sib.get("options_from") if isinstance(sib, dict) else None
+                if not (isinstance(sib_from, dict)
+                        and sib_from.get("source") == "child_schema"):
+                    errors.append(
+                        f"{where} param '{pname}': type_from.param '{ref}' must "
+                        f"itself be an options_from child_schema cascade"
+                    )
 
 
 # Required top-level fields in a driver definition

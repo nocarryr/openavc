@@ -468,6 +468,14 @@ export interface DriverParamDef {
   options_state?: string;
   options_source?: string;
   options_from?: ParamOptionsFrom;
+  // Derive this param's input TYPE from a sibling param's chosen value (a
+  // "field follows the selection" cascade). `{ param }` names a sibling that
+  // itself cascades off a child_id (`options_from: { source: "child_schema" }`);
+  // this field then takes the type/min/max of the control chosen there — e.g. a
+  // `value` field becomes a number spinner (with the gain's range) when `gain`
+  // is picked, or Yes/No when `mute` is picked. Falls back to the declared
+  // `type` until the sibling is chosen. Authoring aid; runtime still validates.
+  type_from?: ParamTypeFrom;
 }
 
 export interface ParamOptionsFrom {
@@ -476,6 +484,12 @@ export interface ParamOptionsFrom {
   // Where the options come from. Only "child_schema" is supported today (the
   // chosen child's per-instance control schema).
   source: string;
+}
+
+export interface ParamTypeFrom {
+  // The sibling param (a child_schema `options_from` cascade) whose chosen
+  // control supplies this field's type/min/max.
+  param: string;
 }
 
 export interface DriverResponseMapping {
@@ -818,6 +832,7 @@ export interface ActionParam {
   options_state?: string;
   options_source?: string;
   options_from?: ParamOptionsFrom;
+  type_from?: ParamTypeFrom;
 }
 
 /** A driver-declared action, resolved by the backend (quick_actions sugar

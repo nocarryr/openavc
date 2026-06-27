@@ -764,3 +764,48 @@ def test_options_from_validated_on_actions():
     ]
     errors = validate_driver_definition(driver)
     assert any("actions[0]" in e and "options_from" in e for e in errors)
+
+
+def _def_with_cascade_chain(value_params: dict) -> dict:
+    """A command with component (child_id) -> control (child_schema cascade),
+    plus a `value` param under test (merged in)."""
+    params = {
+        "component": {"type": "child_id", "child_type": "component"},
+        "control": {
+            "type": "string",
+            "options_from": {"param": "component", "source": "child_schema"},
+        },
+    }
+    params.update(value_params)
+    return _def_with_command(params)
+
+
+def test_type_from_accepted():
+    errors = validate_driver_definition(_def_with_cascade_chain({
+        "value": {"type": "string", "type_from": {"param": "control"}},
+    }))
+    assert errors == []
+
+
+def test_type_from_must_be_mapping():
+    errors = validate_driver_definition(_def_with_cascade_chain({
+        "value": {"type": "string", "type_from": "control"},
+    }))
+    assert any("type_from must be a mapping" in e for e in errors)
+
+
+def test_type_from_unknown_sibling_rejected():
+    errors = validate_driver_definition(_def_with_cascade_chain({
+        "value": {"type": "string", "type_from": {"param": "nope"}},
+    }))
+    assert any("type_from.param 'nope' is not a" in e for e in errors)
+
+
+def test_type_from_sibling_must_be_child_schema_cascade():
+    # `control` here is plain text (no options_from), so type_from can't chain.
+    errors = validate_driver_definition(_def_with_command({
+        "control": {"type": "string"},
+        "value": {"type": "string", "type_from": {"param": "control"}},
+    }))
+    assert any("must itself be an options_from child_schema cascade" in e
+               for e in errors)

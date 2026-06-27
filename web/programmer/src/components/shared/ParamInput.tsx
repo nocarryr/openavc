@@ -1,9 +1,14 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import * as api from "../../api/restClient";
-import type { ChildEntityEntry, DriverParamDef } from "../../api/types";
+import type {
+  ChildEntityEntry,
+  ChildEntityStateVarDef,
+  DriverParamDef,
+} from "../../api/types";
 import { useConnectionStore } from "../../store/connectionStore";
-import { childSchemaOptions, parseStateOptionList } from "./paramOptions";
+import { ParamCombobox } from "./ParamCombobox";
+import { childSchemaOptions, findChildByValue, parseStateOptionList } from "./paramOptions";
 import type { ParamOption } from "./paramOptions";
 import { VariableKeyPicker } from "./VariableKeyPicker";
 
@@ -93,14 +98,29 @@ export function ParamInput({
   const optionsFrom =
     def.options_from?.source === "child_schema" ? def.options_from : undefined;
 
+  // type_from: this field takes its input type from the control chosen in a
+  // sibling param (which itself cascades off a child_id `component`). Resolve
+  // the chain: type_from.param -> its options_from.param (the component) ->
+  // that param's child_type (the children we need to read the schema from).
+  const typeFrom = def.type_from?.param ? def.type_from : undefined;
+  const tfControlDef = typeFrom ? params?.[typeFrom.param] : undefined;
+  const tfComponentParam =
+    tfControlDef?.options_from?.source === "child_schema"
+      ? tfControlDef.options_from.param
+      : undefined;
+  const tfChildType = tfComponentParam
+    ? params?.[tfComponentParam]?.child_type
+    : undefined;
+
   // The child type whose live children this field needs:
   //  - a child_id field needs its own declared child_type;
-  //  - a cascading field needs the sibling child_id param's child_type.
+  //  - a cascading (options_from) field needs the sibling child_id's child_type;
+  //  - a type_from field needs the component child_type to read the control schema.
   const ownChildType = type === "child_id" ? def.child_type : undefined;
   const siblingChildType = optionsFrom
     ? params?.[optionsFrom.param]?.child_type
     : undefined;
-  const fetchChildType = ownChildType ?? siblingChildType;
+  const fetchChildType = ownChildType ?? siblingChildType ?? tfChildType;
 
   // Children register dynamically as the driver discovers them, so fetch fresh
   // per field. `undefined` => still loading.
@@ -133,8 +153,6 @@ export function ParamInput({
   const stateOptionRaw = useConnectionStore((s) =>
     stateOptionKey ? s.liveState[stateOptionKey] : undefined,
   );
-
-  const datalistId = useId();
 
   const rowStyle: CSSProperties = {
     display: "flex",
@@ -194,9 +212,7 @@ export function ParamInput({
         comboOptions = [];
         comboHint = `Pick ${optionsFrom.param} first to list its controls.`;
       } else {
-        const chosen = (children ?? []).find(
-          (c) => String(c.local_id) === sv || c.local_id_padded === sv,
-        );
+        const chosen = findChildByValue(children, sv);
         comboOptions = childSchemaOptions(chosen?.schema);
         if (children !== undefined && !chosen) {
           comboHint = `No "${sv}" found — type the control name.`;
@@ -207,8 +223,25 @@ export function ParamInput({
     comboOptions = parseStateOptionList(stateOptionRaw);
   }
 
+  // Resolve the type_from cascade: the control chosen in the sibling param,
+  // looked up in the chosen component's child schema, supplies this field's
+  // effective type/min/max. Until both are chosen, fall back to the declared
+  // type (a forgiving text box).
+  let typeSpec: ChildEntityStateVarDef | undefined;
+  if (typeFrom && tfComponentParam) {
+    const comp = findChildByValue(children, values?.[tfComponentParam]);
+    const ctrlVal = values?.[typeFrom.param];
+    if (comp?.schema && ctrlVal != null && String(ctrlVal)) {
+      typeSpec = comp.schema[String(ctrlVal)];
+    }
+  }
+  const effType = typeSpec?.type ?? type;
+  const effValues = typeSpec?.values ?? def.values;
+  const effMin = typeSpec?.min ?? def.min;
+  const effMax = typeSpec?.max ?? def.max;
+
   let widget: React.ReactNode;
-  if (type === "enum" && def.values) {
+  if (effType === "enum" && effValues) {
     widget = (
       <select
         value={value}
@@ -216,7 +249,7 @@ export function ParamInput({
         style={{ flex: 1 }}
       >
         {!def.required && <option value="">(none)</option>}
-        {def.values.map((v) => (
+        {effValues.map((v) => (
           <option key={v} value={v}>
             {v}
           </option>
@@ -224,28 +257,26 @@ export function ParamInput({
       </select>
     );
   } else if (comboOptions !== undefined) {
-    const isNumberCombo =
-      type === "integer" || type === "number" || type === "float";
     widget = (
       <div style={{ flex: 1 }}>
-        <input
-          type={isNumberCombo ? "number" : "text"}
-          list={comboOptions.length > 0 ? datalistId : undefined}
-          value={value}
-          min={def.min}
-          max={def.max}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder ?? ""}
-          style={{ width: "100%" }}
-        />
-        {comboOptions.length > 0 && (
-          <datalist id={datalistId}>
-            {comboOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label !== o.value ? o.label : undefined}
-              </option>
-            ))}
-          </datalist>
+        {comboOptions.length > 0 ? (
+          <ParamCombobox
+            value={value}
+            onChange={onChange}
+            options={comboOptions}
+            placeholder={placeholder ?? ""}
+            style={{ width: "100%" }}
+          />
+        ) : (
+          // No options resolved yet (offline device, sibling not picked) —
+          // a plain text box keeps the field forgiving.
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder ?? ""}
+            style={{ width: "100%" }}
+          />
         )}
         {comboHint && (
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
@@ -254,7 +285,7 @@ export function ParamInput({
         )}
       </div>
     );
-  } else if (type === "boolean") {
+  } else if (effType === "boolean") {
     widget = (
       <select
         value={value || "false"}
@@ -297,10 +328,10 @@ export function ParamInput({
     );
   } else {
     const isNumber =
-      type === "integer" || type === "number" || type === "float";
+      effType === "integer" || effType === "number" || effType === "float";
     const numberRange =
-      def.min !== undefined && def.max !== undefined
-        ? `${def.min}-${def.max}`
+      effMin !== undefined && effMax !== undefined
+        ? `${effMin}-${effMax}`
         : undefined;
     widget = (
       <input
@@ -313,8 +344,8 @@ export function ParamInput({
         }
         autoComplete="new-password"
         value={value}
-        min={def.min}
-        max={def.max}
+        min={effMin}
+        max={effMax}
         onChange={(e) => onChange(e.target.value)}
         placeholder={numberRange ?? placeholder ?? ""}
         style={{ flex: 1 }}

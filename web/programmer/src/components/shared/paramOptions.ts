@@ -1,9 +1,23 @@
-import type { ChildEntityStateVarDef } from "../../api/types";
+import type { ChildEntityEntry, ChildEntityStateVarDef } from "../../api/types";
 
 /** One dropdown option: the value sent to the runtime + a human label. */
 export interface ParamOption {
   value: string;
   label: string;
+}
+
+/** Find a child by a sibling param's chosen value — matches the numeric/string
+ *  local_id or its zero-padded form (a `child_id` param stores `String(local_id)`).
+ *  Used by both the option cascade and the value-type cascade. */
+export function findChildByValue(
+  children: ChildEntityEntry[] | undefined,
+  value: unknown,
+): ChildEntityEntry | undefined {
+  const v = value == null ? "" : String(value);
+  if (!v || !children) return undefined;
+  return children.find(
+    (c) => String(c.local_id) === v || c.local_id_padded === v,
+  );
 }
 
 /**
