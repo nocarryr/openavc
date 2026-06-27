@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a problem with OpenAVC
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. The details below help us reproduce and fix it quickly.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem. Include the exact error message if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the Programmer IDE
+        2. Go to ...
+        3. Click ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpenAVC version
+      description: Shown in the Programmer IDE under Settings, or in the system tray tooltip.
+      placeholder: e.g. 0.17.1
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Raspberry Pi OS
+        - Docker
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How did you install OpenAVC?
+      options:
+        - Windows installer
+        - Linux install script
+        - Docker
+        - Raspberry Pi image
+        - Manual / from source
+        - All-in-one appliance
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Paste any relevant log output or error traceback. Server logs are in the Programmer IDE
+        under Logs, and on disk in the data directory (Windows: `C:\ProgramData\OpenAVC`,
+        Linux: `/var/lib/openavc`).
+      render: shell
+    validations:
+      required: false

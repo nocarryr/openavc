@@ -51,8 +51,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Components]
 Name: "server"; Description: "OpenAVC Server"; Types: full compact; Flags: fixed
 Name: "tray"; Description: "System Tray Application"; Types: full
-Name: "service"; Description: "Install as Windows Service (auto-start on boot)"; Types: full
 Name: "shortcuts"; Description: "Desktop and Start Menu shortcuts"; Types: full
+; The Windows service is mandatory (it runs the server at boot, and the tray's
+; Start/Stop/Restart controls drive it). It is not an optional component on
+; purpose: an install without the service leaves the tray unable to start
+; anything. Its files and setup/removal steps below are therefore ungated.
 
 [Files]
 ; Server bundle - always installed unconditionally (server is a fixed/required
@@ -63,11 +66,12 @@ Source: "..\dist\openavc\_internal\*"; DestDir: "{app}\_internal"; Flags: ignore
 ; Tray app bundle (merge into same directory to share DLLs)
 Source: "..\dist\openavc-tray\openavc-tray.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: tray
 Source: "..\dist\openavc-tray\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist; Components: tray
-; NSSM
-Source: "nssm.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: service
-; Service scripts
-Source: "install-service.bat"; DestDir: "{app}"; Flags: ignoreversion; Components: service
-Source: "uninstall-service.bat"; DestDir: "{app}"; Flags: ignoreversion; Components: service
+; NSSM + service scripts - always installed (the service is mandatory, and like
+; the server bundle above, Components:-gating these would let Inno silently skip
+; them on silent upgrades when the registry Inno_SelectedComponents value is empty).
+Source: "nssm.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "install-service.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "uninstall-service.bat"; DestDir: "{app}"; Flags: ignoreversion
 ; Icon
 Source: "openavc.ico"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -82,8 +86,8 @@ Name: "{group}\Uninstall OpenAVC"; Filename: "{uninstallexe}"; Components: short
 Name: "{commonstartup}\OpenAVC Tray"; Filename: "{app}\openavc-tray.exe"; Components: tray
 
 [Run]
-; Install and start service
-Filename: "{app}\install-service.bat"; Parameters: """{app}"" ""{commonappdata}\OpenAVC"""; Flags: runhidden waituntilterminated; Components: service; StatusMsg: "Installing OpenAVC service..."
+; Install and start service (mandatory)
+Filename: "{app}\install-service.bat"; Parameters: """{app}"" ""{commonappdata}\OpenAVC"""; Flags: runhidden waituntilterminated; StatusMsg: "Installing OpenAVC service..."
 ; Launch tray app
 Filename: "{app}\openavc-tray.exe"; Flags: nowait postinstall skipifsilent; Components: tray; Description: "Launch OpenAVC system tray"
 ; Open Programmer IDE in browser
@@ -91,7 +95,7 @@ Filename: "http://localhost:8080/programmer"; Flags: shellexec nowait postinstal
 
 [UninstallRun]
 ; Stop and remove service
-Filename: "{app}\uninstall-service.bat"; Parameters: """{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"; Components: service
+Filename: "{app}\uninstall-service.bat"; Parameters: """{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 ; Kill tray app
 Filename: "taskkill.exe"; Parameters: "/F /IM openavc-tray.exe"; Flags: runhidden; RunOnceId: "KillTray"; Components: tray
 

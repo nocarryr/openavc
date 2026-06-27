@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/open-avc/openavc/discussions
+    about: Ask a question, share a project, or discuss ideas with the community.
+  - name: Documentation
+    url: https://docs.openavc.com
+    about: Setup, drivers, scripting, scheduling, and deployment guides.

@@ -253,14 +253,35 @@ class OpenAVCTray:
         # Open the Programmer IDE Updates view so the user can see the result
         webbrowser.open(f'{self._base_url}/programmer#/updates')
 
+    def _run_service_command(self, command: str) -> None:
+        """Run a service command and surface a dialog if it clearly fails.
+
+        Previously a failed command (e.g. the service isn't installed, or the
+        user declined the elevation prompt) did nothing at all, which looked
+        like the menu item was broken. Now the failure is at least visible.
+        """
+        if _service_command(command):
+            return
+        t = threading.Thread(
+            target=_show_error_dialog,
+            args=(
+                'OpenAVC - Service control failed',
+                f'Could not {command} the OpenAVC service.\n\n'
+                'This needs administrator approval. Try again and accept the '
+                'Windows prompt. If the service is missing, reinstall OpenAVC.',
+            ),
+            daemon=True,
+        )
+        t.start()
+
     def _start_service(self, systray):
-        _service_command('start')
+        self._run_service_command('start')
 
     def _stop_service(self, systray):
-        _service_command('stop')
+        self._run_service_command('stop')
 
     def _restart_service(self, systray):
-        _service_command('restart')
+        self._run_service_command('restart')
 
     def _on_quit(self, systray):
         self._running = False

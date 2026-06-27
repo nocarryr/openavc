@@ -104,7 +104,7 @@ app.add_middleware(
 app.include_router(api_router)
 
 # WebSocket
-app.add_websocket_route("/ws", ws_endpoint)
+app.add_api_websocket_route("/ws", ws_endpoint)
 
 # Static UI (if built)
 # In frozen (PyInstaller) builds, resources are inside sys._MEIPASS.
