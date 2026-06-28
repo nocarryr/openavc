@@ -181,7 +181,7 @@ State key namespaces: `device.<id>.*` (device state), `var.*` (user variables), 
 
 #### Controlling UI Elements from Scripts
 
-You can directly change UI element appearance by setting `ui.*` state keys. These override feedback bindings and take effect immediately on the panel.
+You can directly change UI element appearance by setting `ui.*` state keys. These override Appearance and visibility bindings and take effect immediately on the panel.
 
 ```python
 # Change a button's label and color
@@ -193,7 +193,7 @@ state.set("ui.btn_power.text_color", "#000000")
 state.set("ui.btn_advanced.visible", False)
 state.set("ui.btn_locked.opacity", 0.3)
 
-# Clear an override (reverts to feedback binding or default)
+# Clear an override (reverts to Appearance binding or default)
 state.set("ui.btn_power.label", None)
 ```
 

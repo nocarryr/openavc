@@ -74,7 +74,7 @@ A response turns a reply from the device into a live value you can show on a pan
 - **Has text after**: grab the rest of the line after a prefix. `NAME=Main Stage` sets `name` to `Main Stage`.
 - **Matches (advanced)**: for anything else, write a regular expression and pick the capture group.
 
-The variable appears on the device right away and is usable everywhere as `$device.<id>.<name>`: in macro steps, in triggers, and in UI Builder bindings (pick it from the `$` picker on a command or variable binding). See [Variables and State](variables-and-state.md) for how `$` references work.
+The variable appears on the device right away and is usable everywhere as `$device.<id>.<name>`: in macro steps, in triggers, and in UI Builder bindings (pick it from the `$` picker on a command parameter or a control's **Value** binding). See [Variables and State](variables-and-state.md) for how `$` references work.
 
 ### Polling for live status
 

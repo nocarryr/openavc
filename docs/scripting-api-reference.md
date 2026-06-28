@@ -119,7 +119,7 @@ Scripts can directly control UI element appearance by setting `ui.*` keys:
 | `ui.<element_id>.visible` | `bool` | Show or hide the element |
 | `ui.<element_id>.opacity` | `float` | Set opacity (0.0 to 1.0) |
 
-Set a key to `None` to clear the override and revert to the feedback binding or default.
+Set a key to `None` to clear the override and revert to the Appearance binding or default.
 
 ---
 

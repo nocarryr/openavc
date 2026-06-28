@@ -28,6 +28,10 @@ Keep in mind that device states are always re-polled from hardware when devices 
 
 **Source Binding:** Variables can optionally be *bound* to a device state key. Choose "Bound to state key" in the Source section of a variable's detail panel, select the device state to mirror, and optionally add a value map to translate hardware values into friendly text (e.g., `on` → `Ready`, `warming` → `Warming Up`). This eliminates the need for scripts for simple device-to-variable mirroring.
 
+**Create variables without leaving the editor:** Anywhere you pick a state key -- a Set Variable action, a UI control's **Value** binding, a macro step, a trigger condition -- the picker has a **Create New Variable** option inline. Give it a name, type, and default, and the variable is created and selected in one step, so you can author a binding and the variable it needs together. This is the "pick, don't type" approach used throughout the IDE: you choose keys from a searchable list that shows each one's live value, instead of typing `var.x` by hand and hoping it matches.
+
+**Two-way controls (read and write a variable):** A UI control can both *show* a variable and *change* it. In the UI Builder, set the control's **Shows > Value** to a `var.*` key and check **Two-way (this control can change it)**. Now a slider writes the variable as you drag it, a select writes it when you pick an option, a text field writes it as you type -- and the control still reflects the variable if a macro or script changes it elsewhere. Two-way is available **only for writable `var.*` keys**. You cannot make a control two-way to a `device.*` key: device state is a read-only mirror of what the hardware last reported, and writing it would simply be overwritten on the next poll. To make a control drive a device, read the device value and add a command under **Does** that uses `$value` (see [UI Builder](ui-builder.md)). This is the binding model's one firm rule: never write `device.*` state directly; drive a device with a command.
+
 **Common Variable Patterns:**
 
 | Variable | Type | Purpose |

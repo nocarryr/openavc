@@ -29,7 +29,7 @@ Use the search box at the top of the macro list to filter by name.
 
 The **Device Command** step uses smart dropdowns: after selecting a device, the command dropdown only shows commands defined by that device's driver, with parameter fields that match the driver's command definition. No guessing at command syntax.
 
-The **Group Command** step works the same way but targets a device group instead of a single device. All devices in the group receive the command concurrently. Only commands shared by every device in the group are shown. Offline devices are skipped automatically. Create and manage device groups from the **Groups** tab in the Devices view.
+The **Group Command** step works the same way but targets a device group instead of a single device. All devices in the group receive the command concurrently. Only commands shared by every device in the group are shown, and its parameters use the same smart inputs as a single-device command: a Yes/No selector for boolean parameters, a dropdown for enumerated values, and the **$** toggle for dynamic values. You pick from the driver's choices instead of typing raw values. Offline devices are skipped automatically. Create and manage device groups from the **Groups** tab in the Devices view.
 
 Reorder steps by dragging the grip handle on the left side of each step. Toggle **Stop on Error** in the macro header to halt execution if any step fails (by default, macros continue through errors).
 
@@ -76,6 +76,8 @@ A conditional step checks a state value and runs one set of steps if the conditi
 3. Add steps to the **Then** block (runs when condition is true)
 4. Optionally add steps to the **Else** block (runs when condition is false)
 
+The value field adapts to the key you chose: pick a boolean variable and you get a **true / false** dropdown instead of a text box, so there is no guessing at how to spell the value. This same condition editor is used by **Skip If** guards, **Wait Until** steps, and trigger guard conditions, so the true/false dropdown appears in all of them.
+
 Comparisons automatically handle type differences between device state and your condition value. A device that reports volume as `"-12.5"` (text) will correctly compare against a numeric threshold like `-20`. Similarly, `"true"` (text) matches `true` (boolean). You don't need to worry about the internal type — just enter the value you expect.
 
 Conditionals can be nested (a conditional inside a conditional) up to 5 levels deep. Macros that call other macros via "Run Macro" steps can nest up to 10 levels deep. For most rooms, one level of each is enough.
@@ -115,7 +117,7 @@ Every panel showing this project follows. Common uses:
 - A recovery macro triggered by a fault that opens an `error_overlay`
 - A schedule-driven macro that opens a `welcome` page in the morning
 
-For switching **modes** within a single page (lecture vs. presentation, video conferencing vs. local source), this is usually the wrong tool. Prefer setting a variable with **Set Variable** and binding element visibility to that variable using `visible_when`. That pattern doesn't push every panel to a new page, survives panel reconnects, and keeps the mode state in one place that scripts and other macros can read.
+For switching **modes** within a single page (lecture vs. presentation, video conferencing vs. local source), this is usually the wrong tool. Prefer setting a variable with **Set Variable** and binding element visibility to that variable with the **Shows > Visible when…** card in the UI Builder. That pattern doesn't push every panel to a new page, survives panel reconnects, and keeps the mode state in one place that scripts and other macros can read.
 
 ## Skip If Guards
 
@@ -164,11 +166,11 @@ When a macro is running, the panel provides two forms of feedback:
 
 **Button busy state (automatic).** If a button triggers a macro and that macro is currently running, the button automatically shows a pulsing animation and blocks re-presses. This prevents users from accidentally triggering the same macro twice. No configuration needed.
 
-**Progress label (opt-in).** You can bind a label's text to "Macro Progress" in the Text Binding editor. Select the macro to track and set the idle text (what shows when the macro is not running). While the macro runs, the label shows the current step's description. Add descriptions to each macro step in the step editor to control what users see (e.g., "Powering on projector", "Waiting for warmup"). If no description is set, the system generates one from the action type.
+**Progress label (opt-in).** You can bind a label's text to "Macro Progress" in its **Shows > Text** card. Select the macro to track and set the idle text (what shows when the macro is not running). While the macro runs, the label shows the current step's description. Add descriptions to each macro step in the step editor to control what users see (e.g., "Powering on projector", "Waiting for warmup"). If no description is set, the system generates one from the action type.
 
 ## Variables in Macros
 
-Click the variable icon in any step to create or select a user variable. The Variable Picker shows all available variables with their current values. Variables let macros share state. For example, the `system_on` macro sets `var.room_active` to `true`, and UI buttons use that variable for feedback.
+The **Set Variable** step picks its target from the Variable Picker (a searchable dropdown that shows every variable with its current value, and a **Create New Variable** option inline) rather than a free-text key, so there is nothing to misspell. Its value field then matches the variable's type: a boolean variable gets a **true / false** dropdown, and the **$** toggle lets you copy another variable, device state, or system value in. Variables let macros share state. For example, the `system_on` macro sets `var.room_active` to `true`, and UI buttons use that variable for feedback.
 
 ## Macro Dependencies
 

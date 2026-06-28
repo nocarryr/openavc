@@ -193,25 +193,27 @@ In a real system you would also send routing commands to the video switcher here
 
 Click **UI Builder** in the sidebar. You will see an empty canvas with a grid overlay. The left panel shows the Element Palette, and the right panel shows Properties for whatever is selected.
 
+Every element's **Bindings** panel has two buckets: **Shows** (what the control reflects from live state) and **Does** (what happens when you touch it). You will use both on this page.
+
 ### Add System On button
 
 1. Drag a **Button** from the Element Palette onto the canvas.
 2. In the Properties panel, set the Label to `System On`.
-3. Under **Press Binding**, select **Run Macro** and choose `system_on`.
+3. Open **Bindings**. Under **Does**, leave the **Button Mode** on **Tap** and set the **Press Action** to **Run Macro** -> `system_on`.
 4. Under **Style**, set the background color to a green shade (e.g., `#4CAF50`).
 
 ### Add System Off button
 
 1. Drag another **Button** onto the canvas, below or beside the System On button.
 2. Set the Label to `System Off`.
-3. Under **Press Binding**, select **Run Macro** and choose `system_off`.
+3. Under **Does**, set the **Press Action** to **Run Macro** -> `system_off`.
 4. Set the background color to a red shade (e.g., `#F44336`).
 
 ### Add source select buttons
 
 1. Drag a **Button** onto the canvas. Set the Label to `Laptop`.
-2. Under **Press Binding**, select **Run Macro** and choose `select_laptop`.
-3. Under **Feedback Binding**, set the Source to `var.current_source`.
+2. Under **Does**, set the **Press Action** to **Run Macro** -> `select_laptop`.
+3. Under **Shows > Appearance**, set the Source to `var.current_source`.
 4. Set the Condition so the button is active when the value equals `laptop`.
 5. Set the Active appearance: background color to your theme's accent color (e.g., `#2196F3`).
 6. Set the Inactive appearance: background color to a dimmer tone (e.g., `#424242`).
@@ -219,23 +221,23 @@ Click **UI Builder** in the sidebar. You will see an empty canvas with a grid ov
 Repeat for the Blu-Ray button:
 
 1. Drag another **Button**. Set the Label to `Blu-Ray`.
-2. Press Binding: **Run Macro** -> `select_bluray`.
-3. Feedback Binding: Source = `var.current_source`, active when equals `bluray`.
+2. Does > Press Action: **Run Macro** -> `select_bluray`.
+3. Shows > Appearance: Source = `var.current_source`, active when equals `bluray`.
 4. Same active/inactive colors as the Laptop button.
 
-Now when you press Laptop, the Laptop button highlights and Blu-Ray dims. Press Blu-Ray and the highlighting swaps. This is the equivalent of feedback joins in Crestron. The button state is driven by the variable, not by the press itself.
+Now when you press Laptop, the Laptop button highlights and Blu-Ray dims. Press Blu-Ray and the highlighting swaps. This is the equivalent of feedback joins in Crestron. The button's look is driven by the variable, not by the press itself.
 
 ### Add a status label
 
 1. Drag a **Label** onto the canvas.
-2. Under **Text Binding**, select **State Variable** and choose `var.projector_status`.
+2. Under **Shows > Text**, select **State Variable** and choose `var.projector_status`.
 
 This label will automatically show "Off", "Warming Up", "Ready", or "Cooling Down" based on the projector's live state, using the value map you defined in Step 4.
 
 ### Add a status LED
 
 1. Drag a **Status LED** onto the canvas near the status label.
-2. Under **Color Binding**, set the Source to `device.projector_main.power`.
+2. Under **Shows > Appearance**, set the Source to `device.projector_main.power`.
 3. Add a color map:
    - `on` -> green (`#4CAF50`)
    - `warming` -> amber (`#FF9800`)
@@ -253,13 +255,13 @@ Click the **Add** dropdown in the toolbar and select **Page** to add a new page.
 ### Add a volume fader
 
 1. Drag a **Fader** from the Element Palette onto the Audio page.
-2. Under **Change Binding**, you would normally bind this to a DSP command (e.g., `dsp_main` -> `set_level` with `$value` as the level parameter). Since we do not have a DSP device in this tutorial, you can skip the binding or set it to update a variable for demonstration.
+2. Under **Does > On change**, you would normally add a **Device Command** to drive a DSP (e.g., `dsp_main` -> `set_level` with `$value` as the level parameter). For two-way feedback, you would also set the fader's **Shows > Value** to the DSP's reported level (a `device.*` key, which stays read-only -- the On change command is what actually drives the hardware). Since we do not have a DSP device in this tutorial, you can leave the fader unbound or point its On change action at a variable for demonstration.
 
 ### Add a mute toggle button
 
 1. Drag a **Button** onto the Audio page.
 2. Set the Label to `Mute`.
-3. Set the **Button Mode** to **Toggle**.
+3. Under **Does**, set the **Button Mode** to **Toggle**.
 4. In a real system, you would set the toggle state key to `device.dsp_main.mute`, the On Action to a mute command, and the Off Action to an unmute command. For this tutorial, just set the label so you can see the layout.
 
 ### Add navigation from Main to Audio

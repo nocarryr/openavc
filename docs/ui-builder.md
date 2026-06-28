@@ -79,70 +79,149 @@ Overlay/sidebar properties (width, height, position, backdrop, animation) are ed
 
 ## Bindings
 
-Bindings wire UI elements to actions and state. This is where most of the programming happens. It replaces the signal routing you would do in SIMPL or GC.
+Bindings wire UI elements to live state and to actions. This is where most of the programming happens. It replaces the signal routing you would do in SIMPL or GC.
 
-### Press Binding (buttons)
+Every element's **Bindings** panel is organized into two buckets:
 
-What happens when the button is pressed. Five action types are available:
+- **Shows** -- what the control reflects from live state: its **Value**, its **Appearance**, whether it is **Visible**, and (for lists) its **Items**.
+- **Does** -- what happens when the user touches it: one or more **actions**, grouped by the interaction that triggers them (a button press, a slider change, a keypad submit, a list row tap, a matrix crosspoint route).
 
-- **Run Macro**: execute a named macro (best for multi-step sequences)
-- **Device Command**: send a command directly (pick device, command, params)
-- **Set Variable**: set a user variable value
-- **Navigate to Page**: switch to another page
-- **Script Function**: call a Python function (dropdown shows all functions from enabled scripts)
+Display-only elements (label, gauge, level meter, status LED, clock, image) have a **Shows** bucket only. Pure action elements (a plain button, page nav) lean on **Does**. Most elements use both. The same two words describe every control, so once you learn one you know them all. An interactive control with no action wired yet shows a reminder ("this control has no action yet, so touching it does nothing") so you do not ship a dead button.
 
-A press binding can contain **multiple actions**. Click "Add another action" to stack actions on a single button press. For example, a "Laptop" source button can set `var.current_source` to "laptop" AND run the `apply_source` macro in one press, without needing a wrapper macro.
+### Shows: Value
 
-### Dynamic Parameter Values (the `$` picker)
+The **Value** card sets the state key a control reflects: a slider's position, a gauge reading, a dropdown's current selection, a label's text. Pick the key with the state-key picker. It is searchable, grouped by **Variables / Devices / System**, and shows the live value beside each key so you can confirm you have the right one. For lists, this card is titled **Selected item** (the highlighted row); for labels it is titled **Text**.
 
-When a binding sends a **Device Command**, each parameter has a `$` toggle. Turn it on and a grouped picker opens instead of the plain input. It offers, in one place:
+A Value binding is **read-only by default**: the control mirrors the state, but touching it does not change anything. How you make it write back depends on *what kind of key* you picked, and this is the most important rule in the binding model.
 
-- **This control**: the value this binding delivers at the moment it fires. The choices depend on the binding type. A slider or keypad gives you `value` (the position or text the user just set), and a select gives you the chosen option's `value`. A matrix route gives you `input` and `output`. A mute button gives you `output` and `mute`. Plain button taps carry no value, so they skip this group. When the binding does deliver a value, turning the toggle on defaults to it, since that is the most common case.
-- **Project Variables**, **Device State**, and **System** values: any `$var.<name>`, `$device.<id>.<property>`, or `$system.<property>`. The picker lists the live value next to each one so you can confirm you have the right key, and you can search to narrow the list.
+#### Two-way controls and the device rule
 
-This means a binding can read a project variable or another device's state directly. For example, a button can send a DSP `set_level` command using `$var.target_volume`, or a projector's "match source" button can send `$device.matrix_1.output_2_source`. You no longer need to route through a macro just to reference a variable or another device.
+- **Variable key (`var.*`):** check **Two-way (this control can change it)**. Now dragging the slider, picking the option, or typing in the field writes the variable directly. This is the simplest two-way binding: one key, read and write.
+- **Device key (`device.*`):** you **never write device state directly**. The state value is a mirror of what the device last reported, so writing it would be overwritten on the next poll and the change would never reach the hardware. Instead, the Value card marks a device key **read-only** and prompts you to add a change command under **Does**. Add a **Device Command** that uses **$value** (see [Does: actions](#does-actions)), and the control reads the device's reported level *and* sends the new level to the hardware when touched. Once a command is in place, the card confirms it: "Touching this control sends a command (configured under Does)."
 
-The **Set Variable** action's value field has the same `$` toggle, so you can store a variable, device state, or system value into another variable. To store the value the user just touched on a slider or list instead, use the **Use element's selected value** option.
+This is the one rule to remember: **to drive a device, add a command -- never write `device.*` state.** Because the editor will not let you mark a device value two-way, the old footgun (a slider that *looks* wired to a device but silently does nothing) is now impossible to author.
 
-### Button Modes
+**Example -- a two-way volume slider:** set the slider's **Value** to `device.dsp_1.output_level`, then under **Does > On change** add a Device Command `dsp_1.set_level(level=$value)`. The slider reflects the level the DSP reports and commands the DSP when you drag it.
 
-Each button has a **mode** that controls how presses are handled:
+For a **Select** the per-option routing lives in its **On change** card, so a source-selector dropdown that reads `device.matrix_1.current_input` and routes a different command per option is correct as-is. The Value card points you there ("choose what each option sends in the On change card below") rather than offering a single command.
 
-| Mode | Behavior | Use Case |
+#### Output range scaling (sliders and faders)
+
+Sliders and faders support output range scaling for devices where the useful range is a subset of the full slider travel. This is configured with three properties in the Properties panel:
+
+| Property | Description |
+|----------|-------------|
+| **Output Min** | The minimum value sent to the device (default: same as slider min) |
+| **Output Max** | The maximum value sent to the device (default: same as slider max) |
+| **Scale to Full** | How the slider handles the limited range |
+
+When you bind a slider or fader's Value to a device state variable that has `min` and `max` defined in the driver, these fields are auto-populated.
+
+**Scale to Full** controls the slider's visual behavior:
+
+- **On (Scale to Full):** The slider track covers the full visual range, and the output is scaled proportionally to the output min/max. The user sees a 0-100% slider, but the values sent to the device are mapped to the output range. This hides the device's internal range from the end user.
+- **Off (Show Limit):** The slider shows the actual device range. If the device range is 0-80 on a 0-100 slider, the slider stops at the 80% mark, leaving visible dead space above. This makes the hardware limit visible to the operator.
+
+**Example:** A DSP volume control accepts values 0-80, but the slider is configured 0-100.
+
+- With Scale to Full **on**: dragging to the top of the slider sends 80. The slider looks and feels like a standard 0-100 control.
+- With Scale to Full **off**: the slider stops at the 80 mark. Dragging past 80 has no effect, and the unused range is visually apparent.
+
+### Shows: Appearance
+
+The **Appearance** card changes an element's look based on a state value. This is how buttons light up to show the current selection, the equivalent of feedback joins in Crestron, and how status LEDs map state to color.
+
+- **Source**: pick a category (Variables, Devices, Plugins, System) then the specific state key.
+- **Condition**: when the state key equals a value, the element is "active." For boolean keys you get an ON/OFF toggle; for string keys you get a dropdown of known values.
+- **Active appearance**: background color, text color, and optional label text when the condition is true.
+- **Inactive appearance**: background color, text color, and optional label text when the condition is false.
+- **Live preview**: the editor shows the current value and whether the condition is active or inactive right now.
+
+**Conditional labels** let the element's text change based on state. For example, a power button can show "ON" with a green background when the projector is on, and "OFF" with a dark background when it is off.
+
+Example: on the source-select buttons, set Appearance so that when `var.current_source` equals `"laptop"`, the Laptop button shows as highlighted and all others show as dimmed.
+
+**Multi-state appearance:** for devices with more than two states (e.g., projector power: on/off/warming/cooling), use a multi-state map instead of a simple active/inactive condition. Define a state map where each value gets its own color, icon, and label. Add a row per state value, pick colors, and the element updates per state. This eliminates the need for scripts to handle transitional states like warming and cooling.
+
+**Status LED color map:** for a Status LED, the Appearance card maps state values directly to indicator colors:
+
+```
+device.projector_main.power:
+  "on"      -> green (#4CAF50)
+  "warming" -> amber (#FF9800)
+  "cooling" -> amber (#FF9800)
+  "off"     -> gray (#9E9E9E)
+```
+
+**Per-option highlight (Select):** a Select's Appearance card lets you style each dropdown option independently (its background and text color), so the current choice stands out.
+
+### Shows: Visible when…
+
+Show or hide an element based on system state. In the **Visible when…** card, check **Show only when…** and add a condition.
+
+For example, show video-conference controls only when `var.current_mode` equals `"video_conference"`, or hide an advanced-settings group unless `var.show_advanced` is truthy.
+
+You can add multiple conditions and choose AND or OR logic. With AND (the default), all conditions must be true. With OR, the element is visible when any condition is true. This card is universal -- every element type has it, including groups, so you can show or hide an entire section of the panel at once. Hiding a group hides everything inside it.
+
+Visibility conditions are evaluated client-side in the panel, so they respond instantly without a server round-trip. They also work alongside the `ui.*.visible` state-key overrides (see [Direct UI control from macros and scripts](#direct-ui-control-from-macros-and-scripts)), which take priority when set.
+
+### Shows: Items (lists)
+
+A **List** populates its rows either from the static items configured under **Basic**, or dynamically from state. In the **Items** card, enter a state **key pattern** (use `*` as a wildcard) to build rows from matching keys, for example `device.matrix.input_*_name` to list every input's name. Leave the card blank to use the static items.
+
+### Does: actions
+
+The **Does** bucket is one or more **actions**, grouped by the interaction that triggers them. Every action is one of five types:
+
+- **Run Macro**: execute a named macro (best for multi-step sequences).
+- **Device Command**: send a command directly (pick device, command, params).
+- **Set Variable**: set a user variable value.
+- **Navigate to Page**: switch to another page (or `$back` / `$dismiss` for overlays).
+- **Script Function**: call a Python function (the dropdown lists every function from enabled scripts).
+
+An interaction's action list can hold **multiple actions**, run in order. For example, a "Laptop" source button can set `var.current_source` to "laptop" *and* run the `apply_source` macro in one press, without a wrapper macro.
+
+Which interactions a control offers depends on its type:
+
+| Control | Interaction card(s) |
+|---------|---------------------|
+| **Button** | Press / Hold / Release (via the behavior block, see below) |
+| **Camera Preset** | On press |
+| **Slider, Fader, Text Input** | On change |
+| **Select** | On change (a different action per option) |
+| **Keypad** | On submit |
+| **List** | On row tap |
+| **Matrix** | Video route / Audio route / Mute / Audio mute |
+
+The interaction also decides which "This control" value the action can read (see the `$` picker below): **On change**, **On submit**, and **On row tap** deliver `$value` (the value the user just set or chose); a matrix **route** delivers `$input` and `$output`; a matrix **mute** delivers `$output` and `$mute`.
+
+For a **Select**, the **On change** card lets every option run its own action ("different per choice"), so HDMI 1 routes input 1, HDMI 2 routes input 2, and so on. For a **Matrix**, the four routing interactions (video route, audio route, mute, audio mute) are separate cards but share the same crosspoint grid.
+
+#### Dynamic parameter values (the `$` picker)
+
+When an action sends a **Device Command**, each parameter has a `$` toggle. Turn it on and a grouped picker opens instead of the plain input. It offers, in one place:
+
+- **This control**: the value this interaction delivers at the moment it fires. The choices depend on the interaction. An **On change** or **On submit** gives you `value` (the position, text, or chosen option the user just set). A matrix **route** gives you `input` and `output`. A matrix **mute** gives you `output` and `mute`. A plain button tap carries no value, so it skips this group. When the interaction does deliver a value, turning the toggle on defaults to it, since that is the most common case.
+- **Project Variables**, **Device State**, and **System** values: any `$var.<name>`, `$device.<id>.<property>`, or `$system.<property>`. The picker lists the live value next to each one so you can confirm the key, and you can search to narrow the list.
+
+This means an action can read a project variable or another device's state directly. For example, a button can send a DSP `set_level` command using `$var.target_volume`, or a projector's "match source" button can send `$device.matrix_1.output_2_source`. You no longer need a macro just to reference a variable or another device.
+
+The **Set Variable** action picks its target with the same state-key picker (variables only -- a device key is read-only and cannot be a write target, which reinforces the device rule). Its value field has the same `$` toggle, so you can store a variable, device state, or system value into another variable. To store the value the user just touched on a slider or list instead, check **Use element's selected value**.
+
+#### Button behavior modes
+
+A button's **Does** bucket starts with a **Button Mode** that controls how presses are handled:
+
+| Mode | Behavior | Use case |
 |------|----------|----------|
-| **Tap** | Fires action on press (default) | Most buttons: source select, power on |
-| **Toggle** | Fires On Action or Off Action based on current state | Power on/off, mute/unmute |
-| **Hold Repeat** | Fires action repeatedly while held at a configurable interval | Volume ramp, camera pan/tilt |
-| **Tap / Hold** | Short press fires tap action, long press fires long press action | Quick action vs advanced action |
+| **Tap** | Fires once on press (default) | Most buttons: source select, power on |
+| **Toggle** | Fires the On Action or Off Action based on current state | Power on/off, mute/unmute |
+| **Hold Repeat** | Fires repeatedly while held, at a configurable interval | Volume ramp, camera pan/tilt |
+| **Tap / Long Press** | A short press fires the Tap action, a long press fires the Long Press action | Quick action vs. advanced action |
 
-**Toggle** is state-aware. You pick a state key (any variable or device property), and the button reads it to decide which action to fire. If the state says "off," pressing fires the On Action. If "on," pressing fires the Off Action. You can also set **On Label** and **Off Label** so the button text changes automatically. Toggle works on both web panel buttons and physical control surfaces (Stream Deck).
+**Toggle** is state-aware. You pick a state key (any variable or device property), and the button reads it to decide which action to fire. If the state says "off," pressing fires the On Action; if "on," pressing fires the Off Action. You can also set **On Label** and **Off Label** so the button text changes automatically. Toggle works on both web panel buttons and physical control surfaces (Stream Deck).
 
-Hold Repeat has a configurable repeat interval (default 200ms). Tap/Hold has a configurable threshold (default 500ms). Presses shorter than the threshold are taps, longer are long presses.
-
-### Text Binding (labels)
-
-What text to display:
-
-- **Static**: fixed text like "Main Projector"
-- **State Variable**: bind to a state key so the label updates in real time
-
-Example: Bind a label to `device.projector_main.lamp_hours` to show the current lamp hours without any programming.
-
-### Feedback Binding (buttons)
-
-Visual feedback based on state. This is how buttons light up to show the current selection, the equivalent of feedback joins in Crestron.
-
-- **Source**: pick a category (Variables, Devices, Plugins, System) then the specific state key
-- **Condition**: when the state key equals a value, the button is "active." For boolean keys you get an ON/OFF toggle; for string keys you get a dropdown of known values.
-- **Active appearance**: background color, text color, and optional label text when the condition is true
-- **Inactive appearance**: background color, text color, and optional label text when the condition is false
-- **Live preview**: the editor shows the current value and whether the condition is active or inactive right now
-
-**Conditional labels** let the button text change based on state. For example, a power button can show "ON" with a green background when the projector is on, and "OFF" with a dark background when it's off.
-
-Example: On the source select buttons, set feedback so that when `var.current_source` equals `"laptop"`, the Laptop button shows as highlighted and all others show as dimmed.
-
-**Multi-State Feedback:** For devices with more than two states (e.g., projector power: on/off/warming/cooling), use multi-state feedback instead of a simple active/inactive condition. Define a state map where each value gets its own color, icon, and label. The editor shows a visual map builder. Add a row per state value, pick colors, and the button updates per state. This eliminates the need for scripts or complex variable bindings to handle transitional states like warming and cooling.
+Hold Repeat has a configurable repeat interval (default 200ms). Tap / Long Press has a configurable threshold (default 500ms): presses shorter than the threshold are taps, longer are long presses. A button can also carry a separate **Release Action** that fires when the press is let go.
 
 ## Button Display Modes
 
@@ -171,13 +250,13 @@ When a button has an image, two extra controls tune how it reacts to the button'
 
 **Opacity** fades only the image, not text or icons on top of it.
 
-The key to making a single image react to state: add a **Feedback binding** and set a different `Background` color for each state. The image automatically retints using whichever background color is active. Upload one logo, set *Recolor shape*, pick the theme active color for the ON state, and the logo colors itself as the button turns on and off. Use *Tint (darker)* for colored artwork you want to modulate with the active color.
+The key to making a single image react to state: add an **Appearance** binding and set a different `Background` color for each state. The image automatically retints using whichever background color is active. Upload one logo, set *Recolor shape*, pick the theme active color for the ON state, and the logo colors itself as the button turns on and off. Use *Tint (darker)* for colored artwork you want to modulate with the active color.
 
-When you genuinely need two different images (e.g. a play icon vs a pause icon), set `Image` in each state card of the feedback binding instead of relying on tinting.
+When you genuinely need two different images (e.g. a play icon vs a pause icon), set `Image` in each state card of the Appearance binding instead of relying on tinting.
 
 ### Direct UI Control from Macros and Scripts
 
-In addition to feedback bindings, macros and scripts can directly control UI element appearance using `ui.*` state keys:
+In addition to Appearance bindings, macros and scripts can directly control UI element appearance using `ui.*` state keys:
 
 ```
 state.set → ui.btn_power.label → "WARMING..."
@@ -187,58 +266,7 @@ state.set → ui.btn_power.visible → false
 state.set → ui.btn_power.opacity → 0.5
 ```
 
-These overrides take priority over feedback bindings. Use them when you need more control than the feedback condition provides, for example showing different text for each stage of a multi-step startup sequence.
-
-### Dynamic Visibility
-
-Show or hide elements based on system state. Select an element, open the **Visibility** section in the properties panel, and check "Show only when..." to add a condition.
-
-For example, show video conference controls only when `var.current_mode` equals `"video_conference"`. Or hide an advanced settings group unless `var.show_advanced` is truthy.
-
-You can add multiple conditions and choose AND or OR logic. With AND (default), all conditions must be true. With OR, the element is visible when any condition is true. This works on every element type, including groups, so you can show or hide entire sections of the panel at once.
-
-Visibility conditions are evaluated client-side in the panel, so they respond instantly without a server round-trip. They also work alongside the `ui.*.visible` state key overrides, which take priority when set.
-
-### Color Binding (status LEDs)
-
-Map state values to indicator colors:
-
-```
-device.projector_main.power:
-  "on"      -> green (#4CAF50)
-  "warming" -> amber (#FF9800)
-  "cooling" -> amber (#FF9800)
-  "off"     -> gray (#9E9E9E)
-```
-
-### Value/Slider/Fader Binding
-
-- **Change binding**: what happens when the slider or fader moves (send device command with `$value` as the parameter)
-- **Value binding**: what state key drives the position (for two-way feedback)
-
-Example: Bind a volume slider's change event to `devices.dsp_1.set_level` with `$value`, and bind its value to `device.dsp_1.output_level`. The slider sends level changes to the DSP and reflects the actual level reported back.
-
-### Output Range Scaling
-
-Sliders and faders support output range scaling for devices where the useful range is a subset of the full slider travel. This is configured with three properties in the Properties panel:
-
-| Property | Description |
-|----------|-------------|
-| **Output Min** | The minimum value sent to the device (default: same as slider min) |
-| **Output Max** | The maximum value sent to the device (default: same as slider max) |
-| **Scale to Full** | How the slider handles the limited range |
-
-When you bind a slider or fader to a device state variable that has `min` and `max` defined in the driver, these fields are auto-populated.
-
-**Scale to Full** controls the slider's visual behavior:
-
-- **On (Scale to Full):** The slider track covers the full visual range, and the output is scaled proportionally to the output min/max. The user sees a 0-100% slider, but the values sent to the device are mapped to the output range. This hides the device's internal range from the end user.
-- **Off (Show Limit):** The slider shows the actual device range. If the device range is 0-80 on a 0-100 slider, the slider stops at the 80% mark, leaving visible dead space above. This makes the hardware limit visible to the operator.
-
-**Example:** A DSP volume control accepts values 0-80, but the slider is configured 0-100.
-
-- With Scale to Full **on**: dragging to the top of the slider sends 80. The slider looks and feels like a standard 0-100 control.
-- With Scale to Full **off**: the slider stops at the 80 mark. Dragging past 80 has no effect, and the unused range is visually apparent.
+These overrides take priority over Appearance and Visible-when bindings. Use them when you need more control than a condition provides, for example showing different text for each stage of a multi-step startup sequence.
 
 ## Properties Panel
 

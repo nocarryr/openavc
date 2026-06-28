@@ -224,13 +224,15 @@ Now create the panel page that connects to your script handlers.
 1. Click **UI Builder** in the sidebar
 2. Click the **Add** dropdown in the toolbar, select **Page**, and name it `Main`
 
-Add these elements by dragging from the Element Palette:
+Add these elements by dragging from the Element Palette.
+
+In this tutorial the controls are driven by your **script**, not by bindings. Every control on the panel emits a `ui.<interaction>.<id>` event when touched (a button emits `ui.press.<id>`, a slider emits `ui.change.<id>`), and your script's `@on_event` handlers catch those. So you can leave the button's **Does** bucket empty. The Bindings panel will show a "no action yet" reminder on those buttons, which is expected here: the action lives in the script handler that listens for the event.
 
 **System On button:**
 - Drag a **Button** onto the canvas
 - Set ID to `btn_system_on`
 - Set Label to "System On"
-- This button triggers the `system_on` handler you wrote in Step 2
+- Leave **Does** empty. Pressing it emits `ui.press.btn_system_on`, which triggers the `system_on` handler you wrote in Step 2
 
 **System Off button:**
 - Drag another **Button** onto the canvas
@@ -241,12 +243,12 @@ Add these elements by dragging from the Element Palette:
 - Drag a **Slider** onto the canvas
 - Set ID to `vol_slider`
 - Set Min to 0, Max to 100
-- This slider triggers the `volume_changed` handler from Step 4
+- Dragging it emits `ui.change.vol_slider`, which triggers the `volume_changed` handler from Step 4
 
 **Status label:**
 - Drag a **Label** onto the canvas
 - Set ID to `lbl_projector_status`
-- In the Properties panel, under Bindings, set the label text to bind to `var.projector_status_text`
+- In the Properties panel, under **Shows > Text**, select **State Variable** and choose `var.projector_status_text`
 - This label updates automatically when the `projector_state_changed` handler runs
 
 Switch to **Preview Mode** (toggle at the top of the canvas) to test. Press the System On button and watch the console for log messages. Move the volume slider and confirm the dB conversion appears in the console.
