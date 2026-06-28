@@ -158,7 +158,7 @@ function makeProject(macroKey) {
   };
 }
 
-// --- H-086: validateProject handles action-LIST binding slots ---
+// --- H-086: validateProject handles do.<interaction> action lists ---
 function makeValidationProject(elements) {
   return {
     ui: {
@@ -172,9 +172,9 @@ function makeValidationProject(elements) {
 }
 const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
 {
-  // Array-shaped press binding to a deleted device must be flagged.
+  // Array-shaped do.press binding to a deleted device must be flagged.
   const proj = makeValidationProject([
-    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: [{ action: "device.command", device: "ghost_dev", command: "go" }] } },
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { do: { press: [{ action: "device.command", device: "ghost_dev", command: "go" }] } } },
   ]);
   const issues = H.validateProject(proj).filter((i) => i.severity === "error");
   results.h086_validate_array_device = {
@@ -185,7 +185,7 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
 {
   // Second action in the array is checked too (navigate to deleted page).
   const proj = makeValidationProject([
-    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: [{ action: "device.command", device: "real_dev", command: "go" }, { action: "navigate", page: "gone_page" }] } },
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { do: { press: [{ action: "device.command", device: "real_dev", command: "go" }, { action: "navigate", page: "gone_page" }] } } },
   ]);
   const issues = H.validateProject(proj).filter((i) => i.severity === "error");
   results.h086_validate_array_navigate = {
@@ -194,9 +194,9 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   };
 }
 {
-  // change slot: array-shaped macro action to a deleted macro.
+  // do.change: array-shaped macro action to a deleted macro.
   const proj = makeValidationProject([
-    { id: "s1", type: "select", grid_area: AREA, style: {}, bindings: { change: [{ action: "macro", macro: "ghost_macro" }] } },
+    { id: "s1", type: "select", grid_area: AREA, style: {}, bindings: { do: { change: [{ action: "macro", macro: "ghost_macro" }] } } },
   ]);
   const issues = H.validateProject(proj).filter((i) => i.severity === "error");
   results.h086_validate_array_change_macro = {
@@ -205,9 +205,9 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   };
 }
 {
-  // Legacy single-object binding is still validated.
+  // A do.<interaction> holding a single action object (not an array) is still validated.
   const proj = makeValidationProject([
-    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: { action: "device.command", device: "ghost_dev", command: "go" } } },
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { do: { press: { action: "device.command", device: "ghost_dev", command: "go" } } } },
   ]);
   const issues = H.validateProject(proj).filter((i) => i.severity === "error");
   results.h086_validate_legacy_object = {
@@ -216,15 +216,15 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   };
 }
 {
-  // Valid references in arrays produce NO false positives.
+  // Valid references in do action lists produce NO false positives.
   const proj = makeValidationProject([
-    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { press: [{ action: "device.command", device: "real_dev", command: "go" }, { action: "macro", macro: "real_macro" }] } },
+    { id: "b1", type: "button", grid_area: AREA, style: {}, bindings: { do: { press: [{ action: "device.command", device: "real_dev", command: "go" }, { action: "macro", macro: "real_macro" }] } } },
   ]);
   const issues = H.validateProject(proj).filter((i) => i.severity === "error");
   results.h086_validate_valid_refs_pass = { pass: issues.length === 0, detail: issues };
 }
 
-// --- H-086: removePage scrubs navigate actions in array slots ---
+// --- H-086: removePage scrubs navigate actions in do action lists ---
 {
   const pages = [
     {
@@ -233,9 +233,11 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
         {
           id: "b1", type: "button", grid_area: AREA, style: {},
           bindings: {
-            press: [{ action: "navigate", page: "p2" }, { action: "device.command", device: "d1", command: "go" }],
-            release: [{ action: "navigate", page: "p2" }],
-            hold: { action: "navigate", page: "p2" },  // legacy object shape
+            do: {
+              press: [{ action: "navigate", page: "p2" }, { action: "device.command", device: "d1", command: "go" }],
+              release: [{ action: "navigate", page: "p2" }],
+              hold: { action: "navigate", page: "p2" },  // single-object shape
+            },
           },
         },
       ],
@@ -243,12 +245,12 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
     { id: "p2", name: "P2", grid: { columns: 12, rows: 8 }, elements: [] },
   ];
   const after = H.removePage(pages, "p2");
-  const b = after[0].elements[0].bindings;
+  const d = after[0].elements[0].bindings.do;
   results.h086_removepage_scrubs_arrays = {
     pass:
-      Array.isArray(b.press) && b.press.length === 1 && b.press[0].action === "device.command" &&
-      !("release" in b) && !("hold" in b),
-    detail: b,
+      !!d && Array.isArray(d.press) && d.press.length === 1 && d.press[0].action === "device.command" &&
+      !("release" in d) && !("hold" in d),
+    detail: d,
   };
 }
 
@@ -260,7 +262,7 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
       elements: [
         {
           id: "btn_x", type: "button", grid_area: AREA, style: {},
-          bindings: { feedback: { source: "state", key: "ui.btn_x.value", condition: { equals: true }, style_active: {}, style_inactive: {} } },
+          bindings: { show: { look: { source: "state", key: "ui.btn_x.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
         },
       ],
     },
@@ -269,9 +271,9 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   const dup = after[0].elements[1];
   const orig = after[0].elements[0];
   results.m143_duplicate_rewrites_self_ref = {
-    pass: dup.id !== "btn_x" && dup.bindings.feedback.key === `ui.${dup.id}.value` &&
-      orig.bindings.feedback.key === "ui.btn_x.value",
-    detail: { dupId: dup.id, dupKey: dup.bindings.feedback.key, origKey: orig.bindings.feedback.key },
+    pass: dup.id !== "btn_x" && dup.bindings.show.look.key === `ui.${dup.id}.value` &&
+      orig.bindings.show.look.key === "ui.btn_x.value",
+    detail: { dupId: dup.id, dupKey: dup.bindings.show.look.key, origKey: orig.bindings.show.look.key },
   };
 }
 {
@@ -280,8 +282,8 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
     {
       id: "p1", name: "P1", grid: { columns: 12, rows: 8 },
       elements: [
-        { id: "btn_a", type: "button", grid_area: AREA, style: {}, bindings: { feedback: { source: "state", key: "ui.btn_a.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
-        { id: "lbl_b", type: "label", grid_area: { ...AREA, row: 2 }, style: {}, bindings: { text: { source: "state", key: "ui.btn_a.value" } } },
+        { id: "btn_a", type: "button", grid_area: AREA, style: {}, bindings: { show: { look: { source: "state", key: "ui.btn_a.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } } },
+        { id: "lbl_b", type: "label", grid_area: { ...AREA, row: 2 }, style: {}, bindings: { show: { value: { source: "state", key: "ui.btn_a.value" } } } },
       ],
     },
   ];
@@ -290,10 +292,10 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   const aCopy = copy.elements[0];
   const bCopy = copy.elements[1];
   results.m143_duplicate_page_rewrites_sibling_refs = {
-    pass: aCopy.bindings.feedback.key === `ui.${aCopy.id}.value` &&
-      bCopy.bindings.text.key === `ui.${aCopy.id}.value` &&
-      pages[0].elements[1].bindings.text.key === "ui.btn_a.value",
-    detail: { aCopyId: aCopy.id, aKey: aCopy.bindings.feedback.key, bKey: bCopy.bindings.text.key },
+    pass: aCopy.bindings.show.look.key === `ui.${aCopy.id}.value` &&
+      bCopy.bindings.show.value.key === `ui.${aCopy.id}.value` &&
+      pages[0].elements[1].bindings.show.value.key === "ui.btn_a.value",
+    detail: { aCopyId: aCopy.id, aKey: aCopy.bindings.show.look.key, bKey: bCopy.bindings.show.value.key },
   };
 }
 {
@@ -315,7 +317,7 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
 {
   // Demote onto a page that already has an element with the master's id.
   const masters = [
-    { id: "shared_btn", type: "button", pages: "*", grid_area: AREA, style: {}, bindings: { feedback: { source: "state", key: "ui.shared_btn.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
+    { id: "shared_btn", type: "button", pages: "*", grid_area: AREA, style: {}, bindings: { show: { look: { source: "state", key: "ui.shared_btn.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } } },
   ];
   const pages = [
     { id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [
@@ -327,9 +329,9 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   const demoted = els[1];
   results.m144_demote_collision_renamed = {
     pass: els.length === 2 && demoted.id !== "shared_btn" &&
-      demoted.bindings.feedback.key === `ui.${demoted.id}.value` &&
+      demoted.bindings.show.look.key === `ui.${demoted.id}.value` &&
       r.masterElements.length === 0,
-    detail: { ids: els.map((e) => e.id), key: demoted.bindings.feedback.key },
+    detail: { ids: els.map((e) => e.id), key: demoted.bindings.show.look.key },
   };
 }
 {
@@ -347,15 +349,15 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   const masters = [{ id: "dup_btn", type: "button", pages: "*", grid_area: AREA, style: {}, bindings: {} }];
   const pages = [
     { id: "p1", name: "P1", grid: { columns: 12, rows: 8 }, elements: [
-      { id: "dup_btn", type: "button", grid_area: AREA, style: {}, bindings: { feedback: { source: "state", key: "ui.dup_btn.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } },
+      { id: "dup_btn", type: "button", grid_area: AREA, style: {}, bindings: { show: { look: { source: "state", key: "ui.dup_btn.value", condition: { equals: true }, style_active: {}, style_inactive: {} } } } },
     ] },
   ];
   const r = H.promoteToMaster(pages, masters, "p1", "dup_btn");
   const promoted = r.masterElements[1];
   results.m144_promote_collision_renamed = {
     pass: r.masterElements.length === 2 && promoted.id !== "dup_btn" &&
-      promoted.bindings.feedback.key === `ui.${promoted.id}.value`,
-    detail: { ids: r.masterElements.map((m) => m.id), key: promoted.bindings.feedback.key },
+      promoted.bindings.show.look.key === `ui.${promoted.id}.value`,
+    detail: { ids: r.masterElements.map((m) => m.id), key: promoted.bindings.show.look.key },
   };
 }
 {
@@ -378,15 +380,17 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
     {
       id: "s1", type: "select", grid_area: AREA, style: {},
       bindings: {
-        change: [{
-          action: "value_map",
-          map: {
-            a: { action: "device.command", device: "ghost_dev", command: "go" },
-            b: { action: "macro", macro: "ghost_macro" },
-            c: { action: "value_map", map: { d: { action: "macro", macro: "ghost_nested" } } },
-            e: { action: "device.command", device: "real_dev", command: "ok" },
-          },
-        }],
+        do: {
+          change: [{
+            action: "value_map",
+            map: {
+              a: { action: "device.command", device: "ghost_dev", command: "go" },
+              b: { action: "macro", macro: "ghost_macro" },
+              c: { action: "value_map", map: { d: { action: "macro", macro: "ghost_nested" } } },
+              e: { action: "device.command", device: "real_dev", command: "ok" },
+            },
+          }],
+        },
       },
     },
   ]);

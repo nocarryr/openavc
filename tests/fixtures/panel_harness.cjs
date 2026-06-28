@@ -243,7 +243,7 @@ const tests = {
     m001_l003_countdown() {
         const app = mkApp();
         const near = new Date(Date.now() + 5000).toISOString();
-        const el = app.renderClock({ id: 'cd', type: 'clock', clock_mode: 'countdown', target_time: '2099-01-01T00:00:00Z', bindings: { value: { key: 'var.cd' } } });
+        const el = app.renderClock({ id: 'cd', type: 'clock', clock_mode: 'countdown', target_time: '2099-01-01T00:00:00Z', bindings: { show: { value: { key: 'var.cd' } } } });
         if (app._clockInterval) { window.clearInterval(app._clockInterval); app._clockInterval = null; }
         app.state = { 'var.cd': near };
         el._clockUpdate();
@@ -251,7 +251,7 @@ const tests = {
         assert(txt.length <= 5, `state key wins over target_time (short countdown), got "${txt}"`);
         // L-003: an unparseable value renders the placeholder, not NaN.
         app.state = { 'var.cd': 'not-a-date' };
-        const el2 = app.renderClock({ id: 'cd2', type: 'clock', clock_mode: 'countdown', bindings: { value: { key: 'var.cd' } } });
+        const el2 = app.renderClock({ id: 'cd2', type: 'clock', clock_mode: 'countdown', bindings: { show: { value: { key: 'var.cd' } } } });
         if (app._clockInterval) { window.clearInterval(app._clockInterval); app._clockInterval = null; }
         const txt2 = el2.querySelector('.clock-display').textContent;
         assert(txt2 === '--:--:--', `invalid date -> placeholder, got "${txt2}"`);

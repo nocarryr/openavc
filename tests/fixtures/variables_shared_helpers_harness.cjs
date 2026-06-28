@@ -2,9 +2,10 @@
 // Bundles variablesShared.helpers.ts (with the esbuild in web/programmer/
 // node_modules) and exercises the cross-reference helpers behind the
 // Variables / Device States "Used By" panels:
-//   - scanBindingForVars / scanBindingForAllKeys treat press/release/change as
-//     ARRAYS of actions (the shape the binding editor authors), so button-action
-//     var/state references are no longer silently dropped.
+//   - scanBindingForVars / scanBindingForAllKeys read the show/do binding model:
+//     show.value / show.look key references, and the action lists under each
+//     do.<interaction> (press/release/change/...), so button-action and
+//     two-way var/state references are surfaced, not silently dropped.
 //   - globMatch fully regex-escapes the pattern, so a script-derived key with
 //     metacharacters can't crash (SyntaxError) or hang (ReDoS) the view.
 //   - collectWildcardMatches resolves a wildcard against an arbitrary candidate
@@ -43,61 +44,67 @@ const collectAllKeys = (bindings) => {
 
 const results = {};
 
-// --- H-126: event bindings are ARRAYS of actions ---------------------------
+// --- H-126: do.<interaction> action lists are scanned ----------------------
 
-// A button whose press binding is an array with a Set Variable action. The old
-// single-object scan read `.action` off the array (undefined) and found nothing.
+// A button whose do.press is an array with a Set Variable action — the action's
+// var reference is surfaced.
 results.h126_array_press_var_found = (() => {
   const ids = collectVars({
-    press: [{ action: "state.set", key: "var.lights", value: true }],
+    do: { press: [{ action: "state.set", key: "var.lights", value: true }] },
   });
   return { pass: ids.includes("lights"), detail: ids };
 })();
 
-// Multiple actions in one event array — every var reference is surfaced.
+// Multiple actions across multiple do interactions — every var reference is surfaced.
 results.h126_array_multi_action = (() => {
   const ids = collectVars({
-    press: [
-      { action: "device.command", device: "amp", command: "on" },
-      { action: "state.set", key: "var.scene", value: "movie" },
-    ],
-    release: [{ action: "state.set", key: "var.held", value: false }],
+    do: {
+      press: [
+        { action: "device.command", device: "amp", command: "on" },
+        { action: "state.set", key: "var.scene", value: "movie" },
+      ],
+      release: [{ action: "state.set", key: "var.held", value: false }],
+    },
   });
   return { pass: ids.includes("scene") && ids.includes("held"), detail: ids };
 })();
 
-// value_map nested inside an array action still resolves.
+// value_map nested inside a do.change action still resolves.
 results.h126_array_value_map = (() => {
   const ids = collectVars({
-    change: [
-      {
-        action: "value_map",
-        map: { a: { action: "state.set", key: "var.mode", value: 1 } },
-      },
-    ],
+    do: {
+      change: [
+        {
+          action: "value_map",
+          map: { a: { action: "state.set", key: "var.mode", value: 1 } },
+        },
+      ],
+    },
   });
   return { pass: ids.includes("mode"), detail: ids };
 })();
 
-// scanBindingForAllKeys gets device.* keys out of an array event binding too.
+// scanBindingForAllKeys gets device.* keys out of a do action list too.
 results.h126_array_allkeys_device = (() => {
   const keys = collectAllKeys({
-    press: [{ action: "state.set", key: "device.proj.power", value: "on" }],
+    do: { press: [{ action: "state.set", key: "device.proj.power", value: "on" }] },
   });
   return { pass: keys.includes("device.proj.power"), detail: keys };
 })();
 
-// Legacy single-object event binding still works (no regression).
+// A do.<interaction> holding a single action object (not wrapped in an array)
+// still resolves — asActionList tolerates both shapes.
 results.h126_legacy_object_still_works = (() => {
   const ids = collectVars({
-    press: { action: "state.set", key: "var.legacy", value: 1 },
+    do: { press: { action: "state.set", key: "var.legacy", value: 1 } },
   });
   return { pass: ids.includes("legacy"), detail: ids };
 })();
 
-// Non-event single-object bindings (two-way variable) are unchanged.
+// Two-way variable binding lives at show.value with write_back; the var ref is
+// found from the value source.
 results.h126_two_way_binding = (() => {
-  const ids = collectVars({ variable: { key: "var.vol" } });
+  const ids = collectVars({ show: { value: { key: "var.vol", write_back: true } } });
   return { pass: ids.includes("vol"), detail: ids };
 })();
 
