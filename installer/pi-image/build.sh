@@ -118,8 +118,13 @@ tar czf "$OPENAVC_ARCHIVE" \
 ARCHIVE_SIZE=$(du -h "$OPENAVC_ARCHIVE" | cut -f1)
 echo "Archive created: $ARCHIVE_SIZE"
 
-# Copy update-helper.sh into the stage files directory so 00-run.sh can find it
+# Copy update-helper.sh and the systemd unit into the stage files directory so
+# 00-run.sh can find them. Both come straight from installer/ — the single
+# source of truth — so the Pi unit can't drift from the one the in-app updater
+# syncs against (server's sync_unit compares the active unit to the generic
+# installer/openavc.service shipped in the release tarball).
 cp "$REPO_ROOT/installer/update-helper.sh" "$STAGE_DIR/01-install-openavc/files/update-helper.sh"
+cp "$REPO_ROOT/installer/openavc.service" "$STAGE_DIR/01-install-openavc/files/openavc.service"
 
 # --- Configure pi-gen ---
 
