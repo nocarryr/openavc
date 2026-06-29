@@ -200,11 +200,23 @@ class MQTTTransport:
                 version=version,
             )
         except Exception as e:
-            # Prefer a CONNACK-derived message (more specific: which auth/proto
-            # failure) over a bare exception when we captured one.
-            rc_msg = _CONNACK_MESSAGES.get(self._connack_rc or 0)
+            # gmqtt raises MQTTConnectError(code) on a non-zero CONNACK and does
+            # NOT call on_connect, so read the CONNACK code off the exception
+            # (._code) when present; fall back to anything on_connect captured.
+            code = getattr(e, "_code", None)
+            rc = code if isinstance(code, int) else self._connack_rc
+            rc_msg = _CONNACK_MESSAGES.get(rc) if rc is not None else None
             self._last_error = rc_msg or str(e) or type(e).__name__
+            self._closing = True  # suppress the on_disconnect reconnect callback
+            await self._safe_disconnect()
             self._client = None
+            if rc_msg:
+                # A broker rejection (bad creds / not authorized). Normalize to
+                # ConnectionError but keep the chain so the classifier still
+                # sees any underlying errno/timeout.
+                raise ConnectionError(rc_msg) from e
+            # A transport-level failure (refused/unreachable/timeout) — re-raise
+            # the original so its errno/timeout chain reaches the classifier.
             raise
 
         # A non-zero CONNACK that gmqtt didn't raise on.
