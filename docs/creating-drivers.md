@@ -1483,6 +1483,64 @@ class MySwitcherDriver(BaseDriver):
 - `set_state("input", 3)` writes to `device.<device_id>.input` in the state store.
 - **All sent and received data is automatically logged** in the device log. No logging code needed. See "Device Log" below.
 
+### MQTT Drivers (Python)
+
+Some devices are controlled over **MQTT** — they run (or connect to) an MQTT broker, and you control them by publishing to command topics and subscribing to status topics. Examples: TVs with an embedded broker, building-management gateways, IoT bridges.
+
+MQTT is a **Python-only transport** (like SSH). It isn't offered in the Driver Builder or `.avcdriver` files, because topic-based pub/sub doesn't map onto the request/response shape those use. Set `"transport": "mqtt"` in a Python driver's `DRIVER_INFO` and the platform builds the connection for you.
+
+Because MQTT is pub/sub rather than a single byte stream, inbound messages arrive **topic-tagged**: override `on_mqtt_message(topic, payload)` instead of `on_data_received(data)`, and subscribe to the topics you care about in `_post_connect()` (which also runs again after a reconnect).
+
+```python
+from server.drivers.base import BaseDriver
+
+
+class MyMqttDeviceDriver(BaseDriver):
+    DRIVER_INFO = {
+        "id": "my_mqtt_device",
+        "name": "My MQTT Device",
+        "manufacturer": "Custom",
+        "category": "display",
+        "version": "1.0.0",
+        "author": "Your Name",
+        "description": "Controls a device over MQTT.",
+        "transport": "mqtt",
+        "default_config": {
+            "host": "",
+            "port": 1883,
+            "username": "",
+            "password": "",
+            # TLS (optional): ssl + verify_ssl mirror the TCP/HTTP transports.
+            # client_cert / client_key are paths for devices that require a
+            # client certificate. mqtt_version defaults to "3.1.1" ("5.0" opt-in).
+            "ssl": False,
+            "verify_ssl": True,
+        },
+        "config_schema": {
+            "host": {"type": "string", "required": True, "label": "IP Address"},
+            "port": {"type": "integer", "default": 1883, "label": "Port"},
+        },
+        "state_variables": {"power": {"type": "boolean", "label": "Power"}},
+        "commands": {"power_on": {"label": "Power On", "params": {}}},
+    }
+
+    async def _post_connect(self) -> None:
+        # Transport is open here. Subscribe to status topics.
+        await self.transport.subscribe("device/+/status")
+
+    async def on_mqtt_message(self, topic: str, payload: bytes) -> None:
+        if topic.endswith("/status"):
+            self.set_state("power", payload == b"on")
+
+    async def send_command(self, command, params=None):
+        if command == "power_on":
+            await self.transport.publish("device/cmd/power", "on")
+```
+
+The transport exposes `await self.transport.publish(topic, payload)`, `await self.transport.subscribe(topic)`, and `await self.transport.unsubscribe(topic)`. Recognized config keys: `host`, `port`, `username`, `password`, `client_id`, `ssl` (alias `use_tls`), `verify_ssl`, `client_cert`, `client_key`, `ca_cert`, `ciphers`, `keepalive`, and `mqtt_version`. When `verify_ssl` is off, the transport also relaxes the cipher level so devices with old or weak self-signed broker certificates still connect.
+
+To test an MQTT driver without hardware, pair it with a `_sim.py` that subclasses `MQTTSimulator` (a minimal broker) — see the simulator guide.
+
 ### Creating Python Drivers in the Code View
 
 The easiest way to create a Python driver is in the Programmer IDE:
