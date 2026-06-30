@@ -16,7 +16,11 @@ reportable:
     kernel's ``ping_group_range`` covers the process gid.
   - POSIX tier 2: raw ICMP socket (root / CAP_NET_RAW).
   - POSIX tier 3: exec the system ``ping``.
-  - Nothing available → :data:`METHOD_NONE`; the sweep proceeds to passive
+  - Each candidate is confirmed with a loopback self-test before it is
+    chosen: a socket that opens (or a ``ping`` that execs) but can't
+    actually round-trip an echo is skipped, so a method that would make the
+    whole sweep read "0 alive" never wins.
+  - Nothing working → :data:`METHOD_NONE`; the sweep proceeds to passive
     discovery but reports a loud environment warning.
 
 - **Tri-state per-host results**: :data:`RESULT_ALIVE`,
@@ -144,23 +148,54 @@ def _try_icmp_socket(kind: int) -> socket.socket | None:
         return None
 
 
-def select_ping_method() -> str:
-    """Probe the best available ping method. Cheap — called once per scan."""
+# Loopback self-test: 127.0.0.1 always answers an echo immediately, so a
+# method that can't return RESULT_ALIVE for it can't carry a real sweep.
+_SELFTEST_HOST = "127.0.0.1"
+_SELFTEST_TIMEOUT = 1.0
+
+
+async def _method_round_trips(method: str) -> bool:
+    """True if ``method`` actually pings loopback and gets its echo back.
+
+    Guards against the silent failure where a socket the kernel hands out (or
+    a ``ping`` binary on PATH) opens fine but can't receive replies — which
+    would otherwise make every host in the sweep look dead.
+    """
+    try:
+        result = await ping_host(
+            _SELFTEST_HOST, timeout=_SELFTEST_TIMEOUT, method=method,
+        )
+    except OSError:
+        return False
+    return result == RESULT_ALIVE
+
+
+async def select_ping_method() -> str:
+    """Probe the best WORKING ping method. Cheap — called once per scan.
+
+    Each candidate must both initialize and pass a loopback self-test, so a
+    method that silently can't round-trip an echo is skipped rather than
+    making a live network read as empty.
+    """
     if _IS_WINDOWS:
-        # ping.exe is always present; raw sockets would need Administrator.
+        # ping.exe is always present and functional; raw sockets would need
+        # Administrator. The silent empty-network failure mode doesn't occur
+        # here, so no self-test.
         return METHOD_EXEC
 
-    sock = _try_icmp_socket(socket.SOCK_DGRAM)
-    if sock is not None:
+    for method, kind in (
+        (METHOD_DGRAM, socket.SOCK_DGRAM),
+        (METHOD_RAW, socket.SOCK_RAW),
+    ):
+        sock = _try_icmp_socket(kind)
+        if sock is None:
+            continue
         sock.close()
-        return METHOD_DGRAM
+        if await _method_round_trips(method):
+            return method
+        log.debug("ICMP %s socket opened but failed loopback self-test", method)
 
-    sock = _try_icmp_socket(socket.SOCK_RAW)
-    if sock is not None:
-        sock.close()
-        return METHOD_RAW
-
-    if shutil.which("ping"):
+    if shutil.which("ping") and await _method_round_trips(METHOD_EXEC):
         return METHOD_EXEC
 
     return METHOD_NONE

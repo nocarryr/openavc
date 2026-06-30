@@ -223,7 +223,7 @@ async def ping_sweep(
 
     total = len(all_ips)
     stats.total = total
-    stats.method = icmp.select_ping_method()
+    stats.method = await icmp.select_ping_method()
 
     if stats.method == icmp.METHOD_NONE:
         # No ICMP socket permission and no ping binary on PATH. The scan

@@ -136,41 +136,95 @@ def _fake_socket_module(allowed_kinds: set[int]):
 
 
 class TestMethodSelection:
-    def test_windows_always_exec(self, monkeypatch):
-        monkeypatch.setattr(icmp, "_IS_WINDOWS", True)
-        assert icmp.select_ping_method() == icmp.METHOD_EXEC
+    """Tier selection. ``_method_round_trips`` (the loopback self-test) is
+    patched out here so these stay pure availability tests; the self-test's
+    own fallthrough is covered in TestSelfTestFallthrough below."""
 
-    def test_posix_prefers_dgram(self, monkeypatch):
+    async def test_windows_always_exec(self, monkeypatch):
+        monkeypatch.setattr(icmp, "_IS_WINDOWS", True)
+        assert await icmp.select_ping_method() == icmp.METHOD_EXEC
+
+    async def test_posix_prefers_dgram(self, monkeypatch):
         monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
         mod, closed = _fake_socket_module({socket.SOCK_DGRAM, socket.SOCK_RAW})
         monkeypatch.setattr(icmp, "socket", mod)
-        assert icmp.select_ping_method() == icmp.METHOD_DGRAM
+        monkeypatch.setattr(icmp, "_method_round_trips", AsyncMock(return_value=True))
+        assert await icmp.select_ping_method() == icmp.METHOD_DGRAM
         assert closed == [socket.SOCK_DGRAM]  # probe socket released
 
-    def test_posix_falls_back_to_raw(self, monkeypatch):
+    async def test_posix_falls_back_to_raw(self, monkeypatch):
         monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
         mod, closed = _fake_socket_module({socket.SOCK_RAW})
         monkeypatch.setattr(icmp, "socket", mod)
-        assert icmp.select_ping_method() == icmp.METHOD_RAW
+        monkeypatch.setattr(icmp, "_method_round_trips", AsyncMock(return_value=True))
+        assert await icmp.select_ping_method() == icmp.METHOD_RAW
         assert closed == [socket.SOCK_RAW]
 
-    def test_posix_falls_back_to_exec_ping(self, monkeypatch):
+    async def test_posix_falls_back_to_exec_ping(self, monkeypatch):
         monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
         mod, _ = _fake_socket_module(set())
         monkeypatch.setattr(icmp, "socket", mod)
         monkeypatch.setattr(
             icmp, "shutil", types.SimpleNamespace(which=lambda _: "/usr/bin/ping"),
         )
-        assert icmp.select_ping_method() == icmp.METHOD_EXEC
+        monkeypatch.setattr(icmp, "_method_round_trips", AsyncMock(return_value=True))
+        assert await icmp.select_ping_method() == icmp.METHOD_EXEC
 
-    def test_posix_nothing_available(self, monkeypatch):
+    async def test_posix_nothing_available(self, monkeypatch):
         monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
         mod, _ = _fake_socket_module(set())
         monkeypatch.setattr(icmp, "socket", mod)
         monkeypatch.setattr(
             icmp, "shutil", types.SimpleNamespace(which=lambda _: None),
         )
-        assert icmp.select_ping_method() == icmp.METHOD_NONE
+        assert await icmp.select_ping_method() == icmp.METHOD_NONE
+
+
+class TestSelfTestFallthrough:
+    """A candidate that opens (or execs) but can't round-trip a loopback echo
+    is skipped — this is the silent-empty-network guard."""
+
+    async def test_dgram_opens_but_fails_selftest_falls_to_raw(self, monkeypatch):
+        monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
+        mod, _ = _fake_socket_module({socket.SOCK_DGRAM, socket.SOCK_RAW})
+        monkeypatch.setattr(icmp, "socket", mod)
+
+        async def rt(method):
+            return method == icmp.METHOD_RAW  # dgram self-test fails, raw works
+
+        monkeypatch.setattr(icmp, "_method_round_trips", rt)
+        assert await icmp.select_ping_method() == icmp.METHOD_RAW
+
+    async def test_sockets_fail_selftest_fall_to_exec(self, monkeypatch):
+        monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
+        mod, _ = _fake_socket_module({socket.SOCK_DGRAM, socket.SOCK_RAW})
+        monkeypatch.setattr(icmp, "socket", mod)
+        monkeypatch.setattr(
+            icmp, "shutil", types.SimpleNamespace(which=lambda _: "/usr/bin/ping"),
+        )
+
+        async def rt(method):
+            return method == icmp.METHOD_EXEC  # only exec round-trips
+
+        monkeypatch.setattr(icmp, "_method_round_trips", rt)
+        assert await icmp.select_ping_method() == icmp.METHOD_EXEC
+
+    async def test_nothing_round_trips_is_none(self, monkeypatch):
+        # A dgram socket opens but never answers and nothing else works:
+        # report METHOD_NONE (loud warning) rather than "succeed" with a
+        # method that would read every host as dead.
+        monkeypatch.setattr(icmp, "_IS_WINDOWS", False)
+        mod, _ = _fake_socket_module({socket.SOCK_DGRAM, socket.SOCK_RAW})
+        monkeypatch.setattr(icmp, "socket", mod)
+        monkeypatch.setattr(
+            icmp, "shutil", types.SimpleNamespace(which=lambda _: "/usr/bin/ping"),
+        )
+
+        async def rt(method):
+            return False
+
+        monkeypatch.setattr(icmp, "_method_round_trips", rt)
+        assert await icmp.select_ping_method() == icmp.METHOD_NONE
 
 
 class TestPingHost:
@@ -319,7 +373,7 @@ class TestLiveLoopbackEcho:
     """
 
     async def test_loopback_echo_is_alive(self):
-        method = icmp.select_ping_method()
+        method = await icmp.select_ping_method()
         if method not in (icmp.METHOD_DGRAM, icmp.METHOD_RAW):
             pytest.skip("no ICMP socket available in this environment")
         result = await icmp.ping_host("127.0.0.1", timeout=2.0, method=method)
