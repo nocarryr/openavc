@@ -393,6 +393,32 @@ export async function getNetworkAdapters(): Promise<{ adapters: NetworkAdapter[]
   return request("/network/adapters");
 }
 
+// --- Serial Ports ---
+// Serial ports on the OpenAVC server host, for the device connection picker.
+// USB-to-serial adapters present to the OS as a plain serial port; the adapter
+// must be plugged into the machine running the server (not the browser).
+
+export interface SerialPortInfo {
+  /** OS device path (COM3 / /dev/ttyUSB0 / /dev/cu.usbserial-XXXX). */
+  device: string;
+  /** Human description from the OS (falls back to the device path). */
+  description: string;
+  manufacturer: string;
+  vid: number | null;
+  pid: number | null;
+  /** USB serial number — the stable identity the connection binds to ("" if the adapter exposes none). */
+  serial_number: string;
+  hwid: string;
+  /** True when the port looks like a USB device (has a USB VID). */
+  usb: boolean;
+  /** Friendly composed label for the picker. */
+  label: string;
+}
+
+export async function getSerialPorts(): Promise<{ ports: SerialPortInfo[] }> {
+  return request("/system/serial-ports");
+}
+
 // --- Host Network Configuration ---
 // The machine's own network (IP, gateway, DNS, WiFi, hostname) — distinct
 // from the adapter list above, which only selects the control interface.

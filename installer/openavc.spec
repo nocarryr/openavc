@@ -193,11 +193,15 @@ hiddenimports = [
     'httptools',
     'httptools.parser',
     'httptools.parser.parser',
-    # Serial (pyserial)
+    # Serial (pyserial) — list_ports lazily imports a per-OS backend, so bundle
+    # every platform's so a frozen build enumerates ports wherever it runs.
     'serial',
     'serial.tools',
     'serial.tools.list_ports',
     'serial.tools.list_ports_windows',
+    'serial.tools.list_ports_posix',
+    'serial.tools.list_ports_linux',
+    'serial.tools.list_ports_osx',
     # croniter
     'croniter',
     # yaml

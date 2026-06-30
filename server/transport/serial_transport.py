@@ -31,6 +31,86 @@ except ImportError:
     HAS_SERIAL = False
 
 
+def _serial_port_label(
+    device: str, description: str, manufacturer: str, serial_number: str
+) -> str:
+    """Compose a human label for the connection picker (e.g.
+    "USB Serial Port (COM3) - FTDI / FT4VABCD"). Avoids duplicating the device
+    path or manufacturer when the OS description already contains them."""
+    label = description or device
+    if device not in label:
+        label = f"{label} ({device})"
+    extras = [
+        e
+        for e in (manufacturer, serial_number)
+        if e and e.lower() not in label.lower()
+    ]
+    return f"{label} - {' / '.join(extras)}" if extras else label
+
+
+def list_serial_ports() -> list[dict[str, Any]]:
+    """Enumerate the serial ports present on this host (the machine running the
+    server), for the device connection picker.
+
+    Each entry carries the OS device path plus whatever USB-adapter identity
+    pyserial can read (vendor / product / serial number). ``serial_number`` is
+    what the connection binds to for a stable identity across reboot/replug —
+    cheap CH340-class adapters often expose none, in which case the integrator
+    binds to the path and accepts that it may move. Returns an empty list if
+    pyserial's platform enumeration backend can't be imported.
+    """
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        log.warning("serial.tools.list_ports unavailable; cannot enumerate serial ports")
+        return []
+
+    ports: list[dict[str, Any]] = []
+    for p in list_ports.comports():
+        vid = getattr(p, "vid", None)
+        pid = getattr(p, "pid", None)
+        serial_number = (getattr(p, "serial_number", None) or "").strip()
+        manufacturer = (getattr(p, "manufacturer", None) or "").strip()
+        description = (getattr(p, "description", None) or "").strip()
+        # pyserial reports "n/a" for ports it can't describe (common on Linux
+        # for built-in UARTs) — fall back to the device path so the label reads.
+        if description.lower() in ("", "n/a"):
+            description = p.device
+        ports.append(
+            {
+                "device": p.device,
+                "description": description,
+                "manufacturer": manufacturer,
+                "vid": vid,
+                "pid": pid,
+                "serial_number": serial_number,
+                "hwid": (getattr(p, "hwid", None) or "").strip(),
+                "usb": vid is not None,
+                "label": _serial_port_label(
+                    p.device, description, manufacturer, serial_number
+                ),
+            }
+        )
+    # USB adapters first (the common case), then by device path for stability.
+    ports.sort(key=lambda x: (not x["usb"], x["device"]))
+    return ports
+
+
+def resolve_serial_port_by_serial(usb_serial: str) -> str | None:
+    """Return the live OS device path of the attached adapter whose USB serial
+    number matches ``usb_serial``, or ``None`` if no attached port matches.
+
+    Used by the connection resolver to turn a stored, stable ``usb_serial`` into
+    the volatile path (COM3 / /dev/ttyUSB0) the OS assigns it this boot.
+    """
+    if not usb_serial:
+        return None
+    for p in list_serial_ports():
+        if p["serial_number"] and p["serial_number"] == usb_serial:
+            return p["device"]
+    return None
+
+
 def _log_task_exception(task: asyncio.Task) -> None:
     """Done-callback for fire-and-forget on_data tasks: surface failures that
     would otherwise vanish as a 'Task exception was never retrieved' GC warning."""
@@ -61,6 +141,8 @@ class SerialTransport:
         bytesize: int = 8,
         parity: str = "N",
         stopbits: float = 1,
+        rtscts: bool = False,
+        xonxoff: bool = False,
         simulate: bool = False,
         name: str | None = None,
     ):
@@ -73,6 +155,8 @@ class SerialTransport:
         self._bytesize = bytesize
         self._parity = parity
         self._stopbits = stopbits
+        self._rtscts = rtscts
+        self._xonxoff = xonxoff
         self._name = name or port
 
         # Determine if we should simulate
@@ -120,6 +204,8 @@ class SerialTransport:
         bytesize: int = 8,
         parity: str = "N",
         stopbits: float = 1,
+        rtscts: bool = False,
+        xonxoff: bool = False,
         simulate: bool = False,
         name: str | None = None,
     ) -> "SerialTransport":
@@ -139,6 +225,8 @@ class SerialTransport:
             bytesize: Data bits (5, 6, 7, 8). Default 8.
             parity: Parity ('N', 'E', 'O'). Default 'N'.
             stopbits: Stop bits (1, 1.5, 2). Default 1.
+            rtscts: Enable hardware (RTS/CTS) flow control. Default off.
+            xonxoff: Enable software (XON/XOFF) flow control. Default off.
             simulate: Force simulation mode.
             name: Optional label for log messages (e.g. device_id).
                   Defaults to port path.
@@ -149,7 +237,7 @@ class SerialTransport:
         transport = cls(
             port, baudrate, on_data, on_disconnect, frame_parser,
             delimiter, timeout, inter_command_delay, bytesize, parity,
-            stopbits, simulate, name,
+            stopbits, rtscts, xonxoff, simulate, name,
         )
         await transport._connect()
         return transport
@@ -178,6 +266,8 @@ class SerialTransport:
                     bytesize=self._bytesize,
                     parity=self._parity,
                     stopbits=self._stopbits,
+                    rtscts=self._rtscts,
+                    xonxoff=self._xonxoff,
                 ),
                 timeout=self._timeout,
             )

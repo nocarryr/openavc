@@ -13,7 +13,7 @@ Use the search box at the top of the device list to filter by name, ID, or drive
 3. Select a driver from the dropdown (e.g., "PJLink Class 1 Projector")
 4. Enter a Device ID (e.g., `projector_main`). This is the name used in macros and scripts, so keep it short and descriptive.
 5. Enter a display name (e.g., "Main Projector"). This is what appears in the UI.
-6. Configure connection settings (host, port, etc.). Defaults are pre-filled from the driver. A device that supports serial shows a connection picker with three choices: **Network (IP)**, **Direct serial** (a COM port on this server), or **Through a bridge** (route it over a serial-to-Ethernet bridge such as a Global Cache iTach). See [Connecting Devices Through a Bridge](connecting-through-a-bridge.md).
+6. Configure connection settings (host, port, etc.). Defaults are pre-filled from the driver. A device that supports serial shows a connection picker with three choices: **Network (IP)**, **Direct serial** (pick a serial port detected on this server, including USB-to-serial adapters), or **Through a bridge** (route it over a serial-to-Ethernet bridge such as a Global Cache iTach). See [Connecting Devices Through a Bridge](connecting-through-a-bridge.md).
 7. Click **Add**
 
 The Device ID is permanent and referenced everywhere. Choose a convention and stick with it. Common patterns:
@@ -23,6 +23,14 @@ The Device ID is permanent and referenced everywhere. Choose a convention and st
 | `type_location` | `projector_main`, `display_lobby` |
 | `type_number` | `projector_1`, `switcher_1` |
 | `room_type` | `br201_projector`, `br201_switcher` |
+
+## Serial and USB-to-Serial Connections
+
+A driver that speaks RS-232 can connect either directly to a serial port on the machine running OpenAVC or [through a bridge](connecting-through-a-bridge.md). For a direct connection, choose **Direct serial** in the connection picker and pick the port from the list.
+
+Inexpensive USB-to-serial adapters show up here automatically. Plug one into the OpenAVC server and it appears as a selectable port, named like `COM3` on Windows or `/dev/ttyUSB0` on Linux. The list shows the server's own ports, so the adapter must be plugged into the machine running OpenAVC, not the computer you are browsing from. Click **Refresh** after plugging one in, or choose **Enter path manually** for a port that is not attached yet.
+
+When you pick a USB adapter that reports a serial number, OpenAVC remembers that adapter and reconnects to it even if the operating system assigns a different port name after a reboot or replug. Set the baud rate, parity, data bits, stop bits, and flow control to match the device, following its manual.
 
 ## Testing Commands
 

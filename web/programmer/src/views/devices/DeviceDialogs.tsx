@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useProjectStore } from "../../store/projectStore";
 import * as api from "../../api/restClient";
+import { getSerialPorts, type SerialPortInfo } from "../../api/systemClient";
 import type { DeviceConfig, DriverInfo } from "../../api/types";
 import { DeviceSettingsSetupDialog, hasDriverSetupSettings } from "../../components/shared/DeviceSettingsSetupDialog";
 import {
@@ -231,6 +232,7 @@ function applyConnMode(
     delete v.parity;
     delete v.stopbits;
     delete v.flow_control;
+    delete v.usb_serial;
     v.transport = primaryNetworkTransport(d);
     if (v.host == null) v.host = "";
     // A COM path left in `port` is meaningless as a TCP port → reset to the
@@ -253,6 +255,7 @@ function applyConnMode(
     delete v.host;
     delete v.transport;
     delete v.port;
+    delete v.usb_serial;
     if (v.baudrate == null) v.baudrate = "9600";
   }
   return v;
@@ -264,6 +267,89 @@ const pickerLabelStyle: React.CSSProperties = {
   color: "var(--text-secondary)",
   marginBottom: "var(--space-xs)",
 };
+
+// Direct-serial port chooser: a dropdown of the serial ports detected on the
+// server (USB-to-serial adapters present to the OS as plain serial ports), with
+// a manual-entry escape hatch for a port that isn't attached yet. Picking a
+// detected adapter also stores its USB serial number (`usb_serial`) so the
+// binding survives the OS port name moving across reboot/replug; manual entry
+// stores no serial (the path is taken literally).
+function SerialPortPicker({
+  value,
+  onPick,
+}: {
+  value: string;
+  onPick: (device: string, usbSerial: string) => void;
+}) {
+  const [ports, setPorts] = useState<SerialPortInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [manual, setManual] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    getSerialPorts()
+      .then((r) => setPorts(r.ports))
+      .catch(() => setPorts([]))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const MANUAL = "__manual__";
+  // A stored port that isn't currently attached still has to show as the
+  // selection (editing a device whose adapter is unplugged).
+  const detected = ports.some((p) => p.device === value);
+
+  const onSelect = (next: string) => {
+    if (next === MANUAL) {
+      setManual(true);
+      return;
+    }
+    setManual(false);
+    const match = ports.find((p) => p.device === next);
+    onPick(next, match?.serial_number ?? "");
+  };
+
+  return (
+    <div style={{ marginBottom: "var(--space-sm)" }}>
+      <label style={pickerLabelStyle}>Serial Port</label>
+      <div style={{ display: "flex", gap: "var(--space-xs)" }}>
+        {manual ? (
+          <input
+            value={value}
+            onChange={(e) => onPick(e.target.value, "")}
+            placeholder="COM3 or /dev/ttyUSB0"
+            style={{ flex: 1 }}
+            autoFocus
+          />
+        ) : (
+          <select value={value} onChange={(e) => onSelect(e.target.value)} style={{ flex: 1 }}>
+            <option value="">{loading ? "Detecting ports..." : "Select a serial port..."}</option>
+            {value && !detected && <option value={value}>{value} (not detected)</option>}
+            {ports.map((p) => (
+              <option key={p.device} value={p.device}>{p.label}</option>
+            ))}
+            <option value={MANUAL}>Enter path manually...</option>
+          </select>
+        )}
+        <button
+          type="button"
+          onClick={manual ? () => setManual(false) : load}
+          title={manual ? "Back to the detected-port list" : "Refresh the port list"}
+          style={{ whiteSpace: "nowrap" }}
+        >
+          {manual ? "Back" : "Refresh"}
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: "var(--space-xs)" }}>
+        Ports on the OpenAVC server. The USB adapter must be plugged into that machine.
+      </div>
+    </div>
+  );
+}
 
 function ConnectionModePicker({
   driverInfo,
@@ -423,7 +509,12 @@ function ConnectionModePicker({
 
       {mode === "serial" && (
         <>
-          {field("Serial Port", <input value={configValues.port ?? ""} onChange={(e) => set("port", e.target.value)} placeholder="COM3 or /dev/ttyUSB0" style={{ width: "100%" }} />)}
+          <SerialPortPicker
+            value={configValues.port ?? ""}
+            onPick={(device, usbSerial) =>
+              setConfigValues((v) => ({ ...v, port: device, usb_serial: usbSerial }))
+            }
+          />
           {serialParams}
         </>
       )}
@@ -678,7 +769,10 @@ export function AddDeviceDialog({
     const config: Record<string, unknown> = {};
     const schema = (driverInfo?.config_schema ?? {}) as Record<string, Record<string, unknown>>;
     for (const [key, val] of Object.entries(configValues)) {
-      if (val === "") continue;
+      // Empty normally means "unset, leave alone", but an empty usb_serial is a
+      // deliberate clear (user re-picked a manual / no-serial port) and must be
+      // sent so it overwrites a previously bound adapter serial in the merge.
+      if (val === "" && key !== "usb_serial") continue;
       const fieldType = String(schema[key]?.type || "");
       const result = coerceConfigValue(val, fieldType, schema[key]?.secret === true);
       if (!result.ok) {
@@ -1041,7 +1135,10 @@ export function EditDeviceDialog({
       const config: Record<string, unknown> = {};
       const schema = (driverInfo?.config_schema ?? {}) as Record<string, Record<string, unknown>>;
       for (const [key, val] of Object.entries(configValues)) {
-        if (val === "") continue;
+        // Empty normally means "unset, leave alone", but an empty usb_serial is a
+      // deliberate clear (user re-picked a manual / no-serial port) and must be
+      // sent so it overwrites a previously bound adapter serial in the merge.
+      if (val === "" && key !== "usb_serial") continue;
         const fieldType = String(schema[key]?.type || "");
         const result = coerceConfigValue(val, fieldType, schema[key]?.secret === true);
         if (!result.ok) {

@@ -135,6 +135,9 @@ export const CONNECTION_FIELDS = new Set([
   // the port id it advertises (e.g. "serial:1").
   "bridge",
   "bridge_port",
+  // Local USB-to-serial stable identity: the adapter's USB serial number, which
+  // the resolver turns back into the live OS port path across reboot/replug.
+  "usb_serial",
 ]);
 
 // Connection fields the segmented connection-mode picker owns and renders
@@ -149,6 +152,7 @@ export const SERIAL_PICKER_FIELDS = new Set([
   "port",
   "bridge",
   "bridge_port",
+  "usb_serial",
   "baudrate",
   "bytesize",
   "parity",

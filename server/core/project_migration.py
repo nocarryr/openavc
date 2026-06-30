@@ -28,6 +28,11 @@ CONNECTION_FIELDS = {
     # resolver (engine.resolved_device_config) reads these to rewrite the
     # downstream's effective transport to the bridge's pass-through endpoint.
     "bridge", "bridge_port",
+    # Local USB-to-serial stable identity: the adapter's USB serial number.
+    # `_resolve_usb_binding` (engine.resolved_device_config) resolves it to the
+    # adapter's live OS port path so a direct serial device survives its port
+    # name moving across reboot / replug.
+    "usb_serial",
 }
 
 

@@ -266,8 +266,8 @@ class BaseDriver(ABC):
 
             serial_port = self.config.get("port", "")
             delay = self.config.get("inter_command_delay", 0.0)
-            baudrate, bytesize, parity, stopbits = self._coerce_serial_params(
-                self.config
+            baudrate, bytesize, parity, stopbits, rtscts, xonxoff = (
+                self._coerce_serial_params(self.config)
             )
 
             self.transport = await SerialTransport.create(
@@ -281,6 +281,8 @@ class BaseDriver(ABC):
                 bytesize=bytesize,
                 parity=parity,
                 stopbits=stopbits,
+                rtscts=rtscts,
+                xonxoff=xonxoff,
                 name=self.device_id,
             )
         elif transport_type == "udp":
@@ -669,7 +671,9 @@ class BaseDriver(ABC):
         """
 
     @staticmethod
-    def _coerce_serial_params(config: dict[str, Any]) -> tuple[int, int, str, int | float]:
+    def _coerce_serial_params(
+        config: dict[str, Any],
+    ) -> tuple[int, int, str, int | float, bool, bool]:
         """Coerce + validate serial params from untyped project config.
 
         Project config is untyped JSON, so an integrator / AI tool / hand-edit
@@ -679,7 +683,7 @@ class BaseDriver(ABC):
         ~120 generic reconnect attempts. Coerce string forms to the right type
         and raise a clear, actionable error for genuinely invalid values.
 
-        Returns ``(baudrate, bytesize, parity, stopbits)``.
+        Returns ``(baudrate, bytesize, parity, stopbits, rtscts, xonxoff)``.
         """
         try:
             baudrate = int(config.get("baudrate", 9600))
@@ -721,7 +725,14 @@ class BaseDriver(ABC):
             raise ValueError(
                 f"Invalid stopbits {raw_stopbits!r} (must be 1, 1.5, or 2)"
             )
-        return baudrate, bytesize, parity, stopbits
+        # Flow control: the UI offers none / hardware (RTS/CTS); accept the
+        # software (XON/XOFF) spelling too for forward-compat. An unrecognised
+        # value falls back to no flow control rather than raising — a stray
+        # value shouldn't make the device unconnectable.
+        flow = str(config.get("flow_control", "none")).strip().lower()
+        rtscts = flow in ("hardware", "rtscts", "rts/cts")
+        xonxoff = flow in ("software", "xonxoff", "xon/xoff")
+        return baudrate, bytesize, parity, stopbits, rtscts, xonxoff
 
     def _required_port(self) -> int:
         """Return ``config['port']`` for TCP/UDP/OSC, or raise a clear error.

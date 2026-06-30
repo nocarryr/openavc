@@ -151,17 +151,32 @@ class TestDisconnectCleanup:
 class TestSerialParamCoercion:
 
     def test_defaults(self):
-        assert BaseDriver._coerce_serial_params({}) == (9600, 8, "N", 1)
+        # (baudrate, bytesize, parity, stopbits, rtscts, xonxoff); no flow control.
+        assert BaseDriver._coerce_serial_params({}) == (9600, 8, "N", 1, False, False)
 
     def test_string_values_coerced(self):
         # JSON has no int/float — strings from a hand-edited .avc must work.
         assert BaseDriver._coerce_serial_params(
             {"baudrate": "19200", "bytesize": "7", "parity": "e", "stopbits": "1.5"}
-        ) == (19200, 7, "E", 1.5)
+        ) == (19200, 7, "E", 1.5, False, False)
 
     def test_stopbits_two_is_int(self):
-        _, _, _, stopbits = BaseDriver._coerce_serial_params({"stopbits": "2"})
+        _, _, _, stopbits, _, _ = BaseDriver._coerce_serial_params({"stopbits": "2"})
         assert stopbits == 2 and isinstance(stopbits, int)
+
+    @pytest.mark.parametrize("flow,rtscts,xonxoff", [
+        ("none", False, False),
+        ("hardware", True, False),    # the UI's "Hardware (RTS/CTS)" value
+        ("software", False, True),
+        ("xonxoff", False, True),
+        ("rts/cts", True, False),
+        ("unrecognised", False, False),  # a stray value must not raise / connect-block
+    ])
+    def test_flow_control_maps_to_pyserial_flags(self, flow, rtscts, xonxoff):
+        _, _, _, _, got_rtscts, got_xonxoff = BaseDriver._coerce_serial_params(
+            {"flow_control": flow}
+        )
+        assert (got_rtscts, got_xonxoff) == (rtscts, xonxoff)
 
     @pytest.mark.parametrize("config,match", [
         ({"bytesize": 3}, "bytesize"),

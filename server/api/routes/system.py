@@ -846,6 +846,18 @@ async def get_network_adapters() -> dict[str, Any]:
     return {"adapters": _get_adapters()}
 
 
+@router.get("/system/serial-ports")
+async def get_serial_ports() -> dict[str, Any]:
+    """List the serial ports on this server host for the device connection picker.
+
+    Covers USB-to-serial adapters (with vendor / serial-number identity where the
+    OS exposes it) and any built-in UARTs. The ports are the server's own — a USB
+    adapter must be plugged into the machine running OpenAVC, not the browser's.
+    """
+    from server.transport.serial_transport import list_serial_ports
+    return {"ports": list_serial_ports()}
+
+
 @router.post("/system/reboot")
 async def reboot_system() -> dict[str, str]:
     """Reboot the host via the root privileged helper (Pi appliance).
