@@ -42,11 +42,16 @@ LEGACY_REPO_DIRS=(driver_repo plugin_repo)
 # $APP_DIR.previous on rollback so a partial cp -a (interrupted, disk
 # full, OOM kill) cannot be promoted into the live slot and crash the
 # service on the next start with no working install to fall back to (A61).
+# The venv interpreter is executed, not merely checked for existence: an OS
+# Python minor upgrade (apt 3.11 -> 3.12) can leave venv/bin/python3 as a
+# dangling symlink that passes a file test but can't run, so a snapshot with
+# such a venv must not be treated as a valid rollback target.
 is_app_dir_valid() {
     local dir="$1"
     [ -f "$dir/pyproject.toml" ] && \
     [ -d "$dir/server" ] && \
-    [ -f "$dir/venv/bin/python3" ]
+    [ -f "$dir/venv/bin/python3" ] && \
+    "$dir/venv/bin/python3" -c 'import sys' >/dev/null 2>&1
 }
 
 # True if $1 is a mount point. Reads /proc/self/mountinfo (always present under
@@ -83,6 +88,28 @@ prepare_legacy_repos() {
             rmdir "$dir" 2>/dev/null && echo "$LOG_TAG: removed drained legacy $sub"
         fi
     done
+}
+
+# Abort an in-progress update and restore the snapshot taken at the top of
+# handle_update. Called when the freshly-installed tree can't be made startable
+# (the venv interpreter can't be recreated, or the dependency sync fails), so
+# the service never comes up live on a broken venv. The pending-update marker
+# is left untouched on purpose: the server's post-start confirm then sees the
+# version did NOT change and logs the failure instead of a false success.
+recover_from_snapshot() {
+    local prev="$APP_DIR.previous"
+    if [ ! -d "$prev" ]; then
+        echo "$LOG_TAG: no snapshot at $prev to recover from; manual intervention required"
+        return 1
+    fi
+    echo "$LOG_TAG: restoring previous install from $prev (update aborted)"
+    rm -rf "$APP_DIR"
+    if mv "$prev" "$APP_DIR"; then
+        chown -R openavc:openavc "$APP_DIR" 2>/dev/null || true
+        echo "$LOG_TAG: in-place rollback complete; staying on the previous version"
+    else
+        echo "$LOG_TAG: in-place rollback FAILED; manual intervention required"
+    fi
 }
 
 handle_update() {
@@ -210,12 +237,40 @@ handle_update() {
         chmod 755 "$APP_DIR/update-helper.sh"
     fi
 
-    # 7. Rebuild venv dependencies if pip and requirements.txt exist.
-    #    The venv we migrated came from the old release; pip install
-    #    syncs it against the new release's requirements.txt.
+    # 7. Make the venv functional, then sync dependencies against the new
+    #    release's requirements.txt.
+    #
+    #    The migrated venv came from the old release. An OS Python minor bump
+    #    (apt moves 3.11 -> 3.12) can leave its interpreter dangling, or
+    #    repointed at a minor whose site-packages it lacks — either way the
+    #    next start runs a non-functional install. Test the interpreter; if it
+    #    can't run, recreate the venv with the current system python3 (needs
+    #    python3-venv, shipped by install.sh and the Pi image). A recreated venv
+    #    is empty, so the pip sync below repopulates it.
+    if [ -d "$APP_DIR/venv" ] && ! "$APP_DIR/venv/bin/python3" -c 'import sys' >/dev/null 2>&1; then
+        echo "$LOG_TAG: venv interpreter is non-functional (likely an OS python minor bump) — recreating"
+        rm -rf "$APP_DIR/venv"
+        if ! "$PYTHON" -m venv "$APP_DIR/venv"; then
+            echo "$LOG_TAG: failed to recreate venv (is python3-venv installed?); aborting update"
+            recover_from_snapshot
+            rm -f "$UPDATE_FILE"
+            return
+        fi
+    fi
+
+    #    A failed dependency sync must NOT be reported as success: going live on
+    #    a venv missing its packages crash-loops the service on ImportError with
+    #    no rollback armed. Keep pip's stderr in the journal, check its real exit
+    #    status, and on failure abort the update — rolling back in place to the
+    #    snapshot so the service comes up on the previous working version.
     if [ -x "$APP_DIR/venv/bin/pip" ] && [ -f "$APP_DIR/requirements.txt" ]; then
-        echo "$LOG_TAG: rebuilding venv dependencies"
-        "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet 2>/dev/null || true
+        echo "$LOG_TAG: syncing venv dependencies"
+        if ! "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet; then
+            echo "$LOG_TAG: venv dependency sync failed; aborting update and rolling back in place"
+            recover_from_snapshot
+            rm -f "$UPDATE_FILE"
+            return
+        fi
     fi
 
     # Ensure correct ownership (service runs as openavc user)
@@ -359,11 +414,15 @@ sync_unit() {
 # Main — process instructions if present, sync the unit, then always exit 0.
 # handle_update may exec the freshly-installed helper; in that case sync_unit
 # runs from the re-exec'd process instead (UPDATE_FILE already consumed).
-if [ -f "$UPDATE_FILE" ]; then
-    handle_update
-fi
+# A queued rollback wins over any (possibly stale) update instruction: running
+# handle_update first would do a full extract + venv sync only for the rollback
+# to immediately revert it. If a rollback is pending, drop the update instruction
+# so it can't resurface on a later start, and roll back directly.
 if [ -f "$ROLLBACK_FILE" ]; then
+    rm -f "$UPDATE_FILE"
     handle_rollback
+elif [ -f "$UPDATE_FILE" ]; then
+    handle_update
 fi
 sync_unit
 exit 0

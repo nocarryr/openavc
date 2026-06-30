@@ -70,16 +70,20 @@ _BASH_AVAILABLE = _BASH_PATH is not None
 
 
 def _build_fake_install(
-    target_dir: Path, version: str = "1.0.0", *, with_venv: bool = True
+    target_dir: Path, version: str = "1.0.0", *, with_venv: bool = True,
+    runnable_venv: bool = True,
 ) -> None:
     """Build a directory that looks like /opt/openavc after installation.
 
     Matches the real structure: server/, web/, requirements.txt, etc.
 
-    Includes a minimal venv/bin/python3 marker file by default so the
-    integrity check in update-helper.sh treats the directory as a
-    complete install (A61). Set ``with_venv=False`` to simulate a
-    partial / corrupt install for rollback-refusal tests.
+    Includes a venv/bin/python3 by default. The integrity check in
+    update-helper.sh executes this interpreter (not just stats it), so the
+    stub is a wrapper that runs the real python3. Set ``with_venv=False`` to
+    simulate a partial install (no interpreter at all), or
+    ``runnable_venv=False`` to simulate a dangling interpreter — present but
+    unable to run, as an OS Python minor upgrade can leave it. Both must be
+    refused as rollback targets.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "server").mkdir(exist_ok=True)
@@ -100,9 +104,15 @@ def _build_fake_install(
     )
     if with_venv:
         (target_dir / "venv" / "bin").mkdir(parents=True, exist_ok=True)
-        (target_dir / "venv" / "bin" / "python3").write_text(
-            "#!/usr/bin/python3\n# stub for tests\n"
-        )
+        py = target_dir / "venv" / "bin" / "python3"
+        if runnable_venv:
+            # Runs the real interpreter so `python3 -c 'import sys'` succeeds.
+            py.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        else:
+            # Present but dangling: a bad shebang so executing it fails, like a
+            # venv interpreter orphaned by an apt python minor bump.
+            py.write_text("#!/usr/bin/python3.99\n# dangling interpreter\n")
+        py.chmod(0o755)
 
 
 def _build_update_tarball(staging_dir: Path, version: str) -> Path:
@@ -730,6 +740,59 @@ class TestHelperScriptRollback:
         assert not (data_dir / "apply-rollback").exists()
         # Failure mode logged so an operator can investigate
         assert "corrupt" in result.stdout.lower() or "corrupt" in result.stderr.lower()
+
+    def test_dangling_previous_interpreter_refused(self, tmp_path):
+        """A $PREVIOUS whose venv interpreter is present but cannot run (an OS
+        Python minor bump can orphan it) must NOT be promoted. A stat-only
+        check would wrongly accept it; the helper runs the interpreter so a
+        dangling one is caught and the rollback refused."""
+        data_dir = tmp_path / "data"
+        app_dir = tmp_path / "app"
+        previous = Path(str(app_dir) + ".previous")
+        data_dir.mkdir()
+
+        # Current install (v2.0.0). Previous exists with a venv/bin/python3
+        # file that is present but won't run.
+        _build_fake_install(app_dir, "2.0.0")
+        _build_fake_install(previous, "1.0.0", runnable_venv=False)
+        (data_dir / "apply-rollback").write_text("")
+
+        result = _run_helper(data_dir, app_dir)
+
+        assert result.returncode == 0
+        # Rollback refused — current install untouched
+        assert _read_version(app_dir) == "2.0.0"
+        assert not (data_dir / "apply-rollback").exists()
+        assert "corrupt" in result.stdout.lower() or "corrupt" in result.stderr.lower()
+
+    def test_pending_rollback_skips_stale_update(self, tmp_path):
+        """A pending rollback wins over a stale apply-update.json: the helper
+        must roll back and NOT run the update extract (wasted work it would
+        immediately revert), dropping the stale instruction so it can't
+        resurface on a later start."""
+        data_dir = tmp_path / "data"
+        app_dir = tmp_path / "app"
+        previous = Path(str(app_dir) + ".previous")
+        data_dir.mkdir()
+
+        _build_fake_install(app_dir, "2.0.0")
+        _build_fake_install(previous, "1.0.0")
+        # A stale but well-formed update instruction alongside a rollback.
+        (data_dir / "apply-update.json").write_text(
+            '{"artifact": "/nonexistent/openavc-3.0.0.tar.gz", "to_version": "3.0.0"}'
+        )
+        (data_dir / "apply-rollback").write_text("")
+
+        result = _run_helper(data_dir, app_dir)
+
+        assert result.returncode == 0
+        # Rolled back to previous, not updated to 3.0.0
+        assert _read_version(app_dir) == "1.0.0"
+        # The update extract never ran (no wasted work)
+        assert "applying update" not in result.stdout.lower()
+        # Both instructions consumed
+        assert not (data_dir / "apply-update.json").exists()
+        assert not (data_dir / "apply-rollback").exists()
 
 
 @pytest.mark.skipif(not _BASH_AVAILABLE, reason="bash not available")
