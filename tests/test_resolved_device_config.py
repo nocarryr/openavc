@@ -508,6 +508,61 @@ def test_get_driver_bridge_ports_non_bridge_returns_empty(fake_tcp_driver):
     assert get_driver_bridge_ports("fake_kramer_test") == {}
 
 
+@pytest.fixture
+def fake_ir_bridge_driver():
+    """Register a temporary IR bridge driver (advertises an IR emitter port).
+
+    Synthetic invented device: an IR port routes commands through the bridge at
+    send time (no pass-through TCP port), unlike a serial port.
+    """
+    definition = {
+        "id": "fake_ir_bridge_test",
+        "name": "Fake IR Bridge (test)",
+        "manufacturer": "TestCo",
+        "category": "utility",
+        "version": "1.0.0",
+        "transport": "tcp",
+        "bridge": {
+            "ports": [
+                {"id": "ir:1", "kind": "ir", "label": "IR Port 1"},
+            ],
+        },
+        "default_config": {"host": "", "port": 4998},
+        "config_schema": {},
+        "state_variables": {},
+        "commands": {},
+        "responses": [],
+    }
+    cls = create_configurable_driver_class(definition)
+    register_driver(cls)
+    yield cls
+    unregister_driver("fake_ir_bridge_test")
+
+
+def test_ir_bridge_binding_marks_device_bridge_routed(
+    engine_with_project, fake_ir_bridge_driver
+):
+    """An IR device bound to a bridge's IR port has no transport of its own:
+    the resolver marks it transport=bridge (no host rewrite) so connect() opens
+    no socket and commands route through the bridge instance at send time."""
+    engine = engine_with_project
+    bridge = DeviceConfig(
+        id="irbridge", driver="fake_ir_bridge_test", name="IR Bridge", config={}
+    )
+    tv = DeviceConfig(id="tv", driver="generic_ir", name="TV", config={})
+    engine.project.devices.extend([bridge, tv])
+    engine.project.connections["irbridge"] = {"host": "192.0.2.70"}
+    engine.project.connections["tv"] = {"bridge": "irbridge", "bridge_port": "ir:1"}
+
+    cfg = engine.resolved_device_config(tv)["config"]
+    assert cfg["transport"] == "bridge"
+    # No host/port rewrite — an IR device dials nothing.
+    assert "host" not in cfg
+    # Binding markers survive for the send-time router.
+    assert cfg["bridge"] == "irbridge"
+    assert cfg["bridge_port"] == "ir:1"
+
+
 def test_yaml_bridge_and_transports_survive_into_driver_info(
     fake_bridge_driver, fake_serial_device_driver
 ):

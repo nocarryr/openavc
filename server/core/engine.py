@@ -845,9 +845,16 @@ class Engine:
             resolved["port"] = passthrough_port
             return resolved
 
-        # IR / relay (and any future non-pass-through kind): no transport
-        # rewrite — the command path routes through the bridge object at send
-        # time (Phase 2/3).
+        if port_def.get("kind") == "ir":
+            # An IR device has no transport of its own: it emits through the
+            # live bridge instance at send time (base.emit_via_bridge). Mark it
+            # bridge-routed so connect() opens no socket; the bridge/bridge_port
+            # markers stay in config for the router to resolve.
+            resolved = dict(config)
+            resolved["transport"] = "bridge"
+            return resolved
+
+        # Any other non-pass-through kind: no transport rewrite.
         return config
 
     @staticmethod

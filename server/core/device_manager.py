@@ -260,6 +260,12 @@ class DeviceManager:
         self._devices[device_id] = driver
         self._device_configs[device_id] = device_config
 
+        # A bridge-routed device (e.g. an IR device bound to an emitter port)
+        # emits through the live bridge instance; hand it the router that
+        # reaches that bridge at send time.
+        if config.get("bridge") and config.get("bridge_port"):
+            driver._bridge_router = self._route_bridge_command
+
         # Set device name in state
         self.state.set(
             f"device.{device_id}.name", name, source=f"device.{device_id}"
@@ -316,6 +322,24 @@ class DeviceManager:
                 "connecting anyway", bridge_id, bridge_port, device_id,
                 exc_info=True,
             )
+
+    async def _route_bridge_command(
+        self, bridge_id: str, port_id: str, kind: str, payload: dict[str, Any]
+    ) -> Any:
+        """Route a bridge-routed downstream device's command to its live bridge.
+
+        Injected into bridge-routed drivers as their ``_bridge_router`` so a
+        command (e.g. an IR device's code) reaches the bridge instance that owns
+        the hardware socket. Raises ConnectionError with a clear message when the
+        bridge is missing, not a bridge, or offline — surfaced to the caller as a
+        command failure rather than a silent no-op.
+        """
+        bridge = self._devices.get(bridge_id)
+        if bridge is None or not getattr(bridge, "is_bridge", False):
+            raise ConnectionError(f"Bridge '{bridge_id}' is not available")
+        if not getattr(bridge, "_connected", False):
+            raise ConnectionError(f"Bridge '{bridge_id}' is offline")
+        return await bridge.bridge_emit(port_id, kind, payload)
 
     async def remove_device(self, device_id: str) -> None:
         """Disconnect and remove a device (handles both active and orphaned)."""

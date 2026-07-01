@@ -73,6 +73,10 @@ class BaseDriver(ABC):
         self._poll_task: asyncio.Task | None = None
         self._connected = False
         self._last_poll_success: float = 0.0
+        # For a device that routes its commands through a bridge (e.g. an IR
+        # device bound to a bridge's emitter port): a callable the DeviceManager
+        # injects to reach the live bridge instance. None for a direct device.
+        self._bridge_router: Any = None
         # Last transport error captured before the live transport is torn down
         # on a failure path, so the DeviceManager's connection-fault classifier
         # can still read it after self.transport has been nulled. Cleared at
@@ -227,6 +231,19 @@ class BaseDriver(ABC):
         transport_type = self.config.get("transport") or self.DRIVER_INFO.get(
             "transport", "tcp"
         )
+
+        # A bridge-routed device (e.g. an IR device bound to a bridge's emitter
+        # port) has no transport of its own — it emits through the live bridge
+        # instance (see emit_via_bridge). It is "connected" as a logical device;
+        # a command emitted while the bridge is unavailable surfaces a clear
+        # error at send time.
+        if transport_type == "bridge":
+            self._connected = True
+            self.set_state("connected", True)
+            await self.events.emit(f"device.connected.{self.device_id}")
+            log.info(f"[{self.device_id}] Connected (bridge-routed)")
+            return
+
         frame_parser = self._create_frame_parser()
         delimiter = self._resolve_delimiter()
 
@@ -622,6 +639,75 @@ class BaseDriver(ABC):
         connect (the platform logs and proceeds), so a transient bridge-side
         failure can't strand the downstream device offline.
         """
+
+    # A bridge that emits commands for downstream devices (IR, and any future
+    # non-pass-through kind) owns its command socket and multiplexes it. The
+    # platform speaks a vendor-neutral payload; the bridge driver translates to
+    # its own wire format. For IR: kind == "ir", payload == {"pronto": <hex>,
+    # "repeat": <int>}. Default: not an emitting bridge.
+    async def bridge_emit(
+        self, port_id: str, kind: str, payload: dict[str, Any]
+    ) -> Any:
+        """Emit a downstream device's command through one of this bridge's ports.
+
+        Called on the *bridge* driver by the DeviceManager router when a
+        bridge-routed downstream device sends a command. Override in an emitting
+        bridge (e.g. IR) to convert ``payload`` to the hardware wire format and
+        send it on the bridge's command socket. Default raises.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not emit through bridge ports"
+        )
+
+    @property
+    def can_learn(self) -> bool:
+        """True if this bridge can capture codes from a remote (IR learner).
+
+        Override to return True on a bridge that implements bridge_learn_*.
+        """
+        return False
+
+    async def bridge_learn_start(self) -> None:
+        """Begin a learn session (e.g. enable the IR learner on a dedicated
+        socket and pause polling). Override on a learning bridge. Default raises.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support learning"
+        )
+
+    async def bridge_learn_poll(self, timeout: float) -> str | None:
+        """Wait up to ``timeout`` seconds for the next captured code.
+
+        Returns the captured code as vendor-neutral Pronto hex, or None on
+        timeout (so the caller can loop for continuous auto-capture). Override
+        on a learning bridge.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support learning"
+        )
+
+    async def bridge_learn_stop(self) -> None:
+        """End the learn session (disable the learner, close the socket, resume
+        polling). Override on a learning bridge. Must be safe to call twice.
+        """
+
+    async def emit_via_bridge(self, kind: str, payload: dict[str, Any]) -> Any:
+        """Emit ``payload`` through the bridge this device is bound to.
+
+        For a bridge-routed device (its config carries ``bridge`` +
+        ``bridge_port``): looks up the live bridge via the injected router and
+        calls its bridge_emit. Raises ConnectionError if the device is not
+        bridge-bound or the bridge is unavailable.
+        """
+        bridge_id = self.config.get("bridge")
+        port_id = self.config.get("bridge_port")
+        if not bridge_id or not port_id:
+            raise ConnectionError(f"[{self.device_id}] not bound to a bridge port")
+        if self._bridge_router is None:
+            raise ConnectionError(
+                f"[{self.device_id}] bridge routing unavailable"
+            )
+        return await self._bridge_router(bridge_id, port_id, kind, payload)
 
     # --- Optional overrides ---
 
