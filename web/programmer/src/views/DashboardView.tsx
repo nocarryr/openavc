@@ -124,13 +124,19 @@ function buildPosterHtml({ qrSvg, url, roomName, logoSrc }: { qrSvg: string; url
 </html>`;
 }
 
-function QRCodeDialog({ url, roomName, onClose }: { url: string; roomName: string; onClose: () => void }) {
-  const svgMarkup = useMemo(() => {
-    const qr = qrcode(0, "M");
-    qr.addData(url);
-    qr.make();
-    return qr.createSvgTag({ cellSize: 8, margin: 2, scalable: true });
-  }, [url]);
+function makeQrSvg(data: string): string {
+  const qr = qrcode(0, "M");
+  qr.addData(data);
+  qr.make();
+  return qr.createSvgTag({ cellSize: 8, margin: 2, scalable: true });
+}
+
+// The on-screen QR points at /pair (the dedicated-panel setup walkthrough); the
+// printed wall sign points at /panel so an end user who scans it lands straight
+// on the room's controls.
+function QRCodeDialog({ pairUrl, panelUrl, roomName, onClose }: { pairUrl: string; panelUrl: string; roomName: string; onClose: () => void }) {
+  const pairSvg = useMemo(() => makeQrSvg(pairUrl), [pairUrl]);
+  const panelSvg = useMemo(() => makeQrSvg(panelUrl), [panelUrl]);
 
   const handlePrint = useCallback(async () => {
     // Inline the logo as a data URI so the standalone print window is fully
@@ -151,7 +157,7 @@ function QRCodeDialog({ url, roomName, onClose }: { url: string; roomName: strin
       /* fall back to the resolved URL */
     }
 
-    const posterHtml = buildPosterHtml({ qrSvg: svgMarkup, url, roomName, logoSrc });
+    const posterHtml = buildPosterHtml({ qrSvg: panelSvg, url: panelUrl, roomName, logoSrc });
     const win = window.open("", "_blank");
     if (!win) {
       showError("Couldn't open the print view. Allow pop-ups for this site, then try again.");
@@ -160,7 +166,7 @@ function QRCodeDialog({ url, roomName, onClose }: { url: string; roomName: strin
     win.document.open();
     win.document.write(posterHtml);
     win.document.close();
-  }, [svgMarkup, url, roomName]);
+  }, [panelSvg, panelUrl, roomName]);
 
   return (
     <Dialog title="Scan to connect" onClose={onClose}>
@@ -170,10 +176,10 @@ function QRCodeDialog({ url, roomName, onClose }: { url: string; roomName: strin
         </div>
         <div
           style={{ width: 260, height: 260, background: "#fff", padding: "var(--space-sm)", borderRadius: "var(--border-radius)" }}
-          dangerouslySetInnerHTML={{ __html: svgMarkup }}
+          dangerouslySetInnerHTML={{ __html: pairSvg }}
         />
         <code style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text-muted)", wordBreak: "break-all", textAlign: "center" }}>
-          {url}
+          {pairUrl}
         </code>
         <div style={{
           display: "flex",
@@ -237,6 +243,9 @@ function QRCodeDialog({ url, roomName, onClose }: { url: string; roomName: strin
             Close
           </button>
         </div>
+        <div style={{ color: "var(--text-muted)", fontSize: 11, textAlign: "center", maxWidth: 300 }}>
+          Printing produces a full-page sign whose QR opens the room panel directly.
+        </div>
       </div>
     </Dialog>
   );
@@ -253,14 +262,21 @@ function PanelAccessCard({ systemStatus, roomName }: { systemStatus: Record<stri
 
   const isLocalOnly = bindAddress === "127.0.0.1" || bindAddress === "::1";
 
-  const panelUrl = localIp && !isLocalOnly
-    ? `http://${localIp}${port === 80 ? "" : ":" + String(port)}/panel`
-    : "";
-  const hostnameUrl = hostname && !isLocalOnly
-    ? `http://${hostname}${port === 80 ? "" : ":" + String(port)}/panel`
-    : "";
-  const pairUrl = localIp && !isLocalOnly
-    ? `http://${localIp}${port === 80 ? "" : ":" + String(port)}/pair`
+  // The address the browser is actually using is ground truth. On multi-homed
+  // machines (VPN, virtual/second adapters) the server's auto-detected local_ip
+  // can be an interface panels can't reach, so prefer the current origin and
+  // only fall back to the detected IP on loopback (admin on the box itself).
+  const loc = window.location;
+  const isLoopbackHost = loc.hostname === "localhost" || loc.hostname === "127.0.0.1"
+    || loc.hostname === "::1" || loc.hostname === "[::1]";
+  const lanOrigin = isLoopbackHost
+    ? (localIp ? `${loc.protocol}//${localIp}${port === 80 ? "" : ":" + String(port)}` : "")
+    : loc.origin;
+
+  const panelUrl = lanOrigin && !isLocalOnly ? `${lanOrigin}/panel` : "";
+  const pairUrl = lanOrigin && !isLocalOnly ? `${lanOrigin}/pair` : "";
+  const hostnameUrl = hostname && hostname !== localIp && !isLocalOnly
+    ? `${loc.protocol}//${hostname}${port === 80 ? "" : ":" + String(port)}/panel`
     : "";
 
   const cardStyle: React.CSSProperties = {
@@ -370,7 +386,7 @@ function PanelAccessCard({ systemStatus, roomName }: { systemStatus: Record<stri
           </div>
         )}
       </div>
-      {qrOpen && pairUrl && <QRCodeDialog url={pairUrl} roomName={roomName} onClose={() => setQrOpen(false)} />}
+      {qrOpen && pairUrl && panelUrl && <QRCodeDialog pairUrl={pairUrl} panelUrl={panelUrl} roomName={roomName} onClose={() => setQrOpen(false)} />}
     </div>
   );
 }
