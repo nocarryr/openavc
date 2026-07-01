@@ -63,18 +63,21 @@ function buildPosterHtml({ qrSvg, url, roomName, logoSrc }: { qrSvg: string; url
 <style>
   :root { --sage: #8AB493; --sage-deep: #4a7d5c; --ink: #23302a; --muted: #6a7b70; }
   * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @page { margin: 0; }
   html, body { margin: 0; padding: 0; height: 100%; background: #fff; }
-  body {
+  /* Full-bleed sheet: fills the page and clips the corner accents. Uses absolute
+     (not fixed) positioning so the accents survive paged/print media. */
+  .sheet {
+    position: relative; overflow: hidden; min-height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 22mm 18mm;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: var(--ink);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    text-align: center; min-height: 100vh; position: relative; overflow: hidden;
-    padding: 18mm 16mm;
   }
-  .accent { position: fixed; width: 92mm; height: 92mm; opacity: 0.12; pointer-events: none; z-index: 0; }
+  .accent { position: absolute; width: 105mm; height: 105mm; opacity: 0.22; pointer-events: none; }
   .accent svg { width: 100%; height: 100%; display: block; }
-  .accent-tl { top: -30mm; left: -30mm; }
-  .accent-br { bottom: -30mm; right: -30mm; }
+  .accent-tl { top: -32mm; left: -32mm; }
+  .accent-br { bottom: -32mm; right: -32mm; }
   .content { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; }
   .brand { height: 8mm; width: auto; opacity: 0.75; margin-bottom: 13mm; }
   .headline { font-size: 30pt; font-weight: 700; line-height: 1.22; margin: 0; letter-spacing: -0.01em; }
@@ -86,26 +89,27 @@ function buildPosterHtml({ qrSvg, url, roomName, logoSrc }: { qrSvg: string; url
   .steps b { color: var(--ink); font-weight: 600; }
   .url { margin-top: 6mm; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
          font-size: 12pt; color: var(--sage-deep); word-break: break-all; }
-  @page { margin: 12mm; }
 </style>
 </head>
 <body>
-  <div class="accent accent-tl" aria-hidden="true">
-    <svg viewBox="0 0 200 200"><g fill="none" stroke="#8AB493" stroke-width="7">
-      <circle cx="0" cy="0" r="55"/><circle cx="0" cy="0" r="100"/><circle cx="0" cy="0" r="145"/><circle cx="0" cy="0" r="190"/>
-    </g></svg>
-  </div>
-  <div class="accent accent-br" aria-hidden="true">
-    <svg viewBox="0 0 200 200"><g fill="none" stroke="#4a7d5c" stroke-width="7">
-      <circle cx="200" cy="200" r="55"/><circle cx="200" cy="200" r="100"/><circle cx="200" cy="200" r="145"/><circle cx="200" cy="200" r="190"/>
-    </g></svg>
-  </div>
-  <div class="content">
-    <img id="brand-logo" class="brand" src="${logoSrc}" alt="OpenAVC">
-    <h1 class="headline">To control <span class="room">${room}</span>,<br>scan this QR code</h1>
-    <div class="qr-wrap"><div class="qr">${qrSvg}</div></div>
-    <p class="steps"><b>1.</b> Open your phone or tablet camera &nbsp;&nbsp; <b>2.</b> Tap the link that appears</p>
-    <div class="url">${safeUrl}</div>
+  <div class="sheet">
+    <div class="accent accent-tl" aria-hidden="true">
+      <svg viewBox="0 0 200 200"><g fill="none" stroke="#8AB493" stroke-width="6">
+        <circle cx="0" cy="0" r="60"/><circle cx="0" cy="0" r="105"/><circle cx="0" cy="0" r="150"/><circle cx="0" cy="0" r="195"/>
+      </g></svg>
+    </div>
+    <div class="accent accent-br" aria-hidden="true">
+      <svg viewBox="0 0 200 200"><g fill="none" stroke="#4a7d5c" stroke-width="6">
+        <circle cx="200" cy="200" r="60"/><circle cx="200" cy="200" r="105"/><circle cx="200" cy="200" r="150"/><circle cx="200" cy="200" r="195"/>
+      </g></svg>
+    </div>
+    <div class="content">
+      <img id="brand-logo" class="brand" src="${logoSrc}" alt="OpenAVC">
+      <h1 class="headline">To control <span class="room">${room}</span>,<br>scan this QR code</h1>
+      <div class="qr-wrap"><div class="qr">${qrSvg}</div></div>
+      <p class="steps"><b>1.</b> Open your phone or tablet camera &nbsp;&nbsp; <b>2.</b> Tap the link that appears</p>
+      <div class="url">${safeUrl}</div>
+    </div>
   </div>
   <script>
     (function () {
