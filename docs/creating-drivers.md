@@ -395,6 +395,8 @@ polling:
     - "V\r\n"                        # Query current volume
 ```
 
+For **TCP and serial** drivers, each query is the raw protocol string to send (including its line terminator), as above. On **HTTP and UDP** a query may instead be the name of a declared command (it runs as that command, so its response is matched) or a path. Don't put a command name in a TCP/serial driver's `queries` — it would be sent to the device as literal text and read nothing back. The same applies to `on_connect`.
+
 Notice how much cleaner this is compared to JSON: comments explain the protocol, regex patterns don't need double-escaping, and the structure is easy to scan.
 
 ### Definition Reference
@@ -514,6 +516,13 @@ write:
 ```
 
 The `{value}` placeholder is replaced with the new setting value at runtime. Config values like `{host}` are also available.
+
+A `boolean` setting arrives as a real true/false, and `integer` / `number` as a real number, so use a Python format spec to shape the wire form:
+
+- **Boolean flag byte** (`1` / `0`): `{value:d}` — for example `send: 'TALLY{value:d}\r'` or `path: /cgi?cmd=TAE{value:d}`. Plain `{value}` on a boolean would send `True` / `False`, which most devices reject.
+- **Zero-padded number**: `{value:03d}` sends `63` as `063` for fixed-width fields.
+
+Every device setting needs a `state_key` that polling actually populates. That polled value is the read-back shown in the editor. If a setting can be written but never read, leave it as a command instead, so the UI never shows a stale value.
 
 **Python drivers** override `set_device_setting(key, value)` instead of using `write` definitions:
 
