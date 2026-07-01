@@ -689,6 +689,20 @@ class BaseDriver(ABC):
             f"{type(self).__name__} does not emit through bridge ports"
         )
 
+    async def bridge_import_code(self, wire: str) -> str:
+        """Convert a bridge-native wire code (as an integrator might paste from a
+        manual, e.g. a Global Cache ``sendir`` string) to vendor-neutral Pronto
+        hex for storage in an IR device's code-set.
+
+        Called on the *bridge* driver so the (vendor-specific) wire format is
+        parsed by the code that owns it; the platform stores only Pronto. The
+        default has no wire format to import from. Raise ValueError for an
+        unparseable code.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot import a native IR code"
+        )
+
     @property
     def can_learn(self) -> bool:
         """True if this bridge can capture codes from a remote (IR learner).

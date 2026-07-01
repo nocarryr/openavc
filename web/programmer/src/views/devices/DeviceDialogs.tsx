@@ -191,6 +191,15 @@ export function driverSerialCapable(d: DriverInfo | undefined): boolean {
   return t === "serial" || ts.includes("serial");
 }
 
+// An IR device emits through an IR bridge (no address of its own): transport
+// "bridge", or the ir_codes opt-in flag. Such a device is ALWAYS bridged, so
+// the connection picker shows only "Through a bridge" and filters to ir ports.
+export function driverIrCapable(d: DriverInfo | undefined): boolean {
+  if (!d) return false;
+  if ((d.transport || "").toLowerCase() === "bridge") return true;
+  return (d as unknown as { ir_codes?: boolean }).ir_codes === true;
+}
+
 function driverNetworkCapable(d: DriverInfo | undefined): boolean {
   if (!d) return false;
   const t = (d.transport || "").toLowerCase();
@@ -208,6 +217,8 @@ function primaryNetworkTransport(d: DriverInfo | undefined): string {
 type ConnMode = "network" | "serial" | "bridge";
 
 function inferConnMode(cv: Record<string, string>, d: DriverInfo | undefined): ConnMode {
+  // An IR device is always bridged — there's no network/serial mode for it.
+  if (driverIrCapable(d)) return "bridge";
   if (cv.bridge && cv.bridge_port) return "bridge";
   if ((cv.transport || "").toLowerCase() === "serial") return "serial";
   if ((cv.host ?? "") !== "") return "network";
@@ -250,13 +261,22 @@ function applyConnMode(
     if (v.port && /^\d+$/.test(v.port)) v.port = "";
     if (v.baudrate == null) v.baudrate = "9600";
   } else {
-    // bridge: the resolver computes transport=tcp + host + pass-through port,
-    // so we store only the binding + serial line params.
+    // bridge: the resolver computes the effective transport, so we store only
+    // the binding. A serial device also keeps its line params; an IR device has
+    // none (it emits codes through the port), so drop them.
     delete v.host;
     delete v.transport;
     delete v.port;
     delete v.usb_serial;
-    if (v.baudrate == null) v.baudrate = "9600";
+    if (driverIrCapable(d)) {
+      delete v.baudrate;
+      delete v.bytesize;
+      delete v.parity;
+      delete v.stopbits;
+      delete v.flow_control;
+    } else if (v.baudrate == null) {
+      v.baudrate = "9600";
+    }
   }
   return v;
 }
@@ -375,7 +395,8 @@ function ConnectionModePicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driverInfo?.id]);
 
-  if (!driverSerialCapable(driverInfo)) return null;
+  const isIr = driverIrCapable(driverInfo);
+  if (!driverSerialCapable(driverInfo) && !isIr) return null;
 
   const set = (key: string, value: string) =>
     setConfigValues((v) => ({ ...v, [key]: value }));
@@ -386,32 +407,40 @@ function ConnectionModePicker({
     setConfigValues((v) => applyConnMode(v, next, driverInfo));
   };
 
-  const netCapable = driverNetworkCapable(driverInfo);
+  // An IR device is always bridged: only the "Through a bridge" mode.
+  const netCapable = !isIr && driverNetworkCapable(driverInfo);
   const modes: { id: ConnMode; label: string }[] = [];
-  if (netCapable) modes.push({ id: "network", label: "Network (IP)" });
-  modes.push({ id: "serial", label: "Direct serial" });
+  if (!isIr) {
+    if (netCapable) modes.push({ id: "network", label: "Network (IP)" });
+    modes.push({ id: "serial", label: "Direct serial" });
+  }
   modes.push({ id: "bridge", label: "Through a bridge" });
 
   const modeHelp: Record<ConnMode, string> = {
     network: "Reach the device over the network by IP address.",
     serial: "A serial (RS-232) port on this server.",
-    bridge: "Route this device's serial line through a bridge device (e.g. an iTach).",
+    bridge: isIr
+      ? "Bind this IR device to an emitter port on an IR bridge (e.g. an iTach IP2IR)."
+      : "Route this device's serial line through a bridge device (e.g. an iTach).",
   };
 
-  // Bridge devices = project devices whose driver advertises bridge ports
-  // (excluding this device itself).
+  // The port kind this device binds to: an IR device wants ir ports, everything
+  // else wants serial pass-through ports.
+  const wantKind = isIr ? "ir" : "serial";
+
+  // Bridge devices = project devices whose driver advertises a port of the kind
+  // this device needs (excluding this device itself).
   const bridges = devices.filter((dev) => {
     if (selfId && dev.id === selfId) return false;
     const di = drivers.find((x) => x.id === dev.driver);
-    return (di?.bridge?.ports?.length ?? 0) > 0;
+    return (di?.bridge?.ports ?? []).some((p) => p.kind === wantKind);
   });
   const selectedBridge = bridges.find((b) => b.id === configValues.bridge);
   const selectedBridgeDriver = selectedBridge
     ? drivers.find((x) => x.id === selectedBridge.driver)
     : undefined;
-  // Phase 1: only serial pass-through ports are bindable.
   const bridgePorts = (selectedBridgeDriver?.bridge?.ports ?? []).filter(
-    (p) => p.kind === "serial",
+    (p) => p.kind === wantKind,
   );
 
   const onBridgeChange = (bridgeId: string) => {
@@ -419,8 +448,8 @@ function ConnectionModePicker({
       const bdrv = drivers.find(
         (x) => x.id === devices.find((d) => d.id === bridgeId)?.driver,
       );
-      const ports = (bdrv?.bridge?.ports ?? []).filter((p) => p.kind === "serial");
-      // Auto-select when the bridge has exactly one serial port (the IP2SL case).
+      const ports = (bdrv?.bridge?.ports ?? []).filter((p) => p.kind === wantKind);
+      // Auto-select when the bridge has exactly one port of the wanted kind.
       return {
         ...v,
         bridge: bridgeId,
@@ -522,25 +551,28 @@ function ConnectionModePicker({
       {mode === "bridge" && (
         bridges.length === 0 ? (
           <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", padding: "var(--space-sm)", background: "var(--bg-base)", borderRadius: "var(--border-radius)" }}>
-            No bridge devices in this project yet. Add a bridge (such as a Global Cache iTach) first, then bind this device to one of its ports.
+            {isIr
+              ? "No IR bridge in this project yet. Add an IR bridge (such as a Global Cache iTach IP2IR) first, then bind this device to one of its emitter ports."
+              : "No bridge devices in this project yet. Add a bridge (such as a Global Cache iTach) first, then bind this device to one of its ports."}
           </div>
         ) : (
           <>
             {field(
-              "Bridge",
+              isIr ? "IR bridge" : "Bridge",
               <select value={configValues.bridge ?? ""} onChange={(e) => onBridgeChange(e.target.value)} style={{ width: "100%" }}>
                 <option value="">Select a bridge...</option>
                 {bridges.map((b) => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
               </select>,
             )}
             {configValues.bridge && field(
-              "Bridge port",
+              isIr ? "IR emitter port" : "Bridge port",
               <select value={configValues.bridge_port ?? ""} onChange={(e) => set("bridge_port", e.target.value)} style={{ width: "100%" }}>
                 <option value="">Select a port...</option>
                 {bridgePorts.map((p) => <option key={p.id} value={p.id}>{p.label || p.id}</option>)}
               </select>,
             )}
-            {configValues.bridge && serialParams}
+            {/* Serial devices set line params here; IR devices have none. */}
+            {configValues.bridge && !isIr && serialParams}
           </>
         )
       )}
@@ -993,7 +1025,7 @@ export function AddDeviceDialog({
             >
               Connection Settings
             </div>
-            {serialCapable && (
+            {(serialCapable || driverIrCapable(driverInfo)) && (
               <ConnectionModePicker
                 driverInfo={driverInfo}
                 configValues={configValues}
@@ -1296,7 +1328,7 @@ export function EditDeviceDialog({
             >
               Connection Settings
             </div>
-            {serialCapable && (
+            {(serialCapable || driverIrCapable(driverInfo)) && (
               <ConnectionModePicker
                 driverInfo={driverInfo}
                 configValues={configValues}

@@ -39,6 +39,28 @@ export async function sendRaw(
   });
 }
 
+// --- IR bridges ---
+
+export async function irEmit(
+  bridgeId: string,
+  payload: { port: string; pronto: string; repeat?: number }
+): Promise<{ success: boolean; result: unknown }> {
+  return request(`/devices/${bridgeId}/ir-emit`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function irImport(
+  bridgeId: string,
+  wire: string
+): Promise<{ pronto: string }> {
+  return request(`/devices/${bridgeId}/ir-import`, {
+    method: "POST",
+    body: JSON.stringify({ wire }),
+  });
+}
+
 export async function invokeDeviceAction(
   deviceId: string,
   actionId: string,

@@ -14,6 +14,8 @@ import { findDeviceReferences, validateSettingValue } from "./deviceUtils";
 import { ChildEntities } from "./ChildEntities";
 import { QuickActions } from "./QuickActions";
 import { InlineProtocolEditor } from "./InlineProtocolEditor";
+import { IrCodesEditor } from "./IrCodesEditor";
+import { BridgeIrTools } from "./BridgeIrTools";
 
 export function DeviceDetail({
   deviceId,
@@ -548,6 +550,13 @@ export function DeviceDetail({
                         }`
                       : `Bound: ${bound.map((d) => d.name || d.id).join(", ")}`}
                   </div>
+                  {p.kind === "ir" && (
+                    <BridgeIrTools
+                      bridgeId={deviceId}
+                      port={p.id}
+                      connected={connected}
+                    />
+                  )}
                 </div>
               );
             })}
@@ -695,6 +704,16 @@ export function DeviceDetail({
         <InlineProtocolEditor
           deviceId={deviceId}
           driverInfo={deviceInfo.driver_info as Record<string, unknown>}
+          connected={connected}
+          onSaved={refetchDeviceInfo}
+        />
+      )}
+
+      {/* IR Codes — the code-set editor for IR devices (driver opts in via
+          DRIVER_INFO.ir_codes). Writes ir_codes into the device config. */}
+      {deviceInfo?.driver_info?.ir_codes === true && (
+        <IrCodesEditor
+          deviceId={deviceId}
           connected={connected}
           onSaved={refetchDeviceInfo}
         />

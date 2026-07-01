@@ -21,6 +21,14 @@ class RawSendRequest(BaseModel):
     data: str
 
 
+class IRImportRequest(BaseModel):
+    """Body for ``POST /api/devices/{bridge_id}/ir-import`` — convert a
+    bridge-native wire code (e.g. a Global Cache ``sendir`` string an integrator
+    typed) to canonical Pronto hex for storage in a code-set."""
+
+    wire: str
+
+
 class IREmitRequest(BaseModel):
     """Body for ``POST /api/devices/{bridge_id}/ir-emit`` — the bridge card's
     raw IR-emit diagnostic. Fires an arbitrary Pronto code out one of the

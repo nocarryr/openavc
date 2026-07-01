@@ -48,6 +48,11 @@ class _FakeLearningBridge:
         self.emitted.append((port, kind, payload))
         return {"port": port, "kind": kind}
 
+    async def bridge_import_code(self, wire):
+        if not wire.startswith("sendir"):
+            raise ValueError("not a sendir string")
+        return "0000 006D 0000 0001 0060 0018"
+
 
 class _NotABridge:
     is_bridge = False
@@ -192,3 +197,22 @@ def test_raw_ir_emit_non_bridge_is_404(app_and_bridges):
     client = TestClient(app)
     resp = client.post("/api/devices/x/ir-emit", json={"port": "ir:1", "pronto": "X"})
     assert resp.status_code == 404
+
+
+def test_ir_import_converts_wire_to_pronto(app_and_bridges):
+    app, bridges = app_and_bridges
+    bridges["b1"] = _FakeLearningBridge([])
+    client = TestClient(app)
+    resp = client.post(
+        "/api/devices/b1/ir-import", json={"wire": "sendir,1:1,1,38000,1,1,96,24"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["pronto"].startswith("0000 ")
+
+
+def test_ir_import_bad_code_is_400(app_and_bridges):
+    app, bridges = app_and_bridges
+    bridges["b1"] = _FakeLearningBridge([])
+    client = TestClient(app)
+    resp = client.post("/api/devices/b1/ir-import", json={"wire": "garbage"})
+    assert resp.status_code == 400

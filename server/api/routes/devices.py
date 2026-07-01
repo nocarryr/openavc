@@ -15,6 +15,7 @@ from server.api.models import (
     DeviceUpdateRequest,
     InstallMissingDriversRequest,
     IREmitRequest,
+    IRImportRequest,
     PendingSettingsRequest,
     RawSendRequest,
 )
@@ -514,6 +515,31 @@ async def ir_emit(bridge_id: str, body: IREmitRequest) -> dict[str, Any]:
         raise _api_error(400, str(e), e)
     except Exception as e:
         raise _api_error(500, f"Failed to emit IR through '{bridge_id}'", e)
+
+
+@router.post("/devices/{bridge_id}/ir-import")
+async def ir_import(bridge_id: str, body: IRImportRequest) -> dict[str, Any]:
+    """Convert a bridge-native IR code (e.g. a typed sendir string) to Pronto.
+
+    Backs the IR Codes editor's "type a raw code" path: the bridge driver owns
+    its wire format, so it does the parse; the platform stores only Pronto.
+    """
+    engine = _get_engine()
+    bridge = engine.devices.get_driver(bridge_id)
+    if bridge is None or not getattr(bridge, "is_bridge", False):
+        raise _api_error(
+            404, f"Bridge '{bridge_id}' not found or is not a bridge",
+            ValueError(bridge_id),
+        )
+    try:
+        pronto = await bridge.bridge_import_code(body.wire)
+        return {"pronto": pronto}
+    except NotImplementedError as e:
+        raise _api_error(422, f"Bridge '{bridge_id}' cannot import IR codes", e)
+    except ValueError as e:
+        raise _api_error(400, f"Could not parse that IR code: {e}", e)
+    except Exception as e:
+        raise _api_error(500, f"Failed to import IR code via '{bridge_id}'", e)
 
 
 # --- Device Actions (Quick Action strip) ---
