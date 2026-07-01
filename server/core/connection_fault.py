@@ -31,6 +31,7 @@ HOST_KEY_REJECTED = "host_key_rejected"
 NO_RESPONSE = "no_response"
 CLIENT_MISSING = "client_missing"
 TRANSPORT_DISCONNECTED = "transport_disconnected"  # generic fallback
+BRIDGE_OFFLINE = "bridge_offline"  # a bridge-routed device whose bridge is down
 
 
 @dataclass(frozen=True)
@@ -347,3 +348,27 @@ def classify_connection_fault(
         "The connection to the device dropped. OpenAVC is retrying "
         "automatically.",
     )
+
+
+def bridge_offline_fault(bridge_label: str = "") -> ConnectionFault:
+    """Offline reason for a bridge-routed device whose bridge is unavailable.
+
+    A device that emits through a bridge (an IR device on an emitter port) has
+    no transport of its own — it's reachable only while its bridge is online.
+    This isn't a connection failure to classify from an error string; the
+    device manager calls this directly when it mirrors a bridge's offline state
+    onto its dependents. ``bridge_label`` is the bridge's display name (falls
+    back to generic wording when empty).
+    """
+    who = (bridge_label or "").strip()
+    if who:
+        message = (
+            f"The bridge '{who}' this device sends through is offline. "
+            f"It will come back when the bridge reconnects."
+        )
+    else:
+        message = (
+            "The bridge this device sends through is offline. It will come "
+            "back when the bridge reconnects."
+        )
+    return ConnectionFault(BRIDGE_OFFLINE, message)

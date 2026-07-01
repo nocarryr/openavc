@@ -64,15 +64,28 @@ def _mk(cls, config):
     return cls("dev", config, StateStore(), EventBus())
 
 
-# --- bridge-routed connect: no socket, still "connected" ---
+# --- bridge-routed connect: no socket; liveness mirrors the bound bridge ---
 
 
-def test_bridge_transport_connects_without_a_socket():
+def test_bridge_routed_connect_opens_no_socket_and_mirrors_bridge_state():
+    # Bridge offline at connect time -> the device comes up offline (no socket,
+    # but flagged bridge-routed so the manager can flip it later).
     dev = _mk(_FakeIRDevice, {"transport": "bridge", "bridge": "b", "bridge_port": "ir:1"})
     asyncio.run(dev.connect())
-    assert dev._connected is True
+    assert dev._bridge_routed is True
     assert dev.transport is None
-    assert dev.state.get("device.dev.connected") is True
+    assert dev._connected is False
+    assert dev.state.get("device.dev.connected") is False
+
+    # Bridge already online -> the device seeds online from the bridge's state.
+    dev2 = _mk(_FakeIRDevice, {"transport": "bridge", "bridge": "b", "bridge_port": "ir:1"})
+    dev2.state.set("device.b.connected", True)
+    asyncio.run(dev2.connect())
+    assert dev2._connected is True
+    assert dev2.transport is None
+    assert dev2.state.get("device.dev.connected") is True
+    # The connected property tolerates the no-transport case for a bridge device.
+    assert dev2.connected is True
 
 
 # --- emit_via_bridge routing ---

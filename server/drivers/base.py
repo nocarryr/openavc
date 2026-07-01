@@ -77,6 +77,10 @@ class BaseDriver(ABC):
         # device bound to a bridge's emitter port): a callable the DeviceManager
         # injects to reach the live bridge instance. None for a direct device.
         self._bridge_router: Any = None
+        # True once connect() runs for a bridge-routed device (transport
+        # "bridge"): it owns no transport, so its `connected` liveness is a
+        # mirror of its bridge (the DeviceManager propagates the bridge's state).
+        self._bridge_routed: bool = False
         # Last transport error captured before the live transport is torn down
         # on a failure path, so the DeviceManager's connection-fault classifier
         # can still read it after self.transport has been nulled. Cleared at
@@ -131,9 +135,16 @@ class BaseDriver(ABC):
 
     @property
     def connected(self) -> bool:
-        """True only if both driver and transport report connected."""
+        """True only if both driver and transport report connected.
+
+        A bridge-routed device has no transport of its own (it emits through a
+        live bridge instance), so its liveness is carried by ``_connected``
+        alone — the DeviceManager sets it to mirror the bound bridge's state.
+        """
         if not self._connected:
             return False
+        if self._bridge_routed:
+            return True
         if self.transport is None:
             return False
         return getattr(self.transport, "connected", False)
@@ -234,14 +245,33 @@ class BaseDriver(ABC):
 
         # A bridge-routed device (e.g. an IR device bound to a bridge's emitter
         # port) has no transport of its own — it emits through the live bridge
-        # instance (see emit_via_bridge). It is "connected" as a logical device;
-        # a command emitted while the bridge is unavailable surfaces a clear
-        # error at send time.
+        # instance (see emit_via_bridge). Its liveness mirrors the bound
+        # bridge: online iff the bridge is currently online. The DeviceManager
+        # keeps this in sync as the bridge connects/disconnects; here we seed it
+        # from the bridge's current state so a device added after its bridge is
+        # already up starts online (and one whose bridge is down starts
+        # offline, with a bridge_offline reason set by the DeviceManager).
         if transport_type == "bridge":
-            self._connected = True
-            self.set_state("connected", True)
-            await self.events.emit(f"device.connected.{self.device_id}")
-            log.info(f"[{self.device_id}] Connected (bridge-routed)")
+            self._bridge_routed = True
+            bridge_id = self.config.get("bridge")
+            bridge_port = self.config.get("bridge_port")
+            online = bool(
+                bridge_id
+                and bridge_port
+                and self.state.get(f"device.{bridge_id}.connected")
+            )
+            self._connected = online
+            self.set_state("connected", online)
+            if online:
+                await self.events.emit(f"device.connected.{self.device_id}")
+                log.info(
+                    f"[{self.device_id}] Connected (bridge-routed via {bridge_id})"
+                )
+            else:
+                log.info(
+                    f"[{self.device_id}] Bridge-routed; bound bridge "
+                    f"{bridge_id or '(none)'} is offline or unbound"
+                )
             return
 
         frame_parser = self._create_frame_parser()

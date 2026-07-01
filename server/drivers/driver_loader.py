@@ -230,8 +230,23 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             errors.append(f"Missing required field: {field}")
 
     transport = driver_def.get("transport", "")
-    if transport and transport not in ("tcp", "serial", "udp", "http", "osc"):
+    # "bridge" is the sentinel transport for a device that emits through a live
+    # bridge instance (an IR device on an emitter port) rather than dialing a
+    # host of its own — it opens no socket and routes commands via the bridge.
+    if transport and transport not in (
+        "tcp", "serial", "udp", "http", "osc", "bridge"
+    ):
         errors.append(f"Unsupported transport: {transport}")
+
+    # The IR code-set opt-in is a boolean flag (like inline_protocol): it turns
+    # on the device-page IR Codes editor. The codes themselves live in the
+    # device config / default_config ir_codes map, not here.
+    ir_codes_flag = driver_def.get("ir_codes")
+    if ir_codes_flag is not None and not isinstance(ir_codes_flag, bool):
+        errors.append(
+            "ir_codes: must be a boolean (the code-set lives in "
+            "default_config.ir_codes / the device config)"
+        )
 
     # Validate response patterns compile and don't have catastrophic backtracking
     responses = driver_def.get("responses", [])

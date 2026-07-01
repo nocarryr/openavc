@@ -26,6 +26,7 @@ from server.drivers.inline_protocol import (
     _normalize_config_commands,
     _normalize_config_responses,
     _normalize_config_state_vars,
+    _normalize_ir_codes,
 )
 from server.transport.binary_helpers import encode_escape_sequences as _safe_encode_escapes
 from server.transport.frame_parsers import DEFAULT_MAX_BUFFER, FrameParser
@@ -365,8 +366,14 @@ class ConfigurableDriver(BaseDriver):
         norm_state_vars = _normalize_config_state_vars(
             self.config.get("state_variables")
         )
+        # IR code-set → commands. The effective code-set is the driver-declared
+        # default_config.ir_codes (a community IR driver's shipped codes, already
+        # layered into self.config by resolved_device_config) overlaid with any
+        # device-authored ir_codes. Each becomes an IR command emitted through
+        # the bound bridge (see send_command). Config codes win by name.
+        ir_commands = _normalize_ir_codes(self.config.get("ir_codes"))
 
-        if not (norm_commands or norm_responses or norm_state_vars):
+        if not (norm_commands or norm_responses or norm_state_vars or ir_commands):
             return
 
         # Auto-declare params for {placeholder} tokens so parameterized commands
@@ -388,7 +395,7 @@ class ConfigurableDriver(BaseDriver):
         file_responses = merged.get("responses") or []
         file_state_vars = merged.get("state_variables") or {}
 
-        merged_commands = {**file_commands, **norm_commands}
+        merged_commands = {**file_commands, **norm_commands, **ir_commands}
         merged_responses = list(file_responses) + norm_responses
         derived_vars = _derive_state_vars_from_responses(merged_responses)
         merged_state_vars = {**file_state_vars, **derived_vars, **norm_state_vars}
@@ -774,11 +781,23 @@ class ConfigurableDriver(BaseDriver):
         """Look up command in definition, substitute params, send."""
         params = params or {}
 
+        commands = self._definition.get("commands", {})
+        cmd_def = commands.get(command)
+
+        # IR code-set command: routes through the bound bridge's emitter port,
+        # not a transport of its own. Handle before the transport-connected gate
+        # below (a bridge-routed IR device has no transport). The bridge driver
+        # converts the Pronto code to its wire format and confirms the emit.
+        if isinstance(cmd_def, dict) and cmd_def.get("ir"):
+            ir = cmd_def["ir"]
+            return await self.emit_via_bridge(
+                "ir",
+                {"pronto": ir.get("pronto", ""), "repeat": ir.get("repeat", 1)},
+            )
+
         if not self.transport or not self.transport.connected:
             raise ConnectionError(f"[{self.device_id}] Not connected")
 
-        commands = self._definition.get("commands", {})
-        cmd_def = commands.get(command)
         if cmd_def is None:
             log.warning(f"[{self.device_id}] Unknown command: {command}")
             return None
@@ -1668,6 +1687,14 @@ def create_configurable_driver_class(
     # state_variables into the device config (the generic drivers set it).
     if "inline_protocol" in driver_def:
         driver_info["inline_protocol"] = driver_def["inline_protocol"]
+
+    # Copy the IR code-set opt-in. When true, the device page surfaces the IR
+    # Codes editor (learn / paste Pronto / type sendir / DB search / test emit),
+    # writing the code-set into the device config's ir_codes map. generic_ir
+    # sets it for build-your-own devices; a community IR driver sets it too and
+    # ships its codes in default_config.ir_codes.
+    if "ir_codes" in driver_def:
+        driver_info["ir_codes"] = driver_def["ir_codes"]
 
     # Copy help from each state variable
     state_vars = driver_info.get("state_variables", {})

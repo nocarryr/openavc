@@ -113,6 +113,47 @@ def _derive_command_params(
     return params
 
 
+def _normalize_ir_codes(raw: Any) -> dict[str, Any]:
+    """Normalize an ``ir_codes`` map into canonical IR command definitions.
+
+    An IR device's code-set is a map of ``{name: {label, pronto, repeat}}``
+    (authored per-device in the device config, or shipped as a community IR
+    driver's ``default_config.ir_codes``). Each entry becomes a command with an
+    ``ir`` payload the runtime emits through the bound bridge — the same command
+    surface as any other device command, so panel buttons and macros bind to it
+    via ``do: device.command`` with no IR-specific UI.
+
+    The canonical stored form is Pronto hex plus a per-command repeat count.
+    Pronto validity is checked at emit time by the bridge driver (this stays
+    pure/stdlib and tolerant of hand- or AI-authored config); an entry missing a
+    ``pronto`` string is skipped with a warning rather than crashing driver init.
+    """
+    out: dict[str, Any] = {}
+    for name, val in _as_dict(raw).items():
+        if not isinstance(val, dict):
+            log.warning(
+                "ir_codes entry %r has an unsupported shape (%s); skipped",
+                name, type(val).__name__,
+            )
+            continue
+        pronto = val.get("pronto")
+        if not isinstance(pronto, str) or not pronto.strip():
+            log.warning("ir_codes entry %r has no 'pronto' string; skipped", name)
+            continue
+        try:
+            repeat = int(val.get("repeat", 1))
+        except (TypeError, ValueError):
+            repeat = 1
+        if repeat < 1:
+            repeat = 1
+        out[str(name)] = {
+            "label": val.get("label", name),
+            "params": {},
+            "ir": {"pronto": pronto, "repeat": repeat},
+        }
+    return out
+
+
 def _normalize_config_state_vars(raw: Any) -> dict[str, Any]:
     """Normalize device-config ``state_variables`` into the canonical schema.
 

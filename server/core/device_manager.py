@@ -211,6 +211,11 @@ class DeviceManager:
         self.events.on(
             "device.disconnected.*", self._on_device_disconnected
         )
+        # Mirror a bridge's online state onto the bridge-routed devices bound to
+        # it (an IR device on an emitter port has no transport of its own).
+        self.events.on(
+            "device.connected.*", self._on_device_connected
+        )
 
     async def add_device(self, device_config: dict[str, Any]) -> None:
         """
@@ -284,6 +289,17 @@ class DeviceManager:
             await driver.connect()
             # Apply pending settings after successful connect
             await self._apply_pending_settings(device_id)
+            # A bridge-routed device (IR on an emitter port) connect()s without
+            # a socket: it comes up online iff its bridge is already online. If
+            # the bridge is offline at add time, surface a bridge_offline reason
+            # on the card — the mirror handlers will clear it when the bridge
+            # comes up. (Skipped for a device that connected normally.)
+            if config.get("transport") == "bridge" and not driver.get_state(
+                "connected"
+            ):
+                bridge_id = config.get("bridge")
+                if bridge_id:
+                    self._set_bridge_offline_reason(device_id, bridge_id)
         except Exception as e:
             log.warning(f"Failed to connect '{device_id}': {e}")
             self._set_offline_reason(device_id, driver, exc=e)
@@ -848,9 +864,25 @@ class DeviceManager:
             return
         device_id = parts[2]
 
+        # If this device is a bridge, take its bridge-routed dependents (IR
+        # devices on emitter ports) offline too — they have no transport of
+        # their own and are reachable only while the bridge is. Done before the
+        # intentional-disconnect / still-connected guards below so a bridge
+        # being removed or updated still propagates offline to its dependents.
+        deps = self._bridge_routed_dependents(device_id)
+        if deps:
+            await self._mirror_bridge_state(device_id, False, deps)
+
         # Only reconnect if device still exists and isn't being removed
         driver = self._devices.get(device_id)
         if driver is None:
+            return
+
+        # A bridge-routed device has no transport to reconnect — its connected
+        # state is a pure mirror of its bridge (see _mirror_bridge_state), so
+        # the transport auto-reconnect machinery doesn't apply to it.
+        dev_cfg = self._device_configs.get(device_id, {}).get("config", {})
+        if dev_cfg.get("transport") == "bridge":
             return
 
         # Skip if this is an intentional disconnect (reconnect_device, remove, update)
@@ -877,6 +909,82 @@ class DeviceManager:
         # instead of a bare code.
         self._set_offline_reason(device_id, driver)
         self._start_reconnect(device_id)
+
+    async def _on_device_connected(self, event: str, payload: dict[str, Any]) -> None:
+        """Handle device.connected.* events — mirror a bridge coming online onto
+        the bridge-routed devices bound to it.
+
+        Fires for every device connect (cheap: a no-op unless the connected
+        device is a bridge with bridge-routed dependents). Covers the case where
+        a bridge connects *after* its dependents were added; the add-time seed
+        in ``BaseDriver.connect`` covers the reverse order.
+        """
+        parts = event.split(".", 2)
+        if len(parts) < 3:
+            return
+        device_id = parts[2]
+        deps = self._bridge_routed_dependents(device_id)
+        if deps:
+            await self._mirror_bridge_state(device_id, True, deps)
+
+    def _bridge_routed_dependents(self, bridge_id: str) -> list[str]:
+        """Live device ids that route their commands through ``bridge_id`` and
+        have no transport of their own (resolved ``transport == "bridge"``).
+
+        These are the devices whose connected state mirrors the bridge (IR
+        devices on emitter ports). A serial pass-through downstream is *not*
+        here — it dials the bridge's TCP passthrough and tracks the bridge via
+        its own socket, so it needs no mirroring.
+        """
+        out: list[str] = []
+        for dev_id, dc in self._device_configs.items():
+            if dev_id not in self._devices:
+                continue
+            cfg = dc.get("config", {})
+            if cfg.get("bridge") == bridge_id and cfg.get("transport") == "bridge":
+                out.append(dev_id)
+        return out
+
+    async def _mirror_bridge_state(
+        self, bridge_id: str, online: bool, deps: list[str]
+    ) -> None:
+        """Set each bridge-routed dependent's connected state to ``online`` and
+        emit its lifecycle event (only on an actual transition, so triggers see
+        one edge, not a stream). On going offline, publish a ``bridge_offline``
+        reason; on coming online, clear it.
+        """
+        for dev_id in deps:
+            driver = self._devices.get(dev_id)
+            if driver is None:
+                continue
+            was = bool(driver.get_state("connected"))
+            driver._bridge_routed = True
+            driver._connected = online
+            driver.set_state("connected", online)
+            if online:
+                self._clear_offline_reason(dev_id)
+                if not was:
+                    await self.events.emit(f"device.connected.{dev_id}")
+            else:
+                self._set_bridge_offline_reason(dev_id, bridge_id)
+                if was:
+                    await self.events.emit(f"device.disconnected.{dev_id}")
+
+    def _set_bridge_offline_reason(self, device_id: str, bridge_id: str) -> None:
+        """Publish the offline-reason keys for a bridge-routed device whose
+        bridge is down (a direct taxonomy entry, not classified from an error).
+        """
+        from server.core.connection_fault import bridge_offline_fault
+
+        bridge_name = self.state.get(f"device.{bridge_id}.name") or bridge_id
+        fault = bridge_offline_fault(str(bridge_name))
+        self.state.set_batch(
+            {
+                f"device.{device_id}.offline_reason": fault.code,
+                f"device.{device_id}.offline_detail": fault.message,
+            },
+            source="device_manager",
+        )
 
     def _start_reconnect(self, device_id: str) -> None:
         """Start a background reconnect loop for a device."""
