@@ -35,7 +35,7 @@ class SimulationManager:
     def __init__(self, engine: Any):
         self.engine = engine
         self._process: asyncio.subprocess.Process | None = None
-        self._original_configs: dict[str, dict] = {}  # device_id → {host, port}
+        self._original_configs: dict[str, dict] = {}  # device_id → {host, port, transport}
         self._sim_ports: dict[str, int] = {}  # device_id → sim port
         self._active = False
         self._sim_ui_url: str | None = None
@@ -462,8 +462,61 @@ class SimulationManager:
             Path(self._config_path).unlink(missing_ok=True)
             self._config_path = None
 
+    @staticmethod
+    def _driver_transport_is_serial(driver: Any) -> bool:
+        """True when the device's effective transport is serial.
+
+        The simulator has no serial server — serial drivers are simulated over
+        a TCP loopback stand-in (the same substitution the serial-over-IP
+        bridge passthrough makes in Engine.resolved_device_config). Mirrors
+        BaseDriver.connect's resolution order: an explicit device-config
+        transport wins over the driver's DRIVER_INFO default.
+        """
+        config = getattr(driver, "config", None) or {}
+        driver_info = getattr(driver, "DRIVER_INFO", None) or {}
+        transport = config.get("transport") or driver_info.get("transport", "tcp")
+        return transport == "serial"
+
+    def _apply_sim_redirect(
+        self, driver: Any, device_id: str, sim_port: int
+    ) -> None:
+        """Point one live driver at the simulator on 127.0.0.1:sim_port and
+        record its original connection so _restore_original_config can undo it.
+
+        A serial driver is flipped to TCP for the duration: the simulator
+        serves TCP, so the driver must speak TCP to reach it. Every other
+        transport (tcp/udp/osc/http/mqtt) is served by the sim directly and
+        keeps its declared transport.
+        """
+        self._original_configs[device_id] = {
+            "host": driver.config.get("host", ""),
+            "port": driver.config.get("port", 0),
+            # Preserve absence as None so restore can delete the override and
+            # let the DRIVER_INFO transport apply again (a serial driver has no
+            # explicit transport in config until we add one here).
+            "transport": driver.config.get("transport"),
+        }
+        driver.config["host"] = "127.0.0.1"
+        driver.config["port"] = sim_port
+        if self._driver_transport_is_serial(driver):
+            driver.config["transport"] = "tcp"
+
+    @staticmethod
+    def _restore_original_config(driver: Any, orig: dict) -> None:
+        """Restore a driver's saved connection (host, port, and transport)."""
+        driver.config["host"] = orig.get("host", "")
+        driver.config["port"] = orig.get("port", 0)
+        # Only touch transport when we actually recorded it. A None value means
+        # there was no explicit override before redirect — remove the one we
+        # added so the driver falls back to its DRIVER_INFO transport.
+        if "transport" in orig:
+            if orig["transport"] is None:
+                driver.config.pop("transport", None)
+            else:
+                driver.config["transport"] = orig["transport"]
+
     async def _redirect_connections(self) -> None:
-        """Swap device host/port to point at the simulator."""
+        """Swap device host/port (and serial→tcp) to point at the simulator."""
         dm = self.engine.devices
 
         for device_id, sim_port in self._sim_ports.items():
@@ -471,15 +524,8 @@ class SimulationManager:
             if not driver:
                 continue
 
-            # Save original config
-            self._original_configs[device_id] = {
-                "host": driver.config.get("host", ""),
-                "port": driver.config.get("port", 0),
-            }
-
-            # Redirect to simulator
-            driver.config["host"] = "127.0.0.1"
-            driver.config["port"] = sim_port
+            # Save original config + redirect to simulator (flips serial→tcp)
+            self._apply_sim_redirect(driver, device_id, sim_port)
 
             log.info(
                 "Redirected %s: %s:%s -> 127.0.0.1:%d",
@@ -504,8 +550,7 @@ class SimulationManager:
             if not driver:
                 continue
 
-            driver.config["host"] = orig["host"]
-            driver.config["port"] = orig["port"]
+            self._restore_original_config(driver, orig)
 
             log.info("Restored %s to %s:%s", device_id, orig["host"], orig["port"])
 
@@ -541,12 +586,7 @@ class SimulationManager:
                 continue
             sim_port = self._sim_ports[device_id]
             if driver.config.get("host") != "127.0.0.1" or driver.config.get("port") != sim_port:
-                self._original_configs[device_id] = {
-                    "host": driver.config.get("host", ""),
-                    "port": driver.config.get("port", 0),
-                }
-                driver.config["host"] = "127.0.0.1"
-                driver.config["port"] = sim_port
+                self._apply_sim_redirect(driver, device_id, sim_port)
                 log.info("Re-applied simulation redirect for %s to port %d", device_id, sim_port)
                 try:
                     await dm.reconnect_device(device_id)
@@ -568,8 +608,7 @@ class SimulationManager:
             if orig:
                 driver = dm._devices.get(device_id)
                 if driver:
-                    driver.config["host"] = orig["host"]
-                    driver.config["port"] = orig["port"]
+                    self._restore_original_config(driver, orig)
             # Only forget the port slot when the stop actually succeeds (200)
             # or the instance is already gone (404). On any other outcome the
             # subprocess instance keeps running — dropping the slot would leak
@@ -651,12 +690,7 @@ class SimulationManager:
         self._sim_ports[device_id] = sim_port
         driver = dm._devices.get(device_id)
         if driver:
-            self._original_configs[device_id] = {
-                "host": driver.config.get("host", ""),
-                "port": driver.config.get("port", 0),
-            }
-            driver.config["host"] = "127.0.0.1"
-            driver.config["port"] = sim_port
+            self._apply_sim_redirect(driver, device_id, sim_port)
 
     async def _reconnect_quietly(self, device_id: str) -> None:
         try:
