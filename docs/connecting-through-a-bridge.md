@@ -44,8 +44,8 @@ An **IR device** is anything you would normally point a remote at: a TV, a cable
 ### Add the IR device
 
 1. Add the IR bridge first (Step 1 above), the same way you would a serial bridge.
-2. Click **Add Device** and pick **IR Device** (or a ready-made IR driver for your product, if one exists in the Driver Library).
-3. In **Connection settings**, IR devices are always through a bridge, so you only pick the bridge and the emitter port the device is wired to (for example "IR Out 1"). Save.
+2. Open the bridge's device card and find its **IR ports** (for example IR Out 1, 2, 3). Next to the port your emitter is plugged into, click **Add IR Device**. OpenAVC creates the device already bound to that port and opens it, so you go straight to building its code set.
+3. Rename the device to match what it controls (for example "Living Room TV"). If a ready-made IR driver exists for your product in the Driver Library, you can instead add that from the port and its codes come pre-filled.
 
 ### Build the code set
 
@@ -54,7 +54,7 @@ Open the device and find the **IR Codes** section. There are several ways to add
 - **Learn from the remote.** Click **Learn**, point the original remote at the bridge's learning window, and press a button. OpenAVC captures the code; give it a name (Power On) and save. Turn on continuous capture to walk through a whole remote quickly, naming each button as you press it.
 - **Paste a Pronto code.** Many remote-code sites publish codes in Pronto hex. Paste one in and name it.
 - **Type a raw code.** If you have a Global Cache `sendir` string, paste that; OpenAVC converts it.
-- **Search a code database.** Look up your brand and device, pick a function, and OpenAVC fetches that one code.
+- **Search a code database** *(coming soon).* Look up your brand and device, pick a function, and OpenAVC fetches that one code.
 
 Each code has a **Test** button that fires it through the bridge right now, so you can confirm the emitter is aimed correctly and the code works before you save it. You can rename, reorder, and delete codes at any time. A ready-made IR driver comes with its codes already filled in, and you can add your own on top.
 
@@ -71,7 +71,7 @@ Two places show how everything is wired:
 
 ## Using the bridge on its own
 
-A bridge device works on its own, too. Its card has the standard command sender, so you can query the unit (for example, read its firmware version) without binding anything to it. An IR bridge's card also has a **Learn IR** tool and a raw emit test, so you can capture or fire a code straight from the bridge for troubleshooting, before any IR device is bound to it. The link to the unit's web page lets you reach the manufacturer's own configuration screens.
+A bridge device works on its own, too. Its card has the standard command sender, so you can query the unit (for example, read its firmware version) without binding anything to it. Each IR port also has a **Test this port** tool that learns or fires a single code without saving it, so you can confirm an emitter is working before you build a code set on it. The link to the unit's web page lets you reach the manufacturer's own configuration screens.
 
 ## Troubleshooting
 

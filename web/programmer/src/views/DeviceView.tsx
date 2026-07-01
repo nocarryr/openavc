@@ -649,6 +649,7 @@ export function DeviceView() {
               onDeleted={handleDeviceDeleted}
               onDuplicate={(config) => setDuplicateSource(config)}
               onBrowseDrivers={() => setSubTab("drivers")}
+              onOpenDevice={(id) => setSelectedId(id)}
             />
           ) : (
             <div

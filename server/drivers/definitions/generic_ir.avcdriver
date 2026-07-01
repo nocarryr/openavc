@@ -1,12 +1,13 @@
 # Generic IR Device Driver
 #
 # Control any device that takes an infrared remote (a TV, cable box, Blu-ray
-# player, AVR) through a network IR bridge. Add the device, bind it to one of a
-# bridge's IR emitter ports ("Through a bridge" in the connection dialog), then
-# build its code set on the device page (IR Codes): learn buttons from the
-# original remote, paste Pronto hex, type a raw sendir string, or search a code
-# database. Each code becomes a device command, so panel buttons and macros use
-# it exactly like any other device command.
+# player, AVR) through a network IR bridge. Add the IR bridge first, then on the
+# bridge's device card click "Add IR Device" next to the emitter port your
+# device is wired to — this creates the device already bound to that port and
+# opens it. Build its code set on the device page (IR Codes): learn buttons from
+# the original remote, paste Pronto hex, type a raw sendir string, or search a
+# code database. Each code becomes a device command, so panel buttons and macros
+# use it exactly like any other device command.
 #
 # An IR device has no network address of its own — it emits through the bridge,
 # so it's online whenever the bound bridge is online. Nothing here is specific
@@ -20,9 +21,9 @@ category: utility
 version: 1.0.0
 author: OpenAVC
 description: >
-  Control an infrared device through a network IR bridge. Bind it to an IR
-  emitter port, then build its code set (learn, paste Pronto, or search a
-  database) on the device page — no driver file needed.
+  Control an infrared device through a network IR bridge. Add it from the
+  bridge's IR port, then build its code set (learn, paste Pronto, or type a
+  sendir string) on the device page — no driver file needed.
 
 # Sentinel transport: an IR device opens no socket of its own. It emits through
 # the live bridge instance it's bound to (its connection carries bridge +

@@ -10,6 +10,7 @@ import {
   isSecretConfigField,
   splitConnectionFields,
   SERIAL_PICKER_FIELDS,
+  IR_PICKER_FIELDS,
 } from "./deviceConfigCoerce";
 
 // --- Typed Config Fields ---
@@ -198,6 +199,18 @@ export function driverIrCapable(d: DriverInfo | undefined): boolean {
   if (!d) return false;
   if ((d.transport || "").toLowerCase() === "bridge") return true;
   return (d as unknown as { ir_codes?: boolean }).ir_codes === true;
+}
+
+// Config keys a dedicated picker/editor owns, so the generic schema-driven
+// section never renders them as raw text inputs. Serial and IR each have their
+// own connection picker; `ir_codes` is owned by the device-page IR Codes editor
+// and is never a raw field. The Edit dialog falls back to a device's existing
+// config keys when a driver has no config_schema (e.g. generic_ir), so without
+// this an IR device would leak ir_codes/bridge/bridge_port as editable text.
+function hiddenRawConfigKeys(driverInfo: DriverInfo | undefined): Set<string> {
+  if (driverIrCapable(driverInfo)) return IR_PICKER_FIELDS;
+  if (driverSerialCapable(driverInfo)) return SERIAL_PICKER_FIELDS;
+  return new Set(["ir_codes"]);
 }
 
 function driverNetworkCapable(d: DriverInfo | undefined): boolean {
@@ -779,11 +792,12 @@ export function AddDeviceDialog({
   const driverInfo = drivers.find((d) => d.id === selectedDriver);
   const configKeys = Object.keys((driverInfo?.config_schema ?? {}) as Record<string, unknown>);
   const serialCapable = driverSerialCapable(driverInfo);
-  // The connection picker owns these fields for serial-capable drivers; keep
-  // them out of the generic schema section so they aren't rendered twice.
-  const visibleConfigKeys = serialCapable
-    ? configKeys.filter((k) => !SERIAL_PICKER_FIELDS.has(k))
-    : configKeys;
+  // The connection picker / IR Codes editor own these fields; keep them out of
+  // the generic schema section so they aren't rendered twice (or, for ir_codes,
+  // as raw text at all).
+  const visibleConfigKeys = configKeys.filter(
+    (k) => !hiddenRawConfigKeys(driverInfo).has(k),
+  );
 
   // Check if driver has setup settings
   const hasSetupSettings = useMemo(() => hasDriverSetupSettings(driverInfo), [driverInfo]);
@@ -1134,11 +1148,13 @@ export function EditDeviceDialog({
   const existingKeys = Object.keys(configValues);
   const configKeys = schemaKeys.length > 0 ? schemaKeys : existingKeys;
   const serialCapable = driverSerialCapable(driverInfo);
-  // The connection picker owns these fields for serial-capable drivers; keep
-  // them out of the generic schema section so they aren't rendered twice.
-  const visibleConfigKeys = serialCapable
-    ? configKeys.filter((k) => !SERIAL_PICKER_FIELDS.has(k))
-    : configKeys;
+  // The connection picker / IR Codes editor own these fields; keep them out of
+  // the generic schema section. This matters most on the existingKeys fallback
+  // above: a schema-less IR device (generic_ir) would otherwise dump its raw
+  // ir_codes map + bridge/bridge_port as editable text next to the picker.
+  const visibleConfigKeys = configKeys.filter(
+    (k) => !hiddenRawConfigKeys(driverInfo).has(k),
+  );
 
   // When driver changes, pre-fill config from driver's default_config
   const handleDriverChange = (newDriver: string) => {

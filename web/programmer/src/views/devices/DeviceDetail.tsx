@@ -15,7 +15,7 @@ import { ChildEntities } from "./ChildEntities";
 import { QuickActions } from "./QuickActions";
 import { InlineProtocolEditor } from "./InlineProtocolEditor";
 import { IrCodesEditor } from "./IrCodesEditor";
-import { BridgeIrTools } from "./BridgeIrTools";
+import { BridgeIrPort } from "./BridgeIrPort";
 
 export function DeviceDetail({
   deviceId,
@@ -23,12 +23,14 @@ export function DeviceDetail({
   onDeleted,
   onDuplicate,
   onBrowseDrivers,
+  onOpenDevice,
 }: {
   deviceId: string;
   onEdit: (config: DeviceConfig) => void;
   onDeleted: (deviceId: string) => void;
   onDuplicate: (config: DeviceConfig) => void;
   onBrowseDrivers?: () => void;
+  onOpenDevice?: (deviceId: string) => void;
 }) {
   const project = useProjectStore((s) => s.project);
   const update = useProjectStore((s) => s.update);
@@ -551,10 +553,13 @@ export function DeviceDetail({
                       : `Bound: ${bound.map((d) => d.name || d.id).join(", ")}`}
                   </div>
                   {p.kind === "ir" && (
-                    <BridgeIrTools
+                    <BridgeIrPort
                       bridgeId={deviceId}
-                      port={p.id}
+                      portId={p.id}
+                      portLabel={p.label || p.id}
                       connected={connected}
+                      bound={bound}
+                      onOpenDevice={onOpenDevice}
                     />
                   )}
                 </div>

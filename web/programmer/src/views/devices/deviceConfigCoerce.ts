@@ -160,6 +160,19 @@ export const SERIAL_PICKER_FIELDS = new Set([
   "flow_control",
 ]);
 
+// The IR counterpart to SERIAL_PICKER_FIELDS. An IR device is always bridged, so
+// the connection picker owns `bridge`/`bridge_port` (and `transport` is the
+// "bridge" sentinel), and its code set lives in `ir_codes` — owned by the
+// device-page IR Codes editor. None of these belong in the generic
+// schema-driven config section (an IR driver has no config_schema, so without
+// this filter the Edit dialog would dump them as raw text fields).
+export const IR_PICKER_FIELDS = new Set([
+  "transport",
+  "bridge",
+  "bridge_port",
+  "ir_codes",
+]);
+
 // Split a flat config map the way the device-update API does
 // (server/api/routes/devices.py): connection fields go to the connections
 // table, the rest stays in device.config. The Add dialog persists via the

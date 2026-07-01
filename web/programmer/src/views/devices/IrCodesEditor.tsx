@@ -11,6 +11,7 @@ import {
   ArrowDown,
   Pencil,
   X,
+  Search,
 } from "lucide-react";
 import { useProjectStore } from "../../store/projectStore";
 import * as api from "../../api/restClient";
@@ -473,6 +474,13 @@ export function IrCodesEditor({
           }
         >
           <Radio size={14} /> Learn from remote
+        </button>
+        <button
+          style={{ ...iconBtn, opacity: 0.5, cursor: "default" }}
+          disabled
+          title="Coming soon: search an online IR code database (IRDB) by brand and device"
+        >
+          <Search size={14} /> Search database (coming)
         </button>
       </div>
 
