@@ -29,11 +29,16 @@ def test_integer_param_coerces_float_to_int():
     assert ConfigurableDriver._safe_substitute("MVL{vol}", out) == "MVL26"
 
 
-def test_integer_param_from_string_value():
+def test_integer_param_string_value_passes_through():
+    # A value already shaped as text (a keypad's digit string, a hand-authored
+    # macro value) is not reformatted — the long-standing string convention.
+    # Only arithmetic-produced floats/ints get normalized. "26" already renders
+    # as "26", so there is nothing to fix here.
     out = _normalize_and_validate_command_params(
         "set_volume", {"vol": {"type": "integer"}}, {"vol": "26"}
     )
-    assert out["vol"] == 26 and isinstance(out["vol"], int)
+    assert out["vol"] == "26"
+    assert ConfigurableDriver._safe_substitute("MVL{vol}", out) == "MVL26"
 
 
 def test_number_param_decimals_rounds():

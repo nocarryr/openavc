@@ -195,18 +195,21 @@ def _normalize_and_validate_command_params(
                 raise CommandParamError(
                     f"'{command}': '{name}' must be at most {mx}, got {num:g}"
                 )
-            # Coerce to the declared numeric type so the value lands on the wire
-            # the way the protocol needs it — an `integer` param sends "26", not
-            # "26.0", no matter whether a slider, a macro, or the REST API
-            # produced the value. `decimals` (number/float only) rounds to that
-            # many places; `decimals: 0` yields a whole number. A `number`/`float`
-            # with no `decimals` rule is left as-is, so "26.0" stays "26.0" when
-            # that's genuinely what was passed.
+            # Normalize a *numeric* value to the declared type so a scaled
+            # control value lands on the wire the way the protocol needs — an
+            # `integer` param sends 26, not 26.0, whether a slider, a macro, or
+            # the REST API produced it. `decimals` (number only) rounds to that
+            # many places; `decimals: 0` yields a whole number. A string is left
+            # untouched (validation keeps the long-standing string convention:
+            # a value already shaped as text, e.g. a zero-padded id, is not
+            # reformatted); only floats/ints — what arithmetic produces — are
+            # normalized. A `number` with no `decimals` rule is left as-is too.
             decimals = pdef.get("decimals")
-            if ptype == "integer":
-                out[name] = int(num)
-            elif isinstance(decimals, int):
-                out[name] = int(round(num)) if decimals <= 0 else round(num, decimals)
+            if not isinstance(value, str):
+                if ptype == "integer":
+                    out[name] = int(num)
+                elif isinstance(decimals, int):
+                    out[name] = int(round(num)) if decimals <= 0 else round(num, decimals)
         else:
             pattern = pdef.get("pattern")
             if pattern and isinstance(value, str):
