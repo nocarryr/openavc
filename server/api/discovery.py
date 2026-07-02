@@ -141,7 +141,10 @@ class ScanRequest(BaseModel):
     subnets: list[str] | None = None
     extra_subnets: list[str] | None = None
     snmp_enabled: bool = True
-    snmp_community: str = "public"
+    # None/omitted = keep the stored community. GET /config never returns the
+    # value (it's a credential), so clients that echoed the response back
+    # would otherwise overwrite the real community with the placeholder.
+    snmp_community: str | None = None
     gentle_mode: bool = False
     scan_depth: ScanDepth = "standard"
     max_subnet_size: int = 20  # Min CIDR prefix (/20=4K hosts, /16=65K)
@@ -150,7 +153,8 @@ class ScanRequest(BaseModel):
 
 class DiscoveryConfigRequest(BaseModel):
     snmp_enabled: bool = True
-    snmp_community: str = "public"
+    # None/omitted = keep the stored community (see ScanRequest).
+    snmp_community: str | None = None
     gentle_mode: bool = False
     scan_depth: ScanDepth = "standard"
     max_subnet_size: int = 20
@@ -184,7 +188,8 @@ async def start_scan(req: ScanRequest) -> dict[str, Any]:
 
     # Apply config
     engine.config["snmp_enabled"] = req.snmp_enabled
-    engine.config["snmp_community"] = req.snmp_community
+    if req.snmp_community is not None:
+        engine.config["snmp_community"] = req.snmp_community
     engine.config["gentle_mode"] = req.gentle_mode
     engine.config["scan_depth"] = req.scan_depth
     max_prefix = max(8, min(24, req.max_subnet_size))  # Clamp to /8../24
@@ -316,7 +321,8 @@ async def update_config(req: DiscoveryConfigRequest) -> dict[str, str]:
     """Update discovery settings."""
     engine = _get_engine()
     engine.config["snmp_enabled"] = req.snmp_enabled
-    engine.config["snmp_community"] = req.snmp_community
+    if req.snmp_community is not None:
+        engine.config["snmp_community"] = req.snmp_community
     engine.config["gentle_mode"] = req.gentle_mode
     engine.config["scan_depth"] = req.scan_depth
     engine.config["max_subnet_size"] = max(8, min(24, req.max_subnet_size))
@@ -325,10 +331,12 @@ async def update_config(req: DiscoveryConfigRequest) -> dict[str, str]:
 
 @router.get("/config")
 async def get_config() -> dict[str, Any]:
-    """Get current discovery settings (community string masked)."""
+    """Get current discovery settings (community string never returned)."""
     config = dict(_get_engine().config)
-    if config.get("snmp_community"):
-        config["snmp_community"] = "****"
+    # The community string is a credential: report whether one is set, never
+    # the value itself. A returned value (even masked) gets loaded into the
+    # settings form and echoed back on save/scan, overwriting the real one.
+    config["snmp_community_set"] = bool(config.pop("snmp_community", ""))
     return config
 
 

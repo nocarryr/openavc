@@ -82,7 +82,18 @@ export type ScanDepth = "quick" | "standard" | "thorough";
 
 export interface DiscoveryConfig {
   snmp_enabled: boolean;
-  snmp_community: string;
+  // Whether a community string is configured. The value itself is a
+  // credential and is never returned by the config endpoint.
+  snmp_community_set: boolean;
+  gentle_mode: boolean;
+  scan_depth: ScanDepth;
+  max_subnet_size: number;
+}
+
+export interface DiscoveryConfigUpdate {
+  snmp_enabled: boolean;
+  // Omit to keep the stored community string.
+  snmp_community?: string;
   gentle_mode: boolean;
   scan_depth: ScanDepth;
   max_subnet_size: number;
@@ -137,7 +148,7 @@ export async function discoveryGetConfig(): Promise<DiscoveryConfig> {
   return request("/discovery/config");
 }
 
-export async function discoveryUpdateConfig(config: DiscoveryConfig): Promise<{ status: string }> {
+export async function discoveryUpdateConfig(config: DiscoveryConfigUpdate): Promise<{ status: string }> {
   return request("/discovery/config", {
     method: "PUT",
     body: JSON.stringify(config),

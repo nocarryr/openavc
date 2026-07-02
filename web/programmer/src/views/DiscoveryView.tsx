@@ -27,21 +27,7 @@ import * as api from "../api/restClient";
 import type { DriverInfo, CommunityDriver } from "../api/types";
 import type { DeviceState, DiscoveryEvidence } from "../api/discoveryClient";
 import { showError } from "../store/toastStore";
-
-
-// Generic protocol fallbacks for ports the backend baseline + driver
-// catalog don't already cover. Vendor-specific labels (Samsung MDC,
-// Crestron CIP, PJLink, etc.) come from `portLabels` in the discovery
-// store — the backend builds that map from loaded drivers + community
-// catalog so it stays in sync with the catalog without UI changes.
-const PORT_LABELS: Record<number, string> = {
-  23: "Telnet",
-  80: "HTTP",
-  443: "HTTPS",
-  5900: "VNC",
-  8080: "HTTP alt",
-  9090: "HTTP alt",
-};
+import { mergePortLabels, snmpCommunityField } from "./discoveryViewHelpers";
 
 const HIDDEN_KEY = "openavc_discovery_hidden_ips";
 
@@ -189,15 +175,8 @@ export function DiscoveryPanel() {
   const clear = useDiscoveryStore((s) => s.clear);
   const upsertDevice = useDiscoveryStore((s) => s.upsertDevice);
 
-  // Merge hardcoded PORT_LABELS with dynamic community driver ports
-  const allPortLabels = useMemo(() => {
-    const merged: Record<number, string> = { ...PORT_LABELS };
-    for (const [k, v] of Object.entries(portLabels)) {
-      const port = Number(k);
-      if (!merged[port]) merged[port] = v;
-    }
-    return merged;
-  }, [portLabels]);
+  // Generic fallbacks + dynamic driver/catalog port labels (dynamic wins)
+  const allPortLabels = useMemo(() => mergePortLabels(portLabels), [portLabels]);
 
   const [sortBy, setSortBy] = useState<SortKey>("state");
   const [filterCat, setFilterCat] = useState<FilterCategory>("all");
@@ -215,9 +194,12 @@ export function DiscoveryPanel() {
   const [installedDrivers, setInstalledDrivers] = useState<DriverInfo[]>([]);
   const [communityDrivers, setCommunityDrivers] = useState<CommunityDriver[]>([]);
 
-  // Settings state
+  // Settings state. The stored SNMP community is a credential the config
+  // endpoint never returns — the input starts blank and blank means "keep
+  // the stored value"; only a typed value is sent.
   const [snmpEnabled, setSnmpEnabled] = useState(true);
-  const [snmpCommunity, setSnmpCommunity] = useState("public");
+  const [snmpCommunity, setSnmpCommunity] = useState("");
+  const [snmpCommunitySet, setSnmpCommunitySet] = useState(false);
   const [gentleMode, setGentleMode] = useState(false);
   const [scanDepth, setScanDepth] = useState<api.ScanDepth>("standard");
   const [maxSubnetSize, setMaxSubnetSize] = useState(20);
@@ -231,7 +213,7 @@ export function DiscoveryPanel() {
     api.discoveryGetSubnets().then((r) => setSubnets(r.subnets)).catch(console.error);
     api.discoveryGetConfig().then((c) => {
       setSnmpEnabled(c.snmp_enabled);
-      setSnmpCommunity(c.snmp_community);
+      setSnmpCommunitySet(c.snmp_community_set);
       setGentleMode(c.gentle_mode);
       if (c.scan_depth) setScanDepth(c.scan_depth);
       if (c.max_subnet_size) setMaxSubnetSize(c.max_subnet_size);
@@ -279,7 +261,7 @@ export function DiscoveryPanel() {
       await api.discoveryStartScan({
         extra_subnets: extraSubnet ? [extraSubnet] : undefined,
         snmp_enabled: snmpEnabled,
-        snmp_community: snmpCommunity,
+        snmp_community: snmpCommunityField(snmpCommunity),
         gentle_mode: gentleMode,
         scan_depth: scanDepth,
         max_subnet_size: maxSubnetSize,
@@ -302,7 +284,12 @@ export function DiscoveryPanel() {
   }, [clear]);
 
   const handleSaveSettings = useCallback(async () => {
-    await api.discoveryUpdateConfig({ snmp_enabled: snmpEnabled, snmp_community: snmpCommunity, gentle_mode: gentleMode, scan_depth: scanDepth, max_subnet_size: maxSubnetSize });
+    const communityField = snmpCommunityField(snmpCommunity);
+    await api.discoveryUpdateConfig({ snmp_enabled: snmpEnabled, snmp_community: communityField, gentle_mode: gentleMode, scan_depth: scanDepth, max_subnet_size: maxSubnetSize });
+    if (communityField !== undefined) {
+      setSnmpCommunitySet(true);
+      setSnmpCommunity("");
+    }
     setShowSettings(false);
   }, [snmpEnabled, snmpCommunity, gentleMode, scanDepth, maxSubnetSize]);
 
@@ -531,7 +518,9 @@ export function DiscoveryPanel() {
                 type="text"
                 value={snmpCommunity}
                 onChange={(e) => setSnmpCommunity(e.target.value)}
-                style={{ marginLeft: "var(--space-xs)", width: 120 }}
+                placeholder={snmpCommunitySet ? "leave blank to keep current" : "public"}
+                autoComplete="off"
+                style={{ marginLeft: "var(--space-xs)", width: 180 }}
               />
             </label>
             <label>
