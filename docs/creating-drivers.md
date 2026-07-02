@@ -1906,6 +1906,19 @@ async def connect(self) -> None:
     # ...rest of setup, then set_state("connected", True)
 ```
 
+**Declaring the offline reason.** When a device is offline, the platform publishes `device.<id>.offline_reason` (a stable code: `auth_failed`, `connection_refused`, `unreachable`, `no_response`, ...) and `device.<id>.offline_detail` (the sentence shown on the device card). Standard transport failures classify automatically. When your driver detects a failure the transport can't see — a rejected login, a device that accepts the socket but never speaks your protocol — raise a typed fault so the reason is exact:
+
+```python
+from server.drivers.base import BaseDriver, ConnectionFaultError
+
+raise ConnectionFaultError(
+    f"Login rejected for {host}:{port} — check the username and password.",
+    code="auth_failed",
+)
+```
+
+The code becomes `offline_reason` verbatim and the message becomes `offline_detail`; unknown codes raise immediately so a typo can't silently misclassify. For a failure with no exception to carry it (a keep-alive loop that stopped hearing replies), stash the reason before forcing the disconnect: `self._stash_fault("no_response", "...")` then `self._handle_transport_disconnect()`. Don't re-wrap transport errors that already carry their cause (a refused socket, a DNS failure) — re-raise those unchanged.
+
 ### Convenience Methods
 
 These are available on every driver via the `BaseDriver` base class:
