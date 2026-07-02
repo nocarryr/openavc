@@ -63,6 +63,18 @@ _TIER_CHILD = "child"
 _TIER_LOW = "low"
 
 
+def is_cloud_excluded_key(key: str) -> bool:
+    """True for state keys that must never be sent to the cloud.
+
+    ``system.cloud.*`` is agent-internal (connection status, session id) and
+    ``isc.*`` is remote peer state (relaying it would echo it back through
+    the mesh and expose peer internals). The relay and the AI read tools
+    both apply this filter — keep them on this one predicate so the
+    exclusion can't drift between the two paths.
+    """
+    return key.startswith("system.cloud.") or key.startswith("isc.")
+
+
 class StateRelay:
     """
     Batches state changes by priority tier and forwards them to the cloud.
@@ -191,8 +203,7 @@ class StateRelay:
         now = time.time()
         changes = []
         for key, value in snapshot.items():
-            # Skip cloud-internal and ISC state
-            if key.startswith("system.cloud.") or key.startswith("isc."):
+            if is_cloud_excluded_key(key):
                 continue
             changes.append({
                 "key": key,
@@ -224,12 +235,7 @@ class StateRelay:
         longer exist in the store at callback time. We detect this by
         probing the store and flag the entry so the cloud removes the key.
         """
-        # Do not relay cloud-internal state changes
-        if key.startswith("system.cloud."):
-            return
-
-        # Do not relay ISC remote state (would create echo loops)
-        if key.startswith("isc."):
+        if is_cloud_excluded_key(key):
             return
 
         entry: dict[str, Any] = {

@@ -1345,3 +1345,115 @@ async def test_update_plugin_config_allows_explicit_empty_object(
     assert payload["success"] is True
     assert mock_engine.project.plugins["some_plugin"].config == {}
     mock_engine.plugin_loader.restart_or_apply.assert_awaited_once()
+
+
+# ===== STATE READ TOOLS — cloud exclusion filter + count validation =====
+#
+# Tool results ship to cloud.openavc.com and persist in AI conversation
+# history, so the read tools must apply the same exclusion the state relay
+# does: system.cloud.* (session id!) and isc.* peer state stay on the box.
+
+
+def _make_state_store():
+    """Real StateStore seeded with normal + cloud-excluded keys."""
+    from server.core.state_store import StateStore
+    store = StateStore()
+    store.set("device.projector1.power", "on", source="test")
+    store.set("var.room_mode", "normal", source="test")
+    store.set("plugin.weather.status", "ok", source="test")
+    store.set("system.cloud.status", "connected", source="cloud")
+    store.set("system.cloud.session_id", "sess-secret-123", source="cloud")
+    store.set("isc.peer1.volume", 42, source="isc")
+    return store
+
+
+@pytest.mark.asyncio
+async def test_get_project_state_excludes_cloud_internal_and_isc(handler, mock_agent):
+    mock_agent.state = _make_state_store()
+
+    msg = _make_tool_call_msg("get_project_state")
+    await handler.handle(msg)
+    await _drain()
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    result = payload["result"]
+    assert result["device.projector1.power"] == "on"
+    assert result["var.room_mode"] == "normal"
+    # plugin.* is relayed to the cloud by the state relay, so it stays visible
+    assert result["plugin.weather.status"] == "ok"
+    assert not any(k.startswith("system.cloud.") for k in result)
+    assert not any(k.startswith("isc.") for k in result)
+
+
+@pytest.mark.asyncio
+async def test_get_state_value_refuses_cloud_internal_and_isc(handler, mock_agent):
+    mock_agent.state = _make_state_store()
+
+    for key in ("system.cloud.session_id", "isc.peer1.volume"):
+        msg = _make_tool_call_msg("get_state_value", {"key": key})
+        await handler.handle(msg)
+        await _drain()
+        payload = _get_result_payload(mock_agent)
+        assert payload["success"] is False
+        assert "sess-secret-123" not in str(payload)
+
+    msg = _make_tool_call_msg("get_state_value", {"key": "device.projector1.power"})
+    await handler.handle(msg)
+    await _drain()
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    assert payload["result"] == {"key": "device.projector1.power", "value": "on"}
+
+
+@pytest.mark.asyncio
+async def test_get_state_history_excludes_cloud_internal_and_isc(handler, mock_agent):
+    mock_agent.state = _make_state_store()
+
+    msg = _make_tool_call_msg("get_state_history", {"count": 50})
+    await handler.handle(msg)
+    await _drain()
+
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    keys = [entry["key"] for entry in payload["result"]]
+    assert "device.projector1.power" in keys
+    assert not any(k.startswith("system.cloud.") for k in keys)
+    assert not any(k.startswith("isc.") for k in keys)
+    assert "sess-secret-123" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_get_state_history_validates_count(handler, mock_agent):
+    # No cloud-excluded keys here — the count assertions below need the
+    # returned length to reflect count alone, not the exclusion filter.
+    from server.core.state_store import StateStore
+    store = StateStore()
+    for name, value in (("a", 1), ("b", 2), ("c", 3)):
+        store.set(f"var.{name}", value, source="test")
+    mock_agent.state = store
+
+    # Non-numeric count -> structured error, not an exception
+    msg = _make_tool_call_msg("get_state_history", {"count": "lots"})
+    await handler.handle(msg)
+    await _drain()
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is False
+    assert "integer" in payload["error"]
+
+    # count=0 -> empty list, NOT the whole history ([-0:] slice bug)
+    msg = _make_tool_call_msg("get_state_history", {"count": 0})
+    await handler.handle(msg)
+    await _drain()
+    payload = _get_result_payload(mock_agent)
+    assert payload["success"] is True
+    assert payload["result"] == []
+
+    # Numeric strings / floats coerce instead of crashing
+    for count in ("2", 2.7):
+        msg = _make_tool_call_msg("get_state_history", {"count": count})
+        await handler.handle(msg)
+        await _drain()
+        payload = _get_result_payload(mock_agent)
+        assert payload["success"] is True
+        assert len(payload["result"]) == 2

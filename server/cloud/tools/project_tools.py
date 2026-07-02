@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from server.cloud.state_relay import is_cloud_excluded_key
+
 
 class ProjectToolsMixin:
     """Project reading, state inspection, and metadata update tools."""
@@ -65,17 +67,36 @@ class ProjectToolsMixin:
 
         return result
 
+    # Results from the state read tools ship to the cloud and persist in AI
+    # conversation history, so they apply the same exclusion the state relay
+    # does: cloud-internal (system.cloud.*) and ISC peer (isc.*) state never
+    # leaves the box.
+
     async def _get_project_state(self, input: dict) -> Any:
-        return self._agent.state.snapshot()
+        return {
+            k: v for k, v in self._agent.state.snapshot().items()
+            if not is_cloud_excluded_key(k)
+        }
 
     async def _get_state_value(self, input: dict) -> Any:
         key = input.get("key", "")
+        if is_cloud_excluded_key(key):
+            return {
+                "error": f"State key '{key}' is internal (system.cloud.* and "
+                         f"isc.* state is never sent to the cloud)"
+            }
         value = self._agent.state.get(key)
         return {"key": key, "value": value}
 
     async def _get_state_history(self, input: dict) -> Any:
-        count = input.get("count", 50)
-        return self._agent.state.get_history(count)
+        try:
+            count = int(input.get("count", 50))
+        except (TypeError, ValueError):
+            return {"error": "count must be an integer"}
+        return [
+            entry for entry in self._agent.state.get_history(count)
+            if not is_cloud_excluded_key(entry["key"])
+        ]
 
     async def _update_project_metadata(self, input: dict) -> Any:
         engine = self._get_engine()
