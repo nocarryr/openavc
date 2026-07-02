@@ -320,16 +320,6 @@ cat > /etc/motd << 'MOTD'
 
 MOTD
 
-# --- Copy seed project if not already present ---
-
-SEED_PROJECT="/opt/openavc/installer/seed/default/project.avc"
-TARGET_PROJECT="$DATA_DIR/projects/default/project.avc"
-if [ -f "$SEED_PROJECT" ] && [ ! -f "$TARGET_PROJECT" ]; then
-    mkdir -p "$(dirname "$TARGET_PROJECT")"
-    cp "$SEED_PROJECT" "$TARGET_PROJECT"
-    chown "$OPENAVC_USER:$OPENAVC_USER" "$TARGET_PROJECT"
-fi
-
 # --- Build verification ---
 #
 # Hard-check the final image state. If any of these fail, abort the build
@@ -371,6 +361,14 @@ esac
 
 if [ -e /etc/xdg/autostart/piwiz.desktop ]; then
     echo "FATAL: piwiz.desktop autostart still present"
+    errors=$((errors + 1))
+fi
+
+# The starter project is installed by the 01-install stage from the seed the
+# build staged out of installer/seed/default/. Missing/empty means the image
+# would boot with no project at all.
+if [ ! -s "$DATA_DIR/projects/default/project.avc" ]; then
+    echo "FATAL: seed project missing or empty at $DATA_DIR/projects/default/project.avc"
     errors=$((errors + 1))
 fi
 

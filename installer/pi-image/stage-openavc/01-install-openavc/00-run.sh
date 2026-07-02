@@ -39,12 +39,12 @@ mkdir -p "${ROOTFS_DIR}/var/lib/openavc"
 install -m 644 "$FILES_DIR/default-system.json" \
     "${ROOTFS_DIR}/var/lib/openavc/system.json"
 
-# Copy seed project
+# Copy seed project (staged from installer/seed/default/ by the release
+# workflow / build.sh — fail the build if staging didn't happen rather than
+# shipping an image with no starter project)
 mkdir -p "${ROOTFS_DIR}/var/lib/openavc/projects/default"
-if [ -f "$FILES_DIR/project.avc" ]; then
-    install -m 644 "$FILES_DIR/project.avc" \
-        "${ROOTFS_DIR}/var/lib/openavc/projects/default/project.avc"
-fi
+install -m 644 "$FILES_DIR/project.avc" \
+    "${ROOTFS_DIR}/var/lib/openavc/projects/default/project.avc"
 
 # Copy mDNS service definition
 install -m 644 "$FILES_DIR/openavc-http.service.avahi" \
