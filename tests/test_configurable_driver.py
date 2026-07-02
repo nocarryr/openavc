@@ -153,6 +153,61 @@ async def test_on_data_no_match(driver):
     assert driver.get_state("input") == 0
 
 
+async def test_static_set_values_coerce_to_declared_type(state, events):
+    """Static (non-$) set: shorthand values coerce by the target state var's
+    declared type, exactly like captured values. A boolean var fed
+    set: {mute: "true"} used to store the string "true" — breaking
+    automation `== true` comparisons and the flat-primitives contract.
+    Covers the inverted-protocol case too (a response meaning muted=True
+    carried as a real YAML bool)."""
+    definition = {
+        "id": "acme_display",
+        "name": "Acme Display",
+        "manufacturer": "Acme",
+        "category": "display",
+        "version": "1.0.0",
+        "transport": "tcp",
+        "state_variables": {
+            "mute": {"type": "boolean", "label": "Mute"},
+            "screen_mute": {"type": "boolean", "label": "Screen Mute"},
+            "last_action": {"type": "integer", "label": "Last Action"},
+            "power": {"type": "enum", "label": "Power", "values": ["on", "off"]},
+        },
+        "commands": {},
+        "responses": [
+            # String statics on a boolean var (the common authored form).
+            {"pattern": r"MUTE ON", "set": {"mute": "true"}},
+            {"pattern": r"MUTE OFF", "set": {"mute": "false"}},
+            # Real YAML bool static, inverted protocol (00 = muted).
+            {"pattern": r"OK00", "set": {"screen_mute": True}},
+            {"pattern": r"OK01", "set": {"screen_mute": False}},
+            # Integer static.
+            {"pattern": r"PRESS", "set": {"last_action": "9"}},
+            # Enum statics stay strings.
+            {"pattern": r"PWR1", "set": {"power": "on"}},
+        ],
+    }
+    state.set_event_bus(events)
+    cls = create_configurable_driver_class(definition)
+    drv = cls("disp1", {"host": "127.0.0.1"}, state, events)
+
+    await drv.on_data_received(b"MUTE ON")
+    assert drv.get_state("mute") is True
+    await drv.on_data_received(b"MUTE OFF")
+    assert drv.get_state("mute") is False
+
+    await drv.on_data_received(b"OK00")
+    assert drv.get_state("screen_mute") is True
+    await drv.on_data_received(b"OK01")
+    assert drv.get_state("screen_mute") is False
+
+    await drv.on_data_received(b"PRESS")
+    assert drv.get_state("last_action") == 9
+
+    await drv.on_data_received(b"PWR1")
+    assert drv.get_state("power") == "on"
+
+
 async def test_on_data_empty(driver):
     """Empty data is handled gracefully."""
     await driver.on_data_received(b"")

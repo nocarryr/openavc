@@ -269,7 +269,15 @@ class ConfigurableDriver(BaseDriver):
                                 continue
                             mappings.append({"group": group, "state": state_key, "type": var_type})
                         else:
-                            mappings.append({"group": 0, "state": state_key, "value": value_expr})
+                            # Static values coerce by the state var's declared
+                            # type too — without it a boolean var fed
+                            # `set: {mute: "true"}` stored the string "True".
+                            mappings.append({
+                                "group": 0,
+                                "state": state_key,
+                                "value": value_expr,
+                                "type": var_type,
+                            })
 
                 self._compiled_responses.append((pattern, mappings))
             except re.error as e:
