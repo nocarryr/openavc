@@ -33,6 +33,7 @@ from server.drivers.inline_protocol import (
     _normalize_config_responses,
     _normalize_config_state_vars,
 )
+from server.transport.binary_helpers import encode_escape_sequences
 from simulator.tcp_simulator import TCPSimulator
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,19 @@ def _as_number(value: Any) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _encode_line_ending(value: str | bytes) -> bytes:
+    """Encode an auth line_ending the way the driver does.
+
+    A YAML double-quoted "\\r\\n" arrives as the real control characters,
+    but a single-quoted '\\r\\n' arrives as literal backslash text — the
+    driver runs it through encode_escape_sequences, so use the same
+    decoder for byte-exact parity.
+    """
+    if isinstance(value, bytes):
+        return value
+    return encode_escape_sequences(value)
 
 
 def _mappings_to_set(mappings: list[dict]) -> dict[str, Any]:
@@ -246,11 +260,20 @@ class YAMLAutoSimulator(TCPSimulator):
     ) -> bool:
         """Mirror the driver-side login handshake declared in `auth:`.
 
-        For round-trip testing: send the prompts in order, accept whatever
-        the client sends as credentials (no validation), then send the
-        success_pattern (if defined) and admit the client. Real-hardware
-        validation is the device's job — the simulator only needs to make
-        the handshake play out the same way the driver expects.
+        For round-trip testing: send the prompts in order, read the
+        credential lines, then send the success_pattern (if defined) and
+        admit the client. Credentials aren't validated against a store —
+        with one exception: a username or password of ``"invalid"`` is the
+        designated bad credential, and makes the simulator play out the
+        failure path (emit ``failure_pattern`` when declared, otherwise
+        re-prompt for the username the way a real telnet daemon does) so
+        drivers' auth-rejection handling can be exercised end-to-end.
+
+        The handshake is also skipped when the *driver* would skip it:
+        with ``skip_if_empty`` (default true) and a blank/absent username
+        in this device's config, the driver never authenticates — if the
+        simulator prompted anyway it would eat the first two real commands
+        as credentials.
         """
         auth_def = self._driver_def.get("auth")
         if not isinstance(auth_def, dict):
@@ -258,9 +281,15 @@ class YAMLAutoSimulator(TCPSimulator):
         if auth_def.get("type", "telnet_login") != "telnet_login":
             return True
 
+        username_field = auth_def.get("username_field", "username")
+        configured_user = str(self.config.get(username_field, "") or "")
+        if auth_def.get("skip_if_empty", True) and not configured_user:
+            return True
+
         username_prompt = auth_def.get("username_prompt", "")
         password_prompt = auth_def.get("password_prompt", "")
         success_pattern = auth_def.get("success_pattern")
+        failure_pattern = auth_def.get("failure_pattern")
         line_ending = auth_def.get("line_ending", "\r\n")
         timeout = float(auth_def.get("timeout_seconds", 10))
 
@@ -272,27 +301,62 @@ class YAMLAutoSimulator(TCPSimulator):
         prompt_user = self._render_prompt_literal(username_prompt)
         prompt_pass = self._render_prompt_literal(password_prompt)
         success_text = self._render_prompt_literal(success_pattern) if success_pattern else None
+        failure_text = self._render_prompt_literal(failure_pattern) if failure_pattern else None
+
+        ending = _encode_line_ending(line_ending)
+
+        async def read_credential() -> str:
+            # The driver terminates each credential with the declared
+            # line_ending. readline() only returns on "\n", so for an
+            # ending like "\r" it would hang until the timeout — read
+            # up to the actual terminator instead.
+            if ending.endswith(b"\n"):
+                raw = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            else:
+                try:
+                    raw = await asyncio.wait_for(
+                        reader.readuntil(ending), timeout=timeout
+                    )
+                except asyncio.IncompleteReadError as e:
+                    raw = e.partial
+                except asyncio.LimitOverrunError:
+                    raw = b""
+            return raw.decode("utf-8", errors="replace").strip("\r\n")
+
+        async def emit(data: bytes) -> None:
+            writer.write(data)
+            await writer.drain()
+            self.log_protocol("out", data, client_id)
 
         try:
-            ending = line_ending.encode("utf-8") if isinstance(line_ending, str) else line_ending
+            # Send username prompt, read the username line.
+            await emit(prompt_user.encode("utf-8"))
+            username = await read_credential()
 
-            # Send username prompt, await any input as the username line.
-            writer.write(prompt_user.encode("utf-8"))
-            await writer.drain()
-            self.log_protocol("out", prompt_user.encode("utf-8"), client_id)
-            await asyncio.wait_for(reader.readline(), timeout=timeout)
+            # Send password prompt, read the password line.
+            await emit(prompt_pass.encode("utf-8"))
+            password = await read_credential()
 
-            # Send password prompt, await the password line.
-            writer.write(prompt_pass.encode("utf-8"))
-            await writer.drain()
-            self.log_protocol("out", prompt_pass.encode("utf-8"), client_id)
-            await asyncio.wait_for(reader.readline(), timeout=timeout)
+            if username == "invalid" or password == "invalid":
+                if failure_text:
+                    await emit(failure_text.encode("utf-8") + ending)
+                else:
+                    # No declared failure banner: re-prompt for the
+                    # username like a real telnet daemon. The driver
+                    # treats a missing success banner / post-password
+                    # re-prompt as a rejected login.
+                    await emit(ending + prompt_user.encode("utf-8"))
+                logger.info(
+                    "%s: client %s sent the designated bad credential — "
+                    "rejecting login",
+                    self.name,
+                    client_id,
+                )
+                return False
 
             # Send success indicator if declared.
             if success_text:
-                writer.write(success_text.encode("utf-8") + ending)
-                await writer.drain()
-                self.log_protocol("out", success_text.encode("utf-8"), client_id)
+                await emit(success_text.encode("utf-8") + ending)
 
             return True
         except asyncio.TimeoutError:

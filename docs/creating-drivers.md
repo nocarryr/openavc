@@ -824,6 +824,8 @@ auth:
 4. If `success_pattern` is set, the driver waits for it. Otherwise it briefly drains any post-password noise and assumes success.
 5. The original frame parser is restored, then `on_connect` runs.
 
+**Testing against the simulator:** the auto-generated simulator mirrors the handshake — it presents the prompts, honors the declared `line_ending`, and skips authentication in the same cases the driver would (`skip_if_empty` with a blank username). It accepts any credentials except the designated bad credential: a username or password of `invalid` makes the simulator reject the login — emitting `failure_pattern` when declared, otherwise re-prompting for the username — so you can exercise the driver's auth-failure handling without real hardware.
+
 If the device's auth scheme isn't a prompt-and-response Telnet login (for example, a `LOGIN <password>` command-style auth or JSON-RPC `login` method), `auth: type: telnet_login` does not fit and you should use a Python driver.
 
 #### `polling` section
