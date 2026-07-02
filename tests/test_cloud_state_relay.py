@@ -71,10 +71,19 @@ class _StubDeviceManager:
 
 class _StubDriver:
     """Carries a ``DRIVER_INFO`` dict that the relay reads for
-    ``child_entity_types``."""
+    ``child_entity_types``, plus optional per-child dynamic schemas
+    keyed by ``(child_type, local_id)`` for ``get_child_schema``."""
 
-    def __init__(self, driver_info: dict[str, Any]):
+    def __init__(
+        self,
+        driver_info: dict[str, Any],
+        child_schemas: dict[tuple, dict[str, Any]] | None = None,
+    ):
         self.DRIVER_INFO = driver_info
+        self._child_schemas = child_schemas or {}
+
+    def get_child_schema(self, child_type: str, local_id) -> dict[str, Any]:
+        return self._child_schemas.get((child_type, local_id), {})
 
 
 def _chazy_like_driver() -> _StubDriver:
@@ -128,6 +137,78 @@ class TestKeyTier:
         agent = _RecordingAgent(drivers={"ctrl1": _chazy_like_driver()})
         relay = StateRelay(agent, StateStore())
         assert relay._key_tier("device.ctrl1.encoder.005.source_ir") == "low"
+
+    def test_dotted_child_prop_classifies_as_child_key(self):
+        """A child property name may itself contain dots (Q-SYS control
+        names like ``input.1.gain``) — the key must still classify against
+        the child schema, not fall through to the fast top tier."""
+        driver = _StubDriver({
+            "id": "dsp_like",
+            "child_entity_types": {
+                "component": {
+                    "label": "Component",
+                    "dynamic": True,
+                    "id_format": {"type": "string"},
+                    "state_variables": {
+                        "name": {"type": "string"},
+                        "meter.level": {"type": "number", "cloud_priority": "low"},
+                    },
+                },
+            },
+        })
+        agent = _RecordingAgent(drivers={"core": driver})
+        relay = StateRelay(agent, StateStore())
+        # Statically declared dotted prop honors its declared priority.
+        assert relay._key_tier("device.core.component.Mixer.meter.level") == "low"
+        # A dotted prop the schema doesn't claim gets the default child
+        # cadence — NOT the fast top tier (the old 5-segment assumption).
+        assert relay._key_tier("device.core.component.Mixer.input.1.gain") == "child"
+
+    def test_dynamic_child_schema_priorities_are_honored(self):
+        """cloud_priority in a per-child dynamic schema (register_child's
+        schema=...) must be consulted — the static declaration only carries
+        summary props for dynamic types."""
+        driver = _StubDriver(
+            {
+                "id": "dsp_like",
+                "child_entity_types": {
+                    "component": {
+                        "label": "Component",
+                        "dynamic": True,
+                        "id_format": {"type": "string"},
+                        "state_variables": {"name": {"type": "string"}},
+                    },
+                },
+            },
+            child_schemas={
+                ("component", "Mixer"): {
+                    "mute": {"type": "boolean", "cloud_priority": "high"},
+                    "meter.rms": {"type": "number", "cloud_priority": "low"},
+                    "input.1.gain": {"type": "number"},
+                },
+            },
+        )
+        agent = _RecordingAgent(drivers={"core": driver})
+        relay = StateRelay(agent, StateStore())
+        assert relay._key_tier("device.core.component.Mixer.mute") == "top"
+        assert relay._key_tier("device.core.component.Mixer.meter.rms") == "low"
+        assert relay._key_tier("device.core.component.Mixer.input.1.gain") == "child"
+
+    def test_flat_state_var_low_priority_is_low(self):
+        """cloud_priority: low on a TOP-LEVEL state variable slows that key;
+        undeclared flat keys (incl. platform-managed ones) stay fast."""
+        driver = _StubDriver({
+            "id": "flat_like",
+            "state_variables": {
+                "cpu_usage": {"type": "number", "cloud_priority": "low"},
+                "power": {"type": "boolean"},
+            },
+        })
+        agent = _RecordingAgent(drivers={"proc": driver})
+        relay = StateRelay(agent, StateStore())
+        assert relay._key_tier("device.proc.cpu_usage") == "low"
+        assert relay._key_tier("device.proc.power") == "top"
+        assert relay._key_tier("device.proc.connected") == "top"
 
     def test_child_high_priority_is_top(self):
         agent = _RecordingAgent(drivers={"ctrl1": _chazy_like_driver()})

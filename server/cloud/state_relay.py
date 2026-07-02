@@ -258,11 +258,16 @@ class StateRelay:
         """Return the relay tier (``"top"``, ``"child"``, or ``"low"``)
         for a state key.
 
-        Top-level keys (``device.<id>.<prop>`` plus ``var.*``, ``system.*``,
-        ``ui.*``, ``plugin.*``) and anything we cannot classify ride the
-        fast tier so the cloud does not lag behind real device state.
-        Five-segment ``device.<id>.<type>.<padded>.<prop>`` keys consult
-        the parent device's driver for a declared ``cloud_priority``.
+        Anything we cannot classify rides the fast tier so the cloud does
+        not lag behind real device state. Flat ``device.<id>.<prop>`` keys
+        consult the driver's top-level ``state_variables`` for a declared
+        ``cloud_priority`` (``var.*`` / ``system.*`` / ``ui.*`` /
+        ``plugin.*`` are always fast). Child keys
+        ``device.<id>.<type>.<local_id>.<prop>`` consult the parent
+        device's child schema — the property segment may itself contain
+        dots (e.g. Q-SYS control names like ``input.1.gain``), so the key
+        is split at most four times and everything after the local id is
+        the property.
         """
         cached = self._tier_cache.get(key)
         if cached is not None:
@@ -270,26 +275,56 @@ class StateRelay:
 
         tier = _TIER_TOP
         if key.startswith("device."):
-            parts = key.split(".")
-            # device.<id>.<child_type>.<padded>.<prop>
+            parts = key.split(".", 4)
+            # device.<id>.<child_type>.<local_id>.<prop...>
             if len(parts) == 5:
-                device_id, child_type, _padded, prop = (
+                device_id, child_type, local_id, prop = (
                     parts[1], parts[2], parts[3], parts[4]
                 )
-                tier = self._lookup_child_tier(device_id, child_type, prop)
+                tier = self._lookup_child_tier(
+                    device_id, child_type, local_id, prop
+                )
+            elif len(parts) == 3:
+                tier = self._lookup_flat_tier(parts[1], parts[2])
 
         self._tier_cache[key] = tier
         return tier
 
+    def _driver_for(self, device_id: str) -> Any:
+        devices = getattr(self._agent, "devices", None)
+        if devices is None or not hasattr(devices, "get_driver"):
+            return None
+        return devices.get_driver(device_id)
+
+    def _lookup_flat_tier(self, device_id: str, prop: str) -> str:
+        """Tier for a flat ``device.<id>.<prop>`` key.
+
+        A driver may declare ``cloud_priority: low`` on a top-level state
+        variable to slow-walk verbose flat telemetry (meter levels, CPU
+        gauges). Everything else — including platform-managed keys like
+        ``connected`` and ``offline_reason`` — stays on the fast tier.
+        """
+        driver = self._driver_for(device_id)
+        if driver is None:
+            return _TIER_TOP
+        state_vars = driver.DRIVER_INFO.get("state_variables", {})
+        var_def = state_vars.get(prop) if isinstance(state_vars, dict) else None
+        if isinstance(var_def, dict) and var_def.get("cloud_priority") == "low":
+            return _TIER_LOW
+        return _TIER_TOP
+
     def _lookup_child_tier(
-        self, device_id: str, child_type: str, prop: str
+        self, device_id: str, child_type: str, local_id: str, prop: str
     ) -> str:
         """Resolve the priority tier for a candidate child-entity key by
         consulting the parent device's driver.
 
         Returns ``"top"`` if the device or schema does not claim the key
         as a child property — unknown keys default to fast cadence rather
-        than being silently slow-walked to the cloud.
+        than being silently slow-walked to the cloud. For a
+        ``dynamic: true`` type the static declaration carries only summary
+        props, so the per-child schema supplied at
+        ``register_child(schema=...)`` is consulted too.
 
         Driver-declared ``cloud_priority`` values:
             ``"low"``  -> ``"low"`` tier (30 s cadence)
@@ -298,10 +333,7 @@ class StateRelay:
                           state)
             anything else (incl. unset) -> ``"child"`` tier (5 s cadence)
         """
-        devices = getattr(self._agent, "devices", None)
-        if devices is None or not hasattr(devices, "get_driver"):
-            return _TIER_TOP
-        driver = devices.get_driver(device_id)
+        driver = self._driver_for(device_id)
         if driver is None:
             return _TIER_TOP
         types = driver.DRIVER_INFO.get("child_entity_types", {})
@@ -311,6 +343,8 @@ class StateRelay:
         if not isinstance(type_def, dict):
             return _TIER_TOP
         var_def = type_def.get("state_variables", {}).get(prop)
+        if not isinstance(var_def, dict) and type_def.get("dynamic"):
+            var_def = self._dynamic_child_var(driver, child_type, local_id, prop)
         if not isinstance(var_def, dict):
             return _TIER_CHILD
         priority = var_def.get("cloud_priority")
@@ -319,6 +353,33 @@ class StateRelay:
         if priority == "high":
             return _TIER_TOP
         return _TIER_CHILD
+
+    @staticmethod
+    def _dynamic_child_var(
+        driver: Any, child_type: str, local_id: str, prop: str
+    ) -> dict[str, Any] | None:
+        """The per-child schema entry for ``prop``, or None.
+
+        The state key carries the padded/string form of the local id;
+        integer-id types are retried with the int form. Any lookup error
+        (unknown child, race with deregistration) means "not claimed" —
+        the caller falls back to the default child tier.
+        """
+        get_schema = getattr(driver, "get_child_schema", None)
+        if not callable(get_schema):
+            return None
+        candidates: list[Any] = [local_id]
+        if local_id.isdigit():
+            candidates.append(int(local_id))
+        for lid in candidates:
+            try:
+                schema = get_schema(child_type, lid) or {}
+            except Exception:
+                continue
+            var_def = schema.get(prop)
+            if isinstance(var_def, dict):
+                return var_def
+        return None
 
     async def _flush_bucket_loop(
         self, bucket: str, config_key: str, default_interval: float
