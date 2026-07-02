@@ -144,6 +144,13 @@ When you choose Logarithmic, one extra field appears:
 
 The Response setting only changes how the control feels. The value sent to the device (after any output range scaling) is unchanged, so it is safe to switch between Linear and Logarithmic at any time.
 
+#### Value display and send behavior (sliders and faders)
+
+Two more settings on the slider and fader control the readout and how commands are sent.
+
+- **Unit** and **Shown decimals** change the on-screen number only: a unit label (dB, %) shown beside the value, and how many decimal places the readout uses. They do **not** change the value sent to a device. That value is formatted by the driver's command parameter, so a device that needs a whole number gets one because its driver declares the parameter as an integer, not because of what the readout shows.
+- **Send** chooses whether the control streams commands continuously as you drag (the default) or sends a single command when you let go. Use **On release only** for devices that can't keep up with a burst of commands, such as a serial receiver. In the default live mode, **Rate (ms)** sets the minimum time between commands while dragging.
+
 ### Shows: Appearance
 
 The **Appearance** card changes an element's look based on a state value. This is how buttons light up to show the current selection, the equivalent of feedback joins in Crestron, and how status LEDs map state to color.

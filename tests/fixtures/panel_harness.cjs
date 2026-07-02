@@ -108,9 +108,21 @@ const tests = {
 
     h002_m005_slider_reset_and_drag() {
         const app = mkApp();
+        // The slider input runs in a normalized position domain (0..steps); the
+        // binding carries the display range + the position/format closures the
+        // real renderSlider builds. For a linear 0..100 step-1 slider, position
+        // equals value, so the assertions below read as plain values.
+        const min = 0, max = 100, step = 1, steps = 100;
         const input = document.createElement('input');
-        input.type = 'range'; input.min = '0'; input.max = '100'; input.step = '1';
-        const b = { element: input, binding: { key: 'var.vol' }, fill: null, valueDisplay: null, isVertical: false, outputMin: null, outputMax: null, scaleToFull: true };
+        input.type = 'range'; input.min = '0'; input.max = String(steps); input.step = '1';
+        const valueToPos = (v) => Math.max(0, Math.min(steps, Math.round(((v - min) / (max - min)) * steps)));
+        const fmtValue = (v) => String(v);
+        const b = {
+            element: input, elementDef: { min, max, step }, binding: { key: 'var.vol' },
+            fill: null, valueDisplay: null, isVertical: false,
+            outputMin: null, outputMax: null, scaleToFull: true,
+            steps, valueToPos, fmtValue,
+        };
         app.state = { 'var.vol': 75 };
         app.evaluateSliderValue(b);
         assert(Number(input.value) === 75, `slider set to 75, got ${input.value}`);

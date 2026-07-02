@@ -137,6 +137,8 @@ Order matters here. Build them in the order they appear:
 
 **Parameters** for each command let users fill in what to send. Each parameter has a type, optional required flag, label, help, default, and (numeric) min/max bounds, (enum) allowed values, or (free text) a `pattern` regex the value must match.
 
+**Number formatting on the wire.** The runtime coerces each parameter to its declared type before substituting it, so an `integer` parameter always sends a whole number. A value of `26.0` (for example from a slider bound to the command) goes out as `26`, not `26.0`. For a `number` parameter, set **Decimals** to round to a fixed number of places (`decimals: 0` sends a whole number, `decimals: 1` sends one place). For finer control on a single placeholder, a format spec works inline: `{level:03d}` zero-pads (e.g. `007`), `{addr:02X}` hex-formats, and `{gain:.1f}` fixes one decimal place. Specs work even when the value arrives as a whole-number float.
+
 **Escape sequences** in command strings: `\r`, `\n`, `\t`, `\\`, `\xHH` (hex byte, e.g. `\x1B` for ESC).
 
 Example for an Extron switcher:

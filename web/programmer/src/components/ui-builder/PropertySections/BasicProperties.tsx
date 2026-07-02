@@ -344,6 +344,7 @@ export function BasicProperties({
             </label>
           </FieldRow>
           <ResponseCurveFields element={element} onChange={onChange} />
+          <ValueBehaviorFields element={element} onChange={onChange} includeUnit />
         </>
       )}
 
@@ -638,6 +639,7 @@ export function BasicProperties({
             </label>
           </FieldRow>
           <ResponseCurveFields element={element} onChange={onChange} />
+          <ValueBehaviorFields element={element} onChange={onChange} />
         </>
       )}
 
@@ -1492,6 +1494,83 @@ function ResponseCurveFields({
           </div>
         </>
       )}
+    </>
+  );
+}
+
+/**
+ * Value/send behavior shared by slider and fader. `Shown decimals` controls the
+ * readout only (the value sent to a device is formatted by the driver's command
+ * param, not here). `Send` chooses whether the control streams commands while
+ * dragging or fires a single command on release — the latter for gear that
+ * can't absorb a burst. `includeUnit` adds the unit field for the slider (the
+ * fader already has its own).
+ */
+function ValueBehaviorFields({
+  element,
+  onChange,
+  includeUnit,
+}: {
+  element: UIElement;
+  onChange: (patch: Partial<UIElement>) => void;
+  includeUnit?: boolean;
+}) {
+  const onRelease = element.send_on_release === true;
+  return (
+    <>
+      <SubSection label="Value & Send" />
+      {includeUnit && (
+        <FieldRow label="Unit">
+          <input
+            value={element.unit || ""}
+            onChange={(e) => onChange({ unit: e.target.value })}
+            placeholder="e.g. dB, %"
+            style={{ flex: 1 }}
+          />
+        </FieldRow>
+      )}
+      <FieldRow label="Shown decimals">
+        <input
+          type="number"
+          value={element.display_decimals ?? ""}
+          onChange={(e) =>
+            onChange({ display_decimals: e.target.value === "" ? undefined : Number(e.target.value) })
+          }
+          placeholder="Auto"
+          min={0}
+          max={6}
+          step={1}
+          style={{ flex: 1 }}
+        />
+      </FieldRow>
+      <FieldRow label="Send">
+        <select
+          value={onRelease ? "release" : "live"}
+          onChange={(e) => onChange({ send_on_release: e.target.value === "release" })}
+          style={{ flex: 1 }}
+        >
+          <option value="live">While dragging</option>
+          <option value="release">On release only</option>
+        </select>
+      </FieldRow>
+      {!onRelease && (
+        <FieldRow label="Rate (ms)">
+          <input
+            type="number"
+            value={element.send_throttle_ms ?? ""}
+            onChange={(e) =>
+              onChange({ send_throttle_ms: e.target.value === "" ? undefined : Number(e.target.value) })
+            }
+            placeholder="Default"
+            min={0}
+            step={10}
+            style={{ flex: 1 }}
+          />
+        </FieldRow>
+      )}
+      <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: -2, marginBottom: 4 }}>
+        "On release only" sends one command when you let go — use it for devices that can't keep up with a stream of commands. Shown decimals affect the readout, not the value sent (a driver formats that).
+      </div>
     </>
   );
 }

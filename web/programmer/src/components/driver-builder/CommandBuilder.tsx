@@ -755,6 +755,9 @@ function ParamRow({
                 partial.min = undefined;
                 partial.max = undefined;
               }
+              if (t !== "number") {
+                partial.decimals = undefined;
+              }
               if (t !== "enum") {
                 partial.values = undefined;
               }
@@ -812,7 +815,12 @@ function ParamRow({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: isNumeric ? "1fr 1fr 1fr 1fr" : "1fr 1fr",
+          gridTemplateColumns:
+            def.type === "number"
+              ? "1fr 1fr 1fr 1fr 1fr"
+              : isNumeric
+                ? "1fr 1fr 1fr 1fr"
+                : "1fr 1fr",
           gap: "var(--space-sm)",
           marginTop: "var(--space-sm)",
         }}
@@ -902,6 +910,25 @@ function ParamRow({
                 style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
               />
             </div>
+            {def.type === "number" && (
+              <div>
+                <span style={labelStyle}>Decimals</span>
+                <input
+                  type="number"
+                  value={def.decimals ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onUpdate({ decimals: v === "" ? undefined : parseInt(v, 10) });
+                  }}
+                  min={0}
+                  max={6}
+                  step={1}
+                  placeholder="Any"
+                  title="Round the value to this many decimal places on the wire (0 = whole number)."
+                  style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+                />
+              </div>
+            )}
           </>
         )}
       </div>

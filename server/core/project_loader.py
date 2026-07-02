@@ -257,6 +257,9 @@ class UIElement(_ForwardCompatModel):
     scale_to_full: bool | None = None  # True: scale display to fill track; False: show dead space
     response: str | None = None  # slider/fader taper: "linear" (default) or "logarithmic"
     response_db_range: float | None = None  # logarithmic taper: dB span of the throw (default 60)
+    send_on_release: bool | None = None  # slider/fader: send only when the drag ends, not continuously
+    send_throttle_ms: int | None = None  # slider/fader: min ms between live sends (default per element)
+    display_decimals: int | None = None  # slider/fader: decimal places shown in the value readout
     target_page: str | None = None
     options: list[dict[str, Any]] | None = None
     placeholder: str | None = None

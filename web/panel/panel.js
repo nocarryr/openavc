@@ -1304,6 +1304,10 @@ class PanelApp {
         const sSpan = sliderMax - sliderMin;
         const sResponse = element.response || 'linear';
         const sResponseDbRange = element.response_db_range != null ? Number(element.response_db_range) : 60;
+        const sUnit = element.unit || '';
+        const sDisplayDecimals = element.display_decimals != null ? Number(element.display_decimals) : null;
+        const sSendOnRelease = element.send_on_release === true;
+        const sThrottle = element.send_throttle_ms != null ? Number(element.send_throttle_ms) : 100;
         input.setAttribute('aria-label', element.label || element.id);
         const sOutputMin = element.output_min;
         const sOutputMax = element.output_max;
@@ -1336,7 +1340,12 @@ class PanelApp {
             const travel = this._responseCurveInverse(vf, sResponse, sResponseDbRange);
             return Math.max(0, Math.min(STEPS, Math.round(travel * STEPS)));
         };
-        const fmtValue = (v) => (sliderStep < 1 ? parseFloat(v).toFixed(1) : String(v));
+        const fmtValue = (v) => {
+            const n = Number(v);
+            const dec = sDisplayDecimals != null ? sDisplayDecimals : (sliderStep < 1 ? 1 : 0);
+            const s = dec > 0 ? n.toFixed(dec) : String(Math.round(n));
+            return sUnit ? `${s} ${sUnit}` : s;
+        };
 
         // Set initial position from state if binding exists, else from min
         const sliderBinding = element.bindings?.show?.value;
@@ -1372,8 +1381,19 @@ class PanelApp {
             }
         }
 
-        // Debounced change handler
+        // Send handler: debounced while dragging live, immediate on release.
         let changeTimeout = null;
+        const sendValue = (v, immediate) => {
+            if (changeTimeout) { clearTimeout(changeTimeout); changeTimeout = null; }
+            if (immediate) {
+                this.send({ type: 'ui.change', element_id: element.id, value: v });
+                return;
+            }
+            changeTimeout = setTimeout(() => {
+                this.send({ type: 'ui.change', element_id: element.id, value: v });
+            }, sThrottle);
+            this.debounceTimers.push(changeTimeout);
+        };
         input.addEventListener('input', () => {
             // Dead-space mode: clamp travel so the thumb can't enter the region
             // past the device's output limit (mirrors the value clamp above).
@@ -1387,15 +1407,16 @@ class PanelApp {
             const v = posToValue(parseFloat(input.value));
             input.setAttribute('aria-valuetext', fmtValue(v));
             if (valueDisplay) valueDisplay.textContent = fmtValue(v);
-            if (changeTimeout) clearTimeout(changeTimeout);
-            changeTimeout = setTimeout(() => {
-                this.send({
-                    type: 'ui.change',
-                    element_id: element.id,
-                    value: v,
-                });
-            }, 100);
-            this.debounceTimers.push(changeTimeout);
+            // Live mode streams while dragging; send-on-release waits for 'change'.
+            if (!sSendOnRelease) sendValue(v, false);
+        });
+        // 'change' fires when the value is committed (mouse release, keyboard).
+        // Always send the final value here so send-on-release delivers exactly
+        // one command, and live mode is guaranteed to land on the end value.
+        input.addEventListener('change', () => {
+            const v = posToValue(parseFloat(input.value));
+            if (valueDisplay) valueDisplay.textContent = fmtValue(v);
+            sendValue(v, true);
         });
 
         // Track active dragging so inbound state echoes don't fight the operator
@@ -2633,6 +2654,14 @@ class PanelApp {
         const scaleToFull = element.scale_to_full !== false;
         const response = element.response || 'linear';
         const responseDbRange = element.response_db_range != null ? Number(element.response_db_range) : 60;
+        const faderDisplayDecimals = element.display_decimals != null ? Number(element.display_decimals) : 1;
+        const faderSendOnRelease = element.send_on_release === true;
+        const faderThrottle = element.send_throttle_ms != null ? Number(element.send_throttle_ms) : 50;
+        const fmtFaderValue = (v) => {
+            const n = Number(v);
+            const s = faderDisplayDecimals > 0 ? n.toFixed(faderDisplayDecimals) : String(Math.round(n));
+            return unit ? `${s} ${unit}` : s;
+        };
         // Merge theme element_defaults for consistency with other renderers,
         // even though show_value/show_scale aren't currently theme-editable
         // — keeps the pattern uniform if those flags become themable later.
@@ -2719,7 +2748,7 @@ class PanelApp {
         if (showValue) {
             valueDisplay = document.createElement('div');
             valueDisplay.className = 'fader-value';
-            valueDisplay.textContent = `0 ${unit}`;
+            valueDisplay.textContent = fmtFaderValue(0);
             el.appendChild(valueDisplay);
         }
 
@@ -2737,11 +2766,12 @@ class PanelApp {
         const initFrac = this._responseCurveInverse((currentValue - min) / (max - min), response, responseDbRange);
         if (isHorizontal) handle.style.left = `${initFrac * 100}%`;
         else handle.style.bottom = `${initFrac * 100}%`;
-        if (valueDisplay) valueDisplay.textContent = `${Math.round(currentValue * 10) / 10} ${unit}`;
+        if (valueDisplay) valueDisplay.textContent = fmtFaderValue(currentValue);
 
         // Touch/mouse drag interaction
         let dragging = false;
         let debounceTimer = null;
+        let currentDragVal = currentValue;
 
         const getValueFromEvent = (e) => {
             const rect = trackWrap.getBoundingClientRect();
@@ -2766,14 +2796,20 @@ class PanelApp {
             if (isHorizontal) handle.style.left = `${frac * 100}%`;
             else handle.style.bottom = `${frac * 100}%`;
             handle.setAttribute('aria-valuenow', String(Math.round(val * 10) / 10));
-            if (valueDisplay) valueDisplay.textContent = `${Math.round(val * 10) / 10} ${unit}`;
+            if (valueDisplay) valueDisplay.textContent = fmtFaderValue(val);
         };
 
-        const sendChange = (val) => {
-            if (debounceTimer) clearTimeout(debounceTimer);
+        // Debounced during a live drag; `immediate` sends the final value at once
+        // (used on release so send-on-release fires exactly one command).
+        const sendChange = (val, immediate) => {
+            if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+            if (immediate) {
+                this.send({ type: 'ui.change', element_id: element.id, value: val });
+                return;
+            }
             debounceTimer = setTimeout(() => {
                 this.send({ type: 'ui.change', element_id: element.id, value: val });
-            }, 50);
+            }, faderThrottle);
             this.debounceTimers.push(debounceTimer);
         };
 
@@ -2782,19 +2818,26 @@ class PanelApp {
             dragging = true;
             handle._dragging = true; // suppress inbound state echoes mid-drag
             const val = getValueFromEvent(e);
+            currentDragVal = val;
             updateFader(val);
-            sendChange(val);
+            if (!faderSendOnRelease) sendChange(val);
         };
         const onMove = (e) => {
             if (!dragging) return;
             e.preventDefault();
             const val = getValueFromEvent(e);
+            currentDragVal = val;
             updateFader(val);
-            sendChange(val);
+            if (!faderSendOnRelease) sendChange(val);
         };
         const onEnd = () => {
+            const wasDragging = dragging;
             dragging = false;
             handle._dragging = false;
+            // Send the final position once when the drag ends. In send-on-release
+            // mode this is the only send; in live mode it just guarantees the
+            // stream lands on the end value.
+            if (wasDragging) sendChange(currentDragVal, true);
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onEnd);
             document.removeEventListener('touchmove', onMove);
@@ -2854,7 +2897,7 @@ class PanelApp {
                 element: el,
                 elementDef: element,
                 binding: valueBinding,
-                _fader: { handle, valueDisplay, min, max, unit, horizontal: isHorizontal, outputMin, outputMax, scaleToFull, response, responseDbRange },
+                _fader: { handle, valueDisplay, min, max, unit, horizontal: isHorizontal, outputMin, outputMax, scaleToFull, response, responseDbRange, fmt: fmtFaderValue },
             });
         }
 
@@ -2919,7 +2962,7 @@ class PanelApp {
         const raw = this.state[b.binding.key];
         if (b._lastFaderRaw === raw) return;
         b._lastFaderRaw = raw;
-        const { handle, valueDisplay, min, max, unit, horizontal, outputMin, outputMax, scaleToFull, response, responseDbRange } = b._fader;
+        const { handle, valueDisplay, min, max, horizontal, outputMin, outputMax, scaleToFull, response, responseDbRange, fmt } = b._fader;
         // Don't fight the operator while they're dragging the handle.
         if (handle._dragging) return;
         const span = max - min;
@@ -2928,14 +2971,14 @@ class PanelApp {
             // leaving it parked at the last device value.
             if (horizontal) handle.style.left = '0%';
             else handle.style.bottom = '0%';
-            if (valueDisplay) valueDisplay.textContent = `${Math.round(min * 10) / 10} ${unit}`;
+            if (valueDisplay) valueDisplay.textContent = fmt(min);
             return;
         }
         const value = Math.max(min, Math.min(max, this._reverseScale(Number(raw), min, max, outputMin, outputMax, scaleToFull)));
         const frac = span > 0 ? this._responseCurveInverse((value - min) / span, response, responseDbRange) : 0;
         if (horizontal) handle.style.left = `${frac * 100}%`;
         else handle.style.bottom = `${frac * 100}%`;
-        if (valueDisplay) valueDisplay.textContent = `${Math.round(value * 10) / 10} ${unit}`;
+        if (valueDisplay) valueDisplay.textContent = fmt(value);
     }
 
     // --- Group ---

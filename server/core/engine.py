@@ -1208,17 +1208,34 @@ class Engine:
 
         val = float(raw_value)
         if getattr(element, "scale_to_full", None) is False:
-            return max(output_min, min(output_max, val))
+            result = max(output_min, min(output_max, val))
+        else:
+            display_min = getattr(element, "min", None)
+            display_max = getattr(element, "max", None)
+            if display_min is None or display_max is None:
+                return raw_value
+            display_range = display_max - display_min
+            if display_range == 0:
+                return output_min
+            frac = (val - display_min) / display_range
+            result = output_min + frac * (output_max - output_min)
 
-        display_min = getattr(element, "min", None)
-        display_max = getattr(element, "max", None)
-        if display_min is None or display_max is None:
-            return raw_value
-        display_range = display_max - display_min
-        if display_range == 0:
-            return output_min
-        frac = (val - display_min) / display_range
-        return output_min + frac * (output_max - output_min)
+        # Kill floating-point noise from the division so an identity/whole-number
+        # scale returns 26.0, not 25.9999996. Then, if the control steps in whole
+        # numbers over a whole-number output range and the result is whole, hand
+        # back an int — so an untyped command param renders "26", not "26.0".
+        # (A param declared type: integer coerces regardless, but this keeps the
+        # value clean for drivers that declare nothing.)
+        result = round(result, 9)
+        step = getattr(element, "step", None)
+        whole_control = (
+            (step is None or (isinstance(step, (int, float)) and float(step).is_integer()))
+            and float(output_min).is_integer()
+            and float(output_max).is_integer()
+        )
+        if whole_control and result == int(result):
+            return int(result)
+        return result
 
     def _find_element(self, element_id: str) -> Any | None:
         """Find a UI element by ID across all pages."""

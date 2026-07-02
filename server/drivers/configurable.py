@@ -195,6 +195,18 @@ def _normalize_and_validate_command_params(
                 raise CommandParamError(
                     f"'{command}': '{name}' must be at most {mx}, got {num:g}"
                 )
+            # Coerce to the declared numeric type so the value lands on the wire
+            # the way the protocol needs it — an `integer` param sends "26", not
+            # "26.0", no matter whether a slider, a macro, or the REST API
+            # produced the value. `decimals` (number/float only) rounds to that
+            # many places; `decimals: 0` yields a whole number. A `number`/`float`
+            # with no `decimals` rule is left as-is, so "26.0" stays "26.0" when
+            # that's genuinely what was passed.
+            decimals = pdef.get("decimals")
+            if ptype == "integer":
+                out[name] = int(num)
+            elif isinstance(decimals, int):
+                out[name] = int(round(num)) if decimals <= 0 else round(num, decimals)
         else:
             pattern = pdef.get("pattern")
             if pattern and isinstance(value, str):
@@ -1127,8 +1139,17 @@ class ConfigurableDriver(BaseDriver):
             try:
                 return format(value, spec)
             except (ValueError, TypeError):
-                # A numeric spec ('d'/'x'/'f'/...) applied to a numeric string:
-                # coerce, then format. int first so '02d' works on "5".
+                # An integer spec ('d'/'x'/'X'/'o'/'b') rejects a float even when
+                # it's whole (26.0), which is exactly what a scaled slider value
+                # is. Coerce a whole-number float to int and retry so {vol:d}
+                # renders "26".
+                if isinstance(value, float) and not isinstance(value, bool) and value.is_integer():
+                    try:
+                        return format(int(value), spec)
+                    except (ValueError, TypeError):
+                        pass
+                # A numeric spec applied to a numeric string: coerce, then
+                # format. int first so '02d' works on "5".
                 if isinstance(value, str):
                     for conv in (int, float):
                         try:

@@ -105,6 +105,15 @@ def _validate_param_option_providers(
                 f"{where} param '{pname}': min ({mn}) must be <= max ({mx})"
             )
 
+        # A `decimals` rounding rule (number params) must be a non-negative int.
+        decimals = pdef.get("decimals")
+        if decimals is not None and (
+            not isinstance(decimals, int) or isinstance(decimals, bool) or decimals < 0
+        ):
+            errors.append(
+                f"{where} param '{pname}': decimals must be a non-negative integer"
+            )
+
         for key in ("options_state", "options_source"):
             val = pdef.get(key)
             if val is not None and not (isinstance(val, str) and val):

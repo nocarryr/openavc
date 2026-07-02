@@ -155,6 +155,9 @@ export interface UIElement {
   scale_to_full?: boolean;
   response?: string; // slider/fader taper: "linear" | "logarithmic"
   response_db_range?: number; // logarithmic taper: dB span of the throw
+  send_on_release?: boolean; // slider/fader: send only when the drag ends
+  send_throttle_ms?: number; // slider/fader: min ms between live sends
+  display_decimals?: number; // slider/fader: decimal places in the value readout
   target_page?: string;
   options?: UIElementOption[];
   placeholder?: string;
@@ -448,6 +451,10 @@ export interface DriverParamDef {
   // an authoring aid).
   min?: number;
   max?: number;
+  // Round a `number` value to this many decimal places on the wire (0 = whole
+  // number). Only meaningful for type='number'; `integer` always coerces to a
+  // whole number.
+  decimals?: number;
   // Regex (full-match) a free-text value must satisfy — a shape check for
   // values that can't be enumerated (IP, hostname, fixed-length ID). The
   // runtime validates it at command time; the IDE shows an inline error while
