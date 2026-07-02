@@ -69,9 +69,29 @@ export function getAuthSubprotocols(): string[] | undefined {
  */
 export const AUTH_REQUIRED_EVENT = "openavc:auth-required";
 
-function isApiUrl(url: string): boolean {
-  // /api, /api/..., or /tunnel/<id>/api/...
-  return /(^|\/)api(\/|$|\?)/.test(url);
+/**
+ * True when `url` resolves (against `baseHref`) to the same origin AND an
+ * /api path — /api, /api/..., or /tunnel/<id>/api/....
+ *
+ * The origin anchor is the security boundary: the credential must never ride
+ * a request to another host, no matter what that URL's path looks like. A
+ * path-only match would attach the admin credential to e.g.
+ * https://elsewhere.example/api/... issued by any script running in the SPA
+ * (a plugin UI bundle, injected code). Unparseable URLs get no credential.
+ *
+ * Exported for tests; the interceptor binds baseHref to the live location.
+ */
+export function isSameOriginApiUrl(url: string, baseHref: string): boolean {
+  let base: URL;
+  let resolved: URL;
+  try {
+    base = new URL(baseHref);
+    resolved = new URL(url, base);
+  } catch {
+    return false;
+  }
+  if (resolved.origin !== base.origin) return false;
+  return /(^|\/)api(\/|$)/.test(resolved.pathname);
 }
 
 let installed = false;
@@ -96,7 +116,7 @@ export function installFetchAuth(): void {
       url = input.url;
     }
 
-    const attach = isApiUrl(url);
+    const attach = isSameOriginApiUrl(url, window.location.href);
     let finalInit = init;
 
     if (attach) {
