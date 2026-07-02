@@ -372,6 +372,17 @@ if [ ! -s "$DATA_DIR/projects/default/project.avc" ]; then
     errors=$((errors + 1))
 fi
 
+# The service runs /opt/openavc/venv/bin/python -m server.main as the openavc
+# user. Prove that interpreter can import the server and its dependencies —
+# an install that landed anywhere but this venv (or not at all) would ship an
+# image whose service crash-loops on import at first boot. Run as the service
+# user with the service's env so path resolution matches the real unit and
+# anything the import touches stays user-owned.
+if ! runuser -u "$OPENAVC_USER" -- sh -c 'cd /opt/openavc && OPENAVC_DATA_DIR=/var/lib/openavc OPENAVC_LOG_DIR=/var/log/openavc ./venv/bin/python -c "import server.main"'; then
+    echo "FATAL: venv python cannot import server.main (dependencies missing from /opt/openavc/venv?)"
+    errors=$((errors + 1))
+fi
+
 if [ ! -f "$LABWC_DIR/autostart" ]; then
     echo "FATAL: openavc labwc autostart missing at $LABWC_DIR/autostart"
     errors=$((errors + 1))
