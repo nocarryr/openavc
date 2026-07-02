@@ -114,6 +114,12 @@ def _validate_param_option_providers(
                 f"{where} param '{pname}': decimals must be a non-negative integer"
             )
 
+        # `trim: false` opts a string param out of the runtime whitespace
+        # trim (raw passthrough payloads where a terminator is meaningful).
+        trim = pdef.get("trim")
+        if trim is not None and not isinstance(trim, bool):
+            errors.append(f"{where} param '{pname}': trim must be true or false")
+
         for key in ("options_state", "options_source"):
             val = pdef.get(key)
             if val is not None and not (isinstance(val, str) and val):

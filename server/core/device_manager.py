@@ -17,6 +17,7 @@ from server.core.connection_fault import classify_connection_fault, typed_fault_
 from server.drivers.base import (
     CommandParamError,
     DeviceSettingValueError,
+    normalize_and_validate_command_params,
     validate_device_setting_value,
 )
 from server.core.event_bus import EventBus
@@ -435,6 +436,7 @@ class DeviceManager:
             raise ConnectionError(f"Device '{device_id}' is not connected")
         try:
             params = self._coerce_child_id_params(driver, command, params)
+            params = self._validate_command_params(driver, command, params)
             return await driver.send_command(command, params)
         except Exception as exc:
             await self.events.emit(
@@ -442,6 +444,32 @@ class DeviceManager:
                 {"device_id": device_id, "error": str(exc)},
             )
             raise
+
+    @staticmethod
+    def _validate_command_params(
+        driver: BaseDriver, command: str, params: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Run every command's params through the declared-schema gate,
+        regardless of driver format.
+
+        ConfigurableDriver has validated internally since the pickers work
+        (and still does, covering direct-call paths like the Driver Builder
+        test harness); Python drivers' declared ``min``/``max``/``pattern``
+        were cosmetic until this dispatch-path gate. Reads the instance-level
+        DRIVER_INFO so runtime-populated command sets (qsc_qrc's discovered
+        controls, toa_9000m2's built commands) are gated too. Commands or
+        params without a schema entry pass through untouched.
+        """
+        if not params:
+            return params
+        info = getattr(driver, "DRIVER_INFO", {}) or {}
+        cmd_def = (info.get("commands") or {}).get(command)
+        if not isinstance(cmd_def, dict):
+            return params
+        pdefs = cmd_def.get("params")
+        if not isinstance(pdefs, dict):
+            return params
+        return normalize_and_validate_command_params(command, pdefs, params)
 
     @staticmethod
     def _coerce_child_id_params(

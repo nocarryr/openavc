@@ -672,7 +672,9 @@ set_component_control:
 
 - `min` / `max` on an `integer`/`number` parameter bound the value. Out-of-range values are rejected at command time, and the IDE shows an inline error and blocks the send/save.
 - `pattern` is a regex the value must fully match — a shape check for an IP, hostname, or fixed-length ID. Same enforcement, runtime and IDE.
-- Leading and trailing whitespace is trimmed before the value is sent.
+- Leading and trailing whitespace is trimmed before the value is sent. A raw passthrough parameter whose edge whitespace is part of the payload (say, a trailing line terminator) can declare `trim: false` to keep it.
+
+These rules apply to every driver format — a Python driver's declared `min`/`max`/`pattern` are enforced at command time exactly like a YAML driver's.
 
 ```yaml
 connect_host:

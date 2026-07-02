@@ -460,6 +460,11 @@ export interface DriverParamDef {
   // runtime validates it at command time; the IDE shows an inline error while
   // authoring. (§69 Phase 3.)
   pattern?: string;
+  // String values are whitespace-trimmed by the runtime before dispatch (the
+  // right default for AV text protocols). A raw passthrough param whose edge
+  // whitespace is protocol-meaningful (e.g. a trailing line terminator)
+  // declares `trim: false` to opt out.
+  trim?: boolean;
   // Default value — type-coerced by the runtime against `type`.
   default?: unknown;
   // Allowed values for type='enum' — required for that type.

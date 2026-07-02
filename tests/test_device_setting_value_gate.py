@@ -265,3 +265,150 @@ async def test_child_id_param_junk_rejected_with_actionable_error(core):
     with pytest.raises(CommandParamError, match="child id number"):
         await dm.send_command("pdu2", "outlet_on", {"outlet": "left-one"})
     assert driver.seen == []
+
+
+# ── command-param gate at dispatch (G3 — Python drivers' bounds enforced) ────
+
+
+class _BoundedDriver(BaseDriver):
+    """A Python driver with declared param schemas. Until the dispatch-path
+    gate, its min/max/pattern were cosmetic (only YAML drivers enforced)."""
+
+    DRIVER_INFO = {
+        "id": "acme_amp",
+        "name": "Acme Amplifier",
+        "transport": "tcp",
+        "state_variables": {},
+        "commands": {
+            "set_volume": {
+                "label": "Set Volume",
+                "params": {
+                    "level": {"type": "integer", "min": 0, "max": 63, "required": True},
+                },
+            },
+            "select_input": {
+                "label": "Select Input",
+                "params": {
+                    "input": {"type": "string", "pattern": r"\d{2}", "required": True},
+                },
+            },
+            "send_raw": {
+                "label": "Send Raw",
+                "params": {
+                    "payload": {"type": "string", "trim": False, "required": True},
+                },
+            },
+            "set_label": {
+                "label": "Set Label",
+                "params": {
+                    "text": {"type": "string"},
+                },
+            },
+        },
+    }
+
+    def __init__(self, device_id, config, state, events):
+        super().__init__(device_id, config, state, events)
+        self.seen: list[tuple[str, dict]] = []
+
+    async def connect(self):
+        self._connected = True
+        self.state.set(f"device.{self.device_id}.connected", True, source="driver")
+
+    async def disconnect(self):
+        self._connected = False
+
+    async def send_command(self, command, params=None):
+        self.seen.append((command, dict(params or {})))
+        return True
+
+
+async def _bounded(core, device_id="amp1"):
+    state, events = core
+    dm = DeviceManager(state, events)
+    driver = _BoundedDriver(device_id, {}, state, events)
+    await driver.connect()
+    dm._devices[device_id] = driver
+    return dm, driver
+
+
+async def test_python_driver_bounds_enforced_at_dispatch(core):
+    from server.drivers.base import CommandParamError
+
+    dm, driver = await _bounded(core)
+
+    with pytest.raises(CommandParamError, match="at most 63"):
+        await dm.send_command("amp1", "set_volume", {"level": 99})
+    with pytest.raises(CommandParamError, match="at least 0"):
+        await dm.send_command("amp1", "set_volume", {"level": -5})
+    with pytest.raises(CommandParamError, match="whole number"):
+        await dm.send_command("amp1", "set_volume", {"level": "loud"})
+    assert driver.seen == []  # nothing reached the driver
+
+    # In-range passes; a float from macro arithmetic lands as a real int.
+    await dm.send_command("amp1", "set_volume", {"level": 26.0})
+    assert driver.seen == [("set_volume", {"level": 26})]
+
+
+async def test_python_driver_pattern_enforced_at_dispatch(core):
+    from server.drivers.base import CommandParamError
+
+    dm, driver = await _bounded(core, "amp2")
+
+    with pytest.raises(CommandParamError, match="required format"):
+        await dm.send_command("amp2", "select_input", {"input": "hdmi"})
+    assert driver.seen == []
+
+    await dm.send_command("amp2", "select_input", {"input": " 02 "})
+    assert driver.seen == [("select_input", {"input": "02"})]  # trimmed
+
+
+async def test_trim_false_preserves_raw_payload(core):
+    """A raw passthrough param (trailing terminator is protocol-meaningful)
+    declares trim: false and keeps its whitespace; plain string params trim."""
+    dm, driver = await _bounded(core, "amp3")
+
+    await dm.send_command("amp3", "send_raw", {"payload": "PWR ON\r\n"})
+    assert driver.seen == [("send_raw", {"payload": "PWR ON\r\n"})]
+
+    await dm.send_command("amp3", "set_label", {"text": "  Lobby  "})
+    assert driver.seen[-1] == ("set_label", {"text": "Lobby"})
+
+
+async def test_undeclared_commands_and_params_pass_through(core):
+    """Commands with no schema entry (a driver dispatching by name) and params
+    the schema doesn't declare stay untouched — the gate never blocks them."""
+    dm, driver = await _bounded(core, "amp4")
+
+    await dm.send_command("amp4", "mystery_command", {"anything": "  goes "})
+    assert driver.seen == [("mystery_command", {"anything": "  goes "})]
+
+    await dm.send_command("amp4", "set_volume", {"level": 10, "extra": "  x "})
+    assert driver.seen[-1] == ("set_volume", {"level": 10, "extra": "  x "})
+
+
+async def test_runtime_populated_command_schemas_gated(core):
+    """Drivers that build their command set per-instance (the discovered-
+    controls pattern) shadow DRIVER_INFO on the instance — the gate reads
+    that, so runtime-built bounds are enforced too."""
+    from server.drivers.base import CommandParamError
+
+    state, events = core
+    dm = DeviceManager(state, events)
+    driver = _BoundedDriver("amp5", {}, state, events)
+    driver.DRIVER_INFO = {
+        **type(driver).DRIVER_INFO,
+        "commands": {
+            "set_gain": {
+                "label": "Set Gain",
+                "params": {"db": {"type": "number", "min": -100, "max": 20}},
+            },
+        },
+    }
+    await driver.connect()
+    dm._devices["amp5"] = driver
+
+    with pytest.raises(CommandParamError, match="at most 20"):
+        await dm.send_command("amp5", "set_gain", {"db": 21.5})
+    await dm.send_command("amp5", "set_gain", {"db": -10.5})
+    assert driver.seen == [("set_gain", {"db": -10.5})]

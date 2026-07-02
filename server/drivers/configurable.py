@@ -19,7 +19,11 @@ import json
 import re
 from typing import Any
 
-from server.drivers.base import BaseDriver, CommandParamError, ConnectionFaultError
+from server.drivers.base import (
+    BaseDriver,
+    ConnectionFaultError,
+    normalize_and_validate_command_params as _normalize_and_validate_command_params,
+)
 from server.drivers.inline_protocol import (
     _derive_command_params,
     _derive_state_vars_from_responses,
@@ -117,114 +121,6 @@ def _build_commands_meta(commands_def: dict[str, Any]) -> dict[str, Any]:
                 cmd_meta[key] = cmd_def[key]
         commands_meta[cmd_name] = cmd_meta
     return commands_meta
-
-
-def _as_number(value: Any, ptype: str) -> float | None:
-    """Coerce a command-param value to a float for range checking, or None when
-    it isn't a valid number of the declared type. Booleans never count as
-    numbers; an integer param rejects a non-integral value (5.0 is fine, 5.5 is
-    not)."""
-    if isinstance(value, bool):
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if ptype == "integer" and f != int(f):
-        return None
-    return f
-
-
-def _normalize_and_validate_command_params(
-    command: str,
-    param_defs: dict[str, Any],
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    """Trim and validate user-supplied command params against the command's
-    declared param schema, returning a normalized copy.
-
-    This is the runtime gate for command values. The IDE's pickers and inline
-    validation are an authoring aid, but the runtime is the source of truth —
-    it must never trust that the client narrowed the value correctly (a macro
-    can resolve a ``$var`` to anything, the cloud/REST API can post a raw value,
-    an old client may predate the validation). So every command value passes
-    through here regardless of caller.
-
-    Normalization: string values are whitespace-trimmed (the overwhelmingly
-    correct default for AV text protocols). Validation, per the declared type:
-      - integer/number/float -> must parse as a number and honor min/max.
-      - string (and any type carrying a ``pattern``) -> must fullmatch the
-        declared regex.
-    Only declared params are checked; config-passthrough keys and params with
-    no schema entry are left untouched, and empty optional values are skipped
-    (required-param presence is enforced by the caller/UI, not here).
-
-    Raises ``CommandParamError`` (a ValueError) with a user-facing message.
-    """
-    if not isinstance(param_defs, dict) or not params:
-        return params
-    out = dict(params)
-    for name, pdef in param_defs.items():
-        if not isinstance(pdef, dict) or name not in out:
-            continue
-        value = out[name]
-        if value is None:
-            continue
-        ptype = pdef.get("type", "string")
-
-        # Trim string values, then skip empties (an optional left blank).
-        if isinstance(value, str):
-            value = value.strip()
-            out[name] = value
-            if value == "":
-                continue
-
-        if ptype in ("integer", "number", "float"):
-            num = _as_number(value, ptype)
-            if num is None:
-                kind = "whole number" if ptype == "integer" else "number"
-                raise CommandParamError(
-                    f"'{command}': '{name}' must be a {kind}, got {value!r}"
-                )
-            mn, mx = pdef.get("min"), pdef.get("max")
-            if isinstance(mn, (int, float)) and num < mn:
-                raise CommandParamError(
-                    f"'{command}': '{name}' must be at least {mn}, got {num:g}"
-                )
-            if isinstance(mx, (int, float)) and num > mx:
-                raise CommandParamError(
-                    f"'{command}': '{name}' must be at most {mx}, got {num:g}"
-                )
-            # Normalize a *numeric* value to the declared type so a scaled
-            # control value lands on the wire the way the protocol needs — an
-            # `integer` param sends 26, not 26.0, whether a slider, a macro, or
-            # the REST API produced it. `decimals` (number only) rounds to that
-            # many places; `decimals: 0` yields a whole number. A string is left
-            # untouched (validation keeps the long-standing string convention:
-            # a value already shaped as text, e.g. a zero-padded id, is not
-            # reformatted); only floats/ints — what arithmetic produces — are
-            # normalized. A `number` with no `decimals` rule is left as-is too.
-            decimals = pdef.get("decimals")
-            if not isinstance(value, str):
-                if ptype == "integer":
-                    out[name] = int(num)
-                elif isinstance(decimals, int):
-                    out[name] = int(round(num)) if decimals <= 0 else round(num, decimals)
-        else:
-            pattern = pdef.get("pattern")
-            if pattern and isinstance(value, str):
-                try:
-                    matched = re.fullmatch(pattern, value) is not None
-                except re.error:
-                    # A malformed pattern is caught at driver load; if one slips
-                    # through, don't block the command on it.
-                    matched = True
-                if not matched:
-                    raise CommandParamError(
-                        f"'{command}': '{name}' value {value!r} does not match "
-                        f"the required format ({pattern})"
-                    )
-    return out
 
 
 class ConfigurableDriver(BaseDriver):
