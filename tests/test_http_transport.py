@@ -596,3 +596,124 @@ def test_driver_loader_rejects_invalid():
         "transport": "ftp",
     })
     assert any("Unsupported transport" in e for e in errors)
+
+
+# --- Response size bounding ---
+#
+# Device responses are untrusted network data. Without a ceiling, a huge or
+# runaway response materializes fully in memory on the control server.
+
+
+def _make_capped_transport(handler, cap: int) -> HTTPClientTransport:
+    t = HTTPClientTransport(
+        base_url="http://192.168.1.100", max_response_bytes=cap
+    )
+    t._client = httpx.AsyncClient(
+        base_url="http://192.168.1.100",
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(5.0),
+    )
+    return t
+
+
+@pytest.mark.asyncio
+async def test_response_over_cap_rejected_via_content_length():
+    """A response whose declared Content-Length exceeds the cap is rejected."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 2048)
+
+    t = _make_capped_transport(handler, cap=1024)
+    with pytest.raises(ValueError, match="too large"):
+        await t.get("/status")
+    assert "too large" in t.last_error
+    await t.close()
+
+
+@pytest.mark.asyncio
+async def test_response_over_cap_rejected_while_streaming():
+    """A chunked response with no Content-Length hits the streamed ceiling."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        async def gen():
+            for _ in range(8):
+                yield b"x" * 1000
+
+        # Async-iterator content -> chunked transfer, no Content-Length
+        return httpx.Response(200, content=gen())
+
+    t = _make_capped_transport(handler, cap=4096)
+    with pytest.raises(ValueError, match="too large"):
+        await t.get("/status")
+    await t.close()
+
+
+@pytest.mark.asyncio
+async def test_response_at_cap_passes_intact():
+    """A body exactly at the cap is delivered untouched."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"y" * 1024)
+
+    t = _make_capped_transport(handler, cap=1024)
+    resp = await t.get("/status")
+    assert resp.ok
+    assert resp.text == "y" * 1024
+    await t.close()
+
+
+# --- Per-request timeout isolation ---
+#
+# send_and_wait's timeout must ride the individual request, not shared
+# transport state, so overlapping calls on one device (a poll racing a
+# command) can't leak one call's timeout into the other's request.
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_timeout_does_not_leak_to_concurrent_request():
+    import asyncio
+
+    seen_timeouts: dict[str, dict] = {}
+    release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen_timeouts[path] = dict(request.extensions.get("timeout") or {})
+        if path == "/slow":
+            await release.wait()
+        return httpx.Response(200, content=b"ok")
+
+    t = _make_capped_transport(handler, cap=1024 * 1024)
+
+    # Park a send_and_wait with a custom timeout mid-request...
+    slow = asyncio.create_task(t.send_and_wait(b"GET /slow", timeout=0.9))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert "/slow" in seen_timeouts
+
+    # ...then issue an unrelated request with no timeout override.
+    await t.request("GET", "/fast")
+    release.set()
+    await slow
+
+    # The parked call used its own timeout; the concurrent one used the
+    # client default, not the leaked override.
+    assert seen_timeouts["/slow"]["read"] == 0.9
+    assert seen_timeouts["/fast"]["read"] == 5.0
+    await t.close()
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_default_timeout_uses_client_default():
+    seen_timeouts: dict[str, dict] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_timeouts[request.url.path] = dict(
+            request.extensions.get("timeout") or {}
+        )
+        return httpx.Response(200, content=b"ok")
+
+    t = _make_capped_transport(handler, cap=1024 * 1024)
+    t.timeout = 5.0
+
+    body = await t.send_and_wait(b"GET /status", timeout=5.0)
+    assert body == b"ok"
+    assert seen_timeouts["/status"]["read"] == 5.0
+    await t.close()

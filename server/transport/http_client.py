@@ -71,6 +71,7 @@ class HTTPClientTransport:
         timeout: float = 10.0,
         name: str | None = None,
         local_address: str | None = None,
+        max_response_bytes: int = 32 * 1024 * 1024,
     ):
         """
         Args:
@@ -88,6 +89,12 @@ class HTTPClientTransport:
             timeout: Default request timeout in seconds.
             local_address: Optional IP to bind outgoing connections to a
                            specific network adapter.
+            max_response_bytes: Ceiling on response body size. Device
+                responses are untrusted network data; without a bound, one
+                huge or runaway response materializes fully in memory and
+                can take down the whole control server. 32 MB clears any
+                realistic device API payload (JSON/XML status, EDID dumps,
+                camera snapshots) while keeping memory bounded.
         """
         self.base_url = base_url.rstrip("/")
         self.auth_type = auth_type
@@ -97,6 +104,7 @@ class HTTPClientTransport:
         self.timeout = timeout
         self._name = name or base_url
         self._local_address = local_address
+        self.max_response_bytes = max_response_bytes
 
         self._client: httpx.AsyncClient | None = None
         self._last_response: HTTPResponse | None = None
@@ -215,6 +223,7 @@ class HTTPClientTransport:
         form_data: dict[str, str] | None = None,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | float | None = None,
     ) -> HTTPResponse:
         """
         Generic HTTP request.
@@ -227,6 +236,7 @@ class HTTPClientTransport:
             form_data: Form-encoded body (sets Content-Type: application/x-www-form-urlencoded).
             content: Raw bytes body.
             headers: Additional headers for this request only.
+            timeout: Per-request timeout override; None uses the client default.
 
         Returns:
             HTTPResponse with status, headers, text, and parsed JSON if applicable.
@@ -235,6 +245,7 @@ class HTTPClientTransport:
             ConnectionError: If the client is not open.
             httpx.TimeoutException: If the request times out.
             httpx.ConnectError: If connection to the device fails.
+            ValueError: If the response body exceeds max_response_bytes.
         """
         if self._client is None:
             raise ConnectionError("HTTP client not open — call open() first")
@@ -245,8 +256,10 @@ class HTTPClientTransport:
             path = "/" + path
 
         try:
-            req_timeout = getattr(self, "_request_timeout", None)
-            response = await self._client.request(
+            # Stream the response so the body can be bounded: device
+            # responses are untrusted, and a non-streaming read would
+            # materialize an arbitrarily large body before we could check.
+            req = self._client.build_request(
                 method,
                 path,
                 params=params,
@@ -254,22 +267,53 @@ class HTTPClientTransport:
                 data=form_data,
                 content=content,
                 headers=headers,
-                **({"timeout": req_timeout} if req_timeout else {}),
+                **({"timeout": timeout} if timeout is not None else {}),
             )
+            response = await self._client.send(req, stream=True)
+            try:
+                declared = response.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > self.max_response_bytes:
+                    msg = (
+                        f"Response from {path} too large: {declared} bytes "
+                        f"(limit {self.max_response_bytes})"
+                    )
+                    self._last_error = msg
+                    raise ValueError(msg)
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > self.max_response_bytes:
+                        msg = (
+                            f"Response from {path} too large: exceeded "
+                            f"{self.max_response_bytes} bytes"
+                        )
+                        self._last_error = msg
+                        raise ValueError(msg)
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+            finally:
+                await response.aclose()
+
+            try:
+                text = body.decode(response.encoding or "utf-8", errors="replace")
+            except LookupError:
+                # Device sent a bogus charset in Content-Type
+                text = body.decode("utf-8", errors="replace")
 
             # Parse JSON if content type indicates it
             json_data = None
             content_type = response.headers.get("content-type", "")
             if "json" in content_type or "javascript" in content_type:
                 try:
-                    json_data = response.json()
+                    json_data = json_module.loads(text)
                 except (json_module.JSONDecodeError, ValueError):
                     pass
 
             result = HTTPResponse(
                 status_code=response.status_code,
                 headers=dict(response.headers),
-                text=response.text,
+                text=text,
                 json_data=json_data,
                 ok=response.is_success,
             )
@@ -300,7 +344,9 @@ class HTTPClientTransport:
 
     # --- Compatibility with BaseDriver/ConfigurableDriver transport interface ---
 
-    async def send(self, data: bytes) -> None:
+    async def send(
+        self, data: bytes, *, timeout: httpx.Timeout | float | None = None
+    ) -> HTTPResponse:
         """
         Compatibility method for the transport interface.
 
@@ -309,7 +355,7 @@ class HTTPClientTransport:
             - "POST /path {json_body}"
             - "/path" (defaults to GET)
 
-        Stores the response for retrieval via last_response property.
+        Returns the response (also kept in the last_response property).
         """
         text = data.decode("utf-8", errors="replace").strip()
         method, path, body = self._parse_send_string(text)
@@ -321,13 +367,15 @@ class HTTPClientTransport:
             except (json_module.JSONDecodeError, ValueError):
                 # Not JSON — send as raw content
                 result = await self.request(
-                    method, path, content=body.encode("utf-8")
+                    method, path, content=body.encode("utf-8"),
+                    timeout=timeout,
                 )
                 self._last_response = result
-                return
+                return result
 
-        result = await self.request(method, path, json_body=json_body)
+        result = await self.request(method, path, json_body=json_body, timeout=timeout)
         self._last_response = result
+        return result
 
     async def send_and_wait(self, data: bytes, timeout: float = 5.0) -> bytes:
         """
@@ -335,16 +383,15 @@ class HTTPClientTransport:
 
         For HTTP, every request is inherently a send-and-wait, so this
         is straightforward — send the request and return the response text.
+
+        The timeout rides the request as a per-call argument rather than
+        shared transport state, so overlapping calls on one device (a poll
+        racing a command) can't leak one call's timeout into the other's
+        request.
         """
-        # Store timeout override for the next send() call
-        self._request_timeout = httpx.Timeout(timeout) if timeout != self.timeout else None
-        try:
-            await self.send(data)
-            if self._last_response is not None:
-                return self._last_response.text.encode("utf-8")
-            return b""
-        finally:
-            self._request_timeout = None
+        req_timeout = httpx.Timeout(timeout) if timeout != self.timeout else None
+        result = await self.send(data, timeout=req_timeout)
+        return result.text.encode("utf-8")
 
     # --- Internal helpers ---
 
