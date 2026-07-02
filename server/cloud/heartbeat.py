@@ -56,6 +56,16 @@ class HeartbeatCollector:
         from server.system_config import get_data_dir
         self._data_dir = str(get_data_dir())
 
+        # Prime psutil's CPU sampling. cpu_percent(interval=0) measures the
+        # delta since the previous call, so the very first call returns a
+        # meaningless 0.0 — take that throwaway reading now so the first
+        # heartbeat reports a real value.
+        if HAS_PSUTIL:
+            try:
+                psutil.cpu_percent(interval=0)
+            except (OSError, AttributeError):
+                pass  # psutil can fail on restricted environments
+
     async def collect(self) -> dict[str, Any]:
         """
         Collect all metrics and return as a heartbeat payload dict.
@@ -161,13 +171,17 @@ class HeartbeatCollector:
             return 0  # DeviceManager or StateStore may not be fully initialized
 
     def _get_devices_error(self) -> int:
-        """Number of devices in error state."""
+        """Number of devices offline with a classified connection fault.
+
+        A faulted device carries ``device.<id>.offline_reason`` (set by the
+        connection-fault classifier when a connect attempt fails, cleared on
+        successful reconnect) — command errors are transient events, not state.
+        """
         try:
             count = 0
             for device in self._devices.list_devices():
                 device_id = device.get("id", "")
-                error = self._state.get(f"device.{device_id}.error")
-                if error:
+                if self._state.get(f"device.{device_id}.offline_reason"):
                     count += 1
             return count
         except (AttributeError, TypeError):

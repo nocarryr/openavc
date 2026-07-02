@@ -757,6 +757,64 @@ class TestHeartbeat:
         assert metrics["active_ws_clients"] == 3
         assert metrics["uptime_seconds"] >= 0
 
+    @pytest.mark.asyncio
+    async def test_devices_error_counts_offline_reason(self):
+        """devices_error counts devices carrying an offline_reason fault code.
+
+        The metric used to read ``device.<id>.error``, a state key nothing
+        writes (device errors are events), so it always reported 0 to the
+        cloud even with faulting hardware.
+        """
+        from server.core.state_store import StateStore
+        from server.cloud.heartbeat import HeartbeatCollector
+
+        class FakeDevices:
+            def list_devices(self):
+                return [{"id": "proj"}, {"id": "amp"}, {"id": "cam"}]
+
+        state = StateStore()
+        # proj is faulted, amp reconnected (reason cleared to None), cam clean.
+        state.set("device.proj.offline_reason", "connection_refused")
+        state.set("device.amp.offline_reason", None)
+
+        collector = HeartbeatCollector(state, FakeDevices())
+        metrics = await collector.collect()
+        assert metrics["devices_error"] == 1
+        assert metrics["device_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_first_collect_reports_primed_cpu(self):
+        """Constructing the collector primes psutil's CPU sampling.
+
+        ``psutil.cpu_percent(interval=0)`` returns a meaningless 0.0 on its
+        first-ever call (it measures the delta since the previous call), so
+        without a priming call in __init__ the first heartbeat under-reports
+        a busy CPU.
+        """
+        from unittest.mock import patch
+
+        from server.core.state_store import StateStore
+        from server.cloud import heartbeat as hb
+
+        if not hb.HAS_PSUTIL:
+            pytest.skip("psutil not installed")
+
+        class FakeDevices:
+            def list_devices(self):
+                return []
+
+        calls = []
+
+        def fake_cpu_percent(interval=None):
+            calls.append(interval)
+            return 12.5
+
+        with patch.object(hb.psutil, "cpu_percent", side_effect=fake_cpu_percent):
+            collector = hb.HeartbeatCollector(StateStore(), FakeDevices())
+            assert len(calls) == 1, "__init__ must take the throwaway priming reading"
+            metrics = await collector.collect()
+        assert metrics["cpu_percent"] == 12.5
+
 
 # ===========================================================================
 # Command Handler Tests
