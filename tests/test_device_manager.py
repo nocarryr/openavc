@@ -484,6 +484,26 @@ async def test_offline_reason_cleared_on_reconnect_success(dm, core):
     await dm._cancel_reconnect("test_dev")
 
 
+async def test_offline_reason_cleared_on_resume_success(dm, core):
+    """resume_device mirrors the reconnect success path: a successful resume
+    clears offline_reason/offline_detail (it used to leave the stale reason
+    published alongside connected=True)."""
+    state, events = core
+    driver = MockDriver("test_dev", {}, state, events)
+    driver._connected = False
+    dm._devices["test_dev"] = driver
+    state.set("device.test_dev.paused", True, source="test")
+    state.set("device.test_dev.offline_reason", "unreachable", source="test")
+    state.set("device.test_dev.offline_detail", "Can't reach it.", source="test")
+
+    await dm.resume_device("test_dev")
+
+    assert driver._connected is True
+    assert state.get("device.test_dev.paused") is False
+    assert state.get("device.test_dev.offline_reason") is None
+    assert state.get("device.test_dev.offline_detail") is None
+
+
 # ---------------------------------------------------------------------------
 # device.error.<id> emission (backlog §31)
 # ---------------------------------------------------------------------------

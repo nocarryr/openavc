@@ -770,7 +770,7 @@ responses:
       mode:        { key: video.mode, map: { "1": Extended, "2": Clone } }
 ```
 
-Each `set` value is the JSON field to read: a plain key, a dot path (`video.mode`), or a `{ key, type, map }` object. Missing keys are left alone, and a key that lands on a list or object yields its length. You can add several `json: true` responses — they all run against every reply — and a body that isn't JSON falls through to your regex patterns. In the no-code Commands & Responses editor this is the "has a JSON field" response mode (one field per row).
+Each `set` value is the JSON field to read: a plain key, a dot path (`video.mode`), or a `{ key, type, map }` object. Missing keys are left alone, and a key that lands on a list or object yields its length. A reply wrapped in a single-element array (`[{ ... }]` — some devices wrap every reply that way) is unwrapped to its object first; multi-element arrays are ambiguous and are not parsed. You can add several `json: true` responses — they all run against every reply — and a body that isn't JSON falls through to your regex patterns. In the no-code Commands & Responses editor this is the "has a JSON field" response mode (one field per row).
 
 Response patterns (and the `auth` prompt regexes) are validated when the driver loads: an invalid regex, or one with nested/overlapping quantifiers that can cause catastrophic backtracking against hostile device input (for example `(.+)+`, `(a|a)+`, `(foo|foobar)*`), is rejected and the driver won't load. Anchor and bound your patterns instead.
 

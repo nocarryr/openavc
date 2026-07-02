@@ -479,11 +479,14 @@ class BaseDriver(ABC):
         # For connectionless transports (OSC, HTTP), verify the remote host
         # is actually reachable before reporting connected. TCP and serial
         # validate during open/create. UDP is genuinely connectionless and
-        # has no transport-level probe — UDP drivers MUST declare a positive
-        # `poll_interval` so the periodic poll() round-trip is the reachability
-        # signal; without it, `connected` stays True against a dead host
-        # forever (A68). Set verify_timeout: 0 in config to skip the
-        # pre-connect probe on OSC/HTTP.
+        # has no transport-level probe — a UDP driver MUST make its poll()
+        # await a device reply and raise on silence, so the missed-poll
+        # watchdog becomes the reachability signal; without that, `connected`
+        # stays True against a dead host forever (A68). A poll_interval alone
+        # is NOT enough: a fire-and-forget poll (e.g. a YAML driver's UDP
+        # queries, which never await replies) provides no liveness.
+        # Set verify_timeout: 0 in config to skip the pre-connect probe on
+        # OSC/HTTP.
         verify_timeout = self.config.get("verify_timeout", 3.0)
         if verify_timeout > 0 and hasattr(self.transport, "verify"):
             if not await self.transport.verify(timeout=verify_timeout):
@@ -1206,7 +1209,6 @@ class BaseDriver(ABC):
     # without driver authors inventing their own key shapes. The platform
     # always injects a boolean `online` key per registered child so that
     # listeners can distinguish "configured but offline" from "not configured".
-    # See openavc-device-children-plan.md design §1-§3 for the full design.
 
     # State keys the platform always provides for every registered child,
     # in addition to whatever the driver declares in

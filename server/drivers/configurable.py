@@ -1314,11 +1314,18 @@ class ConfigurableDriver(BaseDriver):
         key resolves, coerces and stores the value. Returns True if at least one
         state was set (so the caller stops before regex matching). json rules are
         additive: a rule whose keys are absent from this body just sets nothing.
+
+        A single-element top-level array (``[{...}]``) is unwrapped to its one
+        object — several device protocols wrap every reply that way (per-unit
+        addressing with one unit per datagram). Multi-element arrays are
+        ambiguous and still fall through to regex matching.
         """
         try:
             obj = json.loads(text)
         except (ValueError, TypeError):
             return False
+        if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+            obj = obj[0]
         if not isinstance(obj, dict):
             return False
         applied = False

@@ -1229,6 +1229,10 @@ class DeviceManager:
         try:
             await driver.connect()
             log.info(f"Resumed device: {device_id}")
+            # Mirror the reconnect-loop success path: drop the stale offline
+            # reason and flush anything queued while the device was away.
+            self._clear_offline_reason(device_id)
+            await self._apply_pending_settings(device_id)
         except Exception as e:
             self.state.set(f"device.{device_id}.connected", False, source="device_manager")
             log.warning(f"resume_device: connect failed for {device_id}: {e}")

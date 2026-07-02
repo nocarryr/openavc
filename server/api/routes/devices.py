@@ -584,6 +584,11 @@ async def invoke_device_action(
                 device_id, action["command"], body.params
             )
             return {"success": True, "result": result, "action_id": action_id}
+        except CommandParamError as e:
+            # A bad parameter value (out of range / wrong type / pattern
+            # mismatch) — surface the actionable message, not a misleading
+            # "device not found" (CommandParamError subclasses ValueError).
+            raise _api_error(400, str(e), e)
         except ValueError as e:
             raise _api_error(404, f"Device '{device_id}' not found", e)
         except ConnectionError as e:
@@ -682,7 +687,7 @@ async def store_pending_settings(
 #   device.<parent_id>.<child_type>.<local_id_padded>.<property>
 # These endpoints expose registered children + project-side label/config
 # to the IDE and integrators without the IDE needing to assemble the
-# state-key namespace itself. See openavc-device-children-plan.md §5.
+# state-key namespace itself.
 
 
 def _project_device_entry(engine: Any, device_id: str):

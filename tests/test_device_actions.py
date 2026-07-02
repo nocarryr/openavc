@@ -17,7 +17,7 @@ from server.core.device_manager import DeviceManager
 from server.core.event_bus import EventBus
 from server.core.state_store import StateStore
 from server.drivers.actions import resolve_device_actions, validate_actions
-from server.drivers.base import BaseDriver
+from server.drivers.base import BaseDriver, CommandParamError
 from server.drivers.configurable import create_configurable_driver_class
 from server.drivers.driver_loader import validate_driver_definition
 from server.main import app
@@ -354,3 +354,16 @@ def test_invoke_action_on_device_without_driver_returns_404(actions_client):
     engine.devices.get_driver = MagicMock(return_value=None)
     resp = c.post("/api/devices/dev1/actions/power_on", json={"params": {}})
     assert resp.status_code == 404
+
+
+def test_invoke_action_bad_param_returns_400_not_404(actions_client):
+    """CommandParamError is a ValueError subclass — it must surface as an
+    actionable 400 (like the plain command route), not 'Device not found'."""
+    c, engine = actions_client
+    engine.devices.send_command = AsyncMock(
+        side_effect=CommandParamError("power_on: 'level' must be between 0 and 100")
+    )
+    resp = c.post("/api/devices/dev1/actions/power_on", json={"params": {"level": 101}})
+    assert resp.status_code == 400
+    assert "level" in resp.text
+    assert "not found" not in resp.text.lower()

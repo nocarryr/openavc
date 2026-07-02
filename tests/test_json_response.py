@@ -100,6 +100,23 @@ async def test_json_invalid_body_is_ignored(driver):
     assert driver.get_state("in_use") is False
 
 
+async def test_json_single_element_array_body_unwrapped(driver):
+    """A [{...}] body is unwrapped — several protocols wrap every reply in a
+    single-element array (one unit per datagram) and previously read nothing."""
+    body = '[{"inUse":true,"sessions":4,"status":"Ok","nested":{"depth":2}}]'
+    await driver.on_data_received(body.encode("utf-8"))
+    assert driver.get_state("in_use") is True
+    assert driver.get_state("sessions") == 4
+    assert driver.get_state("status_text") == "Ok"
+    assert driver.get_state("depth") == 2
+
+
+async def test_json_multi_element_array_still_ignored(driver):
+    """A multi-element array is ambiguous — no unwrap, state untouched."""
+    await driver.on_data_received(b'[{"sessions":9},{"sessions":8}]')
+    assert driver.get_state("sessions") == 0
+
+
 async def test_json_falls_through_to_regex():
     """With both json and regex rules, a non-JSON line still matches regex."""
     definition = dict(JSON_DEFINITION, id="acme_mixed")

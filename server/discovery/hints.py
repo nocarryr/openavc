@@ -411,8 +411,10 @@ def _parse_response_match(
     AND-matches both, which produces "matched hex:abcd, regex:<vendor>"
     output that's almost never the author's intent. If ``require_match``
     is True, exactly one must be present — UDP probes need a matcher to
-    filter junk, but a connect-only TCP probe can succeed on connect
-    alone (and so may declare zero matchers).
+    filter junk. A TCP probe may declare zero matchers (a "banner-read"
+    probe for server-speaks-first protocols), but that is NOT a pure
+    connect test: the probe runner still requires the device to send at
+    least one byte, so a silent open port never matches.
     """
     declared = [
         k for k in ("expect", "expect_regex", "expect_hex")
@@ -556,9 +558,10 @@ def _parse_probe(
           extract:                          # optional metadata extraction
             model: { regex: "model=(.+)", group: 1 }
 
-    Connect-only TCP probes may omit ``send_*`` and ``expect*`` entirely;
-    UDP probes must declare both (no responder filter would match every
-    UDP-noisy host).
+    Banner-read TCP probes may omit ``send_*`` and ``expect*`` entirely —
+    the device must still speak first (at least one byte is required; a
+    silent open port never matches). UDP probes must declare both (no
+    responder filter would match every UDP-noisy host).
     """
     where = f"{kind}_probe"
     block = _ensure_dict(driver_id, where, raw)
