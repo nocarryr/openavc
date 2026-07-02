@@ -1,5 +1,9 @@
 import { Plus, Trash2 } from "lucide-react";
 import type { DriverDefinition } from "../../api/types";
+import {
+  applyStateVarTypeChange,
+  nextStateVariableName,
+} from "./stateVariableHelpers";
 
 interface StateVariableEditorProps {
   draft: DriverDefinition;
@@ -14,7 +18,7 @@ export function StateVariableEditor({
   const varNames = Object.keys(vars);
 
   const addVariable = () => {
-    const name = `variable_${varNames.length + 1}`;
+    const name = nextStateVariableName(varNames);
     onUpdate({
       state_variables: {
         ...vars,
@@ -125,17 +129,14 @@ export function StateVariableEditor({
               <select
                 value={v.type}
                 onChange={(e) => {
-                  const t = e.target.value;
-                  updateVariable(name, "type", t);
-                  // Strip type-incompatible bounds when switching off numeric.
-                  if (t !== "integer" && t !== "number") {
-                    updateVariable(name, "min", undefined);
-                    updateVariable(name, "max", undefined);
-                    updateVariable(name, "step", undefined);
-                  }
-                  if (t !== "enum") {
-                    updateVariable(name, "values", undefined);
-                  }
+                  // One atomic write: type switch + stripping type-incompatible
+                  // fields together, so no update clobbers another.
+                  onUpdate({
+                    state_variables: {
+                      ...vars,
+                      [name]: applyStateVarTypeChange(v, e.target.value),
+                    },
+                  });
                 }}
                 style={{ width: 100, fontSize: "var(--font-size-sm)" }}
               >
