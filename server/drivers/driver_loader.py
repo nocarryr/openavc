@@ -395,6 +395,60 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                     if err:
                         errors.append(err)
 
+    # Validate the optional `liveness:` watchdog block ("send X every N, await
+    # a reply within T, reconnect after K misses"). A misdeclared block would
+    # silently never arm (no watchdog — the exact never-goes-offline failure it
+    # exists to fix) or tear healthy devices down; enforce at load time.
+    liveness_def = driver_def.get("liveness")
+    if liveness_def is not None:
+        if not isinstance(liveness_def, dict):
+            errors.append("liveness: must be a mapping")
+        else:
+            # HTTP polling already awaits every response and raises on
+            # failure, so the missed-poll watchdog covers it; `bridge` devices
+            # own no transport. The probe only makes sense on the socket
+            # transports that can die silently.
+            if transport and transport not in ("tcp", "serial", "udp", "osc"):
+                errors.append(
+                    f"liveness: not supported on transport '{transport}' "
+                    f"(only tcp/serial/udp/osc)"
+                )
+            send = liveness_def.get("send")
+            if not isinstance(send, str) or not send:
+                errors.append(
+                    "liveness: missing required 'send' (the probe payload — "
+                    "a raw protocol string, or an OSC address on osc)"
+                )
+            expect = liveness_def.get("expect")
+            if expect is not None:
+                if not isinstance(expect, str) or not expect:
+                    errors.append("liveness: 'expect' must be a regex string")
+                else:
+                    err = _regex_redos_error("liveness.expect", expect)
+                    if err:
+                        errors.append(err)
+            for key, minimum in (("interval", 1.0), ("timeout", 0.1)):
+                value = liveness_def.get(key)
+                if value is not None:
+                    if not isinstance(value, (int, float)) or isinstance(
+                        value, bool
+                    ) or value < minimum:
+                        errors.append(
+                            f"liveness: '{key}' must be a number >= {minimum}"
+                        )
+            max_failures = liveness_def.get("max_failures")
+            if max_failures is not None and (
+                not isinstance(max_failures, int)
+                or isinstance(max_failures, bool)
+                or max_failures < 1
+            ):
+                errors.append("liveness: 'max_failures' must be an integer >= 1")
+            if liveness_def.get("args") is not None:
+                if transport != "osc":
+                    errors.append("liveness: 'args' is only valid on osc")
+                elif not isinstance(liveness_def["args"], list):
+                    errors.append("liveness: 'args' must be a list")
+
     # Validate the optional actions / quick_actions blocks (Quick Action strip).
     # quick_actions promote command ids to buttons; actions is the full form
     # (kind:"command" promotes a command, kind:"setup" is a provisioning wizard).

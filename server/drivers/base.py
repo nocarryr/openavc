@@ -181,6 +181,20 @@ class BaseDriver(ABC):
     # Subclasses MUST override this with their metadata dict
     DRIVER_INFO: dict[str, Any] = {}
 
+    # Liveness watchdog knobs (see _liveness_probe). Class attributes so a
+    # driver can tune them wholesale (`HEALTH_INTERVAL_S = 20.0`) or per
+    # instance; the defaults suit most request/response protocols. INTERVAL is
+    # the gap between probes, TIMEOUT the per-probe reply deadline, and after
+    # MAX_FAILURES consecutive misses the transport is torn down with a typed
+    # ``no_response`` fault (FAULT_MESSAGE) so the platform reconnects and the
+    # device card shows the real cause.
+    HEALTH_INTERVAL_S: float = 30.0
+    HEALTH_TIMEOUT_S: float = 5.0
+    HEALTH_MAX_FAILURES: int = 2
+    HEALTH_FAULT_MESSAGE: str = (
+        "Connected, but the device stopped answering keep-alive probes."
+    )
+
     def __init__(
         self,
         device_id: str,
@@ -218,6 +232,11 @@ class BaseDriver(ABC):
         # Strong refs to fire-and-forget tasks (disconnect cleanup) so the GC
         # can't collect them mid-run — a bare create_task is only weakly held.
         self._bg_tasks: set[asyncio.Task] = set()
+        # Liveness watchdog task + consecutive-miss counter (see
+        # _liveness_probe). Started by connect() when the driver supplies a
+        # probe; stopped on disconnect / transport drop.
+        self._health_task: asyncio.Task | None = None
+        self._health_failures = 0
         # Registered child entities: {child_type: {local_id: register_epoch}}.
         # The inner mapping is a dict (not a set) so it preserves insertion
         # order, which makes list_children() output stable for tests and IDE
@@ -455,6 +474,7 @@ class BaseDriver(ABC):
                 timeout=self.config.get("timeout", 5.0),
                 ssl=self.config.get("ssl", False),
                 ssl_verify=self.config.get("verify_ssl", True),
+                keepalive=bool(self.config.get("tcp_keepalive", False)),
             )
         elif transport_type == "serial":
             from server.transport.serial_transport import SerialTransport
@@ -627,12 +647,14 @@ class BaseDriver(ABC):
         # For connectionless transports (OSC, HTTP), verify the remote host
         # is actually reachable before reporting connected. TCP and serial
         # validate during open/create. UDP is genuinely connectionless and
-        # has no transport-level probe — a UDP driver MUST make its poll()
-        # await a device reply and raise on silence, so the missed-poll
-        # watchdog becomes the reachability signal; without that, `connected`
-        # stays True against a dead host forever (A68). A poll_interval alone
-        # is NOT enough: a fire-and-forget poll (e.g. a YAML driver's UDP
-        # queries, which never await replies) provides no liveness.
+        # has no transport-level probe — a UDP driver MUST either make its
+        # poll() await a device reply and raise on silence (so the missed-poll
+        # watchdog becomes the reachability signal) or supply a liveness probe
+        # (a YAML driver's `liveness:` block / a Python override of
+        # _liveness_probe); without one of those, `connected` stays True
+        # against a dead host forever (A68). A poll_interval alone is NOT
+        # enough: a fire-and-forget poll (e.g. a YAML driver's UDP queries,
+        # which never await replies) provides no liveness.
         # Set verify_timeout: 0 in config to skip the pre-connect probe on
         # OSC/HTTP.
         verify_timeout = self.config.get("verify_timeout", 3.0)
@@ -676,6 +698,15 @@ class BaseDriver(ABC):
         if poll_interval > 0:
             await self.start_polling(poll_interval)
 
+        # Start the liveness watchdog if the driver supplies a probe. Started
+        # after `connected` is reported; the loop sleeps a full interval before
+        # the first probe, so subclass connect() stages that run after
+        # super().connect() (logins, subscriptions) aren't raced. If such a
+        # stage fails and tears the transport down, the loop notices the dead
+        # transport and exits on its own.
+        if self._health_enabled():
+            self._start_health_loop()
+
     async def disconnect(self) -> None:
         """
         Gracefully close the connection.
@@ -683,6 +714,7 @@ class BaseDriver(ABC):
         Stops polling, closes transport, and updates state.
         Override for custom disconnect logic.
         """
+        self._stop_health_loop()
         await self.stop_polling()
         if self.transport:
             await self.transport.close()
@@ -951,6 +983,105 @@ class BaseDriver(ABC):
         connection (the caller closes the transport). Default: no-op.
         """
 
+    # --- Liveness watchdog (opt-in awaited probe) ---
+
+    async def _liveness_probe(self) -> None:
+        """Optional hook: send a cheap request and await the device's reply.
+
+        Override in drivers whose link can die silently — push/receive-mostly
+        TCP (no FIN when the device vanishes), UDP (genuinely connectionless),
+        anything where neither polling nor the transport surfaces a dead peer.
+        Return normally when the device answered; raise (TimeoutError /
+        ConnectionError / OSError / a protocol error) on a miss. The base
+        class runs the probe every HEALTH_INTERVAL_S under a HEALTH_TIMEOUT_S
+        deadline and, after HEALTH_MAX_FAILURES consecutive misses, tears the
+        transport down with a typed ``no_response`` fault so the platform
+        reconnects and the device card shows the real cause. Overriding this
+        is the whole opt-in — connect() starts the loop, disconnect and the
+        transport-drop cleanup stop it.
+        """
+        raise NotImplementedError
+
+    def _health_enabled(self) -> bool:
+        """True when this driver supplies a liveness probe.
+
+        Default: the subclass overrides _liveness_probe. ConfigurableDriver
+        overrides this to key off the YAML ``liveness:`` block instead (it
+        always overrides the probe, but only some definitions declare one).
+        """
+        return type(self)._liveness_probe is not BaseDriver._liveness_probe
+
+    def _start_health_loop(self) -> None:
+        """Start the liveness watchdog (idempotent while one is running)."""
+        if self._health_task is None or self._health_task.done():
+            self._health_failures = 0
+            self._health_task = asyncio.ensure_future(self._health_loop())
+
+    def _stop_health_loop(self) -> None:
+        if self._health_task and not self._health_task.done():
+            self._health_task.cancel()
+        self._health_task = None
+
+    async def _health_loop(self) -> None:
+        """Probe the device every HEALTH_INTERVAL_S and force a reconnect when
+        it stops answering.
+
+        The probe is awaited under HEALTH_TIMEOUT_S so a hung implementation
+        can't stall the loop. Any exception (timeout, transport failure,
+        protocol error) counts as a miss; a clean return resets the counter.
+        """
+        interval = float(self.HEALTH_INTERVAL_S)
+        timeout = float(self.HEALTH_TIMEOUT_S)
+        max_failures = max(int(self.HEALTH_MAX_FAILURES), 1)
+        try:
+            while self.transport is not None and getattr(
+                self.transport, "connected", False
+            ):
+                await asyncio.sleep(interval)
+                if not (
+                    self.transport is not None
+                    and getattr(self.transport, "connected", False)
+                ):
+                    return
+                try:
+                    await asyncio.wait_for(self._liveness_probe(), timeout)
+                    self._health_failures = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._health_failures += 1
+                    log.warning(
+                        f"[{self.device_id}] Liveness probe failed "
+                        f"({self._health_failures}/{max_failures}): {exc}"
+                    )
+                    if self._health_failures >= max_failures:
+                        log.warning(
+                            f"[{self.device_id}] Device unresponsive — "
+                            f"dropping the connection so the platform can "
+                            f"reconnect"
+                        )
+                        self._force_disconnect(
+                            NO_RESPONSE, self.HEALTH_FAULT_MESSAGE
+                        )
+                        return
+        except asyncio.CancelledError:
+            return
+
+    def _force_disconnect(self, code: str = NO_RESPONSE, message: str = "") -> None:
+        """Tear down a dead transport and fire the disconnect path so the
+        DeviceManager auto-reconnects / classifies the device offline.
+
+        Callable from inside the health loop, so the task ref is dropped
+        first — the disconnect cleanup would otherwise cancel the still-running
+        loop out from under us. The typed fault is stashed because this
+        disconnect carries no exception: a silently-dead device leaves no
+        transport error, so without the stash the device card would show the
+        generic "connection dropped".
+        """
+        self._health_task = None
+        self._stash_fault(code, message)
+        self._handle_transport_disconnect()
+
     @staticmethod
     def _coerce_serial_params(
         config: dict[str, Any],
@@ -1169,6 +1300,7 @@ class BaseDriver(ABC):
         transport's close() sets its own connected=False before tearing down,
         so it never re-enters this handler.
         """
+        self._stop_health_loop()
         await self.stop_polling()
         # Capture the transport's last error before nulling it, so the
         # DeviceManager can classify the offline reason from the event handler

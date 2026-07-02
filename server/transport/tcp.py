@@ -14,6 +14,7 @@ Provides a managed TCP connection with:
 from __future__ import annotations
 
 import asyncio
+import socket as socket_module
 import ssl as ssl_module
 
 from server.transport.frame_parsers import DelimiterFrameParser, FrameParser
@@ -21,6 +22,17 @@ from server.utils.logger import get_logger
 from .types import Callback
 
 log = get_logger(__name__)
+
+# Best-effort TCP keepalive tuning applied when a driver opts in (config
+# `tcp_keepalive: true`): start probing after 60s of idle, probe every 10s,
+# give up after 3 misses — a dead peer is declared in ~90s instead of the OS
+# default (~2 hours). Option constants vary by platform (Linux exposes
+# TCP_KEEPIDLE, macOS calls the idle knob TCP_KEEPALIVE, some platforms lack
+# the tuning knobs entirely); missing ones are skipped and SO_KEEPALIVE alone
+# still applies with OS-default timing.
+KEEPALIVE_IDLE_S = 60
+KEEPALIVE_PROBE_INTERVAL_S = 10
+KEEPALIVE_PROBE_COUNT = 3
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
@@ -53,9 +65,11 @@ class TCPTransport:
         ssl_context: ssl_module.SSLContext | None = None,
         name: str | None = None,
         local_addr: tuple[str, int] | None = None,
+        keepalive: bool = False,
     ):
         self.host = host
         self.port = port
+        self._keepalive = keepalive
         self._on_data = on_data
         self._on_disconnect = on_disconnect
         self._delimiter = delimiter
@@ -108,6 +122,7 @@ class TCPTransport:
         ssl_verify: bool = True,
         name: str | None = None,
         local_addr: tuple[str, int] | None = None,
+        keepalive: bool = False,
     ) -> "TCPTransport":
         """
         Factory method. Creates a TCPTransport and connects.
@@ -129,6 +144,10 @@ class TCPTransport:
                   Defaults to host:port.
             local_addr: Optional (ip, port) tuple to bind the outgoing
                         connection to a specific network adapter.
+            keepalive: Enable OS-level TCP keepalive (SO_KEEPALIVE) on the
+                       socket, with best-effort aggressive timing (see the
+                       KEEPALIVE_* module constants), so a silently-dead peer
+                       is detected at the transport layer.
 
         Returns:
             Connected TCPTransport instance.
@@ -146,6 +165,7 @@ class TCPTransport:
         transport = cls(
             host, port, on_data, on_disconnect, delimiter, timeout,
             inter_command_delay, frame_parser, ssl_context, name, local_addr,
+            keepalive=keepalive,
         )
         await transport._connect()
         return transport
@@ -161,6 +181,8 @@ class TCPTransport:
                 timeout=self._timeout,
             )
             self._connected = True
+            if self._keepalive:
+                self._enable_keepalive()
             if self._frame_parser is not None:
                 self._frame_parser.reset()
             self._reader_task = asyncio.create_task(self._reader_loop())
@@ -170,6 +192,48 @@ class TCPTransport:
             raise ConnectionError(
                 f"Failed to connect to {self.host}:{self.port}: {e}"
             ) from e
+
+    def _enable_keepalive(self) -> None:
+        """Turn on SO_KEEPALIVE with best-effort timing tuning.
+
+        Timing knobs are platform-specific: the idle threshold is TCP_KEEPIDLE
+        on Linux/Windows but TCP_KEEPALIVE on macOS; TCP_KEEPINTVL/TCP_KEEPCNT
+        are absent on some platforms. Whatever isn't available is skipped —
+        SO_KEEPALIVE alone still detects a dead peer, just on OS-default
+        timing. Failures are logged at debug and never abort the connection.
+        """
+        sock = (
+            self._writer.get_extra_info("socket")
+            if self._writer is not None
+            else None
+        )
+        if sock is None:
+            log.debug(f"[{self._name}] No raw socket available for keepalive")
+            return
+        try:
+            sock.setsockopt(
+                socket_module.SOL_SOCKET, socket_module.SO_KEEPALIVE, 1
+            )
+        except OSError as e:
+            log.debug(f"[{self._name}] Could not enable SO_KEEPALIVE: {e}")
+            return
+        idle_opt = getattr(socket_module, "TCP_KEEPIDLE", None) or getattr(
+            socket_module, "TCP_KEEPALIVE", None
+        )
+        for opt, value in (
+            (idle_opt, KEEPALIVE_IDLE_S),
+            (
+                getattr(socket_module, "TCP_KEEPINTVL", None),
+                KEEPALIVE_PROBE_INTERVAL_S,
+            ),
+            (getattr(socket_module, "TCP_KEEPCNT", None), KEEPALIVE_PROBE_COUNT),
+        ):
+            if opt is None:
+                continue
+            try:
+                sock.setsockopt(socket_module.IPPROTO_TCP, opt, value)
+            except OSError:
+                pass
 
     async def send(self, data: bytes) -> None:
         """

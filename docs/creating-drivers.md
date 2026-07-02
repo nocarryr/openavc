@@ -834,6 +834,28 @@ If the device's auth scheme isn't a prompt-and-response Telnet login (for exampl
 
 The poll cadence is **not** set in the `polling` block — it comes from `default_config.poll_interval` (in seconds), which device config can override per-instance. Set `poll_interval: 0` to disable polling. A top-level `polling.interval` is inert (the runtime never reads it) and is rejected by the community-catalog build, so don't add one.
 
+#### `liveness` section
+
+Some links can die without the driver ever noticing: UDP is connectionless (queries are fire-and-forget, so a dead host answers nothing and nothing errors), OSC likewise, and a push-style TCP device that vanishes without closing the socket looks connected forever. A `liveness` block arms a watchdog: send a cheap probe every `interval` seconds, expect a reply within `timeout`, and after `max_failures` consecutive misses drop the connection so the platform reconnects and the device card shows *Not responding*.
+
+```yaml
+liveness:
+  send: "STATUS?\r\n"     # probe payload — raw protocol string, same rules as polling.queries
+                           # (escape sequences, {config} substitution, terminator included);
+                           # on osc transport this is an OSC address (optional args: list)
+  expect: "^STATUS"        # optional regex — only matching replies count; if omitted,
+                           # ANY inbound data during the wait counts as alive
+  interval: 30             # seconds between probes (default 30)
+  timeout: 5               # reply deadline per probe (default 5)
+  max_failures: 2          # consecutive misses before dropping the link (default 2)
+```
+
+Pick a probe the device always answers — a status query the driver already polls is ideal (the reply also refreshes state through normal response matching). Leave `expect` off unless the device chatters on its own so much that "any data" would mask a dead control channel.
+
+Valid on `tcp`, `serial`, `udp`, and `osc`. HTTP drivers don't need it: every HTTP poll already awaits its response, so missed polls flip the device offline on their own. Use it whenever the device is UDP/OSC-polled, or push-based over TCP with long idle gaps.
+
+For plain TCP request/response devices you can also enable OS-level keepalive instead: set `tcp_keepalive: true` in `default_config` and the socket itself detects a dead peer (roughly 90 seconds, tuned by the platform). The two are complementary — `tcp_keepalive` proves the TCP path is up; `liveness` proves the device is actually answering the protocol.
+
 #### `frame_parser` (advanced)
 
 For protocols that don't use a simple delimiter, you can specify a frame parser:

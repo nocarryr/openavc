@@ -275,6 +275,33 @@ class ConfigurableDriver(BaseDriver):
         # consumed by _post_connect to run the handshake pre-`connected`.
         self._auth_pending: bool = False
 
+        # Declarative liveness watchdog (`liveness:` block): "send X every N,
+        # await a reply within T, reconnect after K misses". Backs the
+        # BaseDriver watchdog hook — _health_enabled()/_liveness_probe() below.
+        # Needed for transports that can't self-detect a dead peer: UDP (a
+        # fire-and-forget poll never notices silence), OSC, and push-mostly TCP
+        # (no FIN when the device vanishes). The loader validates the block;
+        # runtime parsing stays defensive so a hand-installed file can't crash
+        # the driver.
+        self._liveness_def: dict[str, Any] | None = None
+        self._liveness_expect: re.Pattern[str] | None = None
+        self._liveness_waiter: asyncio.Future[None] | None = None
+        lv = self._definition.get("liveness")
+        if isinstance(lv, dict) and isinstance(lv.get("send"), str) and lv["send"]:
+            try:
+                if lv.get("expect"):
+                    self._liveness_expect = re.compile(str(lv["expect"]))
+                self.HEALTH_INTERVAL_S = float(lv.get("interval", 30.0))
+                self.HEALTH_TIMEOUT_S = float(lv.get("timeout", 5.0))
+                self.HEALTH_MAX_FAILURES = int(lv.get("max_failures", 2))
+                self._liveness_def = lv
+            except (re.error, TypeError, ValueError) as e:
+                log.warning(
+                    f"[{self.device_id}] Invalid liveness block — watchdog "
+                    f"disabled: {e}"
+                )
+                self._liveness_expect = None
+
         for resp in self._definition.get("responses", []):
             # OSC responses use "address" key instead of "pattern"/"match"
             if "address" in resp:
@@ -1135,6 +1162,76 @@ class ConfigurableDriver(BaseDriver):
 
         return response
 
+    # --- Declarative liveness watchdog (`liveness:` block) ---
+
+    def _health_enabled(self) -> bool:
+        """The BaseDriver watchdog runs only when the YAML declares a
+        `liveness:` block (this class always overrides the probe, so the
+        default is-overridden check would wrongly enable it for every
+        declarative driver)."""
+        return self._liveness_def is not None
+
+    async def _liveness_probe(self) -> None:
+        """Send the declared probe and wait for a qualifying reply.
+
+        Any inbound frame counts as alive — a poll reply or an unsolicited
+        push arriving during the wait window proves the device is there just
+        as well as a direct answer. An `expect` regex narrows that to matching
+        frames only. The reply deadline is enforced by the BaseDriver loop
+        (HEALTH_TIMEOUT_S wraps this coroutine), which cancels the await on
+        timeout; the finally clears the waiter either way.
+        """
+        lv = self._liveness_def
+        if lv is None or self.transport is None:
+            return
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._liveness_waiter = waiter
+        try:
+            await self._send_liveness_probe(lv)
+            await waiter
+        finally:
+            if self._liveness_waiter is waiter:
+                self._liveness_waiter = None
+
+    async def _send_liveness_probe(self, lv: dict[str, Any]) -> None:
+        """Transmit the probe payload for this driver's transport type.
+
+        `send` follows the same conventions as `polling.queries`: a raw
+        protocol string (escape sequences + {config} substitution, terminator
+        included) for tcp/serial/udp, an OSC address (with optional `args`)
+        for osc.
+        """
+        if self._definition.get("transport") == "osc":
+            from server.transport.osc_codec import osc_encode_message
+
+            address = lv["send"]
+            if "{" in address:
+                address = self._safe_substitute(address, self.config)
+            args = self._build_osc_args(lv.get("args", []), self.config)
+            await self.transport.send(osc_encode_message(address, args))
+        else:
+            payload = lv["send"]
+            if "{" in payload:
+                payload = self._safe_substitute(payload, self.config)
+            await self.transport.send(_safe_encode_escapes(payload))
+
+    def _liveness_note_data(self, data: bytes) -> None:
+        """Resolve a waiting liveness probe when qualifying data arrives.
+
+        Called from on_data_received before normal dispatch; never consumes
+        the data. The expect regex (if any) is matched against a permissive
+        text decode so it works for binary-ish payloads too (an OSC packet
+        leads with its ASCII address, so address patterns still match).
+        """
+        waiter = self._liveness_waiter
+        if waiter is None or waiter.done():
+            return
+        if self._liveness_expect is not None:
+            text = data.decode("utf-8", errors="replace")
+            if not self._liveness_expect.search(text):
+                return
+        waiter.set_result(None)
+
     async def on_data_received(self, data: bytes) -> None:
         """Match response against pre-compiled patterns, update state."""
         # During the login handshake, capture all bytes raw and let the
@@ -1149,6 +1246,10 @@ class ConfigurableDriver(BaseDriver):
                 self._auth_overflow = True
             self._auth_event.set()
             return
+
+        # A waiting liveness probe is satisfied by any qualifying inbound
+        # frame; the data still flows through normal dispatch below.
+        self._liveness_note_data(data)
 
         if self._definition.get("transport") == "osc":
             await self._handle_osc_response(data)
