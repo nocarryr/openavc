@@ -129,6 +129,12 @@ def get_driver_registry() -> list[dict[str, Any]]:
             "help": driver_class.DRIVER_INFO.get("help", {}),
             "discovery": driver_class.DRIVER_INFO.get("discovery", {}),
             "device_settings": driver_class.DRIVER_INFO.get("device_settings", {}),
+            # Action strip + child types, so pre-device UIs (driver browser
+            # detail) can show a driver's full surface — device-level views
+            # get the resolved form via get_device_info.
+            "actions": driver_class.DRIVER_INFO.get("actions", []),
+            "quick_actions": driver_class.DRIVER_INFO.get("quick_actions", []),
+            "child_entity_types": driver_class.DRIVER_INFO.get("child_entity_types", {}),
         }
         for driver_class in _DRIVER_REGISTRY.values()
     ]

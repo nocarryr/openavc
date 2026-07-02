@@ -106,6 +106,23 @@ export function ChildEntityTypesEditor({
         ordinary single-unit devices.
       </p>
 
+      <div
+        style={{
+          fontSize: "var(--font-size-sm)",
+          color: "var(--warning, #b58900)",
+          border: "1px solid var(--border-color)",
+          borderRadius: "var(--radius-sm)",
+          padding: "var(--space-sm) var(--space-md)",
+          marginBottom: "var(--space-md)",
+        }}
+      >
+        Registering child instances currently requires a Python driver — a
+        YAML driver can declare types here, but nothing creates children at
+        runtime, so the device&apos;s Child Entities panel will stay empty.
+        Declare types in YAML only if you plan to convert the driver to
+        Python (or as forward-declaration for when YAML support lands).
+      </div>
+
       {typeNames.length === 0 && (
         <p
           style={{

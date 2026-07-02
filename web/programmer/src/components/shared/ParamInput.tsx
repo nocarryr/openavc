@@ -169,9 +169,11 @@ export function ParamInput({
     ...style,
   };
 
-  // A child reference as a state key is a non-sensible combo, so child_id never
-  // shows the dynamic toggle.
-  const canToggle = allowDynamic && type !== "child_id";
+  // The `$` toggle is available for child_id params too — "act on the child
+  // picked on the panel" ($var.selected_outlet) is a real macro pattern. The
+  // engine resolves the reference before the platform coerces the id, so an
+  // integer-id child type still receives a proper id at send time.
+  const canToggle = allowDynamic;
   const dynamic = canToggle && isDynamicParamValue(value);
 
   // Toggling "$" on seeds the binding's own control token (e.g. $value) when
