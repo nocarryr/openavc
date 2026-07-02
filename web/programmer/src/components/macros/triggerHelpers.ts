@@ -152,6 +152,65 @@ export const CRON_PRESETS: CronPreset[] = [
   { label: "Custom", make: () => "" },
 ];
 
+// Read a cron field as a plain integer, falling back when the field is
+// anything else (`*`, a step like */15, a range like 8-17, a list).
+// parseInt alone is wrong here: parseInt('*/15') is NaN and parseInt('8-17')
+// silently truncates to 8, and both used to flow into rebuilt cron strings.
+export function cronFieldInt(field: string | undefined, fallback: number): number {
+  if (field === undefined || !/^\d+$/.test(field)) return fallback;
+  return parseInt(field, 10);
+}
+
+/** Days of week (cron numbers, Sun=0) selected by a cron's dow field. */
+export function getCronActiveDays(cron: string): Set<number> {
+  const parts = cron.split(/\s+/);
+  if (parts.length !== 5) return new Set();
+  const dow = parts[4];
+  if (dow === "*") return new Set([0, 1, 2, 3, 4, 5, 6]);
+  const days = new Set<number>();
+  for (const part of dow.split(",")) {
+    if (part.includes("-")) {
+      const [start, end] = part.split("-").map(Number);
+      for (let i = start; i <= end; i++) days.add(i);
+    } else {
+      days.add(Number(part));
+    }
+  }
+  return days;
+}
+
+// Rebuild a cron with a new day-of-week list, preserving the minute, hour,
+// day, and month fields VERBATIM — a stepped/range schedule like
+// */15 8-17 * * 1-5 keeps its cadence when the user toggles a weekday.
+// A cron without 5 fields falls back to a daily-at-18:00 base.
+export function cronWithDays(cron: string, days: number[]): string {
+  const parts = cron.split(/\s+/);
+  const base = parts.length === 5 ? parts : ["0", "18", "*", "*", "*"];
+  const dowStr = [...days].sort((a, b) => a - b).join(",");
+  return `${base[0]} ${base[1]} ${base[2]} ${base[3]} ${dowStr}`;
+}
+
+/**
+ * Which EVENT_CATEGORIES index lists this saved event pattern, so the editor
+ * opens showing the category the trigger actually uses. Unknown patterns
+ * (script events, wildcards, events of a since-deleted device/macro) land on
+ * Custom, which displays the raw pattern; no pattern means a fresh trigger,
+ * which keeps the Device Events default.
+ */
+export function detectEventCategory(
+  pattern: string | undefined,
+  devices: DeviceConfig[],
+  macros: MacroConfig[],
+): number {
+  if (!pattern) return 0;
+  for (let i = 0; i < EVENT_CATEGORIES.length; i++) {
+    const cat = EVENT_CATEGORIES[i];
+    if (cat.label === "Custom") continue;
+    if (cat.options(devices, macros).some((o) => o.pattern === pattern)) return i;
+  }
+  return EVENT_CATEGORIES.findIndex((c) => c.label === "Custom");
+}
+
 /** Cron expression validation (5-field format) with range checking. */
 export function isValidCron(cron: string): boolean {
   if (!cron.trim()) return false;

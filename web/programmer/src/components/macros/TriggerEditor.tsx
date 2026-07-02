@@ -14,6 +14,10 @@ import {
   isValidCron,
   describeCron,
   EVENT_CATEGORIES,
+  cronFieldInt,
+  getCronActiveDays,
+  cronWithDays,
+  detectEventCategory,
 } from "./triggerHelpers";
 
 interface TriggerEditorProps {
@@ -130,9 +134,10 @@ function ScheduleEditor({
   const parts = cron.split(/\s+/);
   const hasValidParts = parts.length === 5;
 
-  // Detect current preset
-  const currentHour = hasValidParts && parts[1] !== "*" ? parseInt(parts[1]) : 18;
-  const currentMinute = hasValidParts && parts[0] !== "*" ? parseInt(parts[0]) : 0;
+  // Time shown in the preset editors. Non-simple fields (steps, ranges)
+  // fall back to defaults instead of NaN / truncated parses.
+  const currentHour = hasValidParts ? cronFieldInt(parts[1], 18) : 18;
+  const currentMinute = hasValidParts ? cronFieldInt(parts[0], 0) : 0;
 
   // Detect preset from cron
   const detectPreset = (): number => {
@@ -170,32 +175,14 @@ function ScheduleEditor({
   const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const DAY_VALUES = [1, 2, 3, 4, 5, 6, 0]; // cron day numbers
 
-  const getActiveDays = (): Set<number> => {
-    if (!hasValidParts) return new Set();
-    const dow = parts[4];
-    if (dow === "*") return new Set(DAY_VALUES);
-    if (dow === "1-5") return new Set([1, 2, 3, 4, 5]);
-    if (dow === "0,6") return new Set([0, 6]);
-    const days = new Set<number>();
-    for (const part of dow.split(",")) {
-      if (part.includes("-")) {
-        const [start, end] = part.split("-").map(Number);
-        for (let i = start; i <= end; i++) days.add(i);
-      } else {
-        days.add(Number(part));
-      }
-    }
-    return days;
-  };
-
   const toggleDay = (dayNum: number) => {
-    const active = getActiveDays();
+    const active = getCronActiveDays(cron);
     if (active.has(dayNum)) active.delete(dayNum);
     else active.add(dayNum);
     if (active.size === 0) return;
-    const sorted = [...active].sort((a, b) => a - b);
-    const dowStr = sorted.join(",");
-    onChange({ cron: `${currentMinute} ${currentHour} * * ${dowStr}` });
+    // Swap only the day-of-week field; minute/hour/day/month stay verbatim
+    // so stepped or ranged schedules keep their cadence.
+    onChange({ cron: cronWithDays(cron, [...active]) });
     setPresetIdx(4); // Switch to custom since user is manually toggling
   };
 
@@ -208,7 +195,7 @@ function ScheduleEditor({
     setPresetIdx(4);
   };
 
-  const activeDays = getActiveDays();
+  const activeDays = getCronActiveDays(cron);
 
   const FIELD_LABELS = [
     { label: "Minute", hint: "0-59, */5, 0,30", placeholder: "*" },
@@ -517,7 +504,11 @@ function EventEditor({
   const devices = project?.devices ?? [];
   const macros = project?.macros ?? [];
 
-  const [category, setCategory] = useState(0);
+  // Open in the category that lists the saved event, so editing an existing
+  // trigger shows the right dropdown instead of defaulting to Device Events.
+  const [category, setCategory] = useState(() =>
+    detectEventCategory(trigger.event_pattern, devices, macros),
+  );
 
   const catDef = EVENT_CATEGORIES[category];
   const options = catDef?.options(devices, macros) ?? [];
