@@ -23,10 +23,21 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from server.core.connection_fault import (
+    NO_RESPONSE,
+    ConnectionFault,
+    ConnectionFaultError,
+    default_fault_message,
+    typed_fault_from_exc,
+)
 from server.core.event_bus import EventBus
 from server.core.state_store import StateStore
 from server.transport.frame_parsers import FrameParser
 from server.utils.logger import get_logger
+
+# Re-exported for drivers: raise ConnectionFaultError(msg, code=...) instead of
+# wording a plain ConnectionError to hit the classifier's signature tables.
+__all__ = ["BaseDriver", "CommandParamError", "ConnectionFaultError"]
 
 log = get_logger(__name__)
 
@@ -87,6 +98,11 @@ class BaseDriver(ABC):
         # the start of each connect() attempt so a stale cause can't leak into
         # a later, unrelated failure.
         self._last_transport_error: str = ""
+        # A typed offline reason stashed for failures with no exception to
+        # carry the cause (liveness watchdogs, health loops forcing a
+        # reconnect). Beats string classification; same lifecycle as
+        # _last_transport_error.
+        self._last_fault: ConnectionFault | None = None
         # Strong refs to fire-and-forget tasks (disconnect cleanup) so the GC
         # can't collect them mid-run — a bare create_task is only weakly held.
         self._bg_tasks: set[asyncio.Task] = set()
@@ -172,6 +188,25 @@ class BaseDriver(ABC):
             if err:
                 self._last_transport_error = err
 
+    @property
+    def last_fault(self) -> ConnectionFault | None:
+        """A typed offline reason stashed by the driver, if any.
+
+        Read by the DeviceManager when classifying a disconnect; a typed
+        fault wins over string matching of error text.
+        """
+        return self._last_fault
+
+    def _stash_fault(self, code: str, message: str = "") -> None:
+        """Record a typed offline reason for a failure with no exception to
+        carry the cause — a liveness watchdog that stopped hearing replies, a
+        health loop forcing a reconnect. Call just before triggering the
+        disconnect. Cleared at the start of each connect() attempt.
+        """
+        self._last_fault = ConnectionFault(
+            code, message or default_fault_message(code)
+        )
+
     @staticmethod
     def _numeric_default(var_def: dict[str, Any], *, as_int: bool) -> int | float:
         """Default for an integer/number/float state var: its declared ``min``
@@ -228,6 +263,7 @@ class BaseDriver(ABC):
         # Start each attempt with a clean slate so a previous failure's cause
         # can't be misattributed to this one by the fault classifier.
         self._last_transport_error = ""
+        self._last_fault = None
         if self.transport:
             try:
                 await self.transport.close()
@@ -1098,22 +1134,26 @@ class BaseDriver(ABC):
         # Seed at loop start so we don't false-positive before the first poll.
         self._last_poll_success = time.monotonic()
 
+        last_poll_exc: BaseException | None = None
         try:
             while True:
                 try:
                     await self.poll()
                     self._last_poll_success = time.monotonic()
                     dry_polls = 0
+                    last_poll_exc = None
                 except (ConnectionError, TimeoutError, OSError) as exc:
                     log.warning(
                         f"[{self.device_id}] Poll failed (connection): {exc}"
                     )
                     dry_polls += 1
+                    last_poll_exc = exc
                 except httpx_errors as exc:
                     log.warning(
                         f"[{self.device_id}] Poll failed (HTTP): {exc}"
                     )
                     dry_polls += 1
+                    last_poll_exc = exc
                 except Exception as exc:
                     log.exception(
                         f"[{self.device_id}] Unexpected error during poll"
@@ -1132,6 +1172,19 @@ class BaseDriver(ABC):
                     log.warning(
                         f"[{self.device_id}] No response for "
                         f"{dry_polls} poll cycles — marking disconnected"
+                    )
+                    # Record WHY for the fault classifier: the disconnect
+                    # event carries no exception, and a silently-dead peer
+                    # leaves no transport error — without this the card
+                    # shows the generic "connection dropped". A typed fault
+                    # raised by poll() itself wins; otherwise this is the
+                    # canonical stopped-answering case.
+                    self._last_fault = typed_fault_from_exc(
+                        last_poll_exc
+                    ) or ConnectionFault(
+                        NO_RESPONSE,
+                        f"Connected, but the device stopped answering "
+                        f"({dry_polls} poll cycles without a response).",
                     )
                     self._handle_transport_disconnect()
                     return

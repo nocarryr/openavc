@@ -46,6 +46,100 @@ class ConnectionFault:
     message: str
 
 
+# Codes a driver may declare on a ConnectionFaultError. bridge_offline is
+# excluded on purpose — it's assigned by the DeviceManager when it mirrors a
+# bridge's state onto dependents, never raised from inside a driver.
+_DRIVER_FAULT_CODES = frozenset({
+    AUTH_FAILED,
+    CONNECTION_REFUSED,
+    UNREACHABLE,
+    HOST_KEY_REJECTED,
+    NO_RESPONSE,
+    CLIENT_MISSING,
+    TRANSPORT_DISCONNECTED,
+})
+
+# Canonical generic wording per code, used when a typed fault carries no
+# message of its own. Branch-specific wording in classify_connection_fault()
+# stays richer (endpoint interpolation, transport-specific hints).
+_DEFAULT_MESSAGES = {
+    AUTH_FAILED: (
+        "Authentication failed. Check the username and password, or "
+        "install the OpenAVC key on the device."
+    ),
+    CONNECTION_REFUSED: (
+        "Connection refused on {where}. Is the service enabled and the "
+        "port correct?"
+    ),
+    UNREACHABLE: "Can't reach {where}. Check the IP address and network.",
+    HOST_KEY_REJECTED: (
+        "The device's SSH host key changed or was rejected. Verify the "
+        "device, then re-accept it."
+    ),
+    NO_RESPONSE: (
+        "Connected, but the device didn't respond as expected. Wrong "
+        "transport or protocol for this device?"
+    ),
+    CLIENT_MISSING: (
+        "Required client not found. Install it and make sure it's on the "
+        "system PATH."
+    ),
+    TRANSPORT_DISCONNECTED: (
+        "The connection to the device dropped. OpenAVC is retrying "
+        "automatically."
+    ),
+}
+
+
+def default_fault_message(code: str, where: str = "the device") -> str:
+    """The taxonomy's standard integrator-facing sentence for ``code``."""
+    template = _DEFAULT_MESSAGES.get(code) or _DEFAULT_MESSAGES[TRANSPORT_DISCONNECTED]
+    return template.format(where=where)
+
+
+class ConnectionFaultError(ConnectionError):
+    """A connection failure carrying an explicit, pre-classified fault code.
+
+    Drivers raise this instead of wording a plain ConnectionError so a
+    substring in the classifier's signature tables happens to match. The
+    classifier honors ``code`` before any string matching, so the driver
+    states its meaning once, explicitly — the message is free to say
+    whatever is most useful to the integrator (it becomes
+    ``offline_detail``; when empty, the taxonomy's standard wording for the
+    code is used). Re-exported from ``server.drivers.base`` for drivers.
+
+    Unknown codes fail at construction: a typo'd code would silently
+    misclassify forever, and every raise site should be covered by a test
+    that trips it immediately.
+    """
+
+    def __init__(self, message: str = "", *, code: str):
+        if code not in _DRIVER_FAULT_CODES:
+            raise ValueError(
+                f"Unknown connection-fault code {code!r}. Valid codes: "
+                f"{', '.join(sorted(_DRIVER_FAULT_CODES))}"
+            )
+        super().__init__(message)
+        self.fault_code = code
+
+
+def typed_fault_from_exc(
+    exc: BaseException | None,
+    *,
+    host: str = "",
+    port: object = None,
+) -> ConnectionFault | None:
+    """The ConnectionFault declared by a :class:`ConnectionFaultError` in
+    ``exc``'s cause chain, or None when nothing typed is present."""
+    for node in _exc_chain(exc):
+        if isinstance(node, ConnectionFaultError):
+            message = str(node).strip() or default_fault_message(
+                node.fault_code, _endpoint(host, port)
+            )
+            return ConnectionFault(node.fault_code, message)
+    return None
+
+
 # --- Signature tables ------------------------------------------------------
 # All matched against a lowercased haystack of (last_error + str(exc)). Order
 # of the checks in classify_connection_fault() matters more than these lists —
@@ -261,6 +355,13 @@ def classify_connection_fault(
 
     chain = _exc_chain(exc)
     err_no = _errno_of(chain)
+
+    # 0. A driver-declared typed fault wins over everything below — the
+    #    driver already classified itself (ConnectionFaultError). String
+    #    matching only exists for causes nobody typed.
+    typed = typed_fault_from_exc(exc, host=host, port=port)
+    if typed is not None:
+        return typed
 
     # Serial has no auth / route / refused / host-key semantics: a serial
     # failure is almost always "can't open the port" (missing, busy, or no OS

@@ -8,7 +8,7 @@ import pytest
 from server.core.device_manager import DeviceManager, _DRIVER_REGISTRY
 from server.core.event_bus import EventBus
 from server.core.state_store import StateStore
-from server.drivers.base import BaseDriver
+from server.drivers.base import BaseDriver, ConnectionFaultError
 
 needs_pjlink = pytest.mark.skipif(
     "pjlink_class1" not in _DRIVER_REGISTRY,
@@ -482,6 +482,51 @@ async def test_offline_reason_cleared_on_reconnect_success(dm, core):
     assert state.get("device.test_dev.offline_detail") is None
 
     await dm._cancel_reconnect("test_dev")
+
+
+async def test_set_offline_reason_honors_driver_stashed_fault(dm, core):
+    """A typed fault stashed by a watchdog / health loop (a failure with no
+    exception to carry the cause) wins over string classification of the
+    stale transport error."""
+    state, events = core
+    driver = MockDriver("sw", {"host": "10.0.0.5", "port": 4998}, state, events)
+    driver._last_transport_error = "connection refused"  # stale string cause
+    driver._stash_fault("no_response", "Device stopped answering probes.")
+    dm._set_offline_reason("sw", driver)
+
+    assert state.get("device.sw.offline_reason") == "no_response"
+    assert state.get("device.sw.offline_detail") == "Device stopped answering probes."
+
+
+async def test_set_offline_reason_exc_typed_fault_beats_stash(dm, core):
+    """A typed fault in the exception chain is fresher than the stash."""
+    state, events = core
+    driver = MockDriver("sw", {"host": "10.0.0.5", "port": 22}, state, events)
+    driver._stash_fault("no_response")
+    exc = ConnectionFaultError("Bad password", code="auth_failed")
+    dm._set_offline_reason("sw", driver, exc=exc)
+
+    assert state.get("device.sw.offline_reason") == "auth_failed"
+    assert state.get("device.sw.offline_detail") == "Bad password"
+
+
+async def test_poll_watchdog_stashes_no_response(core):
+    """When the missed-poll watchdog trips, the driver records a typed
+    no_response fault — the disconnect event carries no exception and a
+    silently-dead peer leaves no transport error, so without the stash the
+    card would show the generic 'connection dropped'."""
+    state, events = core
+    driver = ErroringDriver("dev_wd", {"max_missed_polls": 1}, state, events)
+    await driver.connect()
+    driver.raise_on_poll = ConnectionError("socket reset")
+
+    await driver.start_polling(0.01)
+    await asyncio.sleep(0.05)
+    await driver.stop_polling()
+
+    assert driver.last_fault is not None
+    assert driver.last_fault.code == "no_response"
+    assert "stopped answering" in driver.last_fault.message
 
 
 async def test_offline_reason_cleared_on_resume_success(dm, core):

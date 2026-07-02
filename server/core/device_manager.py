@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, TYPE_CHECKING
 
-from server.core.connection_fault import classify_connection_fault
+from server.core.connection_fault import classify_connection_fault, typed_fault_from_exc
 from server.core.event_bus import EventBus
 from server.core.state_store import StateStore
 from server.utils.logger import get_logger
@@ -819,7 +819,10 @@ class DeviceManager:
         Reads the transport's last error from the driver — preferring the live
         transport, falling back to the value BaseDriver stashes before tearing
         a failed transport down — plus the connect exception, and runs the one
-        shared classifier. No per-transport branching here.
+        shared classifier. No per-transport branching here. Typed faults win
+        over string matching: first a ConnectionFaultError in the exception
+        chain (the freshest signal), then a fault the driver stashed before
+        forcing a disconnect (liveness watchdogs), then the classifier.
         """
         last_error = ""
         host, port, transport = "", None, ""
@@ -832,10 +835,14 @@ class DeviceManager:
                     last_error = fresh
             host, port, transport = self._connection_descriptor(driver)
 
-        fault = classify_connection_fault(
-            last_error=last_error, exc=exc,
-            host=host, port=port, transport=transport,
-        )
+        fault = typed_fault_from_exc(exc, host=host, port=port)
+        if fault is None and driver is not None:
+            fault = getattr(driver, "last_fault", None)
+        if fault is None:
+            fault = classify_connection_fault(
+                last_error=last_error, exc=exc,
+                host=host, port=port, transport=transport,
+            )
         self.state.set_batch(
             {
                 f"device.{device_id}.offline_reason": fault.code,

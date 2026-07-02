@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import errno
 
+import pytest
+
 from server.core.connection_fault import (
     AUTH_FAILED,
     CLIENT_MISSING,
@@ -20,6 +22,7 @@ from server.core.connection_fault import (
     NO_RESPONSE,
     TRANSPORT_DISCONNECTED,
     UNREACHABLE,
+    ConnectionFaultError,
     classify_connection_fault,
 )
 
@@ -300,3 +303,56 @@ def test_endpoint_degrades_without_host():
     )
     assert fault.code == CONNECTION_REFUSED
     assert "the device" in fault.message
+
+
+# --- typed ConnectionFaultError (drivers declare the code explicitly) --------
+
+
+def test_typed_fault_wins_over_contradicting_strings():
+    """A typed code beats the string tables: the message here contains
+    'operation timed out' (a strong-unreachable signature checked before
+    no_response), but the driver said no_response — no_response it is."""
+    exc = ConnectionFaultError(
+        "Device went silent (The read operation timed out)", code=NO_RESPONSE
+    )
+    fault = classify_connection_fault(
+        last_error="", exc=exc, host="10.0.0.9", port=80, transport="http",
+    )
+    assert fault.code == NO_RESPONSE
+    assert "went silent" in fault.message
+
+
+def test_typed_fault_honored_through_cause_chain():
+    """Transports wrap driver errors — a typed fault buried in __cause__ is
+    still honored, and its own message (not the wrapper's) is surfaced."""
+    exc = _wrap(
+        "Failed to connect to device",
+        ConnectionFaultError("Login rejected by the device", code=AUTH_FAILED),
+    )
+    fault = classify_connection_fault(
+        last_error="", exc=exc, host="pdu.local", port=23, transport="tcp",
+    )
+    assert fault.code == AUTH_FAILED
+    assert fault.message == "Login rejected by the device"
+
+
+def test_typed_fault_empty_message_uses_taxonomy_default():
+    exc = ConnectionFaultError(code=AUTH_FAILED)
+    fault = classify_connection_fault(
+        last_error="", exc=exc, host="h", port=23, transport="tcp",
+    )
+    assert fault.code == AUTH_FAILED
+    assert "Authentication failed" in fault.message
+
+
+def test_typed_fault_unknown_code_fails_at_construction():
+    """A typo'd code must fail loudly at the raise site, not silently
+    misclassify forever."""
+    with pytest.raises(ValueError, match="Unknown connection-fault code"):
+        ConnectionFaultError("boom", code="auth_failure")
+
+
+def test_typed_fault_bridge_offline_not_declarable():
+    """bridge_offline is assigned by the DeviceManager, never by a driver."""
+    with pytest.raises(ValueError):
+        ConnectionFaultError("x", code="bridge_offline")
