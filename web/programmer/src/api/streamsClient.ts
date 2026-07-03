@@ -75,10 +75,21 @@ export function probeStream(data: {
   });
 }
 
-// Snapshot is a binary JPEG, so it loads via <img src>, not request(). The
-// timestamp busts the browser cache so each preview grabs a fresh frame.
-export function snapshotUrl(streamId: string): string {
-  return `${BASE}${EXT}/streams/${encodeURIComponent(streamId)}/snapshot.jpg?t=${Date.now()}`;
+// Snapshot is a binary JPEG. A bare <img src> can't carry the Programmer's
+// credential (the auth interceptor only wraps fetch, not native image loads),
+// so on a claimed instance it would 401 and the preview would always fail.
+// Fetch it instead — auth rides same-origin /api fetches — and hand back an
+// object URL for the <img>. Callers revoke the URL when done. The timestamp
+// busts the browser cache so each preview grabs a fresh frame.
+export async function fetchSnapshot(streamId: string): Promise<string> {
+  const res = await fetch(
+    `${BASE}${EXT}/streams/${encodeURIComponent(streamId)}/snapshot.jpg?t=${Date.now()}`,
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`API ${res.status}: ${body}`);
+  }
+  return URL.createObjectURL(await res.blob());
 }
 
 // request() throws "API <status>: <body>"; body is usually {"detail": "..."}.

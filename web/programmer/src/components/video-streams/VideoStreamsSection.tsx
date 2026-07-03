@@ -290,7 +290,32 @@ function StreamForm({
 
 function PreviewDialog({ stream, onClose }: { stream: Stream; onClose: () => void }) {
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const [src] = useState(() => streamsApi.snapshotUrl(stream.stream_id));
+  const [src, setSrc] = useState<string | null>(null);
+
+  // The snapshot endpoint requires auth on a claimed instance, and only
+  // fetch() carries the Programmer's credential — a native <img src> load
+  // doesn't. Fetch into an object URL, revoke it when the dialog closes.
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    let cancelled = false;
+    streamsApi
+      .fetchSnapshot(stream.stream_id)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        objectUrl = url;
+        setSrc(url);
+      })
+      .catch(() => {
+        if (!cancelled) setState("error");
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [stream.stream_id]);
 
   return (
     <Dialog title={`Preview: ${stream.name}`} onClose={onClose}>
@@ -311,13 +336,15 @@ function PreviewDialog({ stream, onClose }: { stream: Stream; onClose: () => voi
             Could not capture a frame. The source may be offline, or the URL or credentials may be wrong.
           </span>
         )}
-        <img
-          src={src}
-          alt={stream.name}
-          onLoad={() => setState("ok")}
-          onError={() => setState("error")}
-          style={{ maxWidth: "100%", display: state === "ok" ? "block" : "none" }}
-        />
+        {src && (
+          <img
+            src={src}
+            alt={stream.name}
+            onLoad={() => setState("ok")}
+            onError={() => setState("error")}
+            style={{ maxWidth: "100%", display: state === "ok" ? "block" : "none" }}
+          />
+        )}
       </div>
     </Dialog>
   );
