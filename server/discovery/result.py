@@ -265,13 +265,17 @@ def merge_device_info(
     Rules:
       - Never overwrite with None (only enrich)
       - More specific info wins (longer strings)
-      - ``fill_only=True`` (driver-probe / companion sources): only set an
-        identity field that is still empty; never overwrite a value an
-        earlier, higher-trust source already provided. Driver-declared
-        ``tcp_probe``/``udp_probe`` text and community Python companions run
-        *after* passive collection (mDNS/SSDP/AMX/SNMP), so the length-only
-        rule would otherwise let their text clobber authoritative passive
-        identity. They still enrich fields nothing else populated.
+      - ``fill_only=True`` (driver-probe / companion / ARP-OUI sources):
+        only set an identity field that is still empty; never overwrite a
+        value an earlier, higher-trust source already provided. Driver-
+        declared ``tcp_probe``/``udp_probe`` text and community Python
+        companions run *after* passive collection (mDNS/SSDP/AMX/SNMP), so
+        the length-only rule would otherwise let their text clobber
+        authoritative passive identity. The ARP/OUI merges use it too: OUI
+        names the NIC vendor (often not the device vendor), the late ARP
+        harvest runs after passive collection, and on a re-scan the phase-4
+        pass sees identity carried over from the previous scan. They all
+        still enrich fields nothing else populated.
     """
     del source  # legacy parameter, retained so call sites keep their breadcrumb
 

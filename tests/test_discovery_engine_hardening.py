@@ -350,6 +350,30 @@ class TestMergePriority:
 
         assert engine.results["10.77.0.60"].manufacturer == "Acme"
 
+    async def test_late_arp_oui_does_not_overwrite_passive_identity(self):
+        # The late ARP harvest runs after passive collection and merges
+        # the IEEE OUI registrant name — the NIC vendor, which is often
+        # not the device vendor. A longer registrant string must not
+        # clobber what the device self-reported via mDNS/SSDP/SNMP.
+        engine = DiscoveryEngine()
+        dev = engine._get_or_create("10.77.0.61")
+        dev.alive = True
+        dev.manufacturer = "Barco"     # SSDP self-reported
+        dev.category = "projector"
+        assert not dev.mac             # eligible for the late harvest
+
+        with patch("server.discovery.engine.harvest_arp_table",
+                   new_callable=AsyncMock,
+                   return_value={"10.77.0.61": "AA:BB:CC:DD:EE:FF"}), \
+             patch.object(engine.oui_db, "lookup",
+                          return_value=("ASUSTek COMPUTER INC.", "networking")):
+            await engine._late_arp_harvest()
+
+        d = engine.results["10.77.0.61"]
+        assert d.mac == "AA:BB:CC:DD:EE:FF"   # enrichment still lands
+        assert d.manufacturer == "Barco"       # NIC vendor didn't clobber
+        assert d.category == "projector"
+
 
 # --- L-069 / L-070: total_hosts_scanned accuracy + malformed-CIDR safety ----
 

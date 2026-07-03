@@ -760,7 +760,12 @@ class DiscoveryEngine:
                         device.evidence_log.append(evidence_oui(mac, vendor=oui_vendor))
 
                     if info:
-                        merge_device_info(device, info, "arp")
+                        # fill_only: OUI names the NIC vendor, which is
+                        # often not the device vendor, and on a re-scan
+                        # identity fields carried from the previous scan
+                        # would otherwise lose to a longer IEEE registrant
+                        # string. Enrich empty fields; never overwrite.
+                        merge_device_info(device, info, "arp", fill_only=True)
                         await self._emit_device_update(device, "arp_harvest")
 
             # --- Phase 5: Port Scan ---
@@ -1319,7 +1324,11 @@ class DiscoveryEngine:
                 info["manufacturer"] = manufacturer
                 info["category"] = category
                 oui_vendor = manufacturer
-            merge_device_info(device, info, "arp")
+            # fill_only: this runs AFTER passive collection, and OUI names
+            # the NIC vendor — a longer IEEE registrant string must not
+            # clobber the manufacturer/category a device self-reported via
+            # mDNS/SSDP/SNMP. Enrich empty fields; never overwrite.
+            merge_device_info(device, info, "arp", fill_only=True)
             device.evidence_log.append(evidence_oui(mac, vendor=oui_vendor))
             enriched += 1
             await self._emit_device_update(device, "arp_harvest")
