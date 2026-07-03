@@ -20,6 +20,7 @@ import { ActionPicker } from "../ui-builder/BindingEditor/ActionPicker";
 import { FeedbackBindingEditor } from "../ui-builder/BindingEditor/FeedbackBindingEditor";
 import { VariableKeyPicker } from "./VariableKeyPicker";
 import { useConnectionStore } from "../../store/connectionStore";
+import { pressActionFields, pressAfterActionEdit } from "./buttonBindingHelpers";
 
 export interface ButtonBindings {
   press?: Record<string, unknown>[] | null;
@@ -177,9 +178,7 @@ export function ButtonBindingEditor({
   const getActionValue = (sectionId: string): Record<string, unknown> | null => {
     if (sectionId === "press") {
       // Return press binding minus mode/config fields (just the action)
-      const { mode: _m, off_action: _o, hold_action: _h, hold_repeat_ms: _r, hold_threshold_ms: _t,
-              toggle_key: _tk, toggle_value: _tv, on_label: _ol, off_label: _ofl, ...actionFields } = press;
-      return Object.keys(actionFields).length > 0 ? actionFields as Record<string, unknown> : null;
+      return pressActionFields(press);
     }
     if (sectionId === "off_action") return offAction;
     if (sectionId === "hold_action") return holdAction;
@@ -192,20 +191,10 @@ export function ButtonBindingEditor({
 
   const setActionValue = (sectionId: string, value: Record<string, unknown> | null) => {
     if (sectionId === "press") {
-      // Merge action fields into press[0], keeping mode/config
-      const modeFields: Record<string, unknown> = {};
-      if (press.mode) modeFields.mode = press.mode;
-      if (press.off_action) modeFields.off_action = press.off_action;
-      if (press.hold_action) modeFields.hold_action = press.hold_action;
-      if (press.hold_repeat_ms) modeFields.hold_repeat_ms = press.hold_repeat_ms;
-      if (press.hold_threshold_ms) modeFields.hold_threshold_ms = press.hold_threshold_ms;
-      if (press.toggle_key) modeFields.toggle_key = press.toggle_key;
-      if (press.toggle_value !== undefined) modeFields.toggle_value = press.toggle_value;
-      if (press.on_label) modeFields.on_label = press.on_label;
-      if (press.off_label) modeFields.off_label = press.off_label;
-      const updated = value ? { ...modeFields, ...value } : modeFields;
-      const hasContent = Object.keys(updated).length > 0;
-      onBindingsChange({ ...bindings, press: hasContent ? [updated, ...extraActions] : null });
+      // Merge action fields into press[0], keeping mode/config. Removing
+      // the action promotes the next additional action instead of
+      // discarding the rest of the press list.
+      onBindingsChange({ ...bindings, press: pressAfterActionEdit(press, extraActions, value) });
     } else if (sectionId === "off_action") {
       updatePress({ off_action: value ?? undefined });
     } else if (sectionId === "hold_action") {
