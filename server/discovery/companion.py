@@ -14,15 +14,23 @@ The companion exposes a single async function:
 
 The discovery engine loads every loaded driver's companion at startup
 (or after a catalog refresh) and invokes its ``probe()`` once per
-scan, with a hard timeout enforced via ``asyncio.wait_for``.
+scan, on a dedicated worker thread with a hard timeout.
 
 Safety
 ------
 - The companion **must** bind every socket to ``ctx.source_ip``. The
   loader doesn't sandbox Python (impractical), but the API takes
   ``source_ip`` as part of the context so the contract is explicit.
-- A hard wall-clock timeout (default 10s, capped at 30s) bounds the
-  companion's runtime via ``asyncio.wait_for``.
+- Each invocation runs on its own event loop in a daemon worker
+  thread. A hard wall-clock timeout (default 10s, capped at 30s)
+  cancels well-behaved companions via ``asyncio.wait_for``; one that
+  blocks in synchronous C-level I/O (``socket.recv`` without
+  ``await``, ``time.sleep``) stalls only its own thread — the engine
+  abandons the thread shortly after the cap and drops its late emits,
+  so a bad companion can never freeze the server's event loop or wedge
+  a scan.
+- ``ctx.emit_*`` calls are marshalled back to the engine's event loop;
+  engine state is never touched from the worker thread.
 - Companion code is community-trust same as Python drivers — we wrap
   every invocation in a try/except and log on failure.
 """
@@ -33,7 +41,8 @@ import asyncio
 import importlib.util
 import logging
 import sys
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -48,6 +57,13 @@ log = logging.getLogger("discovery.companion")
 
 DEFAULT_PROBE_TIMEOUT_SECONDS: float = 10.0
 MAX_PROBE_TIMEOUT_SECONDS: float = 30.0
+# Extra wall-clock the engine waits past the companion's own timeout
+# before giving up on its worker thread. A well-behaved async companion
+# is cancelled at the cap by the worker loop's wait_for; only a
+# companion wedged in C-level blocking I/O (which no cancellation can
+# reach) ever consumes this grace, after which the daemon thread is
+# abandoned and its late emits dropped.
+THREAD_ABANDON_GRACE_SECONDS: float = 2.0
 
 
 @dataclass
@@ -271,14 +287,82 @@ async def run_companion(
     ``MAX_PROBE_TIMEOUT_SECONDS`` regardless of what the companion or
     engine requests, so a buggy or hostile companion can't stall a
     scan beyond that ceiling.
+
+    The companion coroutine runs on its own event loop in a dedicated
+    daemon thread, never on the engine's loop. Community code that
+    blocks in synchronous C-level I/O ignores cancellation, so run
+    inline it would freeze the whole server past every timeout; on a
+    worker thread it stalls only itself. ``ctx.emit_*`` calls hop back
+    to the engine's loop, which stays the only place engine state is
+    touched.
+
+    The timeout is enforced twice: ``asyncio.wait_for`` on the worker
+    loop cancels a well-behaved async companion at the cap, and this
+    coroutine independently stops waiting
+    ``THREAD_ABANDON_GRACE_SECONDS`` after the cap for a companion
+    wedged in blocking I/O — the daemon thread is abandoned and its
+    late emits dropped. Cancellation (scan timeout, user stop_scan)
+    takes effect immediately the same way.
     """
     cap = min(max(ctx.timeout_seconds, 0.5), MAX_PROBE_TIMEOUT_SECONDS)
+    engine_loop = asyncio.get_running_loop()
+    abandoned = threading.Event()
+    engine_emit = ctx._emit_for_host
+
+    async def _bridged_emit(host: str, ev: Evidence) -> None:
+        # Runs on the worker loop; engine state must only be touched
+        # from the engine's loop, so hop threads for every emit.
+        if abandoned.is_set():
+            return
+        try:
+            emit_fut = asyncio.run_coroutine_threadsafe(
+                engine_emit(host, ev), engine_loop,
+            )
+        except RuntimeError:
+            # Engine loop already closed (server shutdown).
+            return
+        await asyncio.wrap_future(emit_fut)
+
+    worker_ctx = replace(ctx, _emit_for_host=_bridged_emit)
+    finished: asyncio.Future = engine_loop.create_future()
+
+    def _notify_finished() -> None:
+        if not finished.done():
+            finished.set_result(None)
+
+    def _worker() -> None:
+        try:
+            asyncio.run(asyncio.wait_for(probe_fn(worker_ctx), timeout=cap))
+        except asyncio.TimeoutError:
+            log.warning(
+                "Discovery companion %s exceeded %.1fs timeout",
+                driver_id, cap,
+            )
+        except Exception:
+            log.exception("Discovery companion %s failed", driver_id)
+        finally:
+            try:
+                engine_loop.call_soon_threadsafe(_notify_finished)
+            except RuntimeError:
+                pass  # engine loop closed while the companion ran
+
+    thread = threading.Thread(
+        target=_worker,
+        name=f"discovery-companion-{driver_id}",
+        daemon=True,
+    )
+    thread.start()
     try:
-        await asyncio.wait_for(probe_fn(ctx), timeout=cap)
+        await asyncio.wait_for(
+            finished, timeout=cap + THREAD_ABANDON_GRACE_SECONDS,
+        )
     except asyncio.TimeoutError:
+        abandoned.set()
         log.warning(
-            "Discovery companion %s exceeded %.1fs timeout",
+            "Discovery companion %s is stuck in blocking I/O past its "
+            "%.1fs timeout; abandoning its worker thread",
             driver_id, cap,
         )
-    except Exception:
-        log.exception("Discovery companion %s failed", driver_id)
+    except asyncio.CancelledError:
+        abandoned.set()
+        raise

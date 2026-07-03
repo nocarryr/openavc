@@ -743,6 +743,138 @@ class TestCompanionLoader:
         assert any("exceeded" in r.message for r in caplog.records)
 
 
+# A deliberately WRONG companion: parks its thread in C-level blocking
+# sleep (stands in for a sync socket.recv()/connect() with no timeout),
+# which no asyncio cancellation can interrupt.
+_BLOCKING_COMPANION = '''
+import time
+
+async def probe(ctx):
+    time.sleep(6.0)
+'''
+
+
+class TestCompanionThreadIsolation:
+    """Blocking sync I/O in a companion must never stall the engine loop.
+
+    Companions are community code; one that blocks in C-level I/O
+    ignores CancelledError, so run inline it would freeze the whole
+    server past every timeout. The runner therefore executes each
+    companion on its own event loop in a daemon worker thread and
+    abandons the thread shortly after the cap.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocking_companion_keeps_event_loop_responsive(
+        self, tmp_path, caplog,
+    ):
+        (tmp_path / "block_discovery.py").write_text(_BLOCKING_COMPANION)
+        probes = load_discovery_companions([tmp_path])
+
+        async def emit(host, ev):
+            pass
+
+        ctx = ProbeContext(
+            driver_id="block",
+            source_ip="127.0.0.1",
+            target_subnets=(),
+            timeout_seconds=0.5,
+            log=logging.getLogger("test"),
+            _emit_for_host=emit,
+        )
+
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        ticker_task = asyncio.create_task(ticker())
+        try:
+            t0 = time.monotonic()
+            with caplog.at_level(
+                logging.WARNING, logger="discovery.companion",
+            ):
+                await run_companion("block", probes["block"], ctx)
+            elapsed = time.monotonic() - t0
+        finally:
+            ticker_task.cancel()
+
+        # Inline execution would park the loop in time.sleep(6) —
+        # returning only after the full sleep, with the ticker starved.
+        assert elapsed < 4.5, (
+            f"blocking companion stalled run_companion for {elapsed:.2f}s"
+        )
+        assert ticks >= 5, (
+            "event loop was starved while the companion blocked"
+        )
+        assert any("abandoning" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_blocking_companion_cancelled_promptly(self, tmp_path):
+        # stop_scan / scan-level timeout deliver CancelledError; it must
+        # take effect immediately even while the companion is wedged.
+        (tmp_path / "block_discovery.py").write_text(_BLOCKING_COMPANION)
+        probes = load_discovery_companions([tmp_path])
+
+        async def emit(host, ev):
+            pass
+
+        ctx = ProbeContext(
+            driver_id="block",
+            source_ip="127.0.0.1",
+            target_subnets=(),
+            timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
+            log=logging.getLogger("test"),
+            _emit_for_host=emit,
+        )
+
+        t0 = time.monotonic()
+        task = asyncio.create_task(
+            run_companion("block", probes["block"], ctx),
+        )
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        elapsed = time.monotonic() - t0
+        assert elapsed < 3.0, (
+            f"cancel was not delivered until the blocking call "
+            f"returned ({elapsed:.2f}s)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_emit_marshalled_to_engine_loop_thread(self, tmp_path):
+        # Engine state is only safe to touch from the engine's loop, so
+        # the emit callback must run there — not on the worker thread
+        # the companion executes on.
+        (tmp_path / "vend_discovery.py").write_text(_COMPANION_SOURCE)
+        probes = load_discovery_companions([tmp_path])
+
+        engine_thread = threading.get_ident()
+        emit_threads: list[int] = []
+        captured: list[tuple[str, Evidence]] = []
+
+        async def emit(host, ev):
+            emit_threads.append(threading.get_ident())
+            captured.append((host, ev))
+
+        ctx = ProbeContext(
+            driver_id="vend",
+            source_ip="127.0.0.1",
+            target_subnets=("192.168.1.0/24",),
+            timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
+            log=logging.getLogger("test"),
+            _emit_for_host=emit,
+        )
+        await run_companion("vend", probes["vend"], ctx)
+        assert len(captured) == 1
+        assert captured[0][0] == "10.0.0.99"
+        assert emit_threads == [engine_thread]
+
+
 # ---------------------------------------------------------------------------
 # Network-safety regression
 # ---------------------------------------------------------------------------
