@@ -9,6 +9,7 @@ import { useConnectionStore } from "../store/connectionStore";
 import { useLogStore } from "../store/logStore";
 import { useNavigationStore } from "../store/navigationStore";
 import { StatusCardSlot } from "../components/plugins/PluginExtensions";
+import { copyToClipboard } from "../components/shared/clipboard";
 import { showError } from "../store/toastStore";
 import * as api from "../api/restClient";
 import type { CloudStatus } from "../api/restClient";
@@ -16,10 +17,11 @@ import type { CloudStatus } from "../api/restClient";
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
+    copyToClipboard(text).then((copiedOk) => {
+      if (!copiedOk) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    });
   }, [text]);
   return (
     <button

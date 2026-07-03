@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power, Upload, FileCheck2, ChevronDown, ChevronRight, Copy, Smartphone } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
+import { copyToClipboard } from "../components/shared/clipboard";
 import { HostNetworkCard } from "../components/system/HostNetworkCard";
 import { RestartProgressDialog } from "../components/shared/RestartProgressDialog";
 import { showError, showSuccess } from "../store/toastStore";
@@ -841,10 +842,14 @@ export function SystemSettingsView() {
                         <button
                           type="button"
                           onClick={() => {
-                            navigator.clipboard.writeText(tlsStatus.cert!.fingerprint).then(() => {
+                            copyToClipboard(tlsStatus.cert!.fingerprint).then((copied) => {
+                              if (!copied) {
+                                showError("Couldn't copy to clipboard");
+                                return;
+                              }
                               setFingerprintCopied(true);
                               setTimeout(() => setFingerprintCopied(false), 1500);
-                            }).catch(() => showError("Couldn't copy to clipboard"));
+                            });
                           }}
                           style={{
                             ...btnStyle,

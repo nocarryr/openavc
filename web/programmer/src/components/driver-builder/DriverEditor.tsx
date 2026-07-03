@@ -22,6 +22,7 @@ import { CollapsibleSection } from "./CollapsibleSection";
 import { IssueList } from "./IssueList";
 import { validateDriver, issuesFor } from "./validateDriver";
 import { DOCS } from "./docLinks";
+import { copyToClipboard } from "../shared/clipboard";
 
 type TabId =
   | "general"
@@ -112,13 +113,9 @@ export function DriverEditor({
   }, [draft]);
 
   const copyYaml = async () => {
-    try {
-      await navigator.clipboard.writeText(yamlPreview);
-      setYamlCopied(true);
-      setTimeout(() => setYamlCopied(false), 1500);
-    } catch {
-      // ignore — older browsers / no permissions
-    }
+    if (!(await copyToClipboard(yamlPreview))) return;
+    setYamlCopied(true);
+    setTimeout(() => setYamlCopied(false), 1500);
   };
 
   // Devices in the current project that reference the loaded driver by its

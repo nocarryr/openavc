@@ -3,6 +3,7 @@
  */
 import { useState } from "react";
 import { Copy, Check } from "lucide-react";
+import { copyToClipboard } from "./clipboard";
 
 interface CopyButtonProps {
   value: string;
@@ -13,9 +14,9 @@ interface CopyButtonProps {
 export function CopyButton({ value, size = 12, title = "Copy to clipboard" }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = (e: React.MouseEvent) => {
+  const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(value);
+    if (!(await copyToClipboard(value))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
