@@ -16,9 +16,24 @@ Checks performed:
   YAML drivers (.avcdriver):
     1. State coverage   — every state_variable has an initial_state value
     2. Command coverage — every command has a matching simulator handler
+                          (OSC drivers: command/poll addresses match handler
+                          address patterns, response addresses, or the
+                          simulator's built-in system addresses)
     3. Response parsing — simulator responses match the driver's response patterns
     4. Poll coverage    — every polling query has a matching handler
+                          (each_child queries are checked with a sample child id)
     5. Type consistency — boolean/enum/number types are handled correctly
+    6. State machines   — simulator.state_machines structure is well-formed
+    7. Handler syntax   — inline handler: Python bodies compile
+    8. Explicit handlers — set_state: targets exist, {N} capture refs are in
+                          range for the receive: pattern
+    9. Notifications    — notifications: keys exist, boolean value keys are
+                          lowercase, templates round-trip through response
+                          patterns, {value} isn't used for booleans
+   10. Controls         — simulator.controls entries have valid types,
+                          required per-type fields, and known state keys
+   11. Child entities   — drivers with child_entity_types get a heads-up that
+                          per-child state is not auto-generated
 
   Python drivers (.py + _sim.py):
     1. SIMULATOR_INFO   — required fields present (driver_id, name, initial_state)
@@ -30,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import re
 import sys
 from pathlib import Path
@@ -118,18 +134,28 @@ def validate_yaml_driver(path: Path) -> ValidationResult:
     sim = driver_def.get("simulator", {})
     sim_initial = sim.get("initial_state", {})
     sim_handlers = sim.get("command_handlers", [])
+    transport = driver_def.get("transport", "tcp")
+    known_keys = _known_state_keys(state_vars, sim_initial, sim)
 
     # ── Check 1: State variable coverage ──
     _check_state_coverage(result, state_vars, sim_initial, sim)
 
-    # ── Check 2: Command handler coverage ──
-    _check_command_coverage(result, commands, sim_handlers, driver_def)
+    if transport == "osc":
+        # ── Checks 2+4 (OSC): command / poll address coverage ──
+        # OSC commands send an address (+ args), not a text line, and the
+        # simulator matches them against handler address patterns, response
+        # addresses, and its built-in system addresses.
+        _check_osc_command_coverage(result, commands, sim_handlers, responses, driver_def)
+        _check_osc_poll_coverage(result, queries, commands, sim_handlers, responses, driver_def)
+    else:
+        # ── Check 2: Command handler coverage ──
+        _check_command_coverage(result, commands, sim_handlers, driver_def)
 
-    # ── Check 3: Response parsing (round-trip) ──
-    _check_response_parsing(result, commands, sim_handlers, responses, sim_initial, driver_def)
+        # ── Check 3: Response parsing (round-trip) ──
+        _check_response_parsing(result, commands, sim_handlers, responses, sim_initial, driver_def)
 
-    # ── Check 4: Poll query coverage ──
-    _check_poll_coverage(result, queries, sim_handlers, driver_def)
+        # ── Check 4: Poll query coverage ──
+        _check_poll_coverage(result, queries, sim_handlers, driver_def)
 
     # ── Check 5: Type consistency ──
     _check_type_consistency(result, state_vars, sim_initial, sim_handlers)
@@ -137,7 +163,35 @@ def validate_yaml_driver(path: Path) -> ValidationResult:
     # ── Check 6: State machine structure ──
     _check_state_machines(result, sim, commands)
 
+    # ── Check 7: Handler code syntax ──
+    _check_handler_syntax(result, sim_handlers)
+
+    # ── Check 8: Explicit handler set_state / capture references ──
+    _check_explicit_handlers(result, sim_handlers, known_keys)
+
+    # ── Check 9: Notification templates ──
+    _check_notifications(
+        result, sim, state_vars, sim_initial, responses, driver_def, known_keys, transport
+    )
+
+    # ── Check 10: Declarative controls schema ──
+    _check_controls(result, sim, known_keys)
+
+    # ── Check 11: Child entity simulation gap ──
+    _check_child_entities(result, driver_def, sim)
+
     return result
+
+
+def _known_state_keys(state_vars: dict, sim_initial: dict, sim: dict) -> set[str]:
+    """All state keys the simulator will actually have at boot: declared
+    state_variables, explicit initial_state entries, and state machine names
+    (each machine stores its current state under its own name)."""
+    keys = set(state_vars) | set(sim_initial)
+    machines = sim.get("state_machines")
+    if isinstance(machines, dict):
+        keys |= set(machines)
+    return keys
 
 
 def _check_state_machines(result: ValidationResult, sim: dict, commands: dict) -> None:
@@ -328,6 +382,9 @@ def _check_response_parsing(
 
     # Check explicit handler responses
     for handler_def in sim_handlers:
+        if not isinstance(handler_def, dict) or "address" in handler_def:
+            # OSC handlers respond with (address, args) tuples, not text lines
+            continue
         respond_template = handler_def.get("respond")
         handler_code = handler_def.get("handler")
 
@@ -387,7 +444,9 @@ def _check_poll_coverage(
 ) -> None:
     """Check every polling query has a matching simulator handler."""
     handler_patterns = _compile_handler_patterns(sim_handlers)
-    config = driver_def.get("default_config", {})
+    config = _effective_config(driver_def)
+    commands = driver_def.get("commands", {})
+    transport = driver_def.get("transport", "tcp")
 
     for query in queries:
         if isinstance(query, dict):
@@ -398,19 +457,34 @@ def _check_poll_coverage(
         if not query_text:
             continue
 
-        # Substitute config variables in query text
+        # HTTP/UDP queries that name a command run as that command —
+        # command coverage checks those.
+        if transport in ("http", "udp") and query_text in commands:
+            continue
+
+        # Substitute config variables in query text; each_child queries get a
+        # sample child id (the runtime expands them per registered child).
         sample = _substitute_config(query_text, config)
+        sample = sample.replace("{child_id}", "1")
         sample = sample.strip().replace("\\n", "").replace("\\r", "")
-        sample = sample.rstrip("\r\n")
+        sample = sample.rstrip("\r\n").strip()
 
         matched = _find_matching_handler(sample, handler_patterns)
         if not matched:
-            # Check if auto-gen query handlers would cover this
-            # (auto-gen creates handlers from commands with no params)
-            commands = driver_def.get("commands", {})
+            # Check if auto-gen handlers would cover this. The simulator
+            # builds a handler for every command's send template, so any
+            # query matching one of those patterns is answered too.
             auto_covered = False
             for cmd_def in commands.values():
+                if not cmd_def.get("send"):
+                    continue
                 if cmd_def.get("send") == query_text and not cmd_def.get("params"):
+                    auto_covered = True
+                    break
+                auto_pattern = _build_auto_pattern(
+                    cmd_def["send"], cmd_def.get("params", {})
+                )
+                if auto_pattern and auto_pattern.match(sample):
                     auto_covered = True
                     break
 
@@ -463,6 +537,8 @@ def _check_type_consistency(
     # Check for boolean state refs in respond: templates that might produce
     # capitalized Python booleans (True/False instead of true/false)
     for handler_def in sim_handlers:
+        if not isinstance(handler_def, dict):
+            continue
         respond = handler_def.get("respond", "")
         if not respond:
             continue
@@ -478,6 +554,574 @@ def _check_type_consistency(
                         f"'True' not 'true'. Use a script handler with "
                         f"str(state[\"{ref_name}\"]).lower() instead."
                     )
+
+
+# ── OSC coverage (address-based) ──
+
+# Addresses the simulator answers without any handler (yaml_auto
+# _handle_osc_message): subscription renewal, console info/status, and the
+# action/show namespaces it echoes back.
+_OSC_SPECIAL_ADDRESSES = {"/xremote", "/info", "/status"}
+_OSC_SPECIAL_PREFIXES = ("/-action/", "/-show/")
+
+
+def _collect_osc_patterns(sim_handlers: list, responses: list) -> list[str]:
+    """Address patterns (fnmatch) the OSC simulator matches against: script
+    handlers with address:, plus response entries with address: (the sim
+    auto-answers those with current state)."""
+    patterns = []
+    for h in sim_handlers:
+        if isinstance(h, dict) and h.get("address"):
+            patterns.append(str(h["address"]))
+    for resp in responses:
+        if isinstance(resp, dict) and resp.get("address"):
+            patterns.append(str(resp["address"]))
+    return patterns
+
+
+def _osc_address_covered(address: str, patterns: list[str]) -> bool:
+    if address in _OSC_SPECIAL_ADDRESSES or address.startswith(_OSC_SPECIAL_PREFIXES):
+        return True
+    return any(fnmatch.fnmatch(address, p) for p in patterns)
+
+
+# Marker for param placeholders while building a template regex; plain ASCII
+# so re.escape leaves it alone, unusual enough not to appear in addresses.
+_PARAM_MARKER = "Q0PARAMQ0"
+
+
+def _osc_template_regex(template: str, params: dict) -> re.Pattern | None:
+    """Regex matching every address the template can produce (params match
+    any single address segment)."""
+    pat = template
+    for param_name in params:
+        pat = re.sub(r"\{" + re.escape(param_name) + r"(:[^}]*)?\}", _PARAM_MARKER, pat)
+    if "{" in pat:
+        return None  # unresolved config placeholders — can't model statically
+    escaped = re.escape(pat).replace(_PARAM_MARKER, "[^/]+")
+    try:
+        return re.compile(f"^{escaped}$")
+    except re.error:
+        return None
+
+
+def _osc_template_covered(template: str, params: dict, patterns: list[str]) -> bool:
+    """Check whether the set of addresses a parameterized command template can
+    produce overlaps the simulator's address surface.
+
+    A command like /mtx/{mtx}/mix/on with a string param is covered by literal
+    response addresses /mtx/01/mix/on … /mtx/06/mix/on even though no single
+    sample value proves it. Wildcard handler patterns are probed with their
+    * / ? / [...] parts collapsed to a plain segment token.
+    """
+    rx = _osc_template_regex(template, params)
+    if rx is None:
+        return False
+    for pattern in patterns:
+        if any(ch in pattern for ch in "*?["):
+            probe = re.sub(r"\[[^\]]*\]", "x", pattern)
+            probe = re.sub(r"[*?]+", "x", probe)
+        else:
+            probe = pattern
+        if rx.match(probe):
+            return True
+    return False
+
+
+def _check_osc_command_coverage(
+    result: ValidationResult,
+    commands: dict,
+    sim_handlers: list,
+    responses: list,
+    driver_def: dict,
+) -> None:
+    """Check every OSC command's address is answered by the simulator."""
+    patterns = _collect_osc_patterns(sim_handlers, responses)
+    config = _effective_config(driver_def)
+
+    for cmd_name, cmd_def in commands.items():
+        address_template = cmd_def.get("address", "")
+        if not address_template:
+            continue
+
+        params = cmd_def.get("params", {})
+        sample = _generate_sample_command(address_template, params, driver_def)
+        if sample is not None and _osc_address_covered(sample, patterns):
+            continue
+        # A string param's sample value may miss literal response addresses
+        # that do cover the command (e.g. /mtx/{mtx}/mix/on vs /mtx/01/mix/on),
+        # so fall back to matching the template's address shape.
+        if _osc_template_covered(
+            _substitute_config(address_template, config), params, patterns
+        ):
+            continue
+        if sample is None:
+            result.warning(
+                "command_coverage",
+                f"Could not generate sample address for command '{cmd_name}' "
+                f"(address: {address_template!r})"
+            )
+            continue
+        result.error(
+            "command_coverage",
+            f"No simulator handler matches OSC command '{cmd_name}' "
+            f"(sample address: {sample!r}) — add a command_handlers entry "
+            f"with a matching address: pattern or a responses entry for it"
+        )
+
+
+def _check_osc_poll_coverage(
+    result: ValidationResult,
+    queries: list,
+    commands: dict,
+    sim_handlers: list,
+    responses: list,
+    driver_def: dict,
+) -> None:
+    """Check every OSC polling query is answered by the simulator.
+
+    OSC poll queries are either command names (run as that command — covered
+    by command coverage) or raw addresses.
+    """
+    patterns = _collect_osc_patterns(sim_handlers, responses)
+    config = _effective_config(driver_def)
+
+    for query in queries:
+        if isinstance(query, dict):
+            query_text = str(query.get("send", ""))
+        else:
+            query_text = str(query)
+        if not query_text:
+            continue
+
+        if query_text in commands:
+            continue  # runs as that command; command coverage checks it
+
+        sample = _substitute_config(query_text, config)
+        sample = sample.replace("{child_id}", "1")
+        if not _osc_address_covered(sample, patterns):
+            result.error(
+                "poll_coverage",
+                f"No simulator handler matches OSC polling query: {sample!r}"
+            )
+
+
+# ── Simulator-section checks (handlers, notifications, controls, children) ──
+
+
+def _check_handler_syntax(result: ValidationResult, sim_handlers: list) -> None:
+    """Check inline handler: Python bodies compile.
+
+    The simulator skips a handler whose code has a syntax error (with only a
+    server-side log line), so a typo silently kills the handler at runtime.
+    """
+    for h in sim_handlers:
+        if not isinstance(h, dict):
+            result.error("command_handlers", f"command_handlers entries must be mappings, got: {h!r}")
+            continue
+        code = h.get("handler")
+        if code is None:
+            continue
+        label = h.get("address") or h.get("receive") or h.get("match") or "?"
+        try:
+            compile(str(code), "<handler>", "exec")
+        except SyntaxError as e:
+            result.error(
+                "handler_syntax",
+                f"handler for {label!r} has a Python syntax error "
+                f"(line {e.lineno}): {e.msg} — the simulator will skip this handler"
+            )
+
+
+def _check_explicit_handlers(
+    result: ValidationResult,
+    sim_handlers: list,
+    known_keys: set[str],
+) -> None:
+    """Check template-based handlers (receive: + respond:/set_state:).
+
+    Catches set_state: targets that aren't state keys (the sim would write a
+    junk key), {N} capture references beyond what the receive: pattern
+    captures (left as literal text at runtime), and {state.X} references to
+    unknown keys (also left literal).
+    """
+    capture_ref = re.compile(r"\{(\d+)\}")
+    state_ref = re.compile(r"\{state\.(\w+)\}")
+
+    for h in sim_handlers:
+        if not isinstance(h, dict) or "address" in h:
+            continue  # OSC handlers have no receive:/set_state: surface
+
+        pattern_str = h.get("receive") or h.get("match", "")
+        set_state = h.get("set_state")
+        respond = h.get("respond")
+
+        if "handler" in h:
+            if set_state or respond:
+                result.warning(
+                    "command_handlers",
+                    f"handler {pattern_str!r}: set_state:/respond: are ignored "
+                    f"when handler: is present — move that logic into the handler code"
+                )
+            continue
+
+        if not pattern_str:
+            if set_state or respond:
+                result.warning(
+                    "command_handlers",
+                    "handler with respond:/set_state: has no receive: or match: "
+                    "pattern — it can never fire"
+                )
+            continue
+
+        try:
+            group_count = re.compile(pattern_str).groups
+        except re.error as e:
+            result.error(
+                "command_handlers",
+                f"invalid regex in handler pattern {pattern_str!r}: {e} — "
+                f"the simulator will skip this handler"
+            )
+            continue
+
+        templates: list[str] = []
+        if isinstance(set_state, dict):
+            for key, value in set_state.items():
+                if known_keys and key not in known_keys:
+                    result.warning(
+                        "set_state",
+                        f"handler {pattern_str!r}: set_state target '{key}' is not "
+                        f"a state variable or initial_state key — the value will be "
+                        f"written to a key nothing reads"
+                    )
+                templates.append(str(value))
+        if isinstance(respond, str):
+            templates.append(respond)
+
+        for template in templates:
+            for m in capture_ref.finditer(template):
+                n = int(m.group(1))
+                if n > group_count:
+                    result.error(
+                        "set_state",
+                        f"handler {pattern_str!r}: template {template!r} references "
+                        f"capture group {{{n}}} but the pattern has only "
+                        f"{group_count} group(s) — the placeholder stays literal at runtime"
+                    )
+            for m in state_ref.finditer(template):
+                if known_keys and m.group(1) not in known_keys:
+                    result.warning(
+                        "set_state",
+                        f"handler {pattern_str!r}: template {template!r} references "
+                        f"{{state.{m.group(1)}}} which is not a state key — the "
+                        f"placeholder stays literal at runtime"
+                    )
+
+
+def _default_for_type(var_def: dict) -> Any:
+    """The auto-gen initial value for a state variable (mirrors yaml_auto)."""
+    var_type = var_def.get("type", "string")
+    if var_type == "integer":
+        return var_def.get("min", 0)
+    if var_type == "number":
+        return 0.0
+    if var_type == "boolean":
+        return False
+    if var_type == "enum":
+        values = var_def.get("values", [])
+        return values[0] if values else ""
+    return ""
+
+
+def _check_notifications(
+    result: ValidationResult,
+    sim: dict,
+    state_vars: dict,
+    sim_initial: dict,
+    responses: list,
+    driver_def: dict,
+    known_keys: set[str],
+    transport: str,
+) -> None:
+    """Validate the notifications: section (unsolicited push messages).
+
+    Catches notification keys that aren't state keys (never fires), boolean
+    value keys that can't match (lookup uses lowercase 'true'/'false'),
+    {value} templates on boolean variables (emit Python's 'True'/'False'),
+    and templates whose output no driver response pattern parses.
+    """
+    notifications = sim.get("notifications")
+    if notifications is None:
+        return
+    if not isinstance(notifications, dict):
+        result.error("notifications", "simulator.notifications must be a mapping")
+        return
+    if not notifications:
+        return
+
+    if transport not in ("tcp", "serial"):
+        result.warning(
+            "notifications",
+            f"notifications: has no effect for transport '{transport}' — only "
+            f"line-based TCP/serial simulators push notification messages"
+        )
+
+    response_patterns = _compile_response_patterns(responses, driver_def)
+
+    for key, value_map in notifications.items():
+        if known_keys and key not in known_keys:
+            result.warning(
+                "notifications",
+                f"notification key '{key}' is not a state variable or "
+                f"initial_state key — it only fires if a handler writes that key"
+            )
+
+        var_type = state_vars.get(key, {}).get("type", "string")
+
+        if isinstance(value_map, str):
+            value_map = {"*": value_map}
+        elif not isinstance(value_map, dict):
+            result.error(
+                "notifications",
+                f"notification '{key}' must be a template string or a "
+                f"value → template mapping, got: {value_map!r}"
+            )
+            continue
+
+        for trigger_value, template in value_map.items():
+            trigger = str(trigger_value)
+            template = str(template)
+
+            if var_type == "boolean" and trigger not in ("true", "false", "*"):
+                result.error(
+                    "notifications",
+                    f"notification '{key}' value key {trigger!r} never matches — "
+                    f"boolean lookups use lowercase 'true'/'false' (quote the keys "
+                    f"in YAML so they stay strings)"
+                )
+            if var_type == "enum" and trigger != "*":
+                valid = [str(v) for v in state_vars[key].get("values", [])]
+                if valid and trigger not in valid:
+                    result.warning(
+                        "notifications",
+                        f"notification '{key}' value key {trigger!r} is not one of "
+                        f"the enum values {valid}"
+                    )
+
+            if var_type == "boolean" and "{value}" in template:
+                result.error(
+                    "notifications",
+                    f"notification '{key}' template uses {{value}} but '{key}' is "
+                    f"boolean — Python's str(True) produces 'True' not 'true'. Use "
+                    f"per-value templates ('true': ..., 'false': ...) instead."
+                )
+                continue
+
+            if not response_patterns:
+                continue
+
+            # Round-trip: the emitted message should parse via responses:
+            if trigger == "*":
+                if key in sim_initial:
+                    sample_value = sim_initial[key]
+                else:
+                    sample_value = _default_for_type(state_vars.get(key, {}))
+            else:
+                sample_value = trigger
+            message = template.replace("{value}", str(sample_value)).replace("{key}", key)
+            if "{" in message and "}" in message:
+                continue  # unresolved placeholders — can't validate statically
+            if not any(p.search(message) for p in response_patterns):
+                result.warning(
+                    "notifications",
+                    f"notification '{key}' emits {message!r} which matches no "
+                    f"driver response pattern — the driver will ignore it"
+                )
+
+
+# Required fields per control type, beyond the always-required "type".
+# "label" requirements are warned, not errored (the panel renders, just ugly).
+_CONTROL_REQUIRED: dict[str, tuple[str, ...]] = {
+    "power": ("key",),
+    "select": ("key", "options"),
+    "slider": ("key", "min", "max"),
+    "toggle": ("key",),
+    "matrix": ("inputs", "outputs", "state_pattern"),
+    "meters": ("channels", "key_pattern"),
+    "presets": ("key",),
+    "group": ("controls",),
+    "indicator": ("key",),
+}
+_CONTROL_LABEL_REQUIRED = ("toggle", "indicator", "group")
+
+
+def _check_controls(result: ValidationResult, sim: dict, known_keys: set[str]) -> None:
+    """Validate the explicit simulator.controls schema.
+
+    Explicit controls replace the auto-generated set, so a typo'd type or a
+    missing per-type field silently yields a blank or broken panel.
+    """
+    controls = sim.get("controls")
+    if controls is None:
+        return
+    if not isinstance(controls, list):
+        result.error("controls", "simulator.controls must be a list")
+        return
+    for i, control in enumerate(controls):
+        _check_one_control(result, control, f"controls[{i}]", known_keys)
+
+
+def _check_one_control(
+    result: ValidationResult, control: Any, where: str, known_keys: set[str]
+) -> None:
+    if not isinstance(control, dict):
+        result.error("controls", f"{where}: must be a mapping, got: {control!r}")
+        return
+
+    ctype = control.get("type")
+    if ctype not in _CONTROL_REQUIRED:
+        valid = ", ".join(sorted(_CONTROL_REQUIRED))
+        result.error(
+            "controls",
+            f"{where}: unknown control type {ctype!r} — the panel renders "
+            f"nothing for it (valid types: {valid})"
+        )
+        return
+
+    for field in _CONTROL_REQUIRED[ctype]:
+        if field not in control:
+            result.error(
+                "controls",
+                f"{where} ({ctype}): missing required field '{field}'"
+            )
+    if ctype in _CONTROL_LABEL_REQUIRED and "label" not in control:
+        result.warning(
+            "controls",
+            f"{where} ({ctype}): missing 'label' — the panel shows 'undefined'"
+        )
+
+    def _warn_unknown_key(key: Any, field: str) -> None:
+        if isinstance(key, str) and known_keys and key not in known_keys:
+            result.warning(
+                "controls",
+                f"{where} ({ctype}): {field} '{key}' is not a state variable or "
+                f"initial_state key — the control shows nothing and writes to a "
+                f"key nothing reads"
+            )
+
+    if ctype in ("power", "select", "slider", "toggle", "presets", "indicator"):
+        _warn_unknown_key(control.get("key"), "key")
+
+    if ctype == "select":
+        options = control.get("options")
+        if options is not None and not isinstance(options, list):
+            result.error("controls", f"{where} (select): 'options' must be a list")
+        elif isinstance(options, list) and not options:
+            result.warning("controls", f"{where} (select): 'options' is empty")
+
+    if ctype == "slider":
+        for field in ("min", "max"):
+            value = control.get(field)
+            if value is not None and not isinstance(value, (int, float)):
+                result.error(
+                    "controls",
+                    f"{where} (slider): '{field}' must be a number, got: {value!r}"
+                )
+
+    if ctype == "matrix":
+        for field in ("inputs", "outputs"):
+            value = control.get(field)
+            if value is not None and (not isinstance(value, int) or value <= 0):
+                result.error(
+                    "controls",
+                    f"{where} (matrix): '{field}' must be a positive integer, "
+                    f"got: {value!r}"
+                )
+        pattern = control.get("state_pattern")
+        if isinstance(pattern, str):
+            if "{output}" not in pattern:
+                result.warning(
+                    "controls",
+                    f"{where} (matrix): state_pattern {pattern!r} has no "
+                    f"{{output}} placeholder — every output binds the same key"
+                )
+            else:
+                _warn_unknown_key(pattern.replace("{output}", "1"), "state_pattern")
+
+    if ctype == "meters":
+        channels = control.get("channels")
+        if channels is not None and (not isinstance(channels, int) or channels <= 0):
+            result.error(
+                "controls",
+                f"{where} (meters): 'channels' must be a positive integer, "
+                f"got: {channels!r}"
+            )
+        for field in ("key_pattern", "mute_pattern"):
+            pattern = control.get(field)
+            if isinstance(pattern, str):
+                if "{ch}" not in pattern:
+                    result.warning(
+                        "controls",
+                        f"{where} (meters): {field} {pattern!r} has no {{ch}} "
+                        f"placeholder — every channel binds the same key"
+                    )
+                else:
+                    _warn_unknown_key(pattern.replace("{ch}", "1"), field)
+
+    if ctype == "presets":
+        if "count" not in control and "names" not in control:
+            result.warning(
+                "controls",
+                f"{where} (presets): neither 'count' nor 'names' given — the "
+                f"panel renders no preset buttons"
+            )
+        count = control.get("count")
+        if count is not None and not isinstance(count, int):
+            result.error(
+                "controls", f"{where} (presets): 'count' must be an integer"
+            )
+        names = control.get("names")
+        if names is not None and not isinstance(names, list):
+            result.error(
+                "controls", f"{where} (presets): 'names' must be a list"
+            )
+
+    if ctype == "group":
+        children = control.get("controls")
+        if isinstance(children, list):
+            for i, child in enumerate(children):
+                _check_one_control(result, child, f"{where}.controls[{i}]", known_keys)
+        elif children is not None:
+            result.error("controls", f"{where} (group): 'controls' must be a list")
+
+
+def _check_child_entities(result: ValidationResult, driver_def: dict, sim: dict) -> None:
+    """Surface the child-entity simulation gap.
+
+    The simulator carries the child roster (labels/config, shown in the UI)
+    but does not auto-generate per-child state or responses from
+    child_entity_types — that behavior must be authored as explicit
+    simulator handlers.
+    """
+    child_types = driver_def.get("child_entity_types")
+    if not isinstance(child_types, dict) or not child_types:
+        return
+    names = ", ".join(sorted(child_types))
+    if not sim:
+        result.warning(
+            "child_entities",
+            f"driver declares child entity types ({names}) but has no "
+            f"simulator: section — the auto-generated simulator only models "
+            f"top-level state_variables, so child-addressed commands and polls "
+            f"get no realistic responses. Add command_handlers covering them."
+        )
+    else:
+        result.info(
+            "child_entities",
+            f"driver declares child entity types ({names}) — per-child state "
+            f"is not auto-generated, so make sure command_handlers cover "
+            f"child-addressed commands and each_child polling queries."
+        )
 
 
 # ── Python driver validation ──
@@ -665,6 +1309,8 @@ def _compile_handler_patterns(handlers: list) -> list[tuple[re.Pattern, dict]]:
     """Compile regex patterns from simulator command handlers."""
     patterns = []
     for h in handlers:
+        if not isinstance(h, dict):
+            continue  # _check_handler_syntax reports the malformed entry
         pattern_str = h.get("receive") or h.get("match", "")
         if not pattern_str:
             continue
@@ -693,7 +1339,7 @@ def _generate_sample_command(
     Substitutes config variables with default values and parameters
     with type-appropriate test values.
     """
-    config = driver_def.get("default_config", {})
+    config = _effective_config(driver_def)
     result = template
 
     # Substitute config variables first
@@ -702,7 +1348,7 @@ def _generate_sample_command(
     # Substitute parameters with test values
     for param_name, param_def in params.items():
         param_type = param_def.get("type", "string")
-        if param_type == "integer":
+        if param_type in ("integer", "child_id"):
             test_val = str(param_def.get("default", param_def.get("min", 1)))
         elif param_type == "number":
             test_val = str(param_def.get("default", param_def.get("min", 1.0)))
@@ -740,10 +1386,13 @@ def _generate_sample_command(
         else:
             result = result.replace(f"{{{param_name}}}", str(test_val))
 
-    # Strip line endings (literal \n in YAML becomes part of the string)
+    # Strip line endings (literal \n in YAML becomes part of the string).
+    # The final strip mirrors the simulator's dispatch, which strips each
+    # incoming line before matching — without it a template with trailing
+    # whitespace before its \r false-fails handler patterns.
     result = result.strip()
     result = result.replace("\\n", "").replace("\\r", "")
-    result = result.rstrip("\r\n")
+    result = result.rstrip("\r\n").strip()
 
     # Check for unresolved placeholders (config vars that weren't substituted)
     if re.search(r"\{[a-z_]+\}", result):
@@ -760,12 +1409,35 @@ def _substitute_config(template: str, config: dict) -> str:
     return result
 
 
+def _effective_config(driver_def: dict) -> dict:
+    """default_config plus config_derived values.
+
+    Mirrors ConfigurableDriver._compute_derived_config: a derived template
+    whose referenced fields are all non-empty is substituted; otherwise the
+    derived value is "" (so an optional prefix segment simply disappears).
+    """
+    config = dict(driver_def.get("default_config", {}))
+    derived = driver_def.get("config_derived")
+    if isinstance(derived, dict):
+        for name, template in derived.items():
+            if not isinstance(template, str):
+                continue
+            refs = re.findall(r"\{(\w+)(?::[^{}]*)?\}", template)
+            if any(not str(config.get(f, "") or "").strip() for f in refs):
+                config[name] = ""
+            else:
+                config[name] = _substitute_config(template, config)
+    return config
+
+
 def _build_auto_pattern(template: str, params: dict) -> re.Pattern | None:
     """Build the regex that the auto-gen system would create for a command."""
     result = template
     for param_name, param_def in params.items():
         param_type = param_def.get("type", "string")
-        if param_type == "integer":
+        if param_type in ("integer", "child_id"):
+            # child_id values are integer child-entity IDs (mirrors the
+            # simulator's _send_template_to_regex)
             capture = r"(\d+)"
         elif param_type == "number":
             capture = r"([\d.]+)"
@@ -810,7 +1482,7 @@ def _compile_response_patterns(
     responses: list, driver_def: dict
 ) -> list[re.Pattern]:
     """Compile driver response patterns with config variable substitution."""
-    config = driver_def.get("default_config", {})
+    config = _effective_config(driver_def)
     patterns = []
     for resp in responses:
         pattern_str = resp.get("match", "")
