@@ -2,7 +2,9 @@ import { Play } from "lucide-react";
 import type { ProjectConfig } from "../../../api/types";
 import * as api from "../../../api/restClient";
 import { showSuccess, showError } from "../../../store/toastStore";
+import { useConnectionStore } from "../../../store/connectionStore";
 import { ActionPicker } from "./ActionPicker";
+import { resolveTestParams, testBlockedMessage } from "./testActionParams";
 
 interface PressBindingEditorProps {
   value: Record<string, unknown>[];
@@ -47,7 +49,18 @@ export function PressBindingEditor({
   const testAction = async (action: Record<string, unknown>) => {
     try {
       if (action.action === "device.command" && action.device && action.command) {
-        await api.sendCommand(String(action.device), String(action.command), (action.params as Record<string, unknown>) ?? {});
+        // Params can hold $-references; a raw send would put the literal
+        // "$value" on the wire. Resolve what has a live value, refuse the
+        // rest with a message instead of sending a malformed command.
+        const result = resolveTestParams(
+          (action.params as Record<string, unknown>) ?? {},
+          useConnectionStore.getState().liveState,
+        );
+        if (!result.ok) {
+          showError(testBlockedMessage(result));
+          return;
+        }
+        await api.sendCommand(String(action.device), String(action.command), result.params);
         showSuccess("Command sent");
       } else if (action.action === "macro" && action.macro) {
         await api.executeMacro(String(action.macro));
