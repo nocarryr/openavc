@@ -1,5 +1,6 @@
 """Driver listing, installation, definitions, and Python driver REST API endpoints."""
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,20 @@ log = get_logger(__name__)
 router = APIRouter()
 
 
-def _parse_semver(v: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
+def _parse_semver(v: str) -> tuple[int, int, int]:
+    """Parse "X.Y.Z" into a comparable 3-tuple.
+
+    Always three parts, so "0.22" compares equal to "0.22.0" instead of
+    less-than, and a part with a pre-release/build suffix keeps its numeric
+    prefix ("22-rc1" -> 22) instead of vanishing from the tuple.
+    """
+    parts: list[int] = []
+    for piece in v.strip().split(".")[:3]:
+        match = re.match(r"\d+", piece)
+        parts.append(int(match.group()) if match else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
 
 
 def _enforce_min_platform_version(required: str) -> None:
@@ -1194,9 +1207,29 @@ async def update_driver_definition(driver_id: str, body: DriverDefinitionRequest
     return {"status": "updated", "id": driver_def["id"], "devices_reconnected": reconnected}
 
 
+def _merge_patch(current: Any, patch: Any) -> Any:
+    """JSON Merge Patch (RFC 7386): objects merge recursively, a null value
+    deletes the key, and anything else (arrays included) replaces wholesale.
+
+    A shallow top-level merge here silently destroyed sibling entries: a
+    PATCH updating one command replaced the entire ``commands`` block and
+    persisted the truncated driver, breaking every device bound to the
+    dropped commands.
+    """
+    if not isinstance(patch, dict):
+        return patch
+    merged = dict(current) if isinstance(current, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = _merge_patch(merged.get(key), value)
+    return merged
+
+
 @router.patch("/driver-definitions/{driver_id}")
 async def patch_driver_definition(driver_id: str, body: dict) -> dict:
-    """Partially update a driver definition (merge provided fields)."""
+    """Partially update a driver definition (JSON Merge Patch semantics)."""
     from server.drivers.driver_loader import (
         delete_driver_definition,
         is_builtin_driver,
@@ -1225,10 +1258,12 @@ async def patch_driver_definition(driver_id: str, body: dict) -> dict:
             detail="Built-in drivers are read-only. Customize a copy to edit.",
         )
 
-    # Merge: shallow merge top-level keys from body into current
-    merged = {**current, **body}
+    merged = _merge_patch(current, body)
     # Don't allow changing ID via PATCH
     merged["id"] = driver_id
+    # The listing decorates definitions with internal metadata (e.g.
+    # _source_file); keep it out of the saved YAML.
+    merged = {k: v for k, v in merged.items() if not k.startswith("_")}
 
     # Validate merged result
     errors = validate_driver_definition(merged)
@@ -1559,8 +1594,14 @@ def _describe_outgoing(
             cmd_def.get("address", ""), all_params
         )
         args = cmd_def.get("args") or []
+        # Substitute arg values the same way _build_osc_args does, so the
+        # summary shows what went on the wire, not the raw template.
         arg_summary = ", ".join(
-            f"{a.get('type', 's')}={a.get('value', '')}" for a in args
+            "{}={}".format(
+                a.get("type", "s"),
+                ConfigurableDriver._safe_substitute(str(a.get("value", "")), all_params),
+            )
+            for a in args
         )
         return f"OSC {addr}" + (f" [{arg_summary}]" if arg_summary else "")
 
@@ -1785,7 +1826,7 @@ async def _test_http_raw(body: TestCommandRequest) -> dict:
 
     try:
         async with httpx.AsyncClient(
-            timeout=body.timeout, verify=False
+            timeout=body.timeout, verify=body.verify_ssl
         ) as client:
             resp = await client.request(method, url)
             return {

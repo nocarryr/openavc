@@ -5,7 +5,7 @@ Pydantic models for the REST API request/response bodies.
 import re
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CommandRequest(BaseModel):
@@ -179,7 +179,9 @@ class TestCommandRequest(BaseModel):
     host: str = ""
     port: int | str = 23
     transport: str = "tcp"
-    timeout: float = 5.0
+    # Bounded: each test holds a real transport (and often a device's single
+    # TCP control session) open for the full wait.
+    timeout: float = Field(default=5.0, gt=0, le=60)
 
     # Definition mode
     definition: dict[str, Any] | None = None
@@ -191,6 +193,9 @@ class TestCommandRequest(BaseModel):
     # responses so the UI can show what was actually sent.
     command_string: str = ""
     delimiter: str = "\\r"
+    # Raw HTTP probes only. Definition-mode tests go through the real HTTP
+    # transport, which reads verify_ssl from the driver config instead.
+    verify_ssl: bool = True
 
 
 class PythonDriverCreateRequest(BaseModel):

@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from server.api.routes.drivers import (
     _enforce_min_platform_version,
+    _parse_semver,
     _peek_min_platform_version,
 )
 
@@ -72,3 +73,30 @@ def test_enforce_swallows_unparseable(monkeypatch):
     monkeypatch.setattr(server.version, "__version__", "0.7.1")
     # An unparseable required version logs and allows.
     _enforce_min_platform_version("not-a-version")
+
+
+def test_parse_semver_pads_short_versions():
+    # "0.22" must equal "0.22.0" — a short tuple compares less-than and
+    # used to falsely block installs at the gate.
+    assert _parse_semver("0.22") == (0, 22, 0)
+    assert _parse_semver("0.22") == _parse_semver("0.22.0")
+    assert _parse_semver("1") == (1, 0, 0)
+
+
+def test_parse_semver_keeps_numeric_prefix_of_suffixed_parts():
+    # A pre-release/build suffix used to make the whole part vanish from
+    # the tuple ("0.22.0-rc1" -> (0, 22)), shortening the comparison.
+    assert _parse_semver("0.22.0-rc1") == (0, 22, 0)
+    assert _parse_semver("1.2.3+build7") == (1, 2, 3)
+
+
+def test_parse_semver_plain_three_part():
+    assert _parse_semver("1.2.3") == (1, 2, 3)
+    assert _parse_semver("1.2.3") < _parse_semver("1.2.10")
+
+
+def test_enforce_two_part_running_version_not_blocked(monkeypatch):
+    import server.version
+    monkeypatch.setattr(server.version, "__version__", "0.22")
+    # Running "0.22" satisfies a "0.22.0" requirement.
+    _enforce_min_platform_version("0.22.0")

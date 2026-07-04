@@ -332,7 +332,11 @@ async def test_device_connection(device_id: str) -> dict[str, Any]:
             return {"success": False, "error": "No URL configured", "latency_ms": None}
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+            # Verify TLS the way the HTTP transport will (verify_ssl from
+            # device config, on by default) so the reachability result
+            # matches what the driver connection would actually get.
+            verify = bool(cfg.get("verify_ssl", True))
+            async with httpx.AsyncClient(timeout=5.0, verify=verify) as client:
                 await client.head(url)
             latency = round((_time.monotonic() - start) * 1000, 1)
             return {"success": True, "error": None, "latency_ms": latency}
