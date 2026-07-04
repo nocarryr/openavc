@@ -131,17 +131,23 @@ export function ParamInput({
   const fetchChildType = ownChildType ?? siblingChildType ?? tfChildType;
 
   // Children register dynamically as the driver discovers them, so fetch fresh
-  // per field. `undefined` => still loading.
+  // per field. `undefined` => still loading. The type's label_field names the
+  // child state var carrying the device-reported name (e.g. a light's name on
+  // the controller) — used as the display label when no project label is set.
   const [children, setChildren] = useState<ChildEntityEntry[] | undefined>(
     undefined,
   );
+  const [labelField, setLabelField] = useState<string | undefined>(undefined);
   useEffect(() => {
     if (!fetchChildType || !deviceId) return;
     let cancelled = false;
     api
       .listChildEntitiesByType(deviceId, fetchChildType)
       .then((resp) => {
-        if (!cancelled) setChildren(resp.children);
+        if (!cancelled) {
+          setChildren(resp.children);
+          setLabelField(resp.schema?.label_field);
+        }
       })
       .catch(() => {
         if (!cancelled) setChildren([]);
@@ -327,11 +333,22 @@ export function ParamInput({
               ? "Loading children..."
               : `(select ${ownChildType})`}
           </option>
-          {registered.map((c) => (
-            <option key={c.local_id} value={String(c.local_id)}>
-              {c.label ? `${c.label} (${c.local_id})` : `${ownChildType} ${c.local_id}`}
-            </option>
-          ))}
+          {registered.map((c) => {
+            // Display name: the user's project label wins, then the
+            // device-reported name (the type's label_field, live in the
+            // child's state). The stored/sent value is always the id.
+            const reported = labelField ? c.state?.[labelField] : undefined;
+            const name =
+              c.label ||
+              (reported == null ? "" : String(reported));
+            return (
+              <option key={c.local_id} value={String(c.local_id)}>
+                {name
+                  ? `${name} (${c.local_id})`
+                  : `${ownChildType} ${c.local_id}`}
+              </option>
+            );
+          })}
         </select>
         {children !== undefined && registered.length === 0 && (
           <div

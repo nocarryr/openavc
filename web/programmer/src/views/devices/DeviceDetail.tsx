@@ -8,6 +8,7 @@ import { useLogStore } from "../../store/logStore";
 import * as api from "../../api/restClient";
 import type { BridgePort, DeviceConfig, DeviceInfo, DeviceSettingValue, DriverParamDef } from "../../api/types";
 import { ParamInput } from "../../components/shared/ParamInput";
+import { parseStateOptionList } from "../../components/shared/paramOptions";
 import { hasInvalidParams } from "../../components/shared/paramValidation";
 import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins/PluginExtensions";
 import { findDeviceReferences, validateSettingValue } from "./deviceUtils";
@@ -167,6 +168,31 @@ export function DeviceDetail({
 
   const commands = deviceInfo?.commands ?? {};
   const commandNames = Object.keys(commands);
+
+  // State vars that back a param dropdown (any command/action param declaring
+  // `options_state`) hold a JSON-encoded {value,label} list. The Live State
+  // table renders those as a readable option summary instead of the raw JSON.
+  const optionFeedKeys = useMemo(() => {
+    const keys = new Set<string>();
+    const scan = (params: unknown) => {
+      if (!params || typeof params !== "object") return;
+      for (const def of Object.values(params as Record<string, unknown>)) {
+        const os = (def as { options_state?: unknown } | null)?.options_state;
+        if (typeof os === "string" && os) keys.add(os);
+      }
+    };
+    for (const cmd of Object.values(
+      (deviceInfo?.commands ?? {}) as Record<string, unknown>,
+    )) {
+      scan((cmd as { params?: unknown } | null)?.params);
+    }
+    const actions = (deviceInfo?.driver_info as { actions?: unknown } | undefined)
+      ?.actions;
+    if (Array.isArray(actions)) {
+      for (const a of actions) scan((a as { params?: unknown } | null)?.params);
+    }
+    return keys;
+  }, [deviceInfo]);
 
   // child_id params render a dropdown of the device's live children — the
   // shared ParamInput fetches them per-field (children register dynamically as
@@ -689,7 +715,11 @@ export function DeviceDetail({
                         fontSize: "var(--font-size-sm)",
                       }}
                     >
-                      {value}
+                      {optionFeedKeys.has(key) ? (
+                        <OptionFeedValue raw={value} />
+                      ) : (
+                        value
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1047,6 +1077,30 @@ function CommandPicker({
 }
 
 // --- Device Settings Section ---
+
+/** Readable rendering for a picker-feed state value — a JSON-encoded option
+ *  list a command param references via `options_state`. Shows the option
+ *  labels instead of the raw JSON; falls back to the raw string when the
+ *  value doesn't parse (empty, not yet published, malformed). */
+function OptionFeedValue({ raw }: { raw: string }) {
+  const options = parseStateOptionList(raw);
+  if (options.length === 0) return <>{raw}</>;
+  const labels = options.map((o) => o.label);
+  const MAX_SHOWN = 8;
+  const shown = labels.slice(0, MAX_SHOWN).join(", ");
+  const more = labels.length - MAX_SHOWN;
+  return (
+    <span title={`${labels.length} options: ${labels.join(", ")}`}>
+      <span style={{ color: "var(--text-muted)" }}>
+        {labels.length} option{labels.length === 1 ? "" : "s"}:{" "}
+      </span>
+      {shown}
+      {more > 0 && (
+        <span style={{ color: "var(--text-muted)" }}> (+{more} more)</span>
+      )}
+    </span>
+  );
+}
 
 function DeviceSettingsSection({ deviceId, connected }: { deviceId: string; connected: boolean }) {
   const project = useProjectStore((s) => s.project);
