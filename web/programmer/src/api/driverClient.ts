@@ -72,6 +72,8 @@ export interface TestCommandRequest {
   /** Raw mode (legacy fallback) — only used when definition+command_name absent. */
   command_string?: string;
   delimiter?: string;
+  /** Raw HTTPS probes: verify the device certificate (default true). */
+  verify_ssl?: boolean;
 }
 
 export async function testDriverCommand(

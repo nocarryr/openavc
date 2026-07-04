@@ -85,6 +85,10 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
   });
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [rawString, setRawString] = useState("");
+  // Raw HTTPS probes verify the device certificate by default; AV gear
+  // often ships self-signed, so offer the same opt-out the driver config
+  // has (verify_ssl).
+  const [rawVerifySsl, setRawVerifySsl] = useState(true);
   const [results, setResults] = useState<ResultEntry[]>([]);
   const [sending, setSending] = useState(false);
   // A81 — production-device conflict tracking.
@@ -359,6 +363,7 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
               command_string: rawString,
               delimiter: draft.delimiter,
               timeout: 5,
+              verify_ssl: rawVerifySsl,
             }
           : {
               host,
@@ -622,6 +627,22 @@ export function LiveTestPanel({ draft }: LiveTestPanelProps) {
               fontSize: "var(--font-size-sm)",
             }}
           />
+          {transport === "http" && (
+            <label
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                marginTop: 6, fontSize: "var(--font-size-sm)",
+                color: "var(--text-secondary)", cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={rawVerifySsl}
+                onChange={(e) => setRawVerifySsl(e.target.checked)}
+              />
+              Verify TLS certificate (uncheck for self-signed devices)
+            </label>
+          )}
           <div style={helpStyle}>
             {isSerial ? (
               <>
