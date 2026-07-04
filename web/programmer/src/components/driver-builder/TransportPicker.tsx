@@ -1,5 +1,12 @@
+import { useState } from "react";
 import type { DriverDefinition } from "../../api/types";
 import { scrubForTransport } from "./validateDriver";
+import { KeyValueList } from "./CommandBuilder";
+import {
+  displayDelimiter,
+  normalizeDelimiter,
+  parseNumericField,
+} from "./transportPickerHelpers";
 
 interface TransportPickerProps {
   draft: DriverDefinition;
@@ -7,6 +14,8 @@ interface TransportPickerProps {
 }
 
 export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
+  const [revealSecrets, setRevealSecrets] = useState(false);
+
   const labelStyle: React.CSSProperties = {
     display: "block",
     fontSize: "var(--font-size-sm)",
@@ -17,6 +26,39 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
   const rowStyle: React.CSSProperties = {
     marginBottom: "var(--space-md)",
   };
+
+  // Delimiters compare in canonical form (real control characters);
+  // legacy drafts may still hold the escaped text form.
+  const delimiter = normalizeDelimiter(draft.delimiter ?? "");
+
+  // Numeric config fields: store the parsed number, unset the key on blank
+  // (the placeholder shows the effective default), and ignore unparseable
+  // keystrokes — never snap blank or 0 to a magic default mid-edit.
+  const setNumericConfig = (key: string, raw: string, float = false) => {
+    const parsed = parseNumericField(raw, float);
+    if (parsed === undefined) return;
+    const next = { ...draft.default_config };
+    if (parsed === null) delete next[key];
+    else next[key] = parsed;
+    onUpdate({ default_config: next });
+  };
+
+  const numericValue = (key: string): number | "" =>
+    (draft.default_config[key] as number | undefined) ?? "";
+
+  const secretToggle = (
+    <button
+      type="button"
+      onClick={() => setRevealSecrets((v) => !v)}
+      style={{
+        fontSize: "var(--font-size-sm)",
+        color: "var(--accent)",
+        padding: "0 var(--space-sm)",
+      }}
+    >
+      {revealSecrets ? "Hide" : "Show"}
+    </button>
+  );
 
   const switchTransport = (next: string) => {
     if (next === draft.transport) return;
@@ -77,15 +119,15 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
       {draft.transport !== "http" && draft.transport !== "udp" && draft.transport !== "osc" && <div style={rowStyle}>
         <label style={labelStyle}>Message Delimiter</label>
         <select
-          value={draft.delimiter}
+          value={delimiter}
           onChange={(e) => onUpdate({ delimiter: e.target.value })}
           style={{ width: "100%" }}
         >
-          <option value="\r\n">CR+LF (\r\n) — most common</option>
-          <option value="\r">CR only (\r) — Extron, PJLink</option>
-          <option value="\n">LF only (\n) — Biamp, QSC</option>
-          {!["\r\n", "\r", "\n"].includes(draft.delimiter) && (
-            <option value={draft.delimiter}>Custom: {draft.delimiter}</option>
+          <option value={"\r\n"}>CR+LF (\r\n) — most common</option>
+          <option value={"\r"}>CR only (\r) — Extron, PJLink</option>
+          <option value={"\n"}>LF only (\n) — Biamp, QSC</option>
+          {!["\r\n", "\r", "\n"].includes(delimiter) && (
+            <option value={delimiter}>Custom: {displayDelimiter(delimiter)}</option>
           )}
         </select>
         <div
@@ -97,8 +139,8 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
         >
           How the device marks the end of each message. Check the device&apos;s
           protocol manual if unsure.
-          {!["\r\n", "\r", "\n"].includes(draft.delimiter) && (
-            <span> Current value is a custom delimiter: <code>{draft.delimiter}</code></span>
+          {!["\r\n", "\r", "\n"].includes(delimiter) && (
+            <span> Current value is a custom delimiter: <code>{displayDelimiter(delimiter)}</code></span>
           )}
         </div>
       </div>}
@@ -109,17 +151,9 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
             <label style={labelStyle}>Default Port</label>
             <input
               type="number"
-              value={
-                (draft.default_config.port as number | undefined) ?? 80
-              }
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    port: parseInt(e.target.value) || 80,
-                  },
-                })
-              }
+              value={numericValue("port")}
+              placeholder="80"
+              onChange={(e) => setNumericConfig("port", e.target.value)}
               style={{ width: 120 }}
             />
           </div>
@@ -188,7 +222,7 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
             >
               <input
                 type="checkbox"
-                checked={(draft.default_config.verify_ssl as boolean | undefined) ?? false}
+                checked={(draft.default_config.verify_ssl as boolean | undefined) ?? true}
                 onChange={(e) =>
                   onUpdate({
                     default_config: {
@@ -206,19 +240,24 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
           {(draft.default_config.auth_type as string | undefined) === "bearer" && (
             <div style={rowStyle}>
               <label style={labelStyle}>Bearer Token (default)</label>
-              <input
-                value={(draft.default_config.token as string | undefined) ?? ""}
-                onChange={(e) =>
-                  onUpdate({
-                    default_config: {
-                      ...draft.default_config,
-                      token: e.target.value,
-                    },
-                  })
-                }
-                placeholder="leave blank — users enter per device"
-                style={{ width: "100%", fontFamily: "var(--font-mono)" }}
-              />
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <input
+                  type={revealSecrets ? "text" : "password"}
+                  autoComplete="new-password"
+                  value={(draft.default_config.token as string | undefined) ?? ""}
+                  onChange={(e) =>
+                    onUpdate({
+                      default_config: {
+                        ...draft.default_config,
+                        token: e.target.value,
+                      },
+                    })
+                  }
+                  placeholder="leave blank — users enter per device"
+                  style={{ flex: 1, fontFamily: "var(--font-mono)" }}
+                />
+                {secretToggle}
+              </div>
               <div
                 style={{
                   fontSize: "11px",
@@ -227,7 +266,8 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
                 }}
               >
                 Default value if the device ships with a known token. Users
-                normally enter their own per-device token.
+                normally enter their own per-device token. Anything entered
+                here is saved in the driver file as plain text.
               </div>
             </div>
           )}
@@ -264,36 +304,65 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
               </div>
               <div>
                 <label style={labelStyle}>API Key (default)</label>
-                <input
-                  value={(draft.default_config.api_key as string | undefined) ?? ""}
-                  onChange={(e) =>
-                    onUpdate({
-                      default_config: {
-                        ...draft.default_config,
-                        api_key: e.target.value,
-                      },
-                    })
-                  }
-                  placeholder="leave blank — users enter per device"
-                  style={{ width: "100%", fontFamily: "var(--font-mono)" }}
-                />
+                <div style={{ display: "flex", alignItems: "center" }}>
+                  <input
+                    type={revealSecrets ? "text" : "password"}
+                    autoComplete="new-password"
+                    value={(draft.default_config.api_key as string | undefined) ?? ""}
+                    onChange={(e) =>
+                      onUpdate({
+                        default_config: {
+                          ...draft.default_config,
+                          api_key: e.target.value,
+                        },
+                      })
+                    }
+                    placeholder="leave blank — users enter per device"
+                    style={{ flex: 1, fontFamily: "var(--font-mono)" }}
+                  />
+                  {secretToggle}
+                </div>
               </div>
             </div>
           )}
 
           <div style={rowStyle}>
+            <label style={labelStyle}>Default Headers</label>
+            <KeyValueList
+              values={
+                (draft.default_config.default_headers as Record<string, string> | undefined) ?? {}
+              }
+              onChange={(headers) => {
+                const next = { ...draft.default_config };
+                if (Object.keys(headers).length) next.default_headers = headers;
+                else delete next.default_headers;
+                onUpdate({ default_config: next });
+              }}
+              keyPlaceholder="Header-Name"
+              valuePlaceholder="e.g. application/json"
+              monoValue
+            />
+            <div
+              style={{
+                fontSize: "11px",
+                color: "var(--text-muted)",
+                marginTop: "var(--space-xs)",
+              }}
+            >
+              Sent with every request (fixed <code>Accept</code>, a static{" "}
+              <code>User-Agent</code>, a header the device always expects).
+              Per-command headers are set on each command and apply on top of
+              these.
+            </div>
+          </div>
+
+          <div style={rowStyle}>
             <label style={labelStyle}>Request Timeout (seconds)</label>
             <input
               type="number"
-              value={(draft.default_config.timeout as number | undefined) ?? 5}
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    timeout: parseFloat(e.target.value) || 5,
-                  },
-                })
-              }
+              value={numericValue("timeout")}
+              placeholder="5"
+              onChange={(e) => setNumericConfig("timeout", e.target.value, true)}
               min={0.1}
               step={0.5}
               style={{ width: 120 }}
@@ -317,17 +386,9 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
             <label style={labelStyle}>Default Port</label>
             <input
               type="number"
-              value={
-                (draft.default_config.port as number | undefined) ?? 23
-              }
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    port: parseInt(e.target.value) || 23,
-                  },
-                })
-              }
+              value={numericValue("port")}
+              placeholder="23"
+              onChange={(e) => setNumericConfig("port", e.target.value)}
               style={{ width: 120 }}
             />
           </div>
@@ -340,17 +401,9 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
             <label style={labelStyle}>Default Port</label>
             <input
               type="number"
-              value={
-                (draft.default_config.port as number | undefined) ?? 6000
-              }
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    port: parseInt(e.target.value) || 6000,
-                  },
-                })
-              }
+              value={numericValue("port")}
+              placeholder="6000"
+              onChange={(e) => setNumericConfig("port", e.target.value)}
               style={{ width: 120 }}
             />
           </div>
@@ -363,17 +416,9 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
             <label style={labelStyle}>Default Send Port</label>
             <input
               type="number"
-              value={
-                (draft.default_config.port as number | undefined) ?? 8000
-              }
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    port: parseInt(e.target.value) || 8000,
-                  },
-                })
-              }
+              value={numericValue("port")}
+              placeholder="8000"
+              onChange={(e) => setNumericConfig("port", e.target.value)}
               style={{ width: 120 }}
             />
           </div>
@@ -381,17 +426,9 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
             <label style={labelStyle}>Listen Port</label>
             <input
               type="number"
-              value={
-                (draft.default_config.listen_port as number | undefined) ?? 0
-              }
-              onChange={(e) =>
-                onUpdate({
-                  default_config: {
-                    ...draft.default_config,
-                    listen_port: parseInt(e.target.value) || 0,
-                  },
-                })
-              }
+              value={numericValue("listen_port")}
+              placeholder="0"
+              onChange={(e) => setNumericConfig("listen_port", e.target.value)}
               style={{ width: 120 }}
             />
             <div
@@ -523,17 +560,9 @@ export function TransportPicker({ draft, onUpdate }: TransportPickerProps) {
         <label style={labelStyle}>Inter-Command Delay (seconds)</label>
         <input
           type="number"
-          value={
-            (draft.default_config.inter_command_delay as number | undefined) ?? 0
-          }
-          onChange={(e) =>
-            onUpdate({
-              default_config: {
-                ...draft.default_config,
-                inter_command_delay: parseFloat(e.target.value) || 0,
-              },
-            })
-          }
+          value={numericValue("inter_command_delay")}
+          placeholder="0"
+          onChange={(e) => setNumericConfig("inter_command_delay", e.target.value, true)}
           min={0}
           step={0.01}
           style={{ width: 120 }}

@@ -4,6 +4,7 @@ import type { DriverDefinition, DriverInfo, CommunityDriver, InstalledDriver } f
 import * as api from "../api/restClient";
 import { parseApiError } from "../api/errors";
 import { reconcileAfterSave, makeLatestWins, importBlockers } from "./driverBuilderStore.helpers";
+import { secretFieldsInConfig } from "../components/driver-builder/transportPickerHelpers";
 
 const EMPTY_DEFINITION: DriverDefinition = {
   id: "",
@@ -14,7 +15,9 @@ const EMPTY_DEFINITION: DriverDefinition = {
   author: "",
   description: "",
   transport: "tcp",
-  delimiter: "\\r",
+  // Real CR, not the escaped text form — matches what YAML decoding gives
+  // every installed driver, so the delimiter dropdown recognizes it.
+  delimiter: "\r",
   default_config: {},
   config_schema: {},
   state_variables: {},
@@ -229,6 +232,16 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => {
       const { definitions } = get();
       const def = definitions.find((d) => d.id === id);
       if (!def) return;
+      // Credentials saved as config defaults land in the exported file as
+      // plain text — confirm before writing a shareable file containing them.
+      const secrets = secretFieldsInConfig(def.default_config);
+      if (secrets.length > 0) {
+        const ok = window.confirm(
+          `This driver's default config includes a saved ${secrets.join(" and ")}. ` +
+            `The exported file will contain ${secrets.length > 1 ? "them" : "it"} in plain text.\n\nExport anyway?`,
+        );
+        if (!ok) return;
+      }
       // Export as YAML to match community driver format
       const content = yaml.dump(def, {
         lineWidth: 120,

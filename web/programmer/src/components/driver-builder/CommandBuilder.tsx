@@ -436,7 +436,7 @@ function HttpCommandFields({
   );
 }
 
-function KeyValueList({
+export function KeyValueList({
   values,
   onChange,
   keyPlaceholder,
