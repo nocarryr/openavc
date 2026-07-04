@@ -83,6 +83,8 @@ SCENARIOS = [
     "m002_m003_overlay_cleanup",
     "m008_l006_offline_handling",
     "l001_divide_by_zero_guards",
+    "select_look_applies_matching_option_style",
+    "select_look_registered_and_dispatched",
 ]
 
 

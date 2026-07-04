@@ -399,6 +399,66 @@ const tests = {
         assert(overlay.style.pointerEvents === '', 'overlay re-enabled on reconnect');
     },
 
+    // Select per-option styling (show.look.style_map) — the Appearance card
+    // authors it and the docs promise it; the control must take the matched
+    // option's colors and drop them when nothing matches.
+    select_look_applies_matching_option_style() {
+        const app = mkApp();
+        const sel = document.createElement('select');
+        const b = {
+            element: document.createElement('div'),
+            select: sel,
+            elementDef: { style: {} },
+            binding: {
+                source: 'state',
+                key: 'var.scene',
+                style_map: { movie: { bg_color: '#ff0000', text_color: '#ffffff' } },
+            },
+        };
+        app.state = { 'var.scene': 'movie' };
+        app.evaluateSelectLook(b);
+        assert(sel.style.backgroundColor !== '', 'matched option bg applied');
+        assert(sel.style.color !== '', 'matched option text color applied');
+        // A value with no configured style returns the control to the theme.
+        app.state['var.scene'] = 'tv';
+        app.evaluateSelectLook(b);
+        assert(sel.style.backgroundColor === '', 'bg cleared on unmapped value');
+        assert(sel.style.color === '', 'text color cleared on unmapped value');
+        // Key deleted (device offline / var removed) — same fallback.
+        app.state['var.scene'] = 'movie';
+        app.evaluateSelectLook(b);
+        delete app.state['var.scene'];
+        app.evaluateSelectLook(b);
+        assert(sel.style.backgroundColor === '', 'bg cleared on key delete');
+    },
+
+    select_look_registered_and_dispatched() {
+        const app = mkApp();
+        const element = {
+            id: 's1', type: 'select',
+            options: [{ value: 'movie', label: 'Movie' }, { value: 'tv', label: 'TV' }],
+            bindings: {
+                show: {
+                    look: {
+                        source: 'state', key: 'var.scene',
+                        style_map: { movie: { bg_color: '#123456', text_color: '#ffffff' } },
+                    },
+                },
+            },
+        };
+        const el = app.renderSelect(element);
+        const sel = el.querySelector('select');
+        assert(app.bindings.some((x) => x.type === 'select_look'), 'select_look binding registered');
+        // Option rows carry their configured colors for browsers that
+        // support styling native options.
+        const movieOpt = sel.querySelector('option[value="movie"]');
+        assert(movieOpt.style.backgroundColor !== '', 'option row carries its configured bg');
+        // A state change for the bound key flows through the dispatch loop.
+        app.state = { 'var.scene': 'movie' };
+        app.evaluateAllBindings(['var.scene']);
+        assert(sel.style.backgroundColor !== '', 'dispatch applies the matched style to the control');
+    },
+
     // L-001 — degenerate ranges don't produce NaN.
     l001_divide_by_zero_guards() {
         const app = mkApp();

@@ -1494,10 +1494,20 @@ class PanelApp {
 
         const select = document.createElement('select');
         const options = element.options || [];
+        // Per-option styling (show.look.style_map, authored in the UI
+        // Builder's Appearance card). Option colors show in the open list
+        // where the browser supports styling native options.
+        const lookBinding = element.bindings?.show?.look;
+        const styleMap = lookBinding && lookBinding.style_map ? lookBinding.style_map : null;
         for (const opt of options) {
             const option = document.createElement('option');
             option.value = opt.value;
             option.textContent = opt.label;
+            const optStyle = styleMap && styleMap[opt.value];
+            if (optStyle) {
+                if (optStyle.bg_color) option.style.backgroundColor = optStyle.bg_color;
+                if (optStyle.text_color) option.style.color = optStyle.text_color;
+            }
             select.appendChild(option);
         }
 
@@ -1525,6 +1535,18 @@ class PanelApp {
                 element: select,
                 elementDef: element,
                 binding: valueBinding,
+            });
+        }
+
+        // Appearance binding: the control takes the colors of the option
+        // matching the bound key's current value.
+        if (lookBinding && lookBinding.key && styleMap) {
+            this.bindings.push({
+                type: 'select_look',
+                element: el,
+                select,
+                elementDef: element,
+                binding: lookBinding,
             });
         }
 
@@ -3760,6 +3782,9 @@ class PanelApp {
                     case 'select_value':
                         this.evaluateSelectValue(b);
                         break;
+                    case 'select_look':
+                        this.evaluateSelectLook(b);
+                        break;
                     case 'text_input_value':
                         this.evaluateTextInputValue(b);
                         break;
@@ -4111,6 +4136,21 @@ class PanelApp {
             return;
         }
         element.value = String(value);
+    }
+
+    // Select appearance (show.look.style_map): the control takes the colors
+    // configured for the option matching the bound key's current value, and
+    // returns to the themed look when nothing matches. Both properties are
+    // written on every pass so a previous match never lingers.
+    evaluateSelectLook(b) {
+        const { select, binding } = b;
+        const stateValue = this.state[binding.key];
+        const styleMap = binding.style_map || {};
+        const matched = stateValue === undefined || stateValue === null
+            ? undefined
+            : styleMap[String(stateValue)];
+        select.style.backgroundColor = (matched && matched.bg_color) || '';
+        select.style.color = (matched && matched.text_color) || '';
     }
 
     evaluateTextInputValue(b) {
