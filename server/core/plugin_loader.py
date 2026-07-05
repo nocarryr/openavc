@@ -1067,7 +1067,7 @@ class PluginLoader:
             return True
         return False
 
-    async def restart_or_apply(self, plugin_id: str, new_config: dict) -> bool:
+    async def restart_or_apply(self, plugin_id: str, new_config: dict) -> str:
         """Apply new config to a running plugin: hot when the plugin opts in
         via ``on_config_changed``, otherwise stop/start. Every config-write
         path (REST, cloud AI) routes through here so behavior is identical.
@@ -1079,15 +1079,19 @@ class PluginLoader:
         one returning "nothing to do" while the other restarts with a config
         the project file no longer holds.
 
-        Returns False when the plugin wasn't running (nothing to do)."""
+        Returns the outcome: "hot_applied", "restarted", "not_running"
+        (nothing to do), or "start_failed" — the restart's start step
+        failed and the plugin is left stopped; callers must surface that
+        instead of reporting a clean update."""
         async with self._get_lock(plugin_id):
             if not self.is_running(plugin_id):
-                return False
+                return "not_running"
             if await self.apply_config(plugin_id, new_config):
-                return True
+                return "hot_applied"
             await self._stop_plugin_locked(plugin_id)
-            await self._start_plugin_locked(plugin_id, new_config)
-            return True
+            if await self._start_plugin_locked(plugin_id, new_config):
+                return "restarted"
+            return "start_failed"
 
     def clear_missing(self, plugin_id: str) -> None:
         """Remove a plugin from the missing-plugins tracker."""

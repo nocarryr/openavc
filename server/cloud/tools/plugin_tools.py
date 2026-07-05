@@ -234,17 +234,11 @@ class PluginToolsMixin:
             return {"error": f"Plugin '{plugin_id}' not in project"}
 
         # Validate config against plugin's CONFIG_SCHEMA if available
-        from server.core.plugin_loader import _PLUGIN_CLASS_REGISTRY
+        from server.core.plugin_config import validate_config_for_plugin
 
-        from server.cloud.ai_tool_handler import _validate_plugin_config
-
-        plugin_class = _PLUGIN_CLASS_REGISTRY.get(plugin_id)
-        if plugin_class:
-            schema = getattr(plugin_class, "CONFIG_SCHEMA", None)
-            if schema and isinstance(schema, dict):
-                err = _validate_plugin_config(new_config, schema)
-                if err:
-                    return {"error": f"Plugin '{plugin_id}': {err}"}
+        err = validate_config_for_plugin(plugin_id, new_config)
+        if err:
+            return {"error": f"Plugin '{plugin_id}': {err}"}
 
         from server.core.project_loader import save_project_async
 
@@ -253,6 +247,12 @@ class PluginToolsMixin:
         await self._notify_project_changed()
 
         # Hot-apply when the plugin supports it, else restart
-        await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
+        outcome = await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
 
-        return {"status": "updated", "plugin_id": plugin_id}
+        result = {"status": "updated", "plugin_id": plugin_id, "applied": outcome}
+        if outcome == "start_failed":
+            result["warning"] = (
+                f"Config saved, but plugin '{plugin_id}' failed to restart with "
+                f"it and is stopped. Check the config values and plugin logs."
+            )
+        return result

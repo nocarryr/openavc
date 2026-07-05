@@ -6,6 +6,7 @@ Static plugin assets served for iframe / audio / image loads are on the open
 router — see the comment above `open_router` below.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from server.api.auth import programmer_auth_satisfied, require_programmer_auth
 from server.api.errors import api_error as _api_error
+from server.core.plugin_config import validate_config_for_plugin
 from server.core.project_loader import (
     PluginConfig,
     build_default_plugin_config,
@@ -24,6 +26,11 @@ from server.core.project_loader import (
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# Context-action names: plain identifiers, optionally dashed. Everything the
+# IDE emits (declared context_actions ids, matrix route/unroute, preset
+# actions) matches; event-name splicing does not.
+_ACTION_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_programmer_auth)])
 # Open router — for static plugin assets (HTML/JS/CSS/images/audio) that the
@@ -307,15 +314,29 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
 
     new_config = await request.json()
+    if not isinstance(new_config, dict):
+        raise HTTPException(status_code=400, detail="Plugin config must be a JSON object")
+
+    # Same CONFIG_SCHEMA validation the cloud AI path applies — the IDE's
+    # path must not be able to persist a config the plugin can't start with.
+    err = validate_config_for_plugin(plugin_id, new_config)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
 
     engine.project.plugins[plugin_id].config = new_config
     await save_project_async(engine.project_path, engine.project)
     engine.bump_project_revision()
 
     # Hot-apply when the plugin supports it, else restart
-    await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
+    outcome = await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
 
-    return {"status": "updated", "plugin_id": plugin_id}
+    result: dict[str, Any] = {"status": "updated", "plugin_id": plugin_id, "applied": outcome}
+    if outcome == "start_failed":
+        result["warning"] = (
+            f"Config saved, but plugin '{plugin_id}' failed to restart with it "
+            f"and is stopped. Check the config values and plugin logs."
+        )
+    return result
 
 
 # ──── Health ────
@@ -393,11 +414,28 @@ async def emit_context_action(plugin_id: str, action_id: str, request: Request) 
     """Emit a context action event for a plugin."""
     engine = _get_engine()
 
-    # Build payload from request body (if any)
+    # Only plugins in the project can receive action events — an arbitrary
+    # id would let one session emit into any plugin namespace it invents.
+    if not engine.project or plugin_id not in engine.project.plugins:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
+
+    # Action names are plain identifiers (declared context_actions, matrix
+    # route/unroute, preset actions all match); anything else would splice
+    # extra segments into the event name.
+    if not _ACTION_ID_RE.match(action_id):
+        raise HTTPException(status_code=400, detail=f"Invalid action id '{action_id}'")
+
+    # Build payload from request body (if any). Event payloads are dicts
+    # everywhere in the runtime — a non-dict body would make every
+    # subscriber (triggers, scripts, the plugin itself) throw instead of run.
     try:
         payload = await request.json()
     except Exception:
         payload = {}
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Action payload must be a JSON object")
 
     # Emit as plugin event: plugin.<id>.action.<action_id>
     event = f"plugin.{plugin_id}.action.{action_id}"

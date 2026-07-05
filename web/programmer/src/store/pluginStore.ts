@@ -9,6 +9,7 @@ import { create } from "zustand";
 import type { PluginInfo } from "../api/types";
 import type { PluginExtension, CommunityPlugin, InstalledPlugin } from "../api/restClient";
 import * as api from "../api/restClient";
+import { parseApiError } from "../api/errors";
 import { useProjectStore } from "./projectStore";
 import { showError } from "./toastStore";
 
@@ -124,12 +125,17 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
 
   updateConfig: async (pluginId, config) => {
     try {
-      await api.updatePluginConfig(pluginId, config);
+      const result = await api.updatePluginConfig(pluginId, config);
+      if (result.warning) {
+        // Config saved, but the plugin failed to restart with it.
+        showError(result.warning);
+      }
       await get().load();
       await syncProjectStore();
     } catch (e) {
-      set({ error: String(e) });
-      showError(`Couldn't save settings for plugin "${pluginId}": ${String(e)}`);
+      const detail = parseApiError(e);
+      set({ error: detail });
+      showError(`Couldn't save settings for plugin "${pluginId}": ${detail}`);
     }
   },
 

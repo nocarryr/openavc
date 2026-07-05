@@ -123,7 +123,7 @@ async def test_restart_or_apply_hot_path_skips_restart(monkeypatch):
     monkeypatch.setattr(loader, "_stop_plugin_locked", _record_stop)
     monkeypatch.setattr(loader, "_start_plugin_locked", _record_start)
 
-    assert await loader.restart_or_apply("hot", {"x": 1}) is True
+    assert await loader.restart_or_apply("hot", {"x": 1}) == "hot_applied"
     assert calls == []  # hot apply -> no restart
 
 
@@ -143,7 +143,7 @@ async def test_restart_or_apply_falls_back_to_restart(monkeypatch):
     monkeypatch.setattr(loader, "_stop_plugin_locked", _record_stop)
     monkeypatch.setattr(loader, "_start_plugin_locked", _record_start)
 
-    assert await loader.restart_or_apply("hot", {"x": 1}) is True
+    assert await loader.restart_or_apply("hot", {"x": 1}) == "restarted"
     assert calls == [("stop", "hot"), ("start", "hot")]
 
 
@@ -152,7 +152,7 @@ async def test_restart_or_apply_noop_when_not_running():
     loader = PluginLoader(
         StateStore(), EventBus(), MockMacroEngine(), MockDeviceManager()
     )
-    assert await loader.restart_or_apply("ghost", {"x": 1}) is False
+    assert await loader.restart_or_apply("ghost", {"x": 1}) == "not_running"
 
 
 @pytest.mark.asyncio
@@ -244,7 +244,7 @@ async def test_restart_or_apply_serializes_overlapping_updates(monkeypatch):
     result_b = await asyncio.wait_for(task_b, timeout=5)
 
     # Pre-lock: B observed not-running and returned False without applying.
-    assert (result_a, result_b) == (True, True)
+    assert (result_a, result_b) == ("restarted", "restarted")
     # The last-queued update wins and the runtime config matches it.
     assert loader.get_running_config("hot") == {"cfg": "B"}
     assert loader.is_running("hot")

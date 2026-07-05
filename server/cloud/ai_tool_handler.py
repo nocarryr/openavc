@@ -766,55 +766,8 @@ def _validate_script_syntax(source: str, filename: str = "<script>") -> str | No
 
 
 # --- Plugin config schema validation ---
-
-_SCHEMA_TYPE_VALIDATORS: dict[str, type | tuple[type, ...]] = {
-    "string": (str,),
-    "integer": (int,),
-    "number": (int, float),
-    "boolean": (bool,),
-}
-
-
-def _validate_plugin_config(config: dict, schema: dict) -> str | None:
-    """Validate plugin config against its CONFIG_SCHEMA.
-
-    Returns error string or None. Only checks required fields and basic types.
-    """
-    errors: list[str] = []
-    for key, field_def in schema.items():
-        if not isinstance(field_def, dict):
-            continue
-
-        # Group fields — recurse
-        if field_def.get("type") == "group":
-            sub_schema = field_def.get("fields", {})
-            sub_config = config.get(key, {})
-            if isinstance(sub_schema, dict) and isinstance(sub_config, dict):
-                err = _validate_plugin_config(sub_config, sub_schema)
-                if err:
-                    errors.append(err)
-            continue
-
-        # Required field check
-        if field_def.get("required") and key not in config:
-            if "default" not in field_def:
-                errors.append(f"Missing required config field '{key}'")
-                continue
-
-        # Type check for present values
-        value = config.get(key)
-        if value is not None:
-            expected_type = field_def.get("type", "")
-            valid_types = _SCHEMA_TYPE_VALIDATORS.get(expected_type)
-            if valid_types and not isinstance(value, valid_types):
-                errors.append(
-                    f"Config field '{key}' should be {expected_type}, "
-                    f"got {type(value).__name__}"
-                )
-
-    if errors:
-        return "Plugin config validation failed: " + "; ".join(errors)
-    return None
+# Moved to server/core/plugin_config.py so the REST config endpoint and the
+# cloud AI tool accept/reject identical shapes.
 
 
 # --- State key validation ---
