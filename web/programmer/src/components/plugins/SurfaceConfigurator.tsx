@@ -28,6 +28,7 @@ import { ActionPicker } from "../ui-builder/BindingEditor/ActionPicker";
 import { IconPicker } from "../ui-builder/IconPicker";
 import { ElementIcon } from "../ui-builder/ElementIcon";
 import type { ProjectConfig } from "../../api/types";
+import { isCellRouted, matchStateKeys } from "./routingMatrixHelpers";
 import * as api from "../../api/restClient";
 import { BASE } from "../../api/base";
 
@@ -430,7 +431,7 @@ function GridSurface({
       {Array.from({ length: rows * cols }, (_, i) => {
         const assignment = getAssignment(i, currentPage);
         const isSelected = selectedControl === String(i);
-        const hasAssignment = !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press;
+        const hasAssignment = !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press?.length;
         const bgColor = assignment?.bg_color;
 
         return (
@@ -767,6 +768,7 @@ function RoutingMatrix({
   const [newPresetName, setNewPresetName] = useState("");
   const [presetDropdownOpen, setPresetDropdownOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [pendingCells, setPendingCells] = useState<Set<string>>(new Set());
   const dropdownRef = useRef<HTMLDivElement>(null);
   const triggerBtnRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState<{ top?: number; bottom?: number; left: number; width: number }>({ left: 0, width: 180 });
@@ -791,30 +793,39 @@ function RoutingMatrix({
     };
   }, [presetDropdownOpen]);
 
-  // Get row/column labels from state
-  const rowPrefix = (layout.rows_state_pattern ?? "").replace("*", "");
-  const colPrefix = (layout.columns_state_pattern ?? "").replace("*", "");
-
-  const rowKeys = Object.keys(liveState)
-    .filter((k) => k.startsWith(rowPrefix))
-    .sort();
-  const colKeys = Object.keys(liveState)
-    .filter((k) => k.startsWith(colPrefix))
-    .sort();
-
-  // Extract short names
-  const rowNames = rowKeys.map((k) => k.slice(rowPrefix.length));
-  const colNames = colKeys.map((k) => k.slice(colPrefix.length));
+  // Get row/column labels from state ('*' matches anywhere in the pattern)
+  const stateKeys = Object.keys(liveState);
+  const rowNames = matchStateKeys(stateKeys, layout.rows_state_pattern ?? "").map(
+    (m) => m.name,
+  );
+  const colNames = matchStateKeys(stateKeys, layout.columns_state_pattern ?? "").map(
+    (m) => m.name,
+  );
 
   const getCellState = (row: string, col: string): boolean => {
     const pattern = layout.cell_state_pattern ?? "";
     const key = pattern.replace("{row}", row).replace("{col}", col);
-    return Boolean(liveState[key]);
+    return isCellRouted(liveState[key]);
   };
 
   const handleCellClick = async (row: string, col: string) => {
-    const actionId = getCellState(row, col) ? "unroute" : "route";
-    await api.emitContextAction(pluginId, actionId, { row, col });
+    // One action per cell at a time: the toggle direction is derived from
+    // liveState, which only updates when the plugin pushes new crosspoint
+    // state — a rapid second click would re-read the pre-click state and
+    // send the same route/unroute again.
+    const cellKey = `${row}|${col}`;
+    if (pendingCells.has(cellKey)) return;
+    setPendingCells((prev) => new Set(prev).add(cellKey));
+    try {
+      const actionId = getCellState(row, col) ? "unroute" : "route";
+      await api.emitContextAction(pluginId, actionId, { row, col });
+    } finally {
+      setPendingCells((prev) => {
+        const next = new Set(prev);
+        next.delete(cellKey);
+        return next;
+      });
+    }
   };
 
   // Preset support
@@ -1071,17 +1082,20 @@ function RoutingMatrix({
                   </td>
                   {colNames.map((col) => {
                     const active = getCellState(row, col);
+                    const pending = pendingCells.has(`${row}|${col}`);
                     return (
                       <td key={col} style={{ padding: 1 }}>
                         <button
                           onClick={() => handleCellClick(row, col)}
+                          disabled={pending}
                           style={{
                             width: 24,
                             height: 24,
                             borderRadius: 3,
                             background: active ? "var(--accent-bg)" : "var(--bg-surface)",
                             border: "1px solid var(--border-color)",
-                            cursor: "pointer",
+                            cursor: pending ? "wait" : "pointer",
+                            opacity: pending ? 0.5 : 1,
                             transition: "background var(--transition-fast)",
                           }}
                           title={`${row} \u2192 ${col}: ${active ? "Routed" : "Unrouted"}`}
@@ -5777,7 +5791,7 @@ function KeyCell({
 }) {
   const [hovered, setHovered] = useState(false);
   const hasAssignment =
-    !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press;
+    !!assignment?.label || !!assignment?.icon || !!assignment?.bindings?.press?.length;
 
   return (
     <div
