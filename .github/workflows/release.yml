@@ -182,12 +182,15 @@ jobs:
     name: macOS installer (${{ matrix.arch }})
     needs: [test, version]
     runs-on: ${{ matrix.runner }}
-    # Signing and notarization call out to Apple services (secure
-    # timestamp during productbuild/codesign, the notary queue) and a
-    # stalled call can otherwise hang the job for GitHub's 6-hour
-    # default (v0.22.0: productbuild wedged 4+ hours on both arches).
-    # A normal run takes ~25 minutes; fail fast and re-run instead.
-    timeout-minutes: 60
+    # Backstop against a stalled Apple-service call hanging the job for
+    # GitHub's 6-hour default. The productbuild key-auth hang that bit
+    # v0.22.0 is fixed at its source (keys imported with -A, below), so
+    # build + signing now run in minutes. The one stage that can still
+    # legitimately take hours is notarization: Apple's deep analysis
+    # (common for an early Developer ID submission) held the first local
+    # one ~2h. This cap must clear that, so it only ever kills a truly
+    # infinite hang, never a slow-but-succeeding notarization.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -244,10 +247,21 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
           echo "$APPLE_APP_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/app.p12"
           echo "$APPLE_INSTALLER_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/installer.p12"
-          security import "$RUNNER_TEMP/app.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -T /usr/bin/codesign
-          security import "$RUNNER_TEMP/installer.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -T /usr/bin/productbuild
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
-          # Put our keychain first in the search list so codesign finds the identity.
+          # Import with -A (any app may use the key without prompting), NOT
+          # -T <tool>. The -T ACL form makes securityd evaluate an app-list
+          # authorization when the key is used, and on a headless runner that
+          # evaluation blocks forever: productbuild hung in securityd's
+          # generateSignature the first time this signed path ran in CI
+          # (v0.22.0), sampled parking 100% in SecKeyCreateSignature -> mach_msg.
+          # The keychain is ephemeral and dies with the runner, so unrestricted
+          # key access here carries no lasting exposure. A trivial-pkg probe
+          # confirmed -A signs in 0.66s where -T hung past 4 hours.
+          security import "$RUNNER_TEMP/app.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -A
+          security import "$RUNNER_TEMP/installer.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -A
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN" > /dev/null
+          # Make our keychain the default and first in the search list so
+          # codesign/productbuild find the identity.
+          security default-keychain -d user -s "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
           rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12"
 
