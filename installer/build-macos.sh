@@ -179,11 +179,12 @@ fi
 echo "      wrote $FINAL_PKG"
 
 # Notarize + staple (optional — needs the App Store Connect API key).
-# --timeout bounds the wait: a submission occasionally wedges in Apple's
-# queue and never completes, and an unbounded --wait then hangs the
-# release job for hours (v0.22.0 hung 4+ h on both arches). Normal
-# notarization finishes in minutes; on timeout the job fails loudly and
-# a re-run submits fresh, which is the working remedy for a stuck one.
+# --timeout bounds the wait: a submission can wedge in Apple's queue and
+# an unbounded --wait would then hang the job. Normal notarization
+# finishes in minutes; on timeout the job fails loudly and a re-run
+# submits fresh. (The CI job also carries its own timeout-minutes,
+# which covers hangs in the other Apple-service calls here — codesign
+# and productbuild block on the secure-timestamp service when signing.)
 if [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_NOTARY_KEY_ID:-}" ]; then
     echo "      notarizing"
     xcrun notarytool submit "$FINAL_PKG" \

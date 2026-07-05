@@ -182,6 +182,12 @@ jobs:
     name: macOS installer (${{ matrix.arch }})
     needs: [test, version]
     runs-on: ${{ matrix.runner }}
+    # Signing and notarization call out to Apple services (secure
+    # timestamp during productbuild/codesign, the notary queue) and a
+    # stalled call can otherwise hang the job for GitHub's 6-hour
+    # default (v0.22.0: productbuild wedged 4+ hours on both arches).
+    # A normal run takes ~25 minutes; fail fast and re-run instead.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
