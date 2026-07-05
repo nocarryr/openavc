@@ -111,6 +111,40 @@ def resolve_serial_port_by_serial(usb_serial: str) -> str | None:
     return None
 
 
+def resolve_usb_binding(config: dict) -> dict:
+    """Rewrite a USB-serial device's volatile port from its stable adapter id.
+
+    A directly-attached USB-to-serial adapter is given a port name by the OS
+    (COM3 / /dev/ttyUSB0) that is not stable across reboot or replug. When the
+    connection stored the adapter's ``usb_serial`` (USB serial number), resolve
+    it to whatever path the OS assigned that adapter right now, so the device
+    follows its cable instead of a fixed name. Called wherever a serial device
+    is (re)dialed: startup/reload/edit config resolution and each reconnect
+    attempt — the path can change mid-run when the adapter is replugged.
+
+    Only applies to a real local serial connection: a bridge-bound serial
+    device has been rewritten to ``transport=tcp`` by the bridge resolver and
+    is left alone, and an explicit network transport is skipped. If no attached
+    adapter carries that serial (unplugged, or a clone that exposes none), the
+    stored ``port`` is left as-is — the device then fails to connect with the
+    normal serial open error rather than silently dialing the wrong port.
+
+    Returns the same dict when nothing changed, a copy with ``port`` rewritten
+    when it did.
+    """
+    usb_serial = config.get("usb_serial")
+    transport = config.get("transport", "")
+    if not usb_serial or config.get("bridge") or transport not in ("", "serial"):
+        return config
+
+    live = resolve_serial_port_by_serial(usb_serial)
+    if live and live != config.get("port"):
+        resolved = dict(config)
+        resolved["port"] = live
+        return resolved
+    return config
+
+
 def _log_task_exception(task: asyncio.Task) -> None:
     """Done-callback for fire-and-forget on_data tasks: surface failures that
     would otherwise vanish as a 'Task exception was never retrieved' GC warning."""

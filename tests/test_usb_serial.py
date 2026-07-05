@@ -169,3 +169,54 @@ def test_usb_binding_skipped_for_network_and_bridge(monkeypatch):
     # Bridge-bound (already rewritten to tcp by the bridge resolver).
     bridged = {"usb_serial": "AB12CD", "bridge": "itach", "bridge_port": "serial:1"}
     assert Engine._resolve_usb_binding(bridged) == bridged
+
+
+# --- DeviceManager reconnect re-resolution ----------------------------------
+
+
+def test_reconnect_refreshes_moved_usb_port(monkeypatch):
+    """A replug can move the adapter's OS path while the server runs; every
+    reconnect attempt must follow the stable usb_serial to the current path
+    instead of redialing the stale one."""
+    from server.core.device_manager import DeviceManager
+    from server.core.event_bus import EventBus
+    from server.core.state_store import StateStore
+
+    dm = DeviceManager(StateStore(), EventBus())
+    driver = SimpleNamespace(
+        config={"usb_serial": "AB12CD", "port": "/dev/ttyUSB0", "transport": "serial"}
+    )
+    monkeypatch.setattr(
+        list_ports_mod,
+        "comports",
+        lambda: [_fake_port("/dev/ttyUSB1", vid=1, pid=2, serial_number="AB12CD")],
+    )
+
+    dm._refresh_usb_serial_port("disp1", driver)
+    assert driver.config["port"] == "/dev/ttyUSB1"
+
+    # Adapter unplugged entirely: stored port left as-is so the connect
+    # fails with the normal serial open error.
+    monkeypatch.setattr(list_ports_mod, "comports", lambda: [])
+    dm._refresh_usb_serial_port("disp1", driver)
+    assert driver.config["port"] == "/dev/ttyUSB1"
+
+
+def test_reconnect_refresh_ignores_non_serial_devices(monkeypatch):
+    """A stray usb_serial on a network device must not hijack its port
+    during reconnect (mirrors the resolver gate)."""
+    from server.core.device_manager import DeviceManager
+    from server.core.event_bus import EventBus
+    from server.core.state_store import StateStore
+
+    dm = DeviceManager(StateStore(), EventBus())
+    driver = SimpleNamespace(
+        config={"usb_serial": "AB12CD", "transport": "tcp", "host": "1.2.3.4", "port": 23}
+    )
+    monkeypatch.setattr(
+        list_ports_mod,
+        "comports",
+        lambda: [_fake_port("/dev/ttyUSB1", vid=1, pid=2, serial_number="AB12CD")],
+    )
+    dm._refresh_usb_serial_port("disp1", driver)
+    assert driver.config["port"] == 23

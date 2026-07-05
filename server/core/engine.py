@@ -742,35 +742,16 @@ class Engine:
 
     @staticmethod
     def _resolve_usb_binding(config: dict) -> dict:
-        """Rewrite a USB-serial device's volatile port from its stable adapter id.
-
-        A directly-attached USB-to-serial adapter is given a port name by the OS
-        (COM3 / /dev/ttyUSB0) that is not stable across reboot or replug. When
-        the connection stored the adapter's ``usb_serial`` (USB serial number),
-        resolve it to whatever path the OS assigned that adapter this boot, so
-        the device follows its cable instead of a fixed name — the local-serial
-        analog of how ``_resolve_bridge_binding`` resolves a bridge's host.
-
-        Only applies to a real local serial connection: a bridge-bound serial
-        device has already been rewritten to ``transport=tcp`` above and is left
-        alone, and an explicit network transport is skipped. If no attached
-        adapter carries that serial (unplugged, or a clone that exposes none),
-        the stored ``port`` is left as-is — the device then fails to connect with
-        the normal serial open error rather than silently dialing the wrong port.
+        """Rewrite a USB-serial device's volatile port from its stable adapter
+        id — the local-serial analog of how ``_resolve_bridge_binding``
+        resolves a bridge's host. The logic lives in the transport module
+        (``resolve_usb_binding``) so the device manager can re-resolve on
+        every reconnect attempt too: the path can change when the adapter is
+        replugged mid-run.
         """
-        usb_serial = config.get("usb_serial")
-        transport = config.get("transport", "")
-        if not usb_serial or config.get("bridge") or transport not in ("", "serial"):
-            return config
+        from server.transport.serial_transport import resolve_usb_binding
 
-        from server.transport.serial_transport import resolve_serial_port_by_serial
-
-        live = resolve_serial_port_by_serial(usb_serial)
-        if live and live != config.get("port"):
-            resolved = dict(config)
-            resolved["port"] = live
-            return resolved
-        return config
+        return resolve_usb_binding(config)
 
     def _resolve_bridge_binding(self, config: dict) -> dict:
         """Rewrite a bridge-bound device's effective connection to its bridge's port.

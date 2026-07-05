@@ -1172,6 +1172,7 @@ class DeviceManager:
                     # Stop polling before reconnect to prevent race conditions
                     # (poll firing while transport is being replaced)
                     await driver.stop_polling()
+                    self._refresh_usb_serial_port(device_id, driver)
                     await driver.connect()
                     log.info(f"[{device_id}] Reconnected successfully")
                     self._clear_offline_reason(device_id)
@@ -1199,6 +1200,29 @@ class DeviceManager:
         finally:
             self._reconnect_tasks.pop(device_id, None)
 
+    def _refresh_usb_serial_port(self, device_id: str, driver) -> None:
+        """Re-resolve a usb_serial-bound adapter to its current OS path.
+
+        A replug can move the adapter (ttyUSB0 -> ttyUSB1) while the stored
+        path goes stale; the stable USB serial number is the truth, so each
+        reconnect attempt follows the adapter instead of redialing the old
+        path. No-op for anything but a local usb_serial-bound serial device.
+        """
+        try:
+            from server.transport.serial_transport import resolve_usb_binding
+
+            refreshed = resolve_usb_binding(driver.config)
+            if refreshed is not driver.config:
+                log.info(
+                    f"[{device_id}] Serial adapter moved: port "
+                    f"{driver.config.get('port')!r} -> {refreshed.get('port')!r}"
+                )
+                driver.config = refreshed
+        except Exception:
+            log.debug(
+                f"[{device_id}] USB serial re-resolution failed", exc_info=True
+            )
+
     async def reconnect_device(self, device_id: str) -> None:
         """Force disconnect and reconnect a device."""
         if device_id not in self._devices:
@@ -1223,6 +1247,7 @@ class DeviceManager:
             except Exception:
                 pass
             try:
+                self._refresh_usb_serial_port(device_id, driver)
                 await driver.connect()
                 log.info(f"Reconnected device: {device_id}")
             except Exception as e:
