@@ -233,12 +233,19 @@ class PluginToolsMixin:
         if plugin_id not in engine.project.plugins:
             return {"error": f"Plugin '{plugin_id}' not in project"}
 
-        # Validate config against plugin's CONFIG_SCHEMA if available
-        from server.core.plugin_config import validate_config_for_plugin
+        # Validate config against plugin's CONFIG_SCHEMA if available.
+        # Wrong types are rejected; required fields that aren't set yet
+        # only warn, mirroring the REST path — the config may legitimately
+        # be built up across several calls.
+        from server.core.plugin_config import (
+            missing_required_for_plugin,
+            validate_config_for_plugin,
+        )
 
         err = validate_config_for_plugin(plugin_id, new_config)
         if err:
             return {"error": f"Plugin '{plugin_id}': {err}"}
+        missing = missing_required_for_plugin(plugin_id, new_config)
 
         from server.core.project_loader import save_project_async
 
@@ -250,7 +257,13 @@ class PluginToolsMixin:
         outcome = await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
 
         result = {"status": "updated", "plugin_id": plugin_id, "applied": outcome}
-        if outcome == "start_failed":
+        if missing:
+            result["missing_required"] = sorted(missing)
+            result["warning"] = (
+                f"Config saved, but required field(s) {', '.join(sorted(missing))} "
+                f"are not set yet. Plugin '{plugin_id}' can't run until they are."
+            )
+        elif outcome == "start_failed":
             result["warning"] = (
                 f"Config saved, but plugin '{plugin_id}' failed to restart with "
                 f"it and is stopped. Check the config values and plugin logs."

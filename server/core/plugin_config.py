@@ -17,9 +17,14 @@ SCHEMA_TYPE_VALIDATORS: dict[str, type | tuple[type, ...]] = {
 
 
 def validate_plugin_config(config: dict, schema: dict) -> str | None:
-    """Validate plugin config against its CONFIG_SCHEMA.
+    """Validate plugin config value types against its CONFIG_SCHEMA.
 
-    Returns error string or None. Only checks required fields and basic types.
+    Returns error string or None. Checks only the types of values that are
+    present. Required fields that are absent are NOT an error here — a
+    config form is saved incrementally during first-time setup, so a
+    partially-filled config must persist. Missing required fields are a
+    start-time concern, reported separately via missing_required_fields()
+    so the write paths can attach a warning instead of rejecting the save.
     """
     errors: list[str] = []
     for key, field_def in schema.items():
@@ -35,12 +40,6 @@ def validate_plugin_config(config: dict, schema: dict) -> str | None:
                 if err:
                     errors.append(err)
             continue
-
-        # Required field check
-        if field_def.get("required") and key not in config:
-            if "default" not in field_def:
-                errors.append(f"Missing required config field '{key}'")
-                continue
 
         # Type check for present values
         value = config.get(key)
@@ -58,13 +57,38 @@ def validate_plugin_config(config: dict, schema: dict) -> str | None:
     return None
 
 
-def validate_config_for_plugin(plugin_id: str, config: dict) -> str | None:
-    """Validate config against the installed plugin's CONFIG_SCHEMA.
+def missing_required_fields(config: dict, schema: dict) -> list[str]:
+    """Names of required schema fields (with no default) absent from config.
 
-    Returns error string or None. A plugin that isn't installed (or has no
-    schema) validates clean — config for missing plugins is stored as-is so
-    it survives until the plugin is installed.
+    Group fields are reported dotted (``group.field``). The plugin can't
+    start until these are set, but their absence must not block saving the
+    fields the user has filled in so far.
     """
+    missing: list[str] = []
+    for key, field_def in schema.items():
+        if not isinstance(field_def, dict):
+            continue
+
+        if field_def.get("type") == "group":
+            sub_schema = field_def.get("fields", {})
+            sub_config = config.get(key, {})
+            if isinstance(sub_schema, dict) and isinstance(sub_config, dict):
+                missing.extend(
+                    f"{key}.{name}"
+                    for name in missing_required_fields(sub_config, sub_schema)
+                )
+            continue
+
+        if (
+            field_def.get("required")
+            and key not in config
+            and "default" not in field_def
+        ):
+            missing.append(key)
+    return missing
+
+
+def _schema_for_plugin(plugin_id: str) -> dict | None:
     from server.core.plugin_loader import _PLUGIN_CLASS_REGISTRY
 
     plugin_class = _PLUGIN_CLASS_REGISTRY.get(plugin_id)
@@ -73,4 +97,28 @@ def validate_config_for_plugin(plugin_id: str, config: dict) -> str | None:
     schema: Any = getattr(plugin_class, "CONFIG_SCHEMA", None)
     if not schema or not isinstance(schema, dict):
         return None
+    return schema
+
+
+def validate_config_for_plugin(plugin_id: str, config: dict) -> str | None:
+    """Validate config value types against the installed plugin's CONFIG_SCHEMA.
+
+    Returns error string or None. A plugin that isn't installed (or has no
+    schema) validates clean — config for missing plugins is stored as-is so
+    it survives until the plugin is installed.
+    """
+    schema = _schema_for_plugin(plugin_id)
+    if schema is None:
+        return None
     return validate_plugin_config(config, schema)
+
+
+def missing_required_for_plugin(plugin_id: str, config: dict) -> list[str]:
+    """Required-field names still absent from config, per the plugin's schema.
+
+    Empty for a plugin that isn't installed or declares no schema.
+    """
+    schema = _schema_for_plugin(plugin_id)
+    if schema is None:
+        return []
+    return missing_required_fields(config, schema)

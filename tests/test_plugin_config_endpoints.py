@@ -19,7 +19,7 @@ from fastapi import HTTPException
 import server.core.plugin_loader as pl
 from server.api.plugins import emit_context_action, update_plugin_config
 from server.core.event_bus import EventBus
-from server.core.plugin_config import validate_plugin_config
+from server.core.plugin_config import missing_required_fields, validate_plugin_config
 from server.core.plugin_loader import PluginLoader
 from server.core.project_loader import PluginConfig, ProjectConfig, ProjectMeta
 from server.core.state_store import StateStore
@@ -90,9 +90,13 @@ def _engine(monkeypatch, *, restart_outcome="restarted"):
 # ── validate_plugin_config (shared core module) ──
 
 
-def test_validator_flags_missing_required_and_wrong_types():
+def test_validator_flags_wrong_types_but_tolerates_missing_required():
     schema = _AcmeWidgetPlugin.CONFIG_SCHEMA
-    assert validate_plugin_config({}, schema) is not None
+    # Missing required fields are a warning concern (the form saves
+    # incrementally during setup), not a type error.
+    assert validate_plugin_config({}, schema) is None
+    assert missing_required_fields({}, schema) == ["host"]
+    assert missing_required_fields({"host": "x"}, schema) == []
     err = validate_plugin_config({"host": "x", "port": "not-an-int"}, schema)
     assert err is not None and "port" in err
     # Group fields recurse
@@ -104,6 +108,17 @@ def test_validator_flags_missing_required_and_wrong_types():
     assert validate_plugin_config({"host": "x", "port": 80}, schema) is None
 
 
+def test_missing_required_reports_group_fields_dotted():
+    schema = {
+        "creds": {
+            "type": "group",
+            "fields": {"api_key": {"type": "string", "required": True}},
+        },
+    }
+    assert missing_required_fields({}, schema) == ["creds.api_key"]
+    assert missing_required_fields({"creds": {"api_key": "k"}}, schema) == []
+
+
 def test_cloud_path_uses_shared_validator():
     """The cloud AI path must use the identical validator (parity pin)."""
     import inspect
@@ -111,7 +126,9 @@ def test_cloud_path_uses_shared_validator():
     from server.cloud.tools import plugin_tools
 
     src = inspect.getsource(plugin_tools)
-    assert "from server.core.plugin_config import validate_config_for_plugin" in src
+    assert "server.core.plugin_config" in src
+    assert "validate_config_for_plugin" in src
+    assert "missing_required_for_plugin" in src
 
 
 # ── PUT /plugins/{id}/config ──
@@ -150,6 +167,22 @@ async def test_update_config_accepts_valid_and_reports_outcome(monkeypatch):
     assert result["applied"] == "hot_applied"
     assert "warning" not in result
     assert engine.project.plugins["acme_widget"].config == {"host": "10.0.0.10", "port": 81}
+
+
+@pytest.mark.asyncio
+async def test_update_config_partial_save_persists_with_warning(monkeypatch):
+    """First-time setup saves the config form incrementally — a save that
+    still lacks a required field must persist (with a warning naming the
+    field), not 400. Rejecting it made the IDE's autosave toast an error
+    after every keystroke until the whole form was filled."""
+    engine = _engine(monkeypatch, restart_outcome="start_failed")
+    monkeypatch.setitem(pl._PLUGIN_CLASS_REGISTRY, "acme_widget", _AcmeWidgetPlugin)
+
+    result = await update_plugin_config("acme_widget", _FakeRequest({"port": 81}))
+    assert result["status"] == "updated"
+    assert "host" in result["warning"]
+    assert "can't run" in result["warning"]
+    assert engine.project.plugins["acme_widget"].config == {"port": 81}
 
 
 @pytest.mark.asyncio

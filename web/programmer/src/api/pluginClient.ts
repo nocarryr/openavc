@@ -26,7 +26,12 @@ export async function getPluginConfig(pluginId: string): Promise<{ plugin_id: st
 export async function updatePluginConfig(
   pluginId: string,
   config: Record<string, unknown>,
-): Promise<{ status: string; applied?: string; warning?: string }> {
+): Promise<{
+  status: string;
+  applied?: string;
+  warning?: string;
+  missing_required?: string[];
+}> {
   return request(`/plugins/${pluginId}/config`, {
     method: "PUT",
     body: JSON.stringify(config),

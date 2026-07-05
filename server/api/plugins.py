@@ -16,7 +16,10 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from server.api.auth import programmer_auth_satisfied, require_programmer_auth
 from server.api.errors import api_error as _api_error
-from server.core.plugin_config import validate_config_for_plugin
+from server.core.plugin_config import (
+    missing_required_for_plugin,
+    validate_config_for_plugin,
+)
 from server.core.project_loader import (
     PluginConfig,
     build_default_plugin_config,
@@ -317,11 +320,15 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
     if not isinstance(new_config, dict):
         raise HTTPException(status_code=400, detail="Plugin config must be a JSON object")
 
-    # Same CONFIG_SCHEMA validation the cloud AI path applies — the IDE's
-    # path must not be able to persist a config the plugin can't start with.
+    # Same CONFIG_SCHEMA validation the cloud AI path applies. Wrong types
+    # are rejected; required fields that aren't set yet only warn — the
+    # config form saves incrementally during first-time setup, so a
+    # partially-filled config must persist (the plugin just can't start
+    # until it's complete).
     err = validate_config_for_plugin(plugin_id, new_config)
     if err:
         raise HTTPException(status_code=400, detail=err)
+    missing = missing_required_for_plugin(plugin_id, new_config)
 
     engine.project.plugins[plugin_id].config = new_config
     await save_project_async(engine.project_path, engine.project)
@@ -331,7 +338,15 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
     outcome = await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
 
     result: dict[str, Any] = {"status": "updated", "plugin_id": plugin_id, "applied": outcome}
-    if outcome == "start_failed":
+    if missing:
+        # Structured list so the IDE can tell "setup still in progress"
+        # (form already marks required fields) from a real restart failure.
+        result["missing_required"] = sorted(missing)
+        result["warning"] = (
+            f"Config saved, but required field(s) {', '.join(sorted(missing))} "
+            f"are not set yet. Plugin '{plugin_id}' can't run until they are."
+        )
+    elif outcome == "start_failed":
         result["warning"] = (
             f"Config saved, but plugin '{plugin_id}' failed to restart with it "
             f"and is stopped. Check the config values and plugin logs."

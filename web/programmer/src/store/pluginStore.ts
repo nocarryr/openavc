@@ -126,8 +126,10 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   updateConfig: async (pluginId, config) => {
     try {
       const result = await api.updatePluginConfig(pluginId, config);
-      if (result.warning) {
-        // Config saved, but the plugin failed to restart with it.
+      if (result.warning && !result.missing_required?.length) {
+        // Config saved, but the plugin failed to restart with it. A save
+        // that's merely missing required fields is setup-in-progress —
+        // the form's required markers already say what's left, so no toast.
         showError(result.warning);
       }
       await get().load();
