@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Plus, X } from "lucide-react";
 import type { UIElement, UIPage, UIElementOption } from "../../../api/types";
 import { CopyButton } from "../../shared/CopyButton";
@@ -9,6 +9,7 @@ import { VariableKeyPicker } from "../../shared/VariableKeyPicker";
 import { parseStateOptionList } from "../../shared/paramOptions";
 import { MacroRefPicker, DeviceRefPicker } from "../../shared/RefPickers";
 import { panelElementFieldKind } from "./panelElementConfig";
+import { numOrUndefined, intOrUndefined } from "./numericField";
 import { usePluginStore } from "../../../store/pluginStore";
 import { useConnectionStore } from "../../../store/connectionStore";
 import { showInfo } from "../../../store/toastStore";
@@ -251,24 +252,27 @@ export function BasicProperties({
           <FieldRow label="Min">
             <input
               type="number"
-              value={element.min ?? 0}
-              onChange={(e) => onChange({ min: Number(e.target.value) })}
+              value={element.min ?? ""}
+              onChange={(e) => onChange({ min: numOrUndefined(e.target.value) })}
+              placeholder="0"
               style={{ flex: 1 }}
             />
           </FieldRow>
           <FieldRow label="Max">
             <input
               type="number"
-              value={element.max ?? 100}
-              onChange={(e) => onChange({ max: Number(e.target.value) })}
+              value={element.max ?? ""}
+              onChange={(e) => onChange({ max: numOrUndefined(e.target.value) })}
+              placeholder="100"
               style={{ flex: 1 }}
             />
           </FieldRow>
           <FieldRow label="Step">
             <input
               type="number"
-              value={element.step ?? 1}
-              onChange={(e) => onChange({ step: Number(e.target.value) })}
+              value={element.step ?? ""}
+              onChange={(e) => onChange({ step: numOrUndefined(e.target.value) })}
+              placeholder="1"
               style={{ flex: 1 }}
               min={0.01}
               step={0.1}
@@ -297,8 +301,9 @@ export function BasicProperties({
           <FieldRow label="Thumb Size">
             <input
               type="number"
-              value={element.thumb_size ?? 44}
-              onChange={(e) => onChange({ thumb_size: Number(e.target.value) })}
+              value={element.thumb_size ?? ""}
+              onChange={(e) => onChange({ thumb_size: numOrUndefined(e.target.value) })}
+              placeholder="44"
               style={{ flex: 1 }}
               min={16}
               max={80}
@@ -422,16 +427,16 @@ export function BasicProperties({
       {element.type === "gauge" && (
         <>
           <FieldRow label="Min">
-            <input type="number" value={element.min ?? 0} onChange={(e) => onChange({ min: Number(e.target.value) })} style={{ flex: 1 }} />
+            <input type="number" value={element.min ?? ""} onChange={(e) => onChange({ min: numOrUndefined(e.target.value) })} placeholder="0" style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Max">
-            <input type="number" value={element.max ?? 100} onChange={(e) => onChange({ max: Number(e.target.value) })} style={{ flex: 1 }} />
+            <input type="number" value={element.max ?? ""} onChange={(e) => onChange({ max: numOrUndefined(e.target.value) })} placeholder="100" style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Unit">
             <input value={element.unit || ""} onChange={(e) => onChange({ unit: e.target.value })} placeholder="%, dB, etc." style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Arc Angle">
-            <input type="number" value={element.arc_angle ?? 240} onChange={(e) => onChange({ arc_angle: Number(e.target.value) })} min={90} max={360} style={{ flex: 1 }} />
+            <input type="number" value={element.arc_angle ?? ""} onChange={(e) => onChange({ arc_angle: numOrUndefined(e.target.value) })} placeholder="240" min={90} max={360} style={{ flex: 1 }} />
           </FieldRow>
 
           <SubSection label="Gauge Appearance" />
@@ -500,10 +505,10 @@ export function BasicProperties({
       {element.type === "level_meter" && (
         <>
           <FieldRow label="Min">
-            <input type="number" value={element.min ?? -60} onChange={(e) => onChange({ min: Number(e.target.value) })} style={{ flex: 1 }} />
+            <input type="number" value={element.min ?? ""} onChange={(e) => onChange({ min: numOrUndefined(e.target.value) })} placeholder="-60" style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Max">
-            <input type="number" value={element.max ?? 0} onChange={(e) => onChange({ max: Number(e.target.value) })} style={{ flex: 1 }} />
+            <input type="number" value={element.max ?? ""} onChange={(e) => onChange({ max: numOrUndefined(e.target.value) })} placeholder="0" style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Orientation">
             <select value={element.orientation || "vertical"} onChange={(e) => onChange({ orientation: e.target.value })} style={{ flex: 1 }}>
@@ -545,8 +550,9 @@ export function BasicProperties({
           <FieldRow label="Green to">
             <input
               type="number"
-              value={(element.style?.green_to as number) ?? -12}
-              onChange={(e) => onChange({ style: { ...element.style, green_to: Number(e.target.value) } })}
+              value={(element.style?.green_to as number) ?? ""}
+              onChange={(e) => onChange({ style: { ...element.style, green_to: numOrUndefined(e.target.value) } })}
+              placeholder="-12"
               style={{ flex: 1 }}
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>dB</span>
@@ -554,8 +560,9 @@ export function BasicProperties({
           <FieldRow label="Yellow to">
             <input
               type="number"
-              value={(element.style?.yellow_to as number) ?? -3}
-              onChange={(e) => onChange({ style: { ...element.style, yellow_to: Number(e.target.value) } })}
+              value={(element.style?.yellow_to as number) ?? ""}
+              onChange={(e) => onChange({ style: { ...element.style, yellow_to: numOrUndefined(e.target.value) } })}
+              placeholder="-3"
               style={{ flex: 1 }}
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>dB</span>
@@ -567,13 +574,13 @@ export function BasicProperties({
       {element.type === "fader" && (
         <>
           <FieldRow label="Min">
-            <input type="number" value={element.min ?? 0} onChange={(e) => onChange({ min: Number(e.target.value) })} style={{ flex: 1 }} />
+            <input type="number" value={element.min ?? ""} onChange={(e) => onChange({ min: numOrUndefined(e.target.value) })} placeholder="0" style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Max">
-            <input type="number" value={element.max ?? 100} onChange={(e) => onChange({ max: Number(e.target.value) })} style={{ flex: 1 }} />
+            <input type="number" value={element.max ?? ""} onChange={(e) => onChange({ max: numOrUndefined(e.target.value) })} placeholder="100" style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Step">
-            <input type="number" value={element.step ?? 1} onChange={(e) => onChange({ step: Number(e.target.value) })} min={0.01} step={0.1} style={{ flex: 1 }} />
+            <input type="number" value={element.step ?? ""} onChange={(e) => onChange({ step: numOrUndefined(e.target.value) })} placeholder="1" min={0.01} step={0.1} style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Unit">
             <input value={element.unit || ""} onChange={(e) => onChange({ unit: e.target.value })} placeholder="%" style={{ flex: 1 }} />
@@ -736,7 +743,7 @@ export function BasicProperties({
           )}
           {element.clock_mode === "meeting" && (
             <FieldRow label="Duration">
-              <input type="number" value={element.duration_minutes ?? 60} onChange={(e) => onChange({ duration_minutes: Number(e.target.value) })} min={1} style={{ flex: 1 }} />
+              <input type="number" value={element.duration_minutes ?? ""} onChange={(e) => onChange({ duration_minutes: numOrUndefined(e.target.value) })} placeholder="60" min={1} style={{ flex: 1 }} />
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>min</span>
             </FieldRow>
           )}
@@ -766,7 +773,7 @@ export function BasicProperties({
             </select>
           </FieldRow>
           <FieldRow label="Item Height">
-            <input type="number" value={element.item_height ?? 44} onChange={(e) => onChange({ item_height: Number(e.target.value) })} min={24} max={120} style={{ flex: 1 }} />
+            <input type="number" value={element.item_height ?? ""} onChange={(e) => onChange({ item_height: numOrUndefined(e.target.value) })} placeholder="44" min={24} max={120} style={{ flex: 1 }} />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>px</span>
           </FieldRow>
           <ListItemsEditor
@@ -954,7 +961,7 @@ export function BasicProperties({
       {element.type === "keypad" && (
         <>
           <FieldRow label="Digits">
-            <input type="number" value={element.digits ?? 4} onChange={(e) => onChange({ digits: Number(e.target.value) })} min={1} max={10} style={{ flex: 1 }} />
+            <input type="number" value={element.digits ?? ""} onChange={(e) => onChange({ digits: numOrUndefined(e.target.value) })} placeholder="4" min={1} max={10} style={{ flex: 1 }} />
           </FieldRow>
           <FieldRow label="Style">
             <select value={element.keypad_style || "numeric"} onChange={(e) => onChange({ keypad_style: e.target.value })} style={{ flex: 1 }}>
@@ -1063,6 +1070,26 @@ export function BasicProperties({
   );
 }
 
+/** Stable React keys for editable rows that have no natural id. With
+ *  key={i}, deleting a middle row rebinds every row below it — the input at
+ *  that index keeps focus but now edits a different row. Appended rows get
+ *  fresh ids; removeAt keeps the survivors' ids with their rows. Lists are
+ *  only ever appended to or deleted from (no reorder), so length-sync plus
+ *  removeAt covers every mutation. */
+function useRowKeys(length: number) {
+  const next = useRef(0);
+  const keysRef = useRef<number[]>([]);
+  const keys = keysRef.current;
+  if (keys.length > length) keys.length = length;
+  while (keys.length < length) keys.push(next.current++);
+  return {
+    keys,
+    removeAt: (i: number) => {
+      keys.splice(i, 1);
+    },
+  };
+}
+
 function OptionsEditor({
   options,
   onChange,
@@ -1074,7 +1101,10 @@ function OptionsEditor({
     onChange([...options, { label: `Option ${options.length + 1}`, value: `option_${options.length + 1}` }]);
   };
 
+  const rowKeys = useRowKeys(options.length);
+
   const removeOption = (index: number) => {
+    rowKeys.removeAt(index);
     onChange(options.filter((_, i) => i !== index));
   };
 
@@ -1133,7 +1163,7 @@ function OptionsEditor({
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {options.map((opt, i) => (
           <div
-            key={i}
+            key={rowKeys.keys[i]}
             style={{
               display: "flex",
               alignItems: "center",
@@ -1188,7 +1218,10 @@ function ListItemsEditor({
     onChange([...items, { label: `Item ${items.length + 1}`, value: `item_${items.length + 1}` }]);
   };
 
+  const rowKeys = useRowKeys(items.length);
+
   const removeItem = (index: number) => {
+    rowKeys.removeAt(index);
     onChange(items.filter((_, i) => i !== index));
   };
 
@@ -1214,7 +1247,7 @@ function ListItemsEditor({
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {items.map((item, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <div key={rowKeys.keys[i]} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <input
               value={item.label}
               onChange={(e) => updateItem(i, { label: e.target.value })}
@@ -1278,12 +1311,13 @@ function MatrixPresetsEditor({
   macros: { id: string; name: string }[];
   onChange: (presets: MatrixPreset[]) => void;
 }) {
+  const rowKeys = useRowKeys(presets.length);
   return (
     <div style={{ marginTop: 4 }}>
       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>Presets</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {presets.map((preset, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <div key={rowKeys.keys[i]} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <input
               value={preset.name || ""}
               onChange={(e) => {
@@ -1309,7 +1343,10 @@ function MatrixPresetsEditor({
               ))}
             </select>
             <button
-              onClick={() => onChange(presets.filter((_, j) => j !== i))}
+              onClick={() => {
+                rowKeys.removeAt(i);
+                onChange(presets.filter((_, j) => j !== i));
+              }}
               style={{
                 padding: "1px 5px", border: "1px solid var(--border-color)",
                 borderRadius: 3, background: "transparent", color: "var(--color-error)",
@@ -1624,8 +1661,9 @@ function PanelFieldControl({
       return (
         <input
           type="number"
-          value={config[field.key] != null ? Number(config[field.key]) : (field.default != null ? Number(field.default) : "")}
-          onChange={(e) => set(field.type === "integer" ? parseInt(e.target.value) || 0 : parseFloat(e.target.value) || 0)}
+          value={config[field.key] != null ? Number(config[field.key]) : ""}
+          placeholder={field.default != null ? String(field.default) : undefined}
+          onChange={(e) => set(field.type === "integer" ? intOrUndefined(e.target.value) : numOrUndefined(e.target.value))}
           step={field.type === "float" ? 0.1 : 1}
           style={{ flex: 1 }}
         />
@@ -1813,7 +1851,10 @@ function GaugeZonesEditor({
     onChange([...zones, { from: newFrom, to: newTo, color }]);
   };
 
+  const rowKeys = useRowKeys(zones.length);
+
   const removeZone = (index: number) => {
+    rowKeys.removeAt(index);
     onChange(zones.filter((_, i) => i !== index));
   };
 
@@ -1839,7 +1880,7 @@ function GaugeZonesEditor({
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {zones.map((zone, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <div key={rowKeys.keys[i]} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <div
               style={{
                 width: 18,
