@@ -151,4 +151,46 @@ const results = {};
   results.m128_import_warning_does_not_block = { pass: eq(r, []), detail: r };
 }
 
+// --- M-229: cloneDraft fills in state_variables the editors index blindly ---
+{
+  // The runtime loader tolerates a driver that omits state_variables, so a
+  // definition can arrive without it; cloning it verbatim crashed the
+  // State Variables / Behavior / Simulation tabs on Object.keys(undefined).
+  const def = { id: "acme_min", name: "Acme Minimal", transport: "tcp" };
+  let keys = null;
+  let threw = false;
+  try {
+    keys = Object.keys(H.cloneDraft(def).state_variables);
+  } catch {
+    threw = true;
+  }
+  results.m229_clone_fills_missing_state_variables = {
+    pass: !threw && eq(keys, []) && !("state_variables" in def),
+    detail: { keys, threw },
+  };
+}
+{
+  // A well-formed definition round-trips byte-identically: same content AND
+  // same key order (the fill must append only when absent, not re-order).
+  const def = {
+    id: "acme_full",
+    name: "Acme Full",
+    state_variables: { power: { type: "boolean", label: "Power" } },
+    transport: "tcp",
+  };
+  try {
+    const clone = H.cloneDraft(def);
+    clone.state_variables.power.label = "Changed";
+    results.m229_clone_preserves_shape_and_is_deep = {
+      pass:
+        JSON.stringify(Object.keys(H.cloneDraft(def))) === JSON.stringify(Object.keys(def)) &&
+        eq(H.cloneDraft(def), def) &&
+        def.state_variables.power.label === "Power",
+      detail: { clone },
+    };
+  } catch (e) {
+    results.m229_clone_preserves_shape_and_is_deep = { pass: false, detail: String(e) };
+  }
+}
+
 process.stdout.write(JSON.stringify(results));

@@ -87,6 +87,8 @@ SCENARIOS = [
     "m128_import_bad_id",
     "m128_import_deep_structural_error",
     "m128_import_warning_does_not_block",
+    "m229_clone_fills_missing_state_variables",
+    "m229_clone_preserves_shape_and_is_deep",
 ]
 
 

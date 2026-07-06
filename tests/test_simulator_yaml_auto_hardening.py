@@ -484,3 +484,44 @@ def test_notification_substitutes_value_and_key():
     captured.append(msg)
     assert captured == ["PWR power=True"]
     assert "{channel}" not in template
+
+
+# ===========================================================================
+# HTTP response delay — an authored 0 must mean "instant", not fall through
+# ===========================================================================
+
+def _make_http_sim(delays: dict) -> YAMLAutoSimulator:
+    return _make_sim({
+        "id": "acme_http",
+        "name": "Acme HTTP",
+        "transport": "http",
+        "state_variables": {},
+        "commands": {},
+        "responses": [],
+        "simulator": {"delays": delays},
+    })
+
+
+def test_http_delay_zero_beats_request_response_alias():
+    """`command_response: 0` is an explicit instant-reply choice; the old
+    `get(...) or get("request_response", 0)` treated 0 as unset and fell
+    through to the alias."""
+    sim = _make_http_sim({"command_response": 0, "request_response": 5})
+    assert sim._http_response_delay() == 0
+
+
+def test_http_delay_seed_shadows_request_response_alias():
+    """YAML auto-sims always seed command_response (0.05 default), so the
+    undocumented request_response alias never applies to them."""
+    sim = _make_http_sim({"request_response": 2})
+    assert sim._http_response_delay() == 0.05
+
+
+def test_http_delay_defaults_to_auto_seed():
+    sim = _make_http_sim({})
+    assert sim._http_response_delay() == 0.05
+
+
+def test_http_delay_uses_command_response():
+    sim = _make_http_sim({"command_response": 0.5})
+    assert sim._http_response_delay() == 0.5

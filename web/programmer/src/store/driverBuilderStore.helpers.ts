@@ -2,6 +2,21 @@ import type { DriverDefinition } from "../api/types";
 import { validateDriver } from "../components/driver-builder/validateDriver";
 
 /**
+ * Clone a definition into an editor draft, filling in the collections the
+ * editors index without guards. The runtime loader tolerates a hand-authored
+ * .avcdriver that omits state_variables, so definitions arriving from the
+ * API or a file import can miss it even though the type declares it —
+ * cloning it verbatim crashed the State Variables / Behavior / Simulation
+ * tabs on Object.keys(undefined). Appends the key only when absent, so the
+ * YAML key order of well-formed drivers is untouched on re-export.
+ */
+export function cloneDraft(definition: DriverDefinition): DriverDefinition {
+  const draft = structuredClone(definition);
+  draft.state_variables ??= {};
+  return draft;
+}
+
+/**
  * State patch to apply after a successful driver save.
  *
  * The editor inputs (the ID field included) stay editable while the save

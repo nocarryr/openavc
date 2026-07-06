@@ -1,6 +1,16 @@
 import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type { DriverDefinition, DriverSimulatorDef } from "../../api/types";
+import {
+  SIM_ERROR_BEHAVIORS,
+  addErrorModeStateEntry,
+  applyErrorModeBehavior,
+  coerceSimStateValue,
+  removeErrorModeStateEntry,
+  renameErrorModeStateVar,
+  setCommandResponseDelay,
+  type SimErrorMode,
+} from "./simulatorEditorHelpers";
 
 interface SimulatorEditorProps {
   draft: DriverDefinition;
@@ -162,23 +172,29 @@ export function SimulatorEditor({ draft, onUpdate }: SimulatorEditorProps) {
         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
           <input
             type="number"
-            value={sim.delays?.command_response ?? 0.05}
+            value={sim.delays?.command_response ?? ""}
             onChange={(e) =>
-              update({ delays: { ...sim.delays, command_response: parseFloat(e.target.value) || 0.05 } })
+              update({ delays: setCommandResponseDelay(sim.delays, e.target.value) })
             }
             min={0}
             step={0.01}
+            placeholder="0.05"
             style={{ width: 100 }}
           />
           <span style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)" }}>
-            seconds between receiving a command and sending a response
+            seconds between receiving a command and sending a response. Leave
+            blank for the default (0.05), or enter 0 for an instant response.
           </span>
         </div>
       </div>
 
       {/* Error Modes */}
       <div style={rowStyle}>
-        <ErrorModesEditor sim={sim} onUpdate={update} />
+        <ErrorModesEditor
+          sim={sim}
+          onUpdate={update}
+          stateVariables={draft.state_variables}
+        />
       </div>
 
       {/* Raw YAML for advanced features */}
@@ -216,12 +232,15 @@ export function SimulatorEditor({ draft, onUpdate }: SimulatorEditorProps) {
 function ErrorModesEditor({
   sim,
   onUpdate,
+  stateVariables,
 }: {
   sim: DriverSimulatorDef;
   onUpdate: (partial: Partial<DriverSimulatorDef>) => void;
+  stateVariables: DriverDefinition["state_variables"];
 }) {
   const [newMode, setNewMode] = useState("");
   const errorModes = sim.error_modes ?? {};
+  const stateVarNames = Object.keys(stateVariables);
 
   const addMode = () => {
     const key = newMode.replace(/[^a-z0-9_]/gi, "_").toLowerCase();
@@ -235,22 +254,35 @@ function ErrorModesEditor({
     setNewMode("");
   };
 
+  const updateMode = (key: string, mode: SimErrorMode) => {
+    onUpdate({ error_modes: { ...errorModes, [key]: mode } });
+  };
+
   return (
     <div>
       <h3 style={{ fontSize: "var(--font-size-base)", marginBottom: "var(--space-sm)" }}>
         Error Modes
       </h3>
       <p style={{ fontSize: "11px", color: "var(--text-muted)", marginBottom: "var(--space-sm)" }}>
-        Define error scenarios that can be injected during simulation to test error handling.
+        Define error scenarios that can be injected during simulation to test
+        error handling. A mode can affect the wire (stop or corrupt responses)
+        and/or change state values when injected — use State Change Only for
+        device-reported conditions like lamp warnings. To test connection
+        drops, use the Network Conditions controls in the Simulator UI.
       </p>
 
-      {Object.entries(errorModes).map(([key, mode]) => (
+      {Object.entries(errorModes).map(([key, mode]) => {
+        const knownBehavior = SIM_ERROR_BEHAVIORS.some(
+          (b) => b.value === (mode.behavior ?? ""),
+        );
+        const stateEntries = Object.entries(mode.set_state ?? {});
+        const unusedVars = stateVarNames.filter(
+          (v) => !(v in (mode.set_state ?? {})),
+        );
+        return (
         <div
           key={key}
           style={{
-            display: "flex",
-            gap: "var(--space-sm)",
-            alignItems: "center",
             marginBottom: "var(--space-xs)",
             padding: "var(--space-xs) var(--space-sm)",
             background: "var(--bg-surface)",
@@ -258,57 +290,142 @@ function ErrorModesEditor({
             borderRadius: "var(--border-radius)",
           }}
         >
-          <span
+          <div
             style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: "var(--font-size-sm)",
-              width: 160,
+              display: "flex",
+              gap: "var(--space-sm)",
+              alignItems: "center",
             }}
           >
-            {key}
-          </span>
-          <select
-            value={mode.behavior}
-            onChange={(e) =>
-              onUpdate({
-                error_modes: {
-                  ...errorModes,
-                  [key]: { ...mode, behavior: e.target.value },
-                },
-              })
-            }
-            style={{ width: 160, fontSize: "var(--font-size-sm)" }}
-          >
-            <option value="no_response">No Response</option>
-            <option value="corrupt_response">Corrupt Response</option>
-            <option value="disconnect">Disconnect</option>
-            <option value="custom_state">Custom State</option>
-          </select>
-          <input
-            value={mode.description ?? ""}
-            onChange={(e) =>
-              onUpdate({
-                error_modes: {
-                  ...errorModes,
-                  [key]: { ...mode, description: e.target.value },
-                },
-              })
-            }
-            placeholder="Description"
-            style={{ flex: 1, fontSize: "var(--font-size-sm)" }}
-          />
-          <button
-            onClick={() => {
-              const next = { ...errorModes };
-              delete next[key];
-              onUpdate({ error_modes: next });
-            }}
-            style={{ padding: "2px", color: "var(--text-muted)" }}
-          >
-            <Trash2 size={14} />
-          </button>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--font-size-sm)",
+                width: 160,
+              }}
+            >
+              {key}
+            </span>
+            <select
+              value={mode.behavior ?? ""}
+              onChange={(e) =>
+                updateMode(key, applyErrorModeBehavior(mode, e.target.value))
+              }
+              style={{ width: 160, fontSize: "var(--font-size-sm)" }}
+            >
+              {SIM_ERROR_BEHAVIORS.map((b) => (
+                <option key={b.value} value={b.value}>
+                  {b.label}
+                </option>
+              ))}
+              {!knownBehavior && (
+                <option value={mode.behavior}>
+                  {mode.behavior} (not supported)
+                </option>
+              )}
+            </select>
+            <input
+              value={mode.description ?? ""}
+              onChange={(e) =>
+                updateMode(key, { ...mode, description: e.target.value })
+              }
+              placeholder="Description"
+              style={{ flex: 1, fontSize: "var(--font-size-sm)" }}
+            />
+            <button
+              onClick={() => {
+                const next = { ...errorModes };
+                delete next[key];
+                onUpdate({ error_modes: next });
+              }}
+              style={{ padding: "2px", color: "var(--text-muted)" }}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+          {stateEntries.map(([varName, value]) => (
+            <div
+              key={varName}
+              style={{
+                display: "flex",
+                gap: "var(--space-sm)",
+                alignItems: "center",
+                marginTop: "var(--space-xs)",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: "11px",
+                  color: "var(--text-muted)",
+                  width: 160,
+                  textAlign: "right",
+                }}
+              >
+                sets
+              </span>
+              <select
+                value={varName}
+                onChange={(e) =>
+                  updateMode(
+                    key,
+                    renameErrorModeStateVar(mode, varName, e.target.value),
+                  )
+                }
+                style={{ width: 160, fontSize: "var(--font-size-sm)" }}
+              >
+                <option value={varName}>{varName}</option>
+                {unusedVars.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={String(value ?? "")}
+                onChange={(e) =>
+                  updateMode(key, {
+                    ...mode,
+                    set_state: {
+                      ...mode.set_state,
+                      [varName]: coerceSimStateValue(
+                        stateVariables[varName]?.type,
+                        e.target.value,
+                      ),
+                    },
+                  })
+                }
+                placeholder={
+                  stateVariables[varName]?.type === "boolean" ? "true / false" : "value"
+                }
+                style={{
+                  flex: 1,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--font-size-sm)",
+                }}
+              />
+              <button
+                onClick={() =>
+                  updateMode(key, removeErrorModeStateEntry(mode, varName))
+                }
+                style={{ padding: "2px", color: "var(--text-muted)" }}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+          {unusedVars.length > 0 && (
+            <button
+              onClick={() =>
+                updateMode(key, addErrorModeStateEntry(mode, stateVarNames))
+              }
+              style={{ fontSize: "11px", color: "var(--accent)", padding: "2px 0", marginTop: 2 }}
+            >
+              + State Change
+            </button>
+          )}
         </div>
-      ))}
+        );
+      })}
 
       <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-sm)" }}>
         <input

@@ -3,7 +3,7 @@ import yaml from "js-yaml";
 import type { DriverDefinition, DriverInfo, CommunityDriver, InstalledDriver } from "../api/types";
 import * as api from "../api/restClient";
 import { parseApiError } from "../api/errors";
-import { reconcileAfterSave, makeLatestWins, importBlockers } from "./driverBuilderStore.helpers";
+import { reconcileAfterSave, makeLatestWins, importBlockers, cloneDraft } from "./driverBuilderStore.helpers";
 import { secretFieldsInConfig } from "../components/driver-builder/transportPickerHelpers";
 
 const EMPTY_DEFINITION: DriverDefinition = {
@@ -101,7 +101,7 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => {
     }
     const found = definitions.find((d) => d.id === id);
     if (found) {
-      set({ selectedId: id, draft: structuredClone(found), dirty: false, error: null });
+      set({ selectedId: id, draft: cloneDraft(found), dirty: false, error: null });
     }
   };
 
@@ -210,7 +210,7 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => {
       if (blockers.length > 0) {
         set({
           selectedId: null,
-          draft: structuredClone(definition),
+          draft: cloneDraft(definition),
           dirty: true,
           saving: false,
           error: `This driver needs fixes before it can be saved: ${blockers.join(" ")}`,

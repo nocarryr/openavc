@@ -461,6 +461,15 @@ class YAMLAutoSimulator(TCPSimulator):
             self._http_site = None
         logger.info("%s stopped", self.name)
 
+    def _http_response_delay(self) -> float:
+        """Resolve the HTTP response delay: ``command_response`` when the
+        author set it (0 included — an explicit 0 means an instant reply),
+        falling back to the ``request_response`` alias, then no delay."""
+        delay = self._delays.get("command_response")
+        if delay is None:
+            delay = self._delays.get("request_response", 0)
+        return delay
+
     async def _handle_http_request(self, request: Any) -> Any:
         """Convert an aiohttp request to a synthesized command line, dispatch
         it through the standard handler machinery, and wrap the response.
@@ -492,10 +501,7 @@ class YAMLAutoSimulator(TCPSimulator):
             return web.Response(status=504, text="Gateway Timeout")
         if self._network_layer:
             await self._network_layer.apply_latency(self.device_id)
-        delay = (
-            self._delays.get("command_response")
-            or self._delays.get("request_response", 0)
-        )
+        delay = self._http_response_delay()
         if delay > 0:
             await asyncio.sleep(delay)
 

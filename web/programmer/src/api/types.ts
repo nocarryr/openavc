@@ -678,7 +678,11 @@ export interface DriverSimulatorDef {
   delays?: Record<string, number>;
   controls?: Array<Record<string, unknown>>;
   command_handlers?: Array<Record<string, unknown>>;
-  error_modes?: Record<string, { behavior: string; description?: string; state?: Record<string, unknown> }>;
+  // behavior: "no_response" | "corrupt_response" (the only wire-level
+  // behaviors the simulator transports read); omit it for a mode that only
+  // applies set_state. set_state values are applied via
+  // BaseSimulator.set_state() when the mode is injected.
+  error_modes?: Record<string, { behavior?: string; description?: string; set_state?: Record<string, unknown> }>;
 }
 
 /**

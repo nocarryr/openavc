@@ -115,8 +115,12 @@ class HTTPSimulator(BaseSimulator):
         if self._network_layer:
             await self._network_layer.apply_latency(self.device_id)
 
-        # Apply command response delay
-        delay = self._delays.get("command_response") or self._delays.get("request_response", 0)
+        # Apply command response delay. An explicit 0 means an instant reply;
+        # only an unset command_response falls back to the request_response
+        # alias.
+        delay = self._delays.get("command_response")
+        if delay is None:
+            delay = self._delays.get("request_response", 0)
         if delay > 0:
             await asyncio.sleep(delay)
 
