@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useId } from "react";
 import type { MacroStep, MacroConfig, DeviceConfig, DeviceInfo, DriverParamDef } from "../../api/types";
 import { ParamInput } from "../shared/ParamInput";
 import { useProjectStore } from "../../store/projectStore";
@@ -6,6 +6,16 @@ import type { StepPathSegment } from "../../store/logStore";
 import { VariableKeyPicker } from "../shared/VariableKeyPicker";
 import { ConditionEditor } from "./ConditionEditor";
 import { STEP_TYPES, getStepType } from "./macroHelpers";
+import { parseNumericField } from "../driver-builder/transportPickerHelpers";
+import {
+  valueKind,
+  convertValue,
+  parseTypedInput,
+  updatePayloadRow,
+  removePayloadRow,
+  addPayloadRow,
+} from "./macroValueHelpers";
+import type { ValueKind } from "./macroValueHelpers";
 import {
   usePluginMacroActions,
   findPluginAction,
@@ -68,8 +78,13 @@ export function StepEditor({ step, macros, currentMacroId, onChange, activeStepP
               type="number"
               min={0}
               step={0.1}
-              value={step.seconds ?? 0}
-              onChange={(e) => update({ seconds: parseFloat(e.target.value) || 0 })}
+              value={step.seconds ?? ""}
+              onChange={(e) => {
+                // Blank clears the field (runs as 0); junk keeps the prior value.
+                const n = parseNumericField(e.target.value, true);
+                if (n !== undefined) update({ seconds: n ?? undefined });
+              }}
+              placeholder="0"
               style={{ ...inputStyle, maxWidth: 120 }}
             />
           </div>
@@ -565,23 +580,31 @@ function StateSetEditor({
                 <option value="true">true</option>
                 <option value="false">false</option>
               </select>
-            ) : (
+            ) : selectedVar ? (
+              // Declared variable: the variable's type decides how the text
+              // is stored. A string variable keeps "0" or "true" verbatim —
+              // never silently converted to a number or boolean.
               <input
-                type={selectedVar?.type === "number" ? "number" : "text"}
+                type={selectedVar.type === "number" ? "number" : "text"}
                 value={step.value != null ? String(step.value) : ""}
                 onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "true") onChange({ value: true });
-                  else if (v === "false") onChange({ value: false });
-                  else if (v !== "" && !isNaN(Number(v))) onChange({ value: Number(v) });
-                  else onChange({ value: v });
+                  if (selectedVar.type === "number") {
+                    const parsed = parseTypedInput(e.target.value, "number");
+                    if (parsed !== undefined) onChange({ value: parsed });
+                  } else {
+                    onChange({ value: e.target.value });
+                  }
                 }}
-                placeholder={
-                  selectedVar
-                    ? `${selectedVar.type} (default: ${JSON.stringify(selectedVar.default)})`
-                    : "Value"
-                }
+                placeholder={`${selectedVar.type} (default: ${JSON.stringify(selectedVar.default)})`}
                 style={inputStyle}
+              />
+            ) : (
+              // Device/system/plugin state key with no declared type: the
+              // user picks the stored type explicitly instead of the editor
+              // guessing from the text.
+              <TypedValueInput
+                value={step.value}
+                onChange={(value) => onChange({ value })}
               />
             )}
             <button
@@ -613,6 +636,53 @@ function StateSetEditor({
   );
 }
 
+// --- Typed value input (explicit type, no guessing) ---
+
+function TypedValueInput({
+  value,
+  onChange,
+}: {
+  value: unknown;
+  onChange: (v: string | number | boolean) => void;
+}) {
+  const kind = valueKind(value);
+  return (
+    <>
+      <select
+        value={kind}
+        onChange={(e) => onChange(convertValue(value, e.target.value as ValueKind))}
+        title="How the value is stored"
+        style={{ ...inputStyle, flex: "0 0 auto", width: 92 }}
+      >
+        <option value="text">Text</option>
+        <option value="number">Number</option>
+        <option value="boolean">True/False</option>
+      </select>
+      {kind === "boolean" ? (
+        <select
+          value={String(value === true)}
+          onChange={(e) => onChange(e.target.value === "true")}
+          style={inputStyle}
+        >
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      ) : (
+        <input
+          type={kind === "number" ? "number" : "text"}
+          value={value != null ? String(value) : ""}
+          onChange={(e) => {
+            const parsed = parseTypedInput(e.target.value, kind);
+            if (parsed !== undefined) onChange(parsed);
+          }}
+          placeholder={kind === "number" ? "0" : "Value"}
+          style={inputStyle}
+        />
+      )}
+    </>
+  );
+}
+
 // --- Event Emit Editor (with suggestions) ---
 
 const COMMON_EVENTS = [
@@ -632,6 +702,9 @@ function EventEmitEditor({
   step: MacroStep;
   onChange: (patch: Partial<MacroStep>) => void;
 }) {
+  const payload = step.payload ?? {};
+  const payloadEntries = Object.entries(payload);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
       <HelpText>
@@ -656,6 +729,53 @@ function EventEmitEditor({
           ))}
         </datalist>
       </div>
+
+      <div>
+        <label style={{ ...labelStyle, display: "block", marginBottom: 4 }}>Payload</label>
+        {payloadEntries.map(([k, v], i) => (
+          <div key={i} style={{ ...rowStyle, marginBottom: "var(--space-xs)" }}>
+            <input
+              type="text"
+              value={k}
+              onChange={(e) =>
+                onChange({ payload: updatePayloadRow(payload, i, e.target.value, v) })
+              }
+              placeholder="field"
+              style={{ ...inputStyle, flex: "0 0 auto", width: 130, fontFamily: "var(--font-mono)" }}
+            />
+            <TypedValueInput
+              value={v}
+              onChange={(nv) => onChange({ payload: updatePayloadRow(payload, i, k, nv) })}
+            />
+            <button
+              onClick={() => onChange({ payload: removePayloadRow(payload, i) })}
+              style={{ ...inlineIconBtn, color: "var(--color-error)" }}
+              title="Remove field"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <button
+          onClick={() => onChange({ payload: addPayloadRow(payload) })}
+          style={{
+            fontSize: "var(--font-size-sm)",
+            color: "var(--accent)",
+            background: "none",
+            border: "none",
+            padding: "var(--space-xs) 0",
+            cursor: "pointer",
+          }}
+        >
+          + Add field
+        </button>
+        <div style={hintStyle}>
+          Optional data sent with the event. Listeners read it as the event payload — scripts
+          via the <code style={{ background: "var(--bg-hover)", padding: "0 4px", borderRadius: 2 }}>payload</code> argument,
+          triggered macros via <code style={{ background: "var(--bg-hover)", padding: "0 4px", borderRadius: 2 }}>$trigger.&lt;field&gt;</code>.
+        </div>
+      </div>
+
       <div style={hintStyle}>
         Scripts use <code style={{ background: "var(--bg-hover)", padding: "0 4px", borderRadius: 2 }}>@on_event("custom.my_event")</code> to
         respond to emitted events.
@@ -676,6 +796,9 @@ function WaitUntilEditor({
   const condition = step.condition ?? { key: "", operator: "eq", value: "" };
   const never = step.timeout == null;
   const onTimeout = step.on_timeout ?? "fail";
+  // Radio group scoped to this editor instance — a name derived from the
+  // step's values collides when two steps share the same condition/timeout.
+  const radioGroup = useId();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
@@ -700,7 +823,12 @@ function WaitUntilEditor({
           step={0.5}
           value={never ? "" : String(step.timeout ?? 0)}
           disabled={never}
-          onChange={(e) => onChange({ timeout: parseFloat(e.target.value) || 0 })}
+          onChange={(e) => {
+            // Blank or junk keeps the prior timeout — snapping to 0 would
+            // mean "time out immediately", which fails the macro by default.
+            const n = parseNumericField(e.target.value, true);
+            if (typeof n === "number") onChange({ timeout: n });
+          }}
           style={{ ...inputStyle, maxWidth: 120 }}
           placeholder={never ? "never" : "seconds"}
         />
@@ -742,7 +870,7 @@ function WaitUntilEditor({
           >
             <input
               type="radio"
-              name={`wait_until_on_timeout_${step.condition?.key ?? ""}_${step.timeout ?? ""}`}
+              name={radioGroup}
               checked={onTimeout === "fail"}
               onChange={() => onChange({ on_timeout: "fail" })}
             />
@@ -760,7 +888,7 @@ function WaitUntilEditor({
           >
             <input
               type="radio"
-              name={`wait_until_on_timeout_${step.condition?.key ?? ""}_${step.timeout ?? ""}`}
+              name={radioGroup}
               checked={onTimeout === "continue"}
               onChange={() => onChange({ on_timeout: "continue" })}
             />

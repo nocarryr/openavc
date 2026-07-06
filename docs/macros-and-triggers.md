@@ -31,6 +31,10 @@ The **Device Command** step uses smart dropdowns: after selecting a device, the 
 
 The **Group Command** step works the same way but targets a device group instead of a single device. All devices in the group receive the command concurrently. Only commands shared by every device in the group are shown, and its parameters use the same smart inputs as a single-device command: a Yes/No selector for boolean parameters, a dropdown for enumerated values, and the **$** toggle for dynamic values. You pick from the driver's choices instead of typing raw values. Offline devices are skipped automatically. Create and manage device groups from the **Groups** tab in the Devices view.
 
+The **Emit Event** step can attach optional payload fields that travel with the event. Each field has a name and a typed value (text, number, or true/false). Scripts receive them in the `payload` argument of an `@on_event` handler, and a macro triggered by the event can read each field with `$trigger.<field>`.
+
+The **Set Variable** step stores values with the variable's declared type: a string variable keeps text like `0` or `true` exactly as typed. When the target is a device or system state key instead of a variable, a type selector chooses whether the value is stored as text, a number, or true/false.
+
 Reorder steps by dragging the grip handle on the left side of each step. Toggle **Stop on Error** in the macro header to halt execution if any step fails (by default, macros continue through errors).
 
 **Step Templates:** Click the **Templates** dropdown in the step toolbar to insert pre-built multi-step patterns: Volume Ramp, Source Switch, and Power Sequence. Templates add several coordinated steps at once and are a fast way to build common sequences.
