@@ -485,3 +485,55 @@ async def test_ws_panel_cannot_send_restricted_types(engine_and_client):
 
         msg = websocket.receive_json()
         assert msg["type"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Connection cap and rate limiting
+# ---------------------------------------------------------------------------
+
+async def test_ws_connection_cap_rejects_excess_connections(engine_and_client, monkeypatch):
+    """Connections beyond MAX_WS_CONNECTIONS are rejected at the handshake."""
+    from fastapi import WebSocketDisconnect
+
+    _, client = engine_and_client
+    monkeypatch.setattr(ws, "MAX_WS_CONNECTIONS", 2)
+    with client.websocket_connect("/ws?client=panel") as ws1:
+        ws1.receive_json()  # snapshot
+        with client.websocket_connect("/ws?client=panel") as ws2:
+            ws2.receive_json()  # snapshot
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect("/ws?client=panel"):
+                    pass
+
+
+async def test_ws_connection_cap_releases_slot_on_disconnect(engine_and_client, monkeypatch):
+    """Closing a connection frees its slot for a new client."""
+    _, client = engine_and_client
+    monkeypatch.setattr(ws, "MAX_WS_CONNECTIONS", 1)
+    with client.websocket_connect("/ws?client=panel") as ws1:
+        ws1.receive_json()
+    time.sleep(0.2)  # let the server side finish its disconnect cleanup
+    with client.websocket_connect("/ws?client=panel") as ws2:
+        msg = ws2.receive_json()
+        assert msg["type"] == "state.snapshot"
+
+
+async def test_ws_rate_limit_rejects_flood(engine_and_client, monkeypatch):
+    """Messages beyond the per-window cap get an error and are not dispatched."""
+    engine, client = engine_and_client
+    monkeypatch.setattr(ws, "WS_RATE_LIMIT_MAX_MESSAGES", 5)
+    with client.websocket_connect("/ws?client=panel") as websocket:
+        websocket.receive_json()  # snapshot
+        websocket.receive_json()  # ui.definition
+
+        for _ in range(5):
+            websocket.send_json({"type": "pong"})
+        websocket.send_json({"type": "ui.press", "element_id": "btn1"})
+
+        msg = websocket.receive_json()
+        assert msg["type"] == "error"
+        assert "rate limit" in msg["message"].lower()
+        time.sleep(0.1)
+
+    # The rate-limited press was never dispatched
+    assert engine.state.get("var.channel") == ""

@@ -7,6 +7,7 @@ import pytest
 from server.api.ws import (
     _handle_message,
     _is_flat_primitive,
+    _send_ws,
     _PANEL_ALLOWED_TYPES,
     _PANEL_STATE_SET_PREFIXES,
 )
@@ -488,3 +489,93 @@ def test_programmer_only_types_excluded_from_panel():
     """Verify programmer-only message types are NOT in the panel allowed set."""
     for msg_type in ["project.reload", "isc.send", "isc.broadcast"]:
         assert msg_type not in _PANEL_ALLOWED_TYPES
+
+
+# ── ui.submit / ui.route value validation ──
+
+
+@pytest.mark.asyncio
+async def test_ui_submit_rejects_dict_value():
+    """ui.submit rejects non-primitive values (same rule as ui.change)."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api._engine._engine", engine):
+        await _handle_message(
+            ws, {"type": "ui.submit", "element_id": "kp1", "value": {"nested": True}}, "panel"
+        )
+    engine.handle_ui_event.assert_not_awaited()
+    assert ws.sent[0]["type"] == "error"
+    assert "primitive" in ws.sent[0]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_ui_submit_rejects_list_value():
+    """ui.submit rejects list values."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api._engine._engine", engine):
+        await _handle_message(
+            ws, {"type": "ui.submit", "element_id": "kp1", "value": [1, 2]}, "panel"
+        )
+    engine.handle_ui_event.assert_not_awaited()
+    assert ws.sent[0]["type"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_ui_submit_valid_value_dispatches():
+    """ui.submit with a primitive value dispatches to the engine."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api._engine._engine", engine):
+        await _handle_message(
+            ws, {"type": "ui.submit", "element_id": "kp1", "value": "123"}, "panel"
+        )
+    engine.handle_ui_event.assert_awaited_once_with("submit", "kp1", {"value": "123"})
+
+
+@pytest.mark.asyncio
+async def test_ui_route_rejects_nested_input():
+    """ui.route rejects non-primitive input/output indices."""
+    ws = FakeWS()
+    engine = _make_engine()
+    with patch("server.api._engine._engine", engine):
+        await _handle_message(
+            ws,
+            {"type": "ui.route", "element_id": "matrix1", "input": {"i": 1}, "output": 2},
+            "panel",
+        )
+    engine.handle_ui_event.assert_not_awaited()
+    assert ws.sent[0]["type"] == "error"
+
+
+# ── _send_ws exception handling ──
+
+
+class _RaisingWS:
+    """WebSocket stub whose send always raises the given exception."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def send_json(self, data: dict):
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_send_ws_swallows_disconnect_silently(caplog):
+    """Disconnect-class send failures are expected and stay silent."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="server.api.ws"):
+        await _send_ws(_RaisingWS(ConnectionResetError("gone")), {"type": "x"})
+    assert not caplog.records
+
+
+@pytest.mark.asyncio
+async def test_send_ws_logs_unexpected_send_failure(caplog):
+    """Non-disconnect send failures are debug-logged instead of vanishing."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="server.api.ws"):
+        await _send_ws(_RaisingWS(ValueError("encode boom")), {"type": "x"})
+    assert any("send failed" in r.message.lower() for r in caplog.records)

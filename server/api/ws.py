@@ -25,6 +25,22 @@ from server.utils.logger import get_logger
 router = APIRouter()
 log = get_logger(__name__)
 
+# Cap on simultaneous WebSocket connections. Panel connections are
+# unauthenticated, so without a ceiling a misbehaving or malicious client
+# could exhaust server resources by opening connections in a loop. Generous
+# for real deployments (one instance serves one space's panels plus the
+# Programmer IDE).
+MAX_WS_CONNECTIONS = 100
+_ws_connection_count = 0
+
+# Per-client rate limit: at most this many messages per sliding window.
+WS_RATE_LIMIT_MAX_MESSAGES = 200
+WS_RATE_LIMIT_WINDOW_SEC = 1.0
+
+# Exceptions that mean the peer went away mid-send. These are expected and
+# swallowed silently; anything else is a real send failure and gets logged.
+_WS_DISCONNECT_EXCEPTIONS = (WebSocketDisconnect, ConnectionError, OSError)
+
 # The engine lives in a single shared slot in server.api._engine. This handler
 # reads it through get_engine_optional() rather than holding its own reference,
 # so there's no second slot that could fall out of sync with the REST one.
@@ -47,6 +63,7 @@ _log_subscriptions: dict[int, tuple[str, asyncio.Task]] = {}
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     """Main WebSocket endpoint for panel and programmer UIs."""
+    global _ws_connection_count
     query_params = dict(ws.query_params)
     headers = dict(ws.headers)
     requested_type = query_params.get("client", "panel")
@@ -64,6 +81,26 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     # Panel clients cannot escalate to programmer even if they have auth
     client_type = requested_type if is_authenticated else "panel"
 
+    # Connection cap: reject before accepting the handshake. The counter is
+    # incremented before any await so concurrent handshakes can't slip past
+    # the check, and decremented in the outer finally on every exit path.
+    if _ws_connection_count >= MAX_WS_CONNECTIONS:
+        log.warning(
+            f"WebSocket connection rejected: {MAX_WS_CONNECTIONS} connections already open"
+        )
+        await ws.close(code=1013, reason="Too many connections")
+        return
+    _ws_connection_count += 1
+    try:
+        await _run_ws_connection(ws, query_params, headers, client_type)
+    finally:
+        _ws_connection_count -= 1
+
+
+async def _run_ws_connection(
+    ws: WebSocket, query_params: dict, headers: dict, client_type: str
+) -> None:
+    """Accept the handshake and run one client's message loop until disconnect."""
     # Echo back auth subprotocol if client used Sec-WebSocket-Protocol
     subprotocol = get_ws_auth_subprotocol(headers)
     await ws.accept(subprotocol=subprotocol)
@@ -82,8 +119,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             while True:
                 await asyncio.sleep(30)
                 await ws.send_json({"type": "ping"})
-        except (asyncio.CancelledError, Exception):
-            return  # Catch-all: ping loop must exit silently on any error
+        except asyncio.CancelledError:
+            return
+        except _WS_DISCONNECT_EXCEPTIONS:
+            return  # Peer went away — the receive loop handles cleanup
+        except Exception:
+            log.debug("WebSocket ping loop ended on send failure", exc_info=True)
 
     try:
         # Send initial state snapshot BEFORE subscribing to broadcasts,
@@ -114,16 +155,21 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         # Start heartbeat
         ping_task = asyncio.create_task(_ping_loop())
 
-        # Per-client rate limiting: max 200 messages per second
-        _msg_times: deque[float] = deque(maxlen=200)
+        # Per-client rate limiting: sliding window of accepted-message times.
+        # Bounded by the check itself (never grows past the limit).
+        _msg_times: deque[float] = deque()
 
         # Message loop
         while True:
             text = await ws.receive_text()
 
-            # Rate limit check
+            # Rate limit check: prune timestamps that fell out of the window,
+            # then reject if the window is at capacity. Rejected messages are
+            # not counted, so a flood can't extend its own penalty.
             now = time.monotonic()
-            if len(_msg_times) >= 200 and now - _msg_times[0] < 1.0:
+            while _msg_times and now - _msg_times[0] >= WS_RATE_LIMIT_WINDOW_SEC:
+                _msg_times.popleft()
+            if len(_msg_times) >= WS_RATE_LIMIT_MAX_MESSAGES:
                 await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
                 continue
             _msg_times.append(now)
@@ -174,16 +220,20 @@ async def _log_stream_task(ws: WebSocket, queue: asyncio.Queue) -> None:
             })
     except asyncio.CancelledError:
         return
+    except _WS_DISCONNECT_EXCEPTIONS:
+        return  # Peer went away — subscription cleanup happens on disconnect
     except Exception:
-        return  # Catch-all: WS send failure ends the stream task silently
+        log.debug("WebSocket log stream ended on send failure", exc_info=True)
 
 
 async def _send_ws(ws: WebSocket, msg: dict[str, Any]) -> None:
     """Send a JSON message to the client, silently ignoring disconnects."""
     try:
         await ws.send_json(msg)
+    except _WS_DISCONNECT_EXCEPTIONS:
+        pass  # Client disconnected mid-send
     except Exception:
-        pass  # Catch-all: client may have disconnected
+        log.debug("WebSocket send failed", exc_info=True)
 
 
 async def _send_ws_error(
@@ -321,6 +371,9 @@ async def _handle_message(
             return
         input_idx = msg.get("input")
         output_idx = msg.get("output")
+        if not _is_flat_primitive(input_idx) or not _is_flat_primitive(output_idx):
+            await _send_ws_error(ws, msg_type, "Input and output must be flat primitives")
+            return
         audio_flag = bool(msg.get("audio"))
         mute_val = msg.get("mute")
         # Dispatch to one of four binding slots based on the message shape:
@@ -353,6 +406,9 @@ async def _handle_message(
             await _send_ws_error(ws, msg_type, "Missing element_id")
             return
         value = msg.get("value")
+        if not _is_flat_primitive(value):
+            await _send_ws_error(ws, msg_type, "Value must be a flat primitive (str, int, float, bool, or null)")
+            return
         try:
             await engine.handle_ui_event("submit", element_id, {"value": value})
         except Exception as e:
