@@ -94,8 +94,14 @@ class LogBuffer:
         """Remove a subscription."""
         self._subscribers.pop(sub_id, None)
 
-    def get_recent(self, count: int = 100) -> list[dict[str, Any]]:
-        """Get the ``count`` most recent entries as dicts.
+    def get_recent(self, count: int = 100, category: str = "") -> list[dict[str, Any]]:
+        """Get the ``count`` most recent entries as dicts, optionally
+        filtered to one category.
+
+        The category filter runs over the whole buffer BEFORE the count
+        slice — slicing first would return only the matches that happen to
+        fall in the newest ``count`` entries (too few, or none, on a busy
+        log) instead of the newest ``count`` matching entries.
 
         A count of 0 (or negative) returns an empty list — the ``[-count:]``
         slice would otherwise turn 0 into the whole buffer and a negative
@@ -104,6 +110,8 @@ class LogBuffer:
         if count <= 0:
             return []
         entries = list(self._entries)
+        if category:
+            entries = [e for e in entries if e.category == category]
         if count < len(entries):
             entries = entries[-count:]
         return [e.to_dict() for e in entries]

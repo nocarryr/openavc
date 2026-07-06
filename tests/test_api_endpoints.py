@@ -391,6 +391,35 @@ def test_logs_recent(client):
     assert isinstance(data, list)
 
 
+def test_logs_recent_category_scans_whole_buffer(client):
+    """category must filter the whole buffer before the count slice — a busy
+    log otherwise returns zero matches once newer entries push the requested
+    category out of the newest `count` window."""
+    from server.utils.log_buffer import LogEntry, get_log_buffer
+
+    c, engine = client
+    buf = get_log_buffer()
+    buf._entries.clear()
+    try:
+        for i in range(5):
+            buf.append(LogEntry(
+                timestamp=float(i), level="INFO", source="test",
+                category="device", message=f"dev {i}",
+            ))
+        for i in range(200):
+            buf.append(LogEntry(
+                timestamp=float(100 + i), level="INFO", source="test",
+                category="system", message=f"sys {i}",
+            ))
+        resp = c.get("/api/logs/recent?count=100&category=device")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 5
+        assert all(e["category"] == "device" for e in data)
+    finally:
+        buf._entries.clear()
+
+
 # ── System version ──
 
 

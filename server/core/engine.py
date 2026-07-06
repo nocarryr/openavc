@@ -38,6 +38,10 @@ from server.version import __version__
 log = get_logger(__name__)
 
 
+class ProjectRevisionConflictError(Exception):
+    """A revision-checked save found a newer project revision on the server."""
+
+
 def _log_task_exception(task: asyncio.Task) -> None:
     """Done-callback to log unhandled exceptions from fire-and-forget tasks."""
     if task.cancelled():
@@ -536,6 +540,30 @@ class Engine:
     async def reload_project(self) -> None:
         """Hot-reload project.avc without full restart."""
         async with self._reload_lock:
+            await self._reload_project_inner()
+
+    async def save_project_checked(
+        self, project: ProjectConfig, expected_revision: int | None = None
+    ) -> None:
+        """Persist ``project`` to disk and hot-reload it, atomically with the
+        optimistic-concurrency check.
+
+        The revision compare must happen under the same lock that increments
+        ``_project_revision`` during reload. Checked outside it, two
+        concurrent saves can both pass the compare and the loser's edit is
+        silently overwritten — the exact race the 409 contract exists to
+        prevent. Raises :class:`ProjectRevisionConflictError` on mismatch;
+        ``expected_revision=None`` skips the check (save unconditionally).
+        """
+        async with self._reload_lock:
+            if (
+                expected_revision is not None
+                and expected_revision != self._project_revision
+            ):
+                raise ProjectRevisionConflictError(
+                    "Project was modified by another session"
+                )
+            await save_project_async(self.project_path, project)
             await self._reload_project_inner()
 
     def reload_persisted_state(self) -> None:

@@ -122,6 +122,38 @@ def test_buffer_get_recent_negative_count_returns_empty():
     assert buf.get_recent(-3) == []
 
 
+def test_buffer_get_recent_category_filters_before_slice():
+    """The category filter must scan the whole buffer, then take the newest
+    count — filtering after the slice makes a busy log return too few (or
+    zero) matches when the newest entries are all another category."""
+    buf = LogBuffer(maxlen=200)
+    for i in range(10):
+        buf.append(LogEntry(
+            timestamp=float(i), level="INFO", source="test",
+            category="device", message=f"dev {i}",
+        ))
+    # Bury the device entries under newer system chatter
+    for i in range(50):
+        buf.append(LogEntry(
+            timestamp=float(100 + i), level="INFO", source="test",
+            category="system", message=f"sys {i}",
+        ))
+    recent = buf.get_recent(20, category="device")
+    assert len(recent) == 10
+    assert all(e["category"] == "device" for e in recent)
+
+
+def test_buffer_get_recent_category_takes_newest_matches():
+    buf = LogBuffer(maxlen=200)
+    for i in range(30):
+        buf.append(LogEntry(
+            timestamp=float(i), level="INFO", source="test",
+            category="device", message=f"dev {i}",
+        ))
+    recent = buf.get_recent(5, category="device")
+    assert [e["message"] for e in recent] == [f"dev {i}" for i in range(25, 30)]
+
+
 @pytest.mark.asyncio
 async def test_buffer_subscribe_receives_entries():
     buf = LogBuffer()

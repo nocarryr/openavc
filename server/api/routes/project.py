@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from server.api._engine import _get_engine
 from server.api.errors import api_error as _api_error
+from server.core.engine import ProjectRevisionConflictError
 from server.core.project_loader import ProjectConfig, save_project_async
 from server.utils.log_buffer import get_log_buffer
 
@@ -79,18 +80,20 @@ async def save_project_config(request: Request) -> dict[str, Any]:
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid _revision value")
 
-    if expected_rev is not None and expected_rev != engine._project_revision:
-        raise HTTPException(
-            status_code=409,
-            detail="Project was modified by another session. Reload to see the latest changes.",
-        )
-
     try:
         project = ProjectConfig(**body)
     except Exception as e:
         raise _api_error(422, "Invalid project configuration", e)
-    await save_project_async(engine.project_path, project)
-    await engine.reload_project()
+    # Compare-and-set runs inside the engine, under the same lock that
+    # increments the revision — checked here, two concurrent saves could
+    # both pass and one edit would be silently lost.
+    try:
+        await engine.save_project_checked(project, expected_rev)
+    except ProjectRevisionConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail="Project was modified by another session. Reload to see the latest changes.",
+        )
     return JSONResponse(
         content={"status": "saved"},
         headers={"ETag": f'"{engine._project_revision}"'},
@@ -340,10 +343,7 @@ async def create_blank(request: Request) -> dict[str, Any]:
 @router.get("/logs/recent")
 async def get_recent_logs(count: int = 100, category: str = "") -> list[dict[str, Any]]:
     """Get recent log entries, optionally filtered by category."""
-    entries = get_log_buffer().get_recent(count)
-    if category:
-        entries = [e for e in entries if e.get("category") == category]
-    return entries
+    return get_log_buffer().get_recent(count, category=category)
 
 
 # --- Backups ---
