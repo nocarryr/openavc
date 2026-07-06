@@ -657,6 +657,21 @@ export function validateDriver(
           message: `${label} OSC address must start with "/" (e.g. /main/volume).`,
         });
       }
+    } else if ((resp as { json?: boolean }).json) {
+      // json-body rules parse the whole reply as JSON and map fields by
+      // key/path — no regex pattern (mirror driver_loader.py). They need a
+      // set map or mappings list to do anything.
+      const hasSet =
+        typeof (resp as { set?: unknown }).set === "object" &&
+        (resp as { set?: unknown }).set !== null;
+      const hasMappings = Array.isArray((resp as { mappings?: unknown }).mappings);
+      if (!hasSet && !hasMappings) {
+        issues.push({
+          severity: "error",
+          section: "behavior",
+          message: `${label} is a JSON response but maps no fields — add a set map (state variable to JSON key/path) or a mappings list.`,
+        });
+      }
     } else if (!resp.pattern?.trim() && !resp.match?.trim()) {
       issues.push({
         severity: "error",

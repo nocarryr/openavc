@@ -290,6 +290,24 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                 )
             continue
 
+        # json-body rules parse the whole reply as JSON and map fields by
+        # key/path — they carry no regex pattern, so exempt them from the
+        # pattern requirement. They need a set map or mappings list to do
+        # anything, and child_set doesn't apply (no capture groups).
+        if resp.get("json"):
+            if resp.get("child_set") is not None:
+                errors.append(
+                    f"Response {i}: child_set is not supported on json responses"
+                )
+            if not isinstance(resp.get("set"), dict) and not isinstance(
+                resp.get("mappings"), list
+            ):
+                errors.append(
+                    f"Response {i}: json response needs a 'set' map or a "
+                    f"'mappings' list"
+                )
+            continue
+
         pattern = resp.get("pattern", "") or resp.get("match", "")
         if not pattern:
             errors.append(f"Response {i}: missing pattern, match, or address")
@@ -303,11 +321,6 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
         # enforce the shape + capture-ref bounds at load time.
         child_set = resp.get("child_set")
         if child_set is None:
-            continue
-        if resp.get("json"):
-            errors.append(
-                f"Response {i}: child_set is not supported on json responses"
-            )
             continue
         if not isinstance(child_set, list) or not child_set:
             errors.append(f"Response {i}: child_set must be a non-empty list")

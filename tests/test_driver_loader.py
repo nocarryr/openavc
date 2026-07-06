@@ -122,6 +122,38 @@ def test_validate_bad_regex():
     assert any("regex" in e.lower() or "invalid" in e.lower() for e in errors)
 
 
+def test_validate_json_response_needs_no_pattern():
+    # A json: true rule parses the whole reply body — it carries no regex, so
+    # the pattern requirement must not fire (novastar_h_series was the first
+    # catalog driver to hit this).
+    defn = {
+        **VALID_DEFINITION,
+        "responses": [
+            {"json": True, "set": {"power": "status.power"}},
+            {"json": True, "mappings": [{"state": "power", "key": "power"}]},
+        ],
+    }
+    assert validate_driver_definition(defn) == []
+
+
+def test_validate_json_response_requires_field_map():
+    defn = {**VALID_DEFINITION, "responses": [{"json": True}]}
+    errors = validate_driver_definition(defn)
+    assert any("json response needs" in e for e in errors)
+
+
+def test_validate_json_response_rejects_child_set():
+    defn = {
+        **VALID_DEFINITION,
+        "responses": [
+            {"json": True, "set": {"power": "power"},
+             "child_set": [{"type": "output", "id": "$1", "state": {}}]},
+        ],
+    }
+    errors = validate_driver_definition(defn)
+    assert any("child_set is not supported on json responses" in e for e in errors)
+
+
 # --- frame_parser validation (H-062: reject at load, not at connect) ---
 
 
