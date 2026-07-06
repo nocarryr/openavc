@@ -13,6 +13,7 @@ import type {
   DriverParamDef,
 } from "../../api/types";
 import * as api from "../../api/restClient";
+import { normalizeOptionList } from "../shared/paramOptions";
 import { BASE } from "../../api/base";
 import type {
   TestCommandResult,
@@ -1182,6 +1183,9 @@ function ParamInput({
   onChange: (v: string) => void;
 }) {
   if (def.type === "enum" && def.values) {
+    // Options may be plain strings or {value, label} — show the label, send
+    // the wire value (the preview + runtime both work off the value).
+    const options = normalizeOptionList(def.values);
     return (
       <select
         value={value}
@@ -1189,9 +1193,9 @@ function ParamInput({
         style={{ width: "100%" }}
       >
         {!def.required && <option value="">(none)</option>}
-        {def.values.map((v) => (
-          <option key={v} value={v}>
-            {v}
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
           </option>
         ))}
       </select>

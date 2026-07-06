@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
 import type { DriverDefinition, DriverDeviceSettingDef } from "../../api/types";
 import { IdRenameInput, type RenameResult } from "./IdRenameInput";
+import { EnumValuesEditor } from "../shared/EnumValuesEditor";
+import { normalizeOptionList } from "../shared/paramOptions";
 import {
   checkSettingRename,
   nextSettingKey,
@@ -247,19 +249,10 @@ export function DeviceSettingsEditor({ draft, onUpdate }: DeviceSettingsEditorPr
 
                 {setting.type === "enum" && (
                   <div style={{ marginBottom: "var(--space-md)" }}>
-                    <label style={labelStyle}>Values (comma-separated)</label>
-                    <input
-                      value={(setting.values ?? []).join(", ")}
-                      onChange={(e) =>
-                        updateSetting(key, {
-                          values: e.target.value
-                            .split(",")
-                            .map((s) => s.trim())
-                            .filter(Boolean),
-                        })
-                      }
-                      placeholder="e.g., auto, manual, off"
-                      style={{ width: "100%" }}
+                    <label style={labelStyle}>Values</label>
+                    <EnumValuesEditor
+                      values={setting.values}
+                      onChange={(values) => updateSetting(key, { values })}
                     />
                   </div>
                 )}
@@ -309,8 +302,8 @@ export function DeviceSettingsEditor({ draft, onUpdate }: DeviceSettingsEditorPr
                         style={{ width: "100%" }}
                       >
                         <option value="">(none)</option>
-                        {(setting.values ?? []).map((v) => (
-                          <option key={v} value={v}>{v}</option>
+                        {normalizeOptionList(setting.values ?? []).map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
                         ))}
                       </select>
                     ) : setting.type === "integer" || setting.type === "number" || setting.type === "float" ? (

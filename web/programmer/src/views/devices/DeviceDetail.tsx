@@ -8,7 +8,7 @@ import { useLogStore } from "../../store/logStore";
 import * as api from "../../api/restClient";
 import type { BridgePort, DeviceConfig, DeviceInfo, DeviceSettingValue, DriverParamDef } from "../../api/types";
 import { ParamInput } from "../../components/shared/ParamInput";
-import { parseStateOptionList } from "../../components/shared/paramOptions";
+import { normalizeOptionList, optionLabel, parseStateOptionList } from "../../components/shared/paramOptions";
 import { hasInvalidParams } from "../../components/shared/paramValidation";
 import { DevicePanelSlot, ContextActionRenderer } from "../../components/plugins/PluginExtensions";
 import { findDeviceReferences, validateSettingValue } from "./deviceUtils";
@@ -787,8 +787,11 @@ export function DeviceDetail({
                     const defaults: Record<string, string> = {};
                     for (const [name, d] of Object.entries(pdefs ?? {})) {
                       const t = String(d?.type ?? "string");
-                      const vals = d?.values as string[] | undefined;
-                      if (t === "enum" && vals && vals.length > 0) defaults[name] = vals[0];
+                      // values may be {value, label} — seed the first wire value.
+                      const opts = Array.isArray(d?.values)
+                        ? normalizeOptionList(d.values as unknown[])
+                        : [];
+                      if (t === "enum" && opts.length > 0) defaults[name] = opts[0].value;
                       else if (t === "boolean") defaults[name] = "false";
                       else defaults[name] = "";
                     }
@@ -1201,7 +1204,8 @@ function DeviceSettingsSection({ deviceId, connected }: { deviceId: string; conn
           const label = String(def?.label ?? key);
           const help = String(def?.help ?? "");
           const fieldType = String(def?.type ?? "string");
-          const values = def?.values as string[] | undefined;
+          const values = def?.values as unknown[] | undefined;
+          const enumOptions = normalizeOptionList(values ?? []);
           const currentValue = def?.current_value;
           const isPending = key in pendingSettings;
           const isEditing = editingKey === key;
@@ -1240,8 +1244,8 @@ function DeviceSettingsSection({ deviceId, connected }: { deviceId: string; conn
                         onChange={(e) => setEditValue(e.target.value)}
                         style={{ fontSize: "var(--font-size-sm)", padding: "2px 6px" }}
                       >
-                        {values.map((v) => (
-                          <option key={v} value={v}>{v}</option>
+                        {enumOptions.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
                         ))}
                       </select>
                     ) : (
@@ -1309,7 +1313,9 @@ function DeviceSettingsSection({ deviceId, connected }: { deviceId: string; conn
                         color: currentValue != null ? "var(--text-primary)" : "var(--text-muted)",
                       }}
                     >
-                      {currentValue != null ? String(currentValue) : "(not set)"}
+                      {currentValue != null
+                        ? optionLabel(values, String(currentValue))
+                        : "(not set)"}
                     </span>
                     {isPending && (
                       <span

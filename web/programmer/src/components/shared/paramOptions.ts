@@ -59,6 +59,24 @@ export function normalizeOptionList(parsed: unknown[]): ParamOption[] {
   return out;
 }
 
+/**
+ * The display label for a wire value against an enum option list (entries may
+ * be plain strings or `{value, label}`). Returns the value itself when the list
+ * is absent or has no matching labeled entry — so a stored code still renders
+ * legibly even if the option set changed. Shared by every read-side surface
+ * that shows a persisted enum value (device settings, current-value chips).
+ */
+export function optionLabel(
+  values: readonly unknown[] | undefined,
+  wireValue: string,
+): string {
+  if (!values) return wireValue;
+  const match = normalizeOptionList(values as unknown[]).find(
+    (o) => o.value === wireValue,
+  );
+  return match ? match.label : wireValue;
+}
+
 export function parseStateOptionList(raw: unknown): ParamOption[] {
   if (typeof raw !== "string" || !raw) return [];
   let parsed: unknown;

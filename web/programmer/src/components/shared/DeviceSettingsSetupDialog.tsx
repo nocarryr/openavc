@@ -2,6 +2,7 @@ import { useState } from "react";
 import * as api from "../../api/restClient";
 import type { DriverInfo } from "../../api/types";
 import { validateSettingValue } from "../driver-builder/deviceSettingsHelpers";
+import { normalizeOptionList } from "./paramOptions";
 
 /** Generate a non-clashing default value for a unique device setting. */
 function generateUniqueDefault(
@@ -195,7 +196,8 @@ export function DeviceSettingsSetupDialog({
           const label = String(def?.label ?? key);
           const help = String(def?.help ?? "");
           const fieldType = String(def?.type ?? "string");
-          const enumValues = def?.values as string[] | undefined;
+          const enumValues = def?.values as unknown[] | undefined;
+          const enumOptions = normalizeOptionList(enumValues ?? []);
           const result = results[key];
 
           return (
@@ -225,8 +227,8 @@ export function DeviceSettingsSetupDialog({
                   onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
                   style={{ width: "100%" }}
                 >
-                  {enumValues.map((ev) => (
-                    <option key={ev} value={ev}>{ev}</option>
+                  {enumOptions.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
                   ))}
                 </select>
               ) : (

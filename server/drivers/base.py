@@ -81,7 +81,8 @@ def validate_device_setting_value(key: str, sdef: Any, value: Any) -> Any:
     user-facing message. Mirrors the IDE editor's rules so no caller can push
     past them: boolean → a real bool (tolerant of "true"/"false"/0/1 for REST
     callers), integer/number → numeric honoring ``min``/``max``, declared
-    ``values`` → membership (settings are persisted device config — there is
+    ``values`` → membership, accepting a {value, label} entry's
+    label and normalizing to the wire value (settings are persisted device config — there is
     no forgiving-free-text rationale like command pickers), string → trimmed,
     full-matching ``regex`` when declared (``pattern`` accepted as an alias —
     command params use that spelling and the mix-up was a silent no-op).
@@ -143,12 +144,18 @@ def validate_device_setting_value(key: str, sdef: Any, value: Any) -> Any:
 
     values = sdef.get("values")
     if isinstance(values, list) and values:
-        allowed = [str(v) for v in values]
-        if sval not in allowed:
+        # An enum list may carry {value, label} entries (label shown in the
+        # editor, wire value written). Accept either the wire value or the
+        # label and normalize to the wire value. Unlike a command picker, a
+        # device setting is persisted config — there is no forgiving-free-text
+        # path, so anything not resolving into the set is rejected.
+        wire = _enum_wire_values(values)
+        resolved = _resolve_enum_param_value(sval, values)
+        if resolved not in wire:
             raise DeviceSettingValueError(
-                f"'{key}' must be one of: {', '.join(allowed)} — got {value!r}"
+                f"'{key}' must be one of: {', '.join(wire)} — got {value!r}"
             )
-        return sval
+        return resolved
 
     regex = sdef.get("regex") or sdef.get("pattern")
     if regex and sval != "":
@@ -208,6 +215,21 @@ def _resolve_enum_param_value(value: str, options: list[Any]) -> str:
         elif value == str(opt):
             return value
     return label_map.get(value, value)
+
+
+def _enum_wire_values(options: list[Any]) -> list[str]:
+    """The wire values of an enum option list — each entry a plain value or a
+    ``{value, label}`` object (a label-only / value-less dict is skipped, the
+    same entries :func:`_resolve_enum_param_value` can map to)."""
+    out: list[str] = []
+    for opt in options:
+        if isinstance(opt, dict):
+            v = opt.get("value")
+            if v is not None:
+                out.append(str(v))
+        else:
+            out.append(str(opt))
+    return out
 
 
 def normalize_and_validate_command_params(

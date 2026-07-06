@@ -1,5 +1,6 @@
 import type { ActionParam, DriverParamDef } from "../../api/types";
 import { ParamInput } from "../../components/shared/ParamInput";
+import { normalizeOptionList } from "../../components/shared/paramOptions";
 
 /** Default string value to seed a param field with. */
 export function defaultFor(def: ActionParam): string {
@@ -7,7 +8,8 @@ export function defaultFor(def: ActionParam): string {
   if (def.secret || def.type === "password") return "";
   if (def.default !== undefined && def.default !== null) return String(def.default);
   if (def.type === "enum" && def.values && def.values.length > 0 && def.required) {
-    return def.values[0];
+    // Seed the wire value of the first option (values may be {value, label}).
+    return normalizeOptionList(def.values)[0]?.value ?? "";
   }
   if (def.type === "boolean") return "false";
   return "";

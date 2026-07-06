@@ -6,9 +6,15 @@ value before it goes on the wire. Uses an invented receiver so no real product
 is named.
 """
 
+import pytest
+
 from server.core.event_bus import EventBus
 from server.core.state_store import StateStore
-from server.drivers.base import normalize_and_validate_command_params
+from server.drivers.base import (
+    DeviceSettingValueError,
+    normalize_and_validate_command_params,
+    validate_device_setting_value,
+)
 from server.drivers.configurable import create_configurable_driver_class
 
 DSP_OPTIONS = [
@@ -115,3 +121,43 @@ async def test_send_with_wire_value_still_works():
     driver = _make_driver()
     await driver.send_command("set_dsp", {"mode": "0f"})
     assert driver.transport.sent == [b"!1LMD0f\r"]
+
+
+# ---------------------------------------------------------------------------
+# Device settings — the write-side half. Same {value, label} treatment, but a
+# setting is persisted config, so an unrecognized value is rejected (no
+# forgiving-free-text path like a command picker).
+# ---------------------------------------------------------------------------
+
+DS_ENUM = {
+    "type": "enum",
+    "values": [
+        {"value": "00", "label": "Stereo"},
+        {"value": "0f", "label": "Multi Channel Stereo"},
+        "ff",  # plain-string option
+    ],
+}
+
+
+def test_setting_label_maps_to_wire_value():
+    assert validate_device_setting_value("dsp", DS_ENUM, "Multi Channel Stereo") == "0f"
+
+
+def test_setting_wire_value_passes_through():
+    assert validate_device_setting_value("dsp", DS_ENUM, "0f") == "0f"
+
+
+def test_setting_plain_string_option_passes_through():
+    assert validate_device_setting_value("dsp", DS_ENUM, "ff") == "ff"
+
+
+def test_setting_unrecognized_value_rejected():
+    with pytest.raises(DeviceSettingValueError):
+        validate_device_setting_value("dsp", DS_ENUM, "7a")
+
+
+def test_setting_plain_string_enum_unaffected():
+    sdef = {"type": "enum", "values": ["auto", "manual"]}
+    assert validate_device_setting_value("mode", sdef, "manual") == "manual"
+    with pytest.raises(DeviceSettingValueError):
+        validate_device_setting_value("mode", sdef, "nope")

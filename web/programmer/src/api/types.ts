@@ -438,6 +438,13 @@ export interface DriverCommandDef {
   help?: string;
 }
 
+/** An enum option: a bare wire value, or a `{value, label}` pair where the
+ *  label is shown in pickers (and read in macros) while the value goes on the
+ *  wire. A plain string means value === label. The runtime accepts either the
+ *  label or the value from any caller and normalizes to the wire value, so an
+ *  author labels a code set once instead of defining one command per code. */
+export type EnumOption = string | { value: string; label?: string };
+
 export interface DriverParamDef {
   type: string;
   required?: boolean;
@@ -467,8 +474,9 @@ export interface DriverParamDef {
   trim?: boolean;
   // Default value — type-coerced by the runtime against `type`.
   default?: unknown;
-  // Allowed values for type='enum' — required for that type.
-  values?: string[];
+  // Allowed values for type='enum' — required for that type. Each entry is a
+  // bare wire value or a {value, label} pair (see EnumOption).
+  values?: EnumOption[];
   // Only meaningful for type='child_id' — names one of the driver's
   // declared child_entity_types. The runtime command picker renders a
   // dropdown of currently-registered children of that type; the value
@@ -648,7 +656,8 @@ export interface DriverDeviceSettingDef {
   default?: unknown;
   setup?: boolean;
   unique?: boolean;
-  values?: string[];
+  // Enum options — bare wire values or {value, label} pairs (see EnumOption).
+  values?: EnumOption[];
   min?: number;
   max?: number;
   regex?: string;
@@ -808,7 +817,8 @@ export interface DeviceSettingDef {
   setup?: boolean;
   unique?: boolean;
   secret?: boolean;
-  values?: string[];
+  // Enum options — bare wire values or {value, label} pairs (see EnumOption).
+  values?: EnumOption[];
   min?: number;
   max?: number;
   regex?: string;
@@ -877,7 +887,8 @@ export interface ActionParam {
   label?: string;
   help?: string;
   required?: boolean;
-  values?: string[];
+  // Enum options — bare wire values or {value, label} pairs (see EnumOption).
+  values?: EnumOption[];
   min?: number;
   max?: number;
   pattern?: string;

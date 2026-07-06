@@ -6,6 +6,7 @@ import type {
   DriverParamDef,
 } from "../../api/types";
 import { oscArgValueIssue } from "./validateDriver";
+import { EnumValuesEditor } from "../shared/EnumValuesEditor";
 
 interface CommandBuilderProps {
   draft: DriverDefinition;
@@ -936,32 +937,10 @@ function ParamRow({
       {isEnum && (
         <div style={{ marginTop: "var(--space-sm)" }}>
           <span style={labelStyle}>Allowed Values</span>
-          <input
-            value={(def.values ?? []).join(", ")}
-            onChange={(e) => {
-              const values = e.target.value
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean);
-              onUpdate({ values: values.length ? values : undefined });
-            }}
-            placeholder="e.g. low, medium, high"
-            style={{
-              width: "100%",
-              fontSize: "var(--font-size-sm)",
-              fontFamily: "var(--font-mono)",
-            }}
+          <EnumValuesEditor
+            values={def.values}
+            onChange={(values) => onUpdate({ values })}
           />
-          <div
-            style={{
-              fontSize: "11px",
-              color: "var(--text-muted)",
-              marginTop: 2,
-            }}
-          >
-            Comma-separated. The Add Device dialog and macro editor render
-            these as a dropdown.
-          </div>
         </div>
       )}
 

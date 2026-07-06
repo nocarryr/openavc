@@ -496,7 +496,7 @@ device_settings:
 | `default` | Yes | Default value for new devices. |
 | `setup` | No | If `true`, the setting is prompted during add-to-project. Default: `false`. |
 | `unique` | No | If `true`, the system generates a non-clashing default (appends device ID). Default: `false`. |
-| `values` | No | For `enum` type: array of allowed values. |
+| `values` | No | For `enum` type: array of allowed values. Each entry is a plain wire value or a `{value, label}` pair (the editor shows the label, the wire value is written). Unlike a command picker, a setting write that resolves to nothing in the list is rejected — it is persisted device config, not forgiving free text. |
 | `min` / `max` | No | For `integer` / `number` types: value range. |
 | `regex` | No | Optional regex for string validation. |
 | `write` | No | How to write the setting to the device (YAML drivers only, see below). |
@@ -699,6 +699,22 @@ route_decoder:
   params:
     decoder_id: { type: child_id, child_type: decoder, required: true }
     encoder_id: { type: child_id, child_type: encoder, required: true }
+```
+
+**Enum labels.** An `enum` parameter's `values` entries may be plain strings or `{value, label}` pairs. The **label** is what the operator picks in the dropdown and reads in a macro; the **value** is what goes on the wire — so you label a code set once instead of defining one command per code. A caller may pass either the label or the wire value (picker, macro `$var`, or the REST/cloud API); the runtime normalizes to the value. Plain-string lists behave exactly as before.
+
+```yaml
+set_dsp:
+  label: DSP Mode
+  send: "LMD{mode}"
+  params:
+    mode:
+      type: enum
+      required: true
+      values:
+        - { value: "00", label: Stereo }
+        - { value: "0f", label: Multi Channel Stereo }
+        - "ff"   # a plain string is still fine (value == label)
 ```
 
 **Option pickers.** Wherever the platform already knows a parameter's valid values, turn the field into a dropdown so an operator picks instead of typing a string they can misspell. Beyond `enum` (a static list) and `child_id` (live child entities), a parameter can say where its options come from. These pickers appear on every authoring surface — Send Command, Quick Actions, macro steps, and UI Builder button bindings — and stay forgiving (you can still type a value the device hasn't reported yet):
