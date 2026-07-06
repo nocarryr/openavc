@@ -11,32 +11,20 @@ import { useConnectionStore } from "../../store/connectionStore";
 import { showError } from "../../store/toastStore";
 import { usePluginStore } from "../../store/pluginStore";
 import { useLogStore } from "../../store/logStore";
+import type { LogEntry } from "../../store/logStore";
 import type { PluginExtension } from "../../api/restClient";
 import * as api from "../../api/restClient";
 import { SurfaceConfigurator } from "./SurfaceConfigurator";
 import { SchemaFormRenderer } from "./PluginConfigForm";
 import { CollapsibleSection } from "../driver-builder/CollapsibleSection";
 import type { SchemaField } from "../../api/types";
-
-// Convert a glob-style state pattern to an anchored RegExp.
-//
-// Replaces every `*` with `.*` (multi-segment, matches across `.`) and
-// escapes all other regex specials. Anchoring with ^…$ keeps a pattern
-// like `plugin.foo.*` from accidentally matching `plugin.football.*`,
-// the bug A70 called out.
-function compileStatePattern(pattern: string): RegExp | null {
-  const trimmed = pattern.trim();
-  if (!trimmed) return null;
-  // Escape every regex special except `*`, then turn `*` into `.*`.
-  const escaped = trimmed
-    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*");
-  try {
-    return new RegExp(`^${escaped}$`);
-  } catch {
-    return null;
-  }
-}
+import {
+  compileStatePattern,
+  matchesDriverGlob,
+  formatMetric,
+  filterPluginLog,
+  sameLogTail,
+} from "./pluginExtensionHelpers";
 
 // ──── State Table Renderer ────
 // Shows a read-only table of state keys matching a glob pattern with live updates.
@@ -166,14 +154,21 @@ function formatValue(value: unknown): string {
 // Shows log entries filtered to a specific plugin.
 
 export function PluginLogRenderer({ pluginId }: { pluginId: string }) {
-  const logEntries = useLogStore((s) => s.logEntries);
-  const filtered = logEntries.filter(
-    (e: { source: string; message: string }) =>
-      e.source === `server.core.plugin_loader` ||
-      e.message.includes(`[Plugin:${pluginId}]`)
+  // Snapshot + interval instead of a live subscription: logEntries mutates
+  // on every log line (up to 500 entries), so subscribing would re-render
+  // this panel and re-run the O(n) filter for each line exactly when logs
+  // are flowing. A 1s refresh is plenty for a log readout.
+  const [recent, setRecent] = useState<LogEntry[]>(() =>
+    filterPluginLog(useLogStore.getState().logEntries, pluginId)
   );
-
-  const recent = filtered.slice(-50);
+  useEffect(() => {
+    setRecent(filterPluginLog(useLogStore.getState().logEntries, pluginId));
+    const timer = setInterval(() => {
+      const next = filterPluginLog(useLogStore.getState().logEntries, pluginId);
+      setRecent((prev) => (sameLogTail(prev, next) ? prev : next));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [pluginId]);
 
   return (
     <div
@@ -288,12 +283,6 @@ export function StatusCardSlot() {
   );
 }
 
-function formatMetric(value: unknown, format: string): string {
-  if (value === null || value === undefined) return "—";
-  if (format === "boolean") return value ? "Yes" : "No";
-  return String(value);
-}
-
 // ──── Device Panel Slot ────
 // Renders matching device_panel extensions on the device detail page.
 
@@ -316,13 +305,9 @@ export function DevicePanelSlot({
     if (!match) return true;
 
     if (match.driver_id) {
-      const pattern = String(match.driver_id);
-      if (pattern.includes("*")) {
-        const prefix = pattern.replace("*", "");
-        if (!driverId.startsWith(prefix)) return false;
-      } else {
-        if (driverId !== pattern) return false;
-      }
+      // Documented syntax is a glob (`dante_*`) — the shared matcher
+      // honors a `*` anywhere, not just a single trailing one.
+      if (!matchesDriverGlob(driverId, String(match.driver_id))) return false;
     }
     if (match.transport && transport !== match.transport) return false;
     if (match.category && category !== match.category) return false;
@@ -404,12 +389,7 @@ export function ContextActionRenderer({
     if (context === "device" && action.match) {
       const match = action.match as Record<string, unknown>;
       if (match.driver_id && driverId) {
-        const pattern = String(match.driver_id);
-        if (pattern.includes("*")) {
-          if (!driverId.startsWith(pattern.replace("*", ""))) return false;
-        } else {
-          if (driverId !== pattern) return false;
-        }
+        if (!matchesDriverGlob(driverId, String(match.driver_id))) return false;
       }
     }
     return true;
@@ -506,6 +486,7 @@ function SurfaceViewRenderer({ ext }: { ext: PluginExtension }) {
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const updateConfig = usePluginStore((s) => s.updateConfig);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const pendingConfig = useRef<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     api.getPlugin(ext.plugin_id).then((detail) => {
@@ -520,13 +501,28 @@ function SurfaceViewRenderer({ ext }: { ext: PluginExtension }) {
   const handleConfigChange = useCallback(
     (newConfig: Record<string, unknown>) => {
       setConfig(newConfig);
+      pendingConfig.current = newConfig;
       clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
+        pendingConfig.current = null;
         updateConfig(ext.plugin_id, newConfig);
       }, 1500);
     },
     [ext.plugin_id, updateConfig]
   );
+
+  // This surface autosaves, so navigating away must not lose the last edit:
+  // flush a still-pending debounced save on unmount instead of letting the
+  // orphaned timer fire at an arbitrary later moment.
+  useEffect(() => {
+    return () => {
+      clearTimeout(saveTimer.current);
+      if (pendingConfig.current) {
+        updateConfig(ext.plugin_id, pendingConfig.current);
+        pendingConfig.current = null;
+      }
+    };
+  }, [ext.plugin_id, updateConfig]);
 
   const surfaceLayout = pluginDetail?.surface_layout as Record<string, unknown> | undefined;
   const configSchema = pluginDetail?.config_schema as
