@@ -234,7 +234,7 @@ export const useDriverBuilderStore = create<DriverBuilderState>((set, get) => {
       if (!def) return;
       // Credentials saved as config defaults land in the exported file as
       // plain text — confirm before writing a shareable file containing them.
-      const secrets = secretFieldsInConfig(def.default_config);
+      const secrets = secretFieldsInConfig(def.default_config, def.config_schema);
       if (secrets.length > 0) {
         const ok = window.confirm(
           `This driver's default config includes a saved ${secrets.join(" and ")}. ` +

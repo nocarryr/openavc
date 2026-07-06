@@ -99,6 +99,18 @@ const results = {};
   };
 }
 {
+  // integer -> float keeps the numeric bounds: float is the runtime's alias
+  // for number (driver_loader.py accepts both), so it is numeric here too.
+  const r = H.applyChildVarTypeChange(
+    { type: "integer", label: "L", min: 1, max: 9 },
+    "float",
+  );
+  results.numeric_to_float_keeps_bounds = {
+    pass: eq(r, { type: "float", label: "L", min: 1, max: 9 }),
+    detail: r,
+  };
+}
+{
   // The clobber the fix removes: the OLD onChange did several updateVar() calls
   // that each read the SAME stale `vars` snapshot, so the last write (clearing
   // values for a non-enum type) reverted the type back to its previous value.

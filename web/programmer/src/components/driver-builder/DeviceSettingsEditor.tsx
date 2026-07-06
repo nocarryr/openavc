@@ -221,6 +221,7 @@ export function DeviceSettingsEditor({ draft, onUpdate }: DeviceSettingsEditorPr
                       <option value="string">String</option>
                       <option value="integer">Integer</option>
                       <option value="number">Number</option>
+                      <option value="float">Float</option>
                       <option value="boolean">Boolean</option>
                       <option value="enum">Enum</option>
                     </select>
@@ -312,7 +313,7 @@ export function DeviceSettingsEditor({ draft, onUpdate }: DeviceSettingsEditorPr
                           <option key={v} value={v}>{v}</option>
                         ))}
                       </select>
-                    ) : setting.type === "integer" || setting.type === "number" ? (
+                    ) : setting.type === "integer" || setting.type === "number" || setting.type === "float" ? (
                       <input
                         type="number"
                         value={setting.default === undefined ? "" : String(setting.default)}
@@ -342,7 +343,7 @@ export function DeviceSettingsEditor({ draft, onUpdate }: DeviceSettingsEditorPr
                     </div>
                   </div>
 
-                  {setting.type === "integer" || setting.type === "number" ? (
+                  {setting.type === "integer" || setting.type === "number" || setting.type === "float" ? (
                     <div
                       style={{
                         display: "grid",

@@ -664,4 +664,100 @@ const responseIssues = (issues) => issues.filter((i) => /^Response \d/.test(i.me
   results.m173_response_with_pattern_ok = { pass: issues.length === 0, detail: issues };
 }
 
+// --- Config fields: secret defaults are errors, wrong-typed defaults warn ---
+const configIssues = (issues) =>
+  issues.filter((i) => /^Config field/.test(i.message));
+{
+  // A secret field carrying a default exports the credential in plain text
+  // inside the shareable .avcdriver — the import/hand-edit path the Config
+  // editor itself can't produce. Must be a save-blocking error.
+  const issues = configIssues(
+    validate(baseDraft("tcp", {}, {
+      config_schema: { pin: { type: "string", label: "PIN", secret: true } },
+      default_config: { pin: "hunter2" },
+    })),
+  );
+  results.secret_field_default_error = {
+    pass:
+      issues.length === 1 &&
+      issues[0].severity === "error" &&
+      issues[0].section === "connection" &&
+      /secret/.test(issues[0].message),
+    detail: issues,
+  };
+}
+{
+  // The schema entry's own `default` is exported too — same error.
+  const issues = configIssues(
+    validate(baseDraft("tcp", {}, {
+      config_schema: {
+        pin: { type: "string", label: "PIN", secret: true, default: "hunter2" },
+      },
+    })),
+  );
+  results.secret_schema_default_error = {
+    pass: issues.length === 1 && issues[0].severity === "error",
+    detail: issues,
+  };
+}
+{
+  // A secret field with no default (the legacy empty-string seed included)
+  // is clean.
+  const issues = configIssues(
+    validate(baseDraft("tcp", {}, {
+      config_schema: { pin: { type: "string", label: "PIN", secret: true } },
+      default_config: { pin: "" },
+    })),
+  );
+  results.secret_field_no_default_ok = { pass: issues.length === 0, detail: issues };
+}
+{
+  // A string default on an integer field (a legacy Builder draft, or a
+  // hand-edited file) exports wrong-typed YAML — flag it, but only as a
+  // warning since the runtime re-coerces most paths.
+  const issues = configIssues(
+    validate(baseDraft("tcp", {}, {
+      config_schema: { display_id: { type: "integer", label: "Display ID" } },
+      default_config: { display_id: "5" },
+    })),
+  );
+  results.config_default_type_mismatch_warning = {
+    pass:
+      issues.length === 1 &&
+      issues[0].severity === "warning" &&
+      /integer/.test(issues[0].message),
+    detail: issues,
+  };
+}
+{
+  // A string default on a boolean field is the worst shape ("false" is
+  // truthy) — flagged the same way.
+  const issues = configIssues(
+    validate(baseDraft("tcp", {}, {
+      config_schema: { enabled: { type: "boolean", label: "Enabled" } },
+      default_config: { enabled: "false" },
+    })),
+  );
+  results.config_boolean_string_default_warning = {
+    pass: issues.length === 1 && issues[0].severity === "warning",
+    detail: issues,
+  };
+}
+{
+  // Correctly typed defaults (including float, the runtime's number alias)
+  // are clean.
+  const issues = configIssues(
+    validate(baseDraft("tcp", {}, {
+      config_schema: {
+        display_id: { type: "integer", label: "Display ID" },
+        gain: { type: "float", label: "Gain" },
+        enabled: { type: "boolean", label: "Enabled" },
+        zone: { type: "string", label: "Zone" },
+      },
+      default_config: { display_id: 5, gain: 0.5, enabled: false, zone: "A" },
+    })),
+  );
+  results.config_typed_defaults_ok = { pass: issues.length === 0, detail: issues };
+}
+
 process.stdout.write(JSON.stringify(results));

@@ -118,6 +118,12 @@ SCENARIOS = [
     "m173_response_osc_address_no_slash_error",
     "h124_response_osc_address_on_tcp_error",
     "m173_response_with_pattern_ok",
+    "secret_field_default_error",
+    "secret_schema_default_error",
+    "secret_field_no_default_ok",
+    "config_default_type_mismatch_warning",
+    "config_boolean_string_default_warning",
+    "config_typed_defaults_ok",
 ]
 
 

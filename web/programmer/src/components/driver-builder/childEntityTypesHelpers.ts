@@ -66,16 +66,16 @@ const NUMERIC_ONLY_FIELDS = ["min", "max", "step"] as const;
 /**
  * Compute the updated child state-var def when its `type` changes, as a SINGLE
  * object so the write is atomic. Drops numeric bounds when leaving
- * integer/number and enum values when leaving enum. Replaces the old sequence of
- * updateVar() calls that each read a stale snapshot and clobbered the type back
- * to its previous value.
+ * integer/number/float and enum values when leaving enum. Replaces the old
+ * sequence of updateVar() calls that each read a stale snapshot and clobbered
+ * the type back to its previous value.
  */
 export function applyChildVarTypeChange(
   current: DriverChildStateVarDef,
   newType: string,
 ): DriverChildStateVarDef {
   const next = { ...current, type: newType } as Record<string, unknown>;
-  if (newType !== "integer" && newType !== "number") {
+  if (newType !== "integer" && newType !== "number" && newType !== "float") {
     for (const f of NUMERIC_ONLY_FIELDS) delete next[f];
   }
   if (newType !== "enum") {

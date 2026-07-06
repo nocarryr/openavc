@@ -459,6 +459,54 @@ export function validateDriver(
     }
   }
 
+  // ── Config fields: defaults must be safe and typed. A secret field with a
+  //    default exports the credential in plain text inside the shareable
+  //    .avcdriver (the Config editor can't author one, but an imported or
+  //    hand-edited file can carry one in). A default stored as the wrong
+  //    primitive (e.g. "5" on an integer field) exports wrong-typed YAML that
+  //    anything reading default_config directly trips over. ────────────────
+  for (const [fieldName, rawDef] of Object.entries(draft.config_schema ?? {})) {
+    if (!rawDef || typeof rawDef !== "object") continue;
+    const fieldDef = rawDef as {
+      type?: string;
+      secret?: boolean;
+      default?: unknown;
+    };
+    const configDefault = (draft.default_config ?? {})[fieldName];
+    const hasValue = (v: unknown) => v !== undefined && v !== null && v !== "";
+    if (fieldDef.secret === true) {
+      if (hasValue(configDefault) || hasValue(fieldDef.default)) {
+        issues.push({
+          severity: "error",
+          section: "connection",
+          field: `config_schema.${fieldName}`,
+          message: `Config field "${fieldName}" is secret but has a default value — remove the default. A secret default is exported in plain text inside the driver file.`,
+        });
+      }
+      continue;
+    }
+    if (!hasValue(configDefault)) continue;
+    const declaredType = fieldDef.type ?? "string";
+    if (declaredType === "boolean" && typeof configDefault !== "boolean") {
+      issues.push({
+        severity: "warning",
+        section: "connection",
+        field: `config_schema.${fieldName}`,
+        message: `Config field "${fieldName}" default is ${typeof configDefault} but the field type is boolean — re-enter the default in the Config editor so it saves as true/false.`,
+      });
+    } else if (
+      (declaredType === "integer" || declaredType === "number" || declaredType === "float") &&
+      typeof configDefault !== "number"
+    ) {
+      issues.push({
+        severity: "warning",
+        section: "connection",
+        field: `config_schema.${fieldName}`,
+        message: `Config field "${fieldName}" default is ${typeof configDefault} but the field type is ${declaredType} — re-enter the default in the Config editor so it saves as a number.`,
+      });
+    }
+  }
+
   // ── Top-level state variables: the runtime hard-requires a label on every
   //    one (driver_loader.py) and rejects an unknown type. A cleared label or
   //    bad type otherwise only surfaces as an unanchored save-time 422, so

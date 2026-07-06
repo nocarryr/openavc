@@ -1,18 +1,13 @@
 import { useState } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight } from "lucide-react";
 import type { DriverDefinition } from "../../api/types";
-
-interface ConfigField {
-  type: string;
-  label: string;
-  default?: unknown;
-  description?: string;
-  secret?: boolean;
-  required?: boolean;
-  min?: number;
-  max?: number;
-  values?: string[];
-}
+import {
+  type ConfigFieldDef as ConfigField,
+  NUMERIC_CONFIG_TYPES,
+  applyConfigFieldTypeChange,
+  applyConfigSecretToggle,
+  coerceConfigDefault,
+} from "./configSchemaHelpers";
 
 interface ConfigSchemaEditorProps {
   draft: DriverDefinition;
@@ -45,9 +40,8 @@ export function ConfigSchemaEditor({ draft, onUpdate }: ConfigSchemaEditorProps)
     onUpdate({
       config_schema: {
         ...schema,
-        [name]: { type: "string", label: "New Config Field", default: "" },
+        [name]: { type: "string", label: "New Config Field" },
       },
-      default_config: { ...defaultConfig, [name]: "" },
     });
     setExpanded(name);
   };
@@ -85,8 +79,16 @@ export function ConfigSchemaEditor({ draft, onUpdate }: ConfigSchemaEditorProps)
     if (expanded === oldName) setExpanded(cleaned);
   };
 
-  const updateDefault = (name: string, value: string) => {
-    onUpdate({ default_config: { ...defaultConfig, [name]: value } });
+  // `undefined` = no default: the key is dropped so the exported YAML doesn't
+  // carry empty or wrong-typed defaults.
+  const updateDefault = (
+    name: string,
+    value: string | number | boolean | undefined,
+  ) => {
+    const next = { ...defaultConfig };
+    if (value === undefined) delete next[name];
+    else next[name] = value;
+    onUpdate({ default_config: next });
   };
 
   const labelStyle: React.CSSProperties = {
@@ -207,10 +209,24 @@ export function ConfigSchemaEditor({ draft, onUpdate }: ConfigSchemaEditorProps)
                     <select
                       value={field.type}
                       onChange={(e) => {
-                        const t = e.target.value;
-                        const partial: Partial<ConfigField> = { type: t };
-                        if (t !== "enum") partial.values = undefined;
-                        updateField(name, partial);
+                        // One atomic write: the type switch, stripping
+                        // type-incompatible attributes, and re-coercing the
+                        // stored default into the new type together.
+                        const changed = applyConfigFieldTypeChange(
+                          field,
+                          defaultConfig[name],
+                          e.target.value,
+                        );
+                        const nextDefaults = { ...defaultConfig };
+                        if (changed.defaultValue === undefined) {
+                          delete nextDefaults[name];
+                        } else {
+                          nextDefaults[name] = changed.defaultValue;
+                        }
+                        onUpdate({
+                          config_schema: { ...schema, [name]: changed.field },
+                          default_config: nextDefaults,
+                        });
                       }}
                       style={{ width: "100%" }}
                     >
@@ -218,19 +234,80 @@ export function ConfigSchemaEditor({ draft, onUpdate }: ConfigSchemaEditorProps)
                       <option value="text">Text (multi-line)</option>
                       <option value="integer">Integer</option>
                       <option value="number">Number</option>
+                      <option value="float">Float</option>
                       <option value="boolean">Boolean</option>
                       <option value="enum">Enum (dropdown)</option>
                     </select>
                   </div>
                   <div>
                     <label style={labelStyle}>Default Value</label>
-                    <input
-                      value={field.secret ? "" : String(defaultConfig[name] ?? "")}
-                      onChange={(e) => updateDefault(name, e.target.value)}
-                      disabled={field.secret}
-                      placeholder={field.secret ? "Secret fields can't have a default" : ""}
-                      style={{ width: "100%" }}
-                    />
+                    {field.secret ? (
+                      <input
+                        value=""
+                        disabled
+                        placeholder="Secret fields can't have a default"
+                        style={{ width: "100%" }}
+                      />
+                    ) : field.type === "boolean" ? (
+                      <select
+                        value={
+                          defaultConfig[name] === undefined
+                            ? ""
+                            : String(defaultConfig[name])
+                        }
+                        onChange={(e) =>
+                          updateDefault(
+                            name,
+                            coerceConfigDefault(field.type, e.target.value),
+                          )
+                        }
+                        style={{ width: "100%" }}
+                      >
+                        <option value="">(none)</option>
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                      </select>
+                    ) : field.type === "enum" ? (
+                      <select
+                        value={
+                          defaultConfig[name] === undefined
+                            ? ""
+                            : String(defaultConfig[name])
+                        }
+                        onChange={(e) =>
+                          updateDefault(
+                            name,
+                            coerceConfigDefault(field.type, e.target.value),
+                          )
+                        }
+                        style={{ width: "100%" }}
+                      >
+                        <option value="">(none)</option>
+                        {(field.values ?? []).map((v) => (
+                          <option key={v} value={v}>{v}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type={
+                          NUMERIC_CONFIG_TYPES.has(field.type)
+                            ? "number"
+                            : "text"
+                        }
+                        value={
+                          defaultConfig[name] === undefined
+                            ? ""
+                            : String(defaultConfig[name])
+                        }
+                        onChange={(e) =>
+                          updateDefault(
+                            name,
+                            coerceConfigDefault(field.type, e.target.value),
+                          )
+                        }
+                        style={{ width: "100%" }}
+                      />
+                    )}
                   </div>
                   <div
                     style={{
@@ -269,18 +346,16 @@ export function ConfigSchemaEditor({ draft, onUpdate }: ConfigSchemaEditorProps)
                         type="checkbox"
                         checked={field.secret ?? false}
                         onChange={(e) => {
-                          const isSecret = e.target.checked;
-                          // A secret must never carry a default value — clear it
-                          // when the field is marked secret.
+                          // A secret must never carry a default value — marking
+                          // secret purges the default entirely (including one
+                          // imported from a hand-authored file).
                           onUpdate(
-                            isSecret
-                              ? {
-                                  config_schema: { ...schema, [name]: { ...schema[name], secret: true } },
-                                  default_config: { ...defaultConfig, [name]: "" },
-                                }
-                              : {
-                                  config_schema: { ...schema, [name]: { ...schema[name], secret: false } },
-                                },
+                            applyConfigSecretToggle(
+                              schema,
+                              defaultConfig,
+                              name,
+                              e.target.checked,
+                            ),
                           );
                         }}
                       />

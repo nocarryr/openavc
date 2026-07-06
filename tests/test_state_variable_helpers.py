@@ -83,6 +83,7 @@ SCENARIOS = [
     "leaving_numeric_drops_bounds",
     "leaving_enum_drops_values",
     "numeric_to_numeric_keeps_bounds",
+    "numeric_to_float_keeps_bounds",
     "type_change_keeps_help",
     "atomic_beats_stale_sequential",
 ]

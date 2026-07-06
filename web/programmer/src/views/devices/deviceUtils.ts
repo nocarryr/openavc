@@ -53,7 +53,7 @@ export function validateSettingValue(
     return { ok: true, value: raw === "true" };
   }
 
-  if (fieldType === "integer" || fieldType === "number") {
+  if (fieldType === "integer" || fieldType === "number" || fieldType === "float") {
     const trimmed = raw.trim();
     if (trimmed === "") {
       return { ok: false, error: "Enter a number — the setting was not saved." };

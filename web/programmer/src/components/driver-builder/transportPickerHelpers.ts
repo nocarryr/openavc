@@ -56,13 +56,21 @@ export const SECRET_CONFIG_FIELDS = ["token", "api_key"] as const;
 /**
  * Which secret fields carry a non-empty value — used to mask the inputs'
  * context and to warn before exporting a driver file that would contain
- * the credential in cleartext.
+ * the credential in cleartext. A field counts as secret by well-known name
+ * (token/api_key) or when the driver's config_schema flags it `secret: true`
+ * — the latter catches hand-authored/imported drivers whose secret fields
+ * the Builder itself can't create defaults for.
  */
 export function secretFieldsInConfig(
   config: Record<string, unknown> | undefined,
+  schema?: Record<string, unknown>,
 ): string[] {
   if (!config) return [];
-  return SECRET_CONFIG_FIELDS.filter(
+  const names = new Set<string>(SECRET_CONFIG_FIELDS);
+  for (const [name, def] of Object.entries(schema ?? {})) {
+    if ((def as { secret?: boolean } | undefined)?.secret === true) names.add(name);
+  }
+  return [...names].filter(
     (field) => typeof config[field] === "string" && (config[field] as string).length > 0,
   );
 }

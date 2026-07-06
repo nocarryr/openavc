@@ -113,7 +113,7 @@ export function validateSettingValue(
   if (raw === "" || !def) return { ok: true };
   const type = def.type ?? "string";
 
-  if (type === "integer" || type === "number") {
+  if (type === "integer" || type === "number" || type === "float") {
     const n = type === "integer" ? parseInt(raw, 10) : parseFloat(raw);
     if (!Number.isFinite(n)) {
       return { ok: false, error: `Must be ${type === "integer" ? "a whole number" : "a number"}.` };

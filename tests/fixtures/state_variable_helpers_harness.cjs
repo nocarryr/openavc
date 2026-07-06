@@ -109,6 +109,18 @@ const results = {};
   };
 }
 {
+  // integer -> float keeps the numeric bounds: float is the runtime's alias
+  // for number (driver_loader.py accepts both), so it is numeric here too.
+  const r = H.applyStateVarTypeChange(
+    { type: "integer", label: "L", min: 1, max: 9, step: 0.5 },
+    "float",
+  );
+  results.numeric_to_float_keeps_bounds = {
+    pass: eq(r, { type: "float", label: "L", min: 1, max: 9, step: 0.5 }),
+    detail: r,
+  };
+}
+{
   // Help text is unrelated to the type and must survive any switch.
   const r = H.applyStateVarTypeChange(
     { type: "integer", label: "L", help: "H", min: 1 },

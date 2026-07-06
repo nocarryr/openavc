@@ -96,7 +96,7 @@ export function StateVariableEditor({
 
       {varNames.map((name) => {
         const v = vars[name];
-        const isNumeric = v.type === "integer" || v.type === "number";
+        const isNumeric = v.type === "integer" || v.type === "number" || v.type === "float";
         return (
           <div key={name} style={{ marginBottom: "var(--space-xs)" }}>
             <div
@@ -143,6 +143,7 @@ export function StateVariableEditor({
                 <option value="string">String</option>
                 <option value="integer">Integer</option>
                 <option value="number">Number</option>
+                <option value="float">Float</option>
                 <option value="boolean">Boolean</option>
                 <option value="enum">Enum</option>
               </select>

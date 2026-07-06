@@ -127,6 +127,8 @@ SCENARIOS = [
     "token_detected",
     "blank_token_ignored",
     "both_detected",
+    "schema_flagged_secret_detected",
+    "schema_flagged_blank_ignored",
 ]
 
 

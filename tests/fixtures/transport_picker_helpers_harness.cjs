@@ -68,5 +68,19 @@ results.both_detected = eq(
   H.secretFieldsInConfig({ token: "t", api_key: "k", port: 80 }),
   ["token", "api_key"],
 );
+// A field the driver's own config_schema flags `secret: true` counts too —
+// the export warning must catch imported drivers whose secret fields aren't
+// named token/api_key.
+results.schema_flagged_secret_detected = eq(
+  H.secretFieldsInConfig(
+    { pin: "hunter2", zone: "A" },
+    { pin: { type: "string", secret: true }, zone: { type: "string" } },
+  ),
+  ["pin"],
+);
+results.schema_flagged_blank_ignored = eq(
+  H.secretFieldsInConfig({ pin: "" }, { pin: { secret: true } }),
+  [],
+);
 
 console.log(JSON.stringify(results));

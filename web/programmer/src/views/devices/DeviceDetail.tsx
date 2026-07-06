@@ -1248,7 +1248,7 @@ function DeviceSettingsSection({ deviceId, connected }: { deviceId: string; conn
                       <input
                         value={editValue}
                         onChange={(e) => setEditValue(e.target.value)}
-                        type={fieldType === "integer" || fieldType === "number" ? "number" : "text"}
+                        type={fieldType === "integer" || fieldType === "number" || fieldType === "float" ? "number" : "text"}
                         min={def?.min}
                         max={def?.max}
                         step={fieldType === "integer" ? 1 : undefined}
