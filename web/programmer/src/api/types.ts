@@ -436,6 +436,10 @@ export interface DriverCommandDef {
   args?: { type: string; value: string }[];
   params: Record<string, DriverParamDef>;
   help?: string;
+  // Byte-stream only. When the driver sets command_prefix/command_suffix,
+  // a command flagged raw skips that wrap and goes on the wire exactly as
+  // written — for the odd command that carries its own framing.
+  raw?: boolean;
 }
 
 /** An enum option: a bare wire value, or a `{value, label}` pair where the
@@ -756,6 +760,15 @@ export interface DriverDefinition {
   description: string;
   transport: string;
   delimiter: string;
+  // Opt-in send-side command framing (byte-stream transports only — tcp /
+  // serial / udp). When set, the runtime wraps every command it sends as
+  // `command_prefix + command + command_suffix`, so a fixed packet header and
+  // terminator are authored once instead of repeated on each command. Both are
+  // stored as literal-escape text (type `\r`, `\n`, `\xHH`) and support
+  // `{config}` substitution. A command flagged `raw: true` opts out of the
+  // wrap. Absent on both means today's behavior exactly (no double-terminate).
+  command_prefix?: string;
+  command_suffix?: string;
   default_config: Record<string, unknown>;
   config_schema: Record<string, unknown>;
   state_variables: Record<string, { type: string; label: string; values?: string[]; help?: string; min?: number; max?: number; step?: number }>;

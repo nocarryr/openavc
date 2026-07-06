@@ -156,6 +156,10 @@ export function DriverEditor({
   const onConnectCount = (draft.on_connect ?? []).length;
   const authEnabled = !!draft.auth;
   const frameParserEnabled = !!draft.frame_parser;
+  // Command framing wraps byte-stream sends only — OSC uses an address, HTTP a
+  // path/body, so neither is line-framed and the section is hidden for them.
+  const isByteStream = ["tcp", "serial", "udp"].includes(draft.transport);
+  const framingEnabled = !!(draft.command_prefix || draft.command_suffix);
 
   const countMeta = (n: number, singular: string) =>
     n === 0 ? "none" : `${n} ${n === 1 ? singular : `${singular}s`}`;
@@ -586,6 +590,18 @@ export function DriverEditor({
             >
               <TransportPicker draft={draft} onUpdate={onUpdate} />
             </CollapsibleSection>
+
+            {isByteStream && (
+              <CollapsibleSection
+                title="Command Framing"
+                subtitle="Optional — a constant prefix and suffix that wrap every command, so a fixed packet header and line terminator are set once instead of on each command."
+                meta={framingEnabled ? "enabled" : "none"}
+                defaultOpen={framingEnabled}
+                helpHref={DOCS.commands}
+              >
+                <CommandFramingEditor draft={draft} onUpdate={onUpdate} />
+              </CollapsibleSection>
+            )}
 
             <CollapsibleSection
               title="Authentication"
@@ -1054,6 +1070,76 @@ function PublishingSection({
         read-only — the community catalog flips this once a driver is
         validated against real hardware.
       </div>
+    </div>
+  );
+}
+
+function CommandFramingEditor({
+  draft,
+  onUpdate,
+}: {
+  draft: DriverDefinition;
+  onUpdate: (partial: Partial<DriverDefinition>) => void;
+}) {
+  const helpStyle: React.CSSProperties = {
+    fontSize: "11px",
+    color: "var(--text-muted)",
+    marginTop: "var(--space-xs)",
+  };
+
+  // Store the literal-escape text the author types (`\r`, `\x02`, ...) — the
+  // runtime decodes escapes at send time, exactly like a command's send
+  // string. Blank clears the key so we never ship `command_prefix: ""`.
+  const field = (
+    key: "command_prefix" | "command_suffix",
+    label: string,
+    placeholder: string,
+    help: React.ReactNode,
+  ) => (
+    <div style={{ marginBottom: "var(--space-md)" }}>
+      <label style={sectionLabelStyle}>{label}</label>
+      <input
+        value={draft[key] ?? ""}
+        onChange={(e) => onUpdate({ [key]: e.target.value || undefined })}
+        placeholder={placeholder}
+        style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+      />
+      <div style={helpStyle}>{help}</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <p style={{ ...helpStyle, marginTop: 0, marginBottom: "var(--space-md)" }}>
+        Both are optional and off by default. When set, every command this
+        driver sends goes on the wire as{" "}
+        <code>prefix + command + suffix</code> — so a command whose string is{" "}
+        <code>PWR01</code>, with prefix <code>!1</code> and suffix{" "}
+        <code>\r</code>, is sent as <code>!1PWR01\r</code>. Author your command
+        strings bare and let the frame wrap them. Use <code>\r</code>,{" "}
+        <code>\n</code>, <code>\xHH</code> for control bytes;{" "}
+        <code>{"{config_key}"}</code> is substituted from device config.
+      </p>
+      {field(
+        "command_prefix",
+        "Command Prefix",
+        "e.g. !1",
+        <>Prepended to every command — a fixed packet header the protocol shares.</>,
+      )}
+      {field(
+        "command_suffix",
+        "Command Suffix",
+        "e.g. \\r",
+        <>
+          Appended to every command — its line terminator. Set this instead of
+          typing <code>\r</code> on each command string.
+        </>,
+      )}
+      <p style={{ ...helpStyle, marginTop: 0 }}>
+        A single command can opt out of the frame with its <strong>Send raw</strong>{" "}
+        toggle (in the Commands section) — for the odd command that already
+        carries its own framing.
+      </p>
     </div>
   );
 }

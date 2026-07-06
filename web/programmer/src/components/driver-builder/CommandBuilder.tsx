@@ -276,6 +276,34 @@ export function CommandBuilder({ draft, onUpdate }: CommandBuilderProps) {
                       Use {"{param_name}"} for parameter placeholders. Use \r, \n
                       for control characters.
                     </div>
+                    {/* Per-command opt-out of the driver's command framing.
+                        Only meaningful — and only shown — when the driver
+                        declares a command_prefix/command_suffix in the
+                        Connection tab. */}
+                    {(draft.command_prefix || draft.command_suffix) && (
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          fontSize: "var(--font-size-sm)",
+                          color: "var(--text-secondary)",
+                          marginTop: "var(--space-sm)",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!cmd.raw}
+                          onChange={(e) =>
+                            updateCommand(name, {
+                              raw: e.target.checked || undefined,
+                            })
+                          }
+                        />
+                        Send raw — skip the driver&apos;s command framing for this
+                        command
+                      </label>
+                    )}
                   </div>
                 )}
 
