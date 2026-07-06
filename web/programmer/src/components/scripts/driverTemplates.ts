@@ -18,7 +18,7 @@ export const DRIVER_TEMPLATES: DriverTemplate[] = [
     name: "TCP Device",
     description: "Delimiter-based text protocol (most AV gear)",
     transport: "tcp",
-    generateCode: (info) => `"""${info.name} driver for OpenAVC."""
+    generateCode: (info) => `"""${pyText(info.name)} driver for OpenAVC."""
 import asyncio
 from typing import Any
 
@@ -39,15 +39,15 @@ log = get_logger(__name__)
 
 
 class ${classNameFrom(info.id)}(BaseDriver):
-    """Driver for ${info.name}."""
+    """Driver for ${pyText(info.name)}."""
 
     DRIVER_INFO = {
         "id": "${info.id}",
-        "name": "${info.name}",
-        "manufacturer": "${info.manufacturer}",
-        "category": "${info.category}",
+        "name": "${pyText(info.name)}",
+        "manufacturer": "${pyText(info.manufacturer)}",
+        "category": "${pyText(info.category)}",
         "version": "1.0.0",
-        "description": "Control ${info.name} via TCP.",
+        "description": "Control ${pyText(info.name)} via TCP.",
         "transport": "tcp",
         "delimiter": "\\r\\n",
         "default_config": {
@@ -137,7 +137,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
         },
         "help": {
             "overview": (
-                "Controls ${info.name} via TCP. "
+                "Controls ${pyText(info.name)} via TCP. "
                 "Replace the command strings and response parsing below "
                 "with values from the device's protocol documentation."
             ),
@@ -314,7 +314,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
     name: "HTTP/REST Device",
     description: "HTTP API polling driver",
     transport: "http",
-    generateCode: (info) => `"""${info.name} driver for OpenAVC."""
+    generateCode: (info) => `"""${pyText(info.name)} driver for OpenAVC."""
 import asyncio
 from typing import Any
 
@@ -327,15 +327,15 @@ log = get_logger(__name__)
 
 
 class ${classNameFrom(info.id)}(BaseDriver):
-    """Driver for ${info.name} via HTTP/REST API."""
+    """Driver for ${pyText(info.name)} via HTTP/REST API."""
 
     DRIVER_INFO = {
         "id": "${info.id}",
-        "name": "${info.name}",
-        "manufacturer": "${info.manufacturer}",
-        "category": "${info.category}",
+        "name": "${pyText(info.name)}",
+        "manufacturer": "${pyText(info.manufacturer)}",
+        "category": "${pyText(info.category)}",
         "version": "1.0.0",
-        "description": "Control ${info.name} via HTTP/REST API.",
+        "description": "Control ${pyText(info.name)} via HTTP/REST API.",
         "transport": "http",
         "default_config": {
             "host": "",
@@ -412,7 +412,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
         },
         "help": {
             "overview": (
-                "Controls ${info.name} via its HTTP REST API. "
+                "Controls ${pyText(info.name)} via its HTTP REST API. "
                 "Replace the API paths and JSON payloads below with values "
                 "from the device's API documentation."
             ),
@@ -564,7 +564,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
     name: "Serial Device",
     description: "RS-232/RS-485 with baud rate config",
     transport: "serial",
-    generateCode: (info) => `"""${info.name} driver for OpenAVC."""
+    generateCode: (info) => `"""${pyText(info.name)} driver for OpenAVC."""
 import asyncio
 from typing import Any
 
@@ -575,15 +575,15 @@ log = get_logger(__name__)
 
 
 class ${classNameFrom(info.id)}(BaseDriver):
-    """Driver for ${info.name} via serial port."""
+    """Driver for ${pyText(info.name)} via serial port."""
 
     DRIVER_INFO = {
         "id": "${info.id}",
-        "name": "${info.name}",
-        "manufacturer": "${info.manufacturer}",
-        "category": "${info.category}",
+        "name": "${pyText(info.name)}",
+        "manufacturer": "${pyText(info.manufacturer)}",
+        "category": "${pyText(info.category)}",
         "version": "1.0.0",
-        "description": "Control ${info.name} via RS-232/RS-485.",
+        "description": "Control ${pyText(info.name)} via RS-232/RS-485.",
         "transport": "serial",
         "delimiter": "\\r",
         "default_config": {
@@ -658,7 +658,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
         },
         "help": {
             "overview": (
-                "Controls ${info.name} via RS-232 serial. "
+                "Controls ${pyText(info.name)} via RS-232 serial. "
                 "Replace the command strings and response parsing below "
                 "with values from the device's RS-232 protocol manual."
             ),
@@ -763,7 +763,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
     name: "Polling Device",
     description: "TCP device with periodic status queries",
     transport: "tcp",
-    generateCode: (info) => `"""${info.name} driver for OpenAVC."""
+    generateCode: (info) => `"""${pyText(info.name)} driver for OpenAVC."""
 import asyncio
 from typing import Any
 
@@ -774,7 +774,7 @@ log = get_logger(__name__)
 
 
 class ${classNameFrom(info.id)}(BaseDriver):
-    """Driver for ${info.name} with periodic polling.
+    """Driver for ${pyText(info.name)} with periodic polling.
 
     This template is for devices where you send a query command and
     then parse the multi-line or structured response. Good for devices
@@ -783,11 +783,11 @@ class ${classNameFrom(info.id)}(BaseDriver):
 
     DRIVER_INFO = {
         "id": "${info.id}",
-        "name": "${info.name}",
-        "manufacturer": "${info.manufacturer}",
-        "category": "${info.category}",
+        "name": "${pyText(info.name)}",
+        "manufacturer": "${pyText(info.manufacturer)}",
+        "category": "${pyText(info.category)}",
         "version": "1.0.0",
-        "description": "Control ${info.name} via TCP with status polling.",
+        "description": "Control ${pyText(info.name)} via TCP with status polling.",
         "transport": "tcp",
         "delimiter": "\\r\\n",
         "default_config": {
@@ -867,7 +867,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
         },
         "help": {
             "overview": (
-                "Controls ${info.name} via TCP with periodic status polling. "
+                "Controls ${pyText(info.name)} via TCP with periodic status polling. "
                 "The driver queries the device at regular intervals and parses "
                 "the responses to keep state current."
             ),
@@ -982,7 +982,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
     name: "Minimal",
     description: "Bare BaseDriver with all extension points documented",
     transport: "tcp",
-    generateCode: (info) => `"""${info.name} driver for OpenAVC.
+    generateCode: (info) => `"""${pyText(info.name)} driver for OpenAVC.
 
 Minimal template with all available extension points shown as comments.
 Uncomment what you need.
@@ -998,23 +998,16 @@ log = get_logger(__name__)
 
 
 class ${classNameFrom(info.id)}(BaseDriver):
-    """Driver for ${info.name}."""
+    """Driver for ${pyText(info.name)}."""
 
     DRIVER_INFO = {
         "id": "${info.id}",
-        "name": "${info.name}",
-        "manufacturer": "${info.manufacturer}",
-        "category": "${info.category}",
+        "name": "${pyText(info.name)}",
+        "manufacturer": "${pyText(info.manufacturer)}",
+        "category": "${pyText(info.category)}",
         "version": "1.0.0",
         "transport": "${info.transport}",
-        "default_config": {
-            "host": "",
-            "port": 23,
-        },
-        "config_schema": {
-            "host": {"type": "string", "label": "IP Address", "required": True},
-            "port": {"type": "integer", "label": "Port", "default": 23},
-        },
+${minimalConfigBlock(info.transport)}
         "state_variables": {},
         "commands": {},
         # "help": {
@@ -1103,7 +1096,7 @@ class ${classNameFrom(info.id)}(BaseDriver):
     transport: "osc",
     generateCode: (info) => {
       const cls = classNameFrom(info.id);
-      return `"""${info.name} driver for OpenAVC — OSC over UDP."""
+      return `"""${pyText(info.name)} driver for OpenAVC — OSC over UDP."""
 
 from __future__ import annotations
 
@@ -1116,17 +1109,17 @@ from server.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-class ${cls}Driver(BaseDriver):
-    """${info.name} driver using Open Sound Control."""
+class ${cls}(BaseDriver):
+    """${pyText(info.name)} driver using Open Sound Control."""
 
     DRIVER_INFO = {
         "id": "${info.id}",
-        "name": "${info.name}",
-        "manufacturer": "${info.manufacturer}",
-        "category": "${info.category}",
+        "name": "${pyText(info.name)}",
+        "manufacturer": "${pyText(info.manufacturer)}",
+        "category": "${pyText(info.category)}",
         "version": "1.0.0",
         "author": "OpenAVC",
-        "description": "Controls ${info.name} via OSC over UDP.",
+        "description": "Controls ${pyText(info.name)} via OSC over UDP.",
         "transport": "osc",
         "default_config": {
             "host": "",
@@ -1142,6 +1135,12 @@ class ${cls}Driver(BaseDriver):
                 "default": 0,
                 "label": "Listen Port",
                 "description": "Set to 0 to receive on the same socket",
+            },
+            "poll_interval": {
+                "type": "integer",
+                "label": "Poll Interval (s)",
+                "default": 10,
+                "min": 0,
             },
         },
         "state_variables": {
@@ -1204,4 +1203,76 @@ function classNameFrom(id: string): string {
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join("")
     + "Driver";
+}
+
+// Free-text fields (name, manufacturer) are interpolated into Python string
+// literals and docstrings; escape so quotes/backslashes can't break the
+// generated source.
+function pyText(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n");
+}
+
+// default_config/config_schema for the minimal template, matched to what
+// BaseDriver reads for each transport type.
+function minimalConfigBlock(transport: string): string {
+  switch (transport) {
+    case "serial":
+      return `        "default_config": {
+            "port": "",
+            "baudrate": 9600,
+        },
+        "config_schema": {
+            "port": {"type": "string", "label": "Serial Port", "required": True},
+            "baudrate": {"type": "integer", "label": "Baud Rate", "default": 9600},
+        },`;
+    case "udp":
+      return `        "default_config": {
+            "host": "",
+            "port": 0,
+        },
+        "config_schema": {
+            "host": {"type": "string", "label": "IP Address", "required": True},
+            "port": {"type": "integer", "label": "Port", "required": True},
+        },`;
+    case "osc":
+      return `        "default_config": {
+            "host": "",
+            "port": 8000,
+            "listen_port": 0,
+        },
+        "config_schema": {
+            "host": {"type": "string", "label": "IP Address", "required": True},
+            "port": {"type": "integer", "label": "Send Port", "default": 8000},
+            "listen_port": {
+                "type": "integer",
+                "default": 0,
+                "label": "Listen Port",
+                "description": "Set to 0 to receive on the same socket",
+            },
+        },`;
+    case "http":
+      return `        "default_config": {
+            "host": "",
+            "port": 80,
+            "ssl": False,
+        },
+        "config_schema": {
+            "host": {"type": "string", "label": "IP Address", "required": True},
+            "port": {"type": "integer", "label": "Port", "default": 80},
+            "ssl": {"type": "boolean", "label": "Use HTTPS", "default": False},
+        },`;
+    default:
+      return `        "default_config": {
+            "host": "",
+            "port": 23,
+        },
+        "config_schema": {
+            "host": {"type": "string", "label": "IP Address", "required": True},
+            "port": {"type": "integer", "label": "Port", "default": 23},
+        },`;
+  }
 }
