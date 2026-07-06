@@ -38,6 +38,10 @@ export async function updatePluginConfig(
   });
 }
 
+export async function removePluginConfig(pluginId: string): Promise<{ status: string; plugin_id: string }> {
+  return request(`/plugins/${pluginId}/config`, { method: "DELETE" });
+}
+
 export async function getPluginHealth(pluginId: string): Promise<{ status: string; message: string }> {
   return request(`/plugins/${pluginId}/health`);
 }

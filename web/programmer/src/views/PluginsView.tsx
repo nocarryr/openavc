@@ -165,6 +165,8 @@ function PluginListItem({
 
 function MissingPluginBanner({ plugin }: { plugin: PluginInfo }) {
   const navigateTo = useNavigationStore((s) => s.navigateTo);
+  const removeConfig = usePluginStore((s) => s.removeConfig);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const isMissing = plugin.status === "missing";
   const isIncompat = isPluginIncompatible(plugin);
 
@@ -198,7 +200,7 @@ function MissingPluginBanner({ plugin }: { plugin: PluginInfo }) {
           ? `This project uses the plugin "${plugin.name || plugin.plugin_id}" which is not installed.`
           : `Plugin "${plugin.name || plugin.plugin_id}" is not compatible with the current platform.`}
       </div>
-      {isMissing && (
+      {isMissing && !confirmRemove && (
         <div style={{ display: "flex", gap: "var(--space-sm)" }}>
           <button
             onClick={() => navigateTo("plugins")}
@@ -212,6 +214,50 @@ function MissingPluginBanner({ plugin }: { plugin: PluginInfo }) {
             }}
           >
             Install from Community
+          </button>
+          <button
+            onClick={() => setConfirmRemove(true)}
+            style={{
+              padding: "var(--space-xs) var(--space-md)",
+              borderRadius: "var(--border-radius)",
+              background: "var(--bg-hover)",
+              fontSize: "var(--font-size-sm)",
+            }}
+          >
+            Remove Plugin Config
+          </button>
+        </div>
+      )}
+      {isMissing && confirmRemove && (
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", flexWrap: "wrap" }}>
+          <span style={{ fontSize: "var(--font-size-sm)" }}>
+            Remove this plugin and its settings from the project?
+          </span>
+          <button
+            onClick={() => {
+              setConfirmRemove(false);
+              removeConfig(plugin.plugin_id);
+            }}
+            style={{
+              padding: "var(--space-xs) var(--space-md)",
+              borderRadius: "var(--border-radius)",
+              background: "var(--color-error, #dc2626)",
+              color: "#fff",
+              fontSize: "var(--font-size-sm)",
+            }}
+          >
+            Yes, Remove
+          </button>
+          <button
+            onClick={() => setConfirmRemove(false)}
+            style={{
+              padding: "var(--space-xs) var(--space-md)",
+              borderRadius: "var(--border-radius)",
+              background: "var(--bg-hover)",
+              fontSize: "var(--font-size-sm)",
+            }}
+          >
+            Cancel
           </button>
         </div>
       )}

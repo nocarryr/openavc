@@ -354,6 +354,39 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
     return result
 
 
+@router.delete("/plugins/{plugin_id}/config")
+async def remove_plugin_config(plugin_id: str) -> dict[str, Any]:
+    """Remove a plugin's reference (config + enabled flag) from the project.
+
+    This is how a project drops a plugin that isn't installed — the
+    missing-plugin banner's "Remove Plugin Config" — without having to
+    install it first. Works for installed plugins too: a running plugin is
+    stopped before its entry is removed. Plugin files and persistent data
+    are untouched; use DELETE /plugins/{plugin_id} to uninstall.
+    """
+    engine = _get_engine()
+    if not engine.project or plugin_id not in engine.project.plugins:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
+    try:
+        if engine.plugin_loader.is_running(plugin_id):
+            await engine.plugin_loader.stop_plugin(plugin_id)
+        del engine.project.plugins[plugin_id]
+        engine.project.plugin_dependencies = [
+            d for d in engine.project.plugin_dependencies
+            if d.plugin_id != plugin_id
+        ]
+        await save_project_async(engine.project_path, engine.project)
+        # Server-side project mutation: bump the revision so an open editor's
+        # stale full-project PUT is 409'd instead of restoring the entry.
+        engine.bump_project_revision()
+        # Drop missing/incompatible tracking and broadcast state keys so the
+        # warning doesn't linger for a reference that no longer exists.
+        engine.plugin_loader.remove_plugin_tracking(plugin_id)
+        return {"status": "removed", "plugin_id": plugin_id}
+    except Exception as e:
+        raise _api_error(500, f"Failed to remove plugin config for '{plugin_id}'", e)
+
+
 # ──── Health ────
 
 

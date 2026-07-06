@@ -47,6 +47,7 @@ interface PluginStore {
   disablePlugin: (pluginId: string) => Promise<void>;
   updateConfig: (pluginId: string, config: Record<string, unknown>) => Promise<void>;
   activatePlugin: (pluginId: string) => Promise<void>;
+  removeConfig: (pluginId: string) => Promise<void>;
   updatePluginStatus: (pluginId: string, status: string) => void;
 
   // ── Community Browse ──
@@ -148,6 +149,19 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
       showError(`Couldn't activate plugin "${pluginId}": ${String(e)}`);
+    }
+  },
+
+  removeConfig: async (pluginId) => {
+    try {
+      await api.removePluginConfig(pluginId);
+      if (get().selectedId === pluginId) {
+        set({ selectedId: null });
+      }
+      await get().load();
+    } catch (e) {
+      set({ error: String(e) });
+      showError(`Couldn't remove plugin config for "${pluginId}": ${String(e)}`);
     }
   },
 

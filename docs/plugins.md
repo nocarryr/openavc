@@ -52,7 +52,7 @@ Plugins declare which platforms they support. The Browse view filters by your cu
 ### Enable a Plugin
 
 1. Go to the **Plugins** view, **Installed** tab
-2. Click the toggle next to the plugin name
+2. Click the plugin in the list, then click **Enable** in the detail view
 
 If the plugin requires configuration before it can start (for example, an MQTT broker URL), a **Setup Dialog** appears with the required fields. Fill them in and click Save.
 
@@ -60,7 +60,7 @@ If the plugin has sensible defaults for all settings, it starts immediately.
 
 ### Configure a Plugin
 
-Click a plugin in the Installed list to open its detail view. The **Configuration** tab shows all available settings, auto-rendered from the plugin's configuration schema.
+Click a plugin in the Installed list to open its detail view. The **Configuration** section shows all available settings, auto-rendered from the plugin's configuration schema.
 
 Settings include standard field types (text, numbers, toggles, dropdowns) and OpenAVC-specific types:
 
@@ -79,7 +79,7 @@ Configuration changes are auto-saved. If the plugin is running, it restarts auto
 
 ### Disable a Plugin
 
-Click the toggle to disable. The plugin stops and all its runtime effects (state keys, event subscriptions, background tasks) are cleaned up automatically. State keys under `plugin.<id>.*` are fully deleted from the state store (not just set to `None`), so they will not appear in state snapshots while the plugin is stopped. Configuration is preserved, and re-enabling restores everything.
+Select the plugin in the list and click **Disable**. The plugin stops and all its runtime effects (state keys, event subscriptions, background tasks) are cleaned up automatically. State keys under `plugin.<id>.*` are fully deleted from the state store (not just set to `None`), so they will not appear in state snapshots while the plugin is stopped. Configuration is preserved, and re-enabling restores everything.
 
 ---
 

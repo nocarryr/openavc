@@ -280,3 +280,108 @@ async def test_context_action_missing_body_emits_empty_dict(monkeypatch):
     engine = _engine(monkeypatch)
     await emit_context_action("acme_widget", "refresh", _FakeRequest(ValueError("no body")))
     assert engine.events.emitted == [("plugin.acme_widget.action.refresh", {})]
+
+
+# ── DELETE /plugins/{id}/config (remove project reference) ──
+
+
+def _removal_engine(monkeypatch, *, running=False):
+    """Engine whose plugin_loader records removal-related calls."""
+    from server.core.project_loader import PluginDependency
+
+    calls = {"stopped": [], "untracked": [], "saved": [], "bumped": 0}
+
+    async def _stop(plugin_id):
+        calls["stopped"].append(plugin_id)
+
+    project = _project()
+    project.plugin_dependencies = [
+        PluginDependency(plugin_id="acme_widget", plugin_name="Acme Widget"),
+        PluginDependency(plugin_id="other_plugin", plugin_name="Other"),
+    ]
+
+    def _bump():
+        calls["bumped"] += 1
+
+    engine = SimpleNamespace(
+        project=project,
+        project_path="unused.avc",
+        plugin_loader=SimpleNamespace(
+            is_running=lambda pid: running,
+            stop_plugin=_stop,
+            remove_plugin_tracking=lambda pid: calls["untracked"].append(pid),
+        ),
+        bump_project_revision=_bump,
+    )
+    monkeypatch.setattr("server.api.plugins._engine", engine)
+
+    async def _record_save(path, project_cfg):
+        calls["saved"].append(path)
+
+    monkeypatch.setattr("server.api.plugins.save_project_async", _record_save)
+    return engine, calls
+
+
+@pytest.mark.asyncio
+async def test_remove_config_deletes_reference_dependencies_and_tracking(monkeypatch):
+    from server.api.plugins import remove_plugin_config
+
+    engine, calls = _removal_engine(monkeypatch)
+    result = await remove_plugin_config("acme_widget")
+
+    assert result == {"status": "removed", "plugin_id": "acme_widget"}
+    assert "acme_widget" not in engine.project.plugins
+    assert [d.plugin_id for d in engine.project.plugin_dependencies] == ["other_plugin"]
+    assert calls["saved"] == ["unused.avc"]
+    assert calls["bumped"] == 1
+    assert calls["untracked"] == ["acme_widget"]
+    assert calls["stopped"] == []  # not running, no stop needed
+
+
+@pytest.mark.asyncio
+async def test_remove_config_404s_when_not_in_project(monkeypatch):
+    from server.api.plugins import remove_plugin_config
+
+    engine, calls = _removal_engine(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await remove_plugin_config("ghost_plugin")
+    assert exc.value.status_code == 404
+    assert "acme_widget" in engine.project.plugins  # untouched
+    assert calls["saved"] == []
+    assert calls["bumped"] == 0
+
+
+@pytest.mark.asyncio
+async def test_remove_config_stops_running_plugin_first(monkeypatch):
+    from server.api.plugins import remove_plugin_config
+
+    engine, calls = _removal_engine(monkeypatch, running=True)
+    result = await remove_plugin_config("acme_widget")
+    assert result["status"] == "removed"
+    assert calls["stopped"] == ["acme_widget"]
+    assert "acme_widget" not in engine.project.plugins
+
+
+# ── Frontend wiring pins (missing-plugin banner Remove Plugin Config) ──
+
+
+def test_frontend_remove_plugin_config_wiring():
+    """The documented 'Remove Plugin Config' banner action exists end to end:
+    button in MissingPluginBanner -> store action -> DELETE client call."""
+    from pathlib import Path
+
+    web = Path(__file__).resolve().parents[1] / "web" / "programmer" / "src"
+
+    view = (web / "views" / "PluginsView.tsx").read_text(encoding="utf-8")
+    assert "Remove Plugin Config" in view
+    assert "removeConfig(plugin.plugin_id)" in view
+
+    store = (web / "store" / "pluginStore.ts").read_text(encoding="utf-8")
+    assert "removeConfig" in store
+    assert "api.removePluginConfig" in store
+
+    client = (web / "api" / "pluginClient.ts").read_text(encoding="utf-8")
+    assert "removePluginConfig" in client
+    assert (
+        "request(`/plugins/${pluginId}/config`, { method: \"DELETE\" })" in client
+    )
