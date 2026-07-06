@@ -397,7 +397,7 @@ polling:
     - "V\r\n"                        # Query current volume
 ```
 
-For **TCP and serial** drivers, each query is the raw protocol string to send (including its line terminator), as above. On **HTTP and UDP** a query may instead be the name of a declared command (it runs as that command, so its response is matched) or a path. Don't put a command name in a TCP/serial driver's `queries` — it would be sent to the device as literal text and read nothing back. The same applies to `on_connect`.
+For **TCP and serial** drivers, each query is the raw protocol string to send (including its line terminator), as above. A query may instead be the **name of a declared command** — on any transport it then runs as that command, so its response is matched and any `command_prefix` / `command_suffix` framing is applied (name a framed command here rather than re-typing its wire string). On **HTTP** a query that isn't a command name is treated as a path. The same applies to `on_connect`.
 
 Notice how much cleaner this is compared to JSON: comments explain the protocol, regex patterns don't need double-escaping, and the structure is easy to scan.
 
@@ -431,6 +431,8 @@ The tables below document each field in detail.
 | `description` | No | Brief description. |
 | `help` | No | Help text object: `{overview: "...", setup: "..."}`. Shown in the Add Device dialog and available to the AI assistant. |
 | `delimiter` | No | Message delimiter. Default: `"\\r"`. Use `"\\r\\n"` for CRLF. |
+| `command_prefix` | No | A constant string prepended to every command's `send` string. Set it once for a protocol whose commands all share a fixed lead-in (a "packet header") instead of repeating it on each command. Byte-stream transports only (TCP/serial/UDP). |
+| `command_suffix` | No | A constant string appended to every command's `send` string (its terminator). Set it once so you don't type `\r` on every command. Byte-stream transports only. Supports the same escape sequences as `send`. |
 | `default_config` | No | Default values for config fields. |
 | `config_schema` | No | Describes config fields shown in "Add Device" dialog. |
 | `device_settings` | No | Configurable settings that live on the device. See below. |
@@ -682,7 +684,10 @@ set_input:
 ```
 
 - `send`: The raw bytes to send. `{param_name}` placeholders are substituted at runtime. Config values like `{set_id}` are also available. Supported escape sequences: `\r`, `\n`, `\t`, `\\`, `\xHH` (hex byte). (The key `string` is accepted as an alias.)
+- `raw`: Optional. Set `raw: true` to send this command's `send` string exactly as written, skipping the driver's `command_prefix` / `command_suffix` framing (below). Use it for the odd command that doesn't share the common frame.
 - `help`: Optional description of what the command does. Shown in the Programmer IDE command testing panel, macro editor, UI builder, and used by the AI assistant to understand commands.
+
+> **Command framing.** When a text protocol wraps every command in a fixed header and terminator, declare them once at the driver level with `command_prefix` and `command_suffix` and author bare `send` strings. For example, `command_prefix: "!1"` and `command_suffix: "\r"` turn a command whose `send` is `PWR01` into `!1PWR01\r` on the wire. Both are opt-in and byte-stream only (TCP/serial/UDP); an OSC or HTTP command is never framed, and a single command can opt out with `raw: true`. To poll a framed command, list its **name** in `polling.queries` (it runs as that command, so the frame is applied and the response is matched) rather than re-typing the framed string.
 - `params`: Parameter definitions. Each key matches a `{placeholder}` in the send string. Each parameter can include an optional `help` field describing what values are expected.
 
 Parameter types are `string`, `integer`, `number`, `boolean`, `enum`, and `child_id`. A `child_id` parameter targets one of the driver's declared `child_entity_types` — set `child_type` to the type name. The command picker offers a dropdown of that device's registered children, and the integer local ID is substituted into the `{placeholder}`:

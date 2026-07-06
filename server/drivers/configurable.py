@@ -403,9 +403,33 @@ class ConfigurableDriver(BaseDriver):
                 "delimiter", ""
             )
 
-        norm_commands = _normalize_config_commands(
-            self.config.get("commands"), line_ending
+        # Send-side command framing (opt-in, byte-stream only). A constant
+        # command_prefix / command_suffix wraps every command so a text protocol
+        # with a fixed packet header + terminator is authored once, not per
+        # command. File-authored commands are wrapped at send time (send_command,
+        # gated on _inline_command_names); inline/device-config commands are
+        # wrapped here so their poll queries + the auto-simulator see the framed
+        # form. command_suffix falls back to the delimiter for inline commands
+        # only — never for file commands, whose send strings already carry their
+        # terminator (a delimiter fallback there would double-terminate them).
+        self._command_prefix = (
+            self.config.get("command_prefix")
+            or self._definition.get("command_prefix")
+            or ""
         )
+        self._command_suffix = (
+            self.config.get("command_suffix")
+            or self._definition.get("command_suffix")
+            or ""
+        )
+
+        norm_commands = _normalize_config_commands(
+            self.config.get("commands"),
+            self._command_suffix or line_ending,
+            prefix=self._command_prefix,
+        )
+        # File commands (not in this set) are the ones send_command frames.
+        self._inline_command_names: set[str] = set(norm_commands)
         norm_responses = _normalize_config_responses(self.config.get("responses"))
         norm_state_vars = _normalize_config_state_vars(
             self.config.get("state_variables")
@@ -632,7 +656,9 @@ class ConfigurableDriver(BaseDriver):
         For HTTP/UDP a query that names a command runs as that command, so its
         response goes through the matcher; any other string is a raw path /
         payload (and an HTTP raw path's response is fed to the matcher too).
-        TCP/serial send the raw protocol string. OSC is handled by the callers.
+        TCP/serial resolve a command name the same way (so send-side framing
+        applies and the response is matched), else send the raw protocol string.
+        OSC is handled by the callers.
         """
         transport_type = self._definition.get("transport")
         commands = self._definition.get("commands", {})
@@ -651,8 +677,15 @@ class ConfigurableDriver(BaseDriver):
                 formatted = self._safe_substitute(query, self.config) if "{" in query else query
                 await self.transport.send(_safe_encode_escapes(formatted))
         else:  # tcp / serial
-            formatted = self._safe_substitute(query, self.config) if "{" in query else query
-            await self.transport.send(_safe_encode_escapes(formatted))
+            if query in commands:
+                # A query that names a command runs as that command, so send-side
+                # framing (command_prefix/suffix) applies and the response goes
+                # through the matcher — matches the HTTP/UDP branches above. A
+                # raw protocol string (not a command name) is sent as authored.
+                await self.send_command(query)
+            else:
+                formatted = self._safe_substitute(query, self.config) if "{" in query else query
+                await self.transport.send(_safe_encode_escapes(formatted))
 
     def _expand_query(self, query: Any) -> list[str]:
         """Expand one polling/on_connect entry. Strings pass through
@@ -1096,6 +1129,21 @@ class ConfigurableDriver(BaseDriver):
         if not raw:
             log.warning(f"[{self.device_id}] Command '{command}' has no send string")
             return None
+
+        # Send-side framing (opt-in): wrap a file-authored command with the
+        # driver's command_prefix / command_suffix so a fixed packet header +
+        # terminator is declared once, not per command. Inline/device-config
+        # commands are already framed at merge time (skipped via
+        # _inline_command_names); a command may opt out with raw: true to go on
+        # the wire exactly as written.
+        prefix = getattr(self, "_command_prefix", "")
+        suffix = getattr(self, "_command_suffix", "")
+        if (
+            (prefix or suffix)
+            and command not in getattr(self, "_inline_command_names", ())
+            and not cmd_def.get("raw")
+        ):
+            raw = f"{prefix}{raw}{suffix}"
 
         # Substitute {param} placeholders — merge config values so drivers
         # can use config fields like {set_id} or {level_instance_tag} in commands.

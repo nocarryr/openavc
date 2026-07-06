@@ -920,11 +920,22 @@ class YAMLAutoSimulator(TCPSimulator):
         """Build command handlers from commands: section."""
         commands = self._driver_def.get("commands", {})
         state_vars = set(self._driver_def.get("state_variables", {}).keys())
+        # Match the framed form the real driver puts on the wire: a driver-level
+        # command_prefix is prepended to every command (the trailing
+        # command_suffix/terminator is whitespace, already stripped from the
+        # incoming line in _dispatch_command). A raw: true command is unframed.
+        prefix = self._driver_def.get("command_prefix") or ""
 
         for cmd_name, cmd_def in commands.items():
             send_template = cmd_def.get("send", "")
             if not send_template:
                 continue
+            if (
+                prefix
+                and not cmd_def.get("raw")
+                and not send_template.startswith(prefix)
+            ):
+                send_template = prefix + send_template
 
             params = cmd_def.get("params", {})
 

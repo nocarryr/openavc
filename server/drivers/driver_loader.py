@@ -412,6 +412,13 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             f"Command '{cmd_name}'", cmd_def.get("params"), errors,
         )
 
+    # Opt-in send-side command framing: a constant prefix/suffix wraps every
+    # byte-stream command. Both must be strings when present.
+    for frame_key in ("command_prefix", "command_suffix"):
+        frame_val = driver_def.get(frame_key)
+        if frame_val is not None and not isinstance(frame_val, str):
+            errors.append(f"{frame_key}: must be a string")
+
     # Device settings: each entry must be writable (a `write:` block — the
     # runtime raises NotImplementedError without one) and its state_key must
     # name a declared state variable. A typo'd state_key used to load fine
