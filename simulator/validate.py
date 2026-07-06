@@ -240,11 +240,25 @@ def _check_state_machines(result: ValidationResult, sim: dict, commands: dict) -
             )
             continue
 
+        seen_triggers: set[tuple] = set()
         for i, t in enumerate(transitions):
             label = f"state_machine '{name}' transition {i}"
             if not isinstance(t, dict):
                 result.error("state_machine", f"{label} must be a mapping")
                 continue
+
+            # Two entries for the same (from, trigger) pair: the first listed
+            # wins at runtime, so the later one is unreachable.
+            if "trigger" in t:
+                pair = (t.get("from"), t.get("trigger"))
+                if pair in seen_triggers:
+                    result.warning(
+                        "state_machine",
+                        f"{label} duplicates an earlier transition for "
+                        f"from '{pair[0]}' trigger '{pair[1]}' — the first "
+                        f"listed wins, this one is unreachable",
+                    )
+                seen_triggers.add(pair)
 
             frm = t.get("from")
             if frm is None:

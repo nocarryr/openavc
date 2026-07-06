@@ -10,6 +10,7 @@ import asyncio
 
 import pytest
 
+from simulator.base import StateMachine
 from simulator.validate import ValidationResult, _check_state_machines
 from simulator.yaml_auto import YAMLAutoSimulator, _send_template_to_regex
 
@@ -89,6 +90,144 @@ def test_state_machine_unrelated_command_does_not_transition():
     sim = _make_sim(_PROJECTOR_DEF)
     sim.handle_command(b"INP3")  # set_input — not a power trigger
     assert sim.get_state("power") == "off"
+
+
+# ===========================================================================
+# M-222 / M-223 / L-139 — transition resolution must be order-independent:
+# an exact trigger beats a "*" wildcard wherever each appears in the list,
+# reject resolves with the same rules, and every after_seconds arms.
+# ===========================================================================
+
+def _machine(transitions: list[dict], initial: str = "locked") -> StateMachine:
+    return StateMachine(
+        name="m",
+        states=["locked", "idle", "ready", "error"],
+        initial=initial,
+        transitions=transitions,
+        on_change=lambda key, val: None,
+    )
+
+
+@pytest.mark.parametrize("order", ["wildcard_first", "specific_first"])
+def test_specific_transition_beats_wildcard_reject_in_any_order(order):
+    """M-222/M-223: 'reject everything except unlock' works no matter which
+    line the author writes first — the wildcard must not shadow the specific
+    transition, and reordering must not change behavior."""
+    specific = {"from": "locked", "trigger": "unlock", "to": "idle"}
+    catch_all = {"from": "locked", "trigger": "*", "reject": True}
+    transitions = (
+        [catch_all, specific] if order == "wildcard_first" else [specific, catch_all]
+    )
+    sm = _machine(transitions)
+
+    assert sm.is_rejected("unlock") is False
+    assert sm.trigger("unlock") is True
+    assert sm.current == "idle"
+
+    sm.current = "locked"
+    assert sm.is_rejected("other_cmd") is True
+    assert sm.trigger("other_cmd") is False
+    assert sm.current == "locked"
+
+
+def test_specific_reject_beats_wildcard_accept():
+    """The same specificity rule in the other direction: a named reject wins
+    over a catch-all transition listed above it."""
+    sm = _machine([
+        {"from": "locked", "trigger": "*", "to": "idle"},
+        {"from": "locked", "trigger": "forbidden", "reject": True},
+    ])
+    assert sm.is_rejected("forbidden") is True
+    assert sm.trigger("forbidden") is False
+    assert sm.current == "locked"
+    assert sm.trigger("anything_else") is True
+    assert sm.current == "idle"
+
+
+@pytest.mark.asyncio
+async def test_yaml_dispatch_allows_specific_command_past_wildcard_reject():
+    """M-223 end-to-end: the YAML dispatch path consults is_rejected() before
+    trigger(), so a '*' reject used to veto a specific allowed transition for
+    the same state even when the specific line was listed first."""
+    driver_def = {
+        "id": "acme_lock",
+        "name": "Acme Lock",
+        "transport": "tcp",
+        "delimiter": "\\r",
+        "state_variables": {},
+        "commands": {
+            "unlock": {"send": "UNLOCK"},
+            "lock": {"send": "LOCK"},
+            "beep": {"send": "BEEP"},
+        },
+        "responses": [],
+        "simulator": {
+            "state_machines": {
+                "door": {
+                    "states": ["locked", "idle"],
+                    "initial": "locked",
+                    "transitions": [
+                        {"from": "locked", "trigger": "*", "reject": True},
+                        {"from": "locked", "trigger": "unlock", "to": "idle"},
+                    ],
+                },
+            },
+        },
+    }
+    sim = _make_sim(driver_def)
+    sim.handle_command(b"BEEP")  # wildcard-rejected while locked
+    assert sim.get_state("door") == "locked"
+    sim.handle_command(b"UNLOCK")  # specific transition must not be vetoed
+    assert sim.get_state("door") == "idle"
+    await sim.stop()
+
+
+@pytest.mark.asyncio
+async def test_all_after_seconds_transitions_arm():
+    """L-139: a state with a fallback timeout listed before a fast path must
+    arm BOTH timers — only the first-listed used to arm. The first to fire
+    wins and cancels the rest."""
+    sm = _machine(
+        [
+            {"from": "locked", "after_seconds": 5.0, "to": "error"},
+            {"from": "locked", "after_seconds": 0.05, "to": "ready"},
+        ],
+        initial="idle",
+    )
+    sm._enter_state("locked")  # arms the timers for the entered state
+    assert len(sm._timer_tasks) == 2
+    await asyncio.sleep(0.2)
+    assert sm.current == "ready"  # fast path fired, fallback was cancelled
+    assert all(t.done() for t in sm._timer_tasks)
+    sm.cancel_timers()
+
+
+def test_validator_warns_on_duplicate_trigger_transition():
+    """A second entry for the same (from, trigger) pair is unreachable —
+    the validator should say so instead of leaving it silent."""
+    sim_def = {
+        "state_machines": {
+            "power": {
+                "states": ["off", "on"],
+                "initial": "off",
+                "transitions": [
+                    {"from": "off", "trigger": "power_on", "to": "on"},
+                    {"from": "off", "trigger": "power_on", "reject": True},
+                ],
+            },
+        },
+    }
+    result = ValidationResult("x", "x", "yaml")
+    _check_state_machines(result, sim_def, {"power_on": {}})
+    assert any("unreachable" in w.message for w in result.warnings)
+
+    # Distinct triggers for the same from-state stay silent.
+    sim_def["state_machines"]["power"]["transitions"][1] = {
+        "from": "off", "trigger": "power_toggle", "to": "on",
+    }
+    result2 = ValidationResult("x", "x", "yaml")
+    _check_state_machines(result2, sim_def, {"power_on": {}, "power_toggle": {}})
+    assert not any("unreachable" in w.message for w in result2.warnings)
 
 
 def test_validator_flags_malformed_state_machine():

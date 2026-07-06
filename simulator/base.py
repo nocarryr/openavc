@@ -298,61 +298,65 @@ class StateMachine:
         self.current = initial
         self.transitions = transitions
         self._on_change = on_change
-        self._timer_task: asyncio.Task | None = None
+        self._timer_tasks: list[asyncio.Task] = []
+
+    def _match(self, trigger_name: str) -> dict | None:
+        """Resolve which transition entry wins for this trigger.
+
+        A transition naming the trigger exactly beats a ``"*"`` wildcard no
+        matter where each appears in the list, so a catch-all (e.g.
+        ``{from: cooling, trigger: "*", reject: true}``) can't shadow a
+        specific transition for the same state and the list order in the
+        driver file doesn't change behavior. Within the same specificity the
+        first listed entry wins.
+        """
+        wildcard = None
+        for t in self.transitions:
+            if t.get("from") != self.current:
+                continue
+            t_trigger = t.get("trigger")
+            if t_trigger == trigger_name:
+                return t
+            if t_trigger == "*" and wildcard is None:
+                wildcard = t
+        return wildcard
 
     def trigger(self, trigger_name: str) -> bool:
         """Process a trigger. Returns True if a transition occurred."""
-        for t in self.transitions:
-            if t.get("from") != self.current:
-                continue
-
-            # Check for reject
-            t_trigger = t.get("trigger")
-            if t.get("reject") and (t_trigger == "*" or t_trigger == trigger_name):
-                return False
-
-            if t_trigger == trigger_name or t_trigger == "*":
-                new_state = t["to"]
-                self._enter_state(new_state)
-                return True
-
-        return False
+        t = self._match(trigger_name)
+        if t is None or t.get("reject"):
+            return False
+        self._enter_state(t["to"])
+        return True
 
     def is_rejected(self, trigger_name: str) -> bool:
-        """True if the current state explicitly rejects this trigger.
+        """True if the current state rejects this trigger.
 
         Lets command dispatch suppress the response for commands a device
         ignores in its current state (e.g. anything during projector cooldown,
-        declared as ``{from: cooling, trigger: "*", reject: true}``).
+        declared as ``{from: cooling, trigger: "*", reject: true}``). Resolved
+        with the same specificity rules as :meth:`trigger`, so a specific
+        allowed transition is not reported rejected by a ``"*"`` reject.
         """
-        for t in self.transitions:
-            if t.get("from") != self.current:
-                continue
-            if t.get("reject"):
-                t_trigger = t.get("trigger")
-                if t_trigger == "*" or t_trigger == trigger_name:
-                    return True
-        return False
+        t = self._match(trigger_name)
+        return bool(t and t.get("reject"))
 
     def _enter_state(self, new_state: str) -> None:
         """Transition to a new state and schedule auto-transitions."""
         self.current = new_state
         self._on_change(self.name, new_state)
 
-        # Cancel any pending auto-transition
-        if self._timer_task and not self._timer_task.done():
-            self._timer_task.cancel()
-            self._timer_task = None
+        # Cancel pending auto-transitions from the previous state
+        self.cancel_timers()
 
-        # Check for auto-transitions (after_seconds)
+        # Arm every auto-transition (after_seconds) declared for this state —
+        # e.g. a fast path plus a fallback timeout. The first to fire enters
+        # its target state, which cancels the rest.
         for t in self.transitions:
             if t.get("from") == new_state and "after_seconds" in t:
-                delay = t["after_seconds"]
-                target = t["to"]
-                self._timer_task = asyncio.ensure_future(
-                    self._auto_transition(delay, target)
-                )
-                break
+                self._timer_tasks.append(asyncio.ensure_future(
+                    self._auto_transition(t["after_seconds"], t["to"])
+                ))
 
     async def _auto_transition(self, delay: float, target: str) -> None:
         """Wait and then auto-transition."""
@@ -360,10 +364,11 @@ class StateMachine:
         self._enter_state(target)
 
     def cancel_timers(self) -> None:
-        """Cancel a pending auto-transition timer (called on simulator stop)."""
-        if self._timer_task and not self._timer_task.done():
-            self._timer_task.cancel()
-        self._timer_task = None
+        """Cancel pending auto-transition timers (also called on simulator stop)."""
+        for task in self._timer_tasks:
+            if not task.done():
+                task.cancel()
+        self._timer_tasks = []
 
 
 def _safe_ascii(data: bytes) -> str:
