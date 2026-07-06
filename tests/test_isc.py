@@ -1277,3 +1277,135 @@ async def test_send_command_cleans_pending_on_send_failure(isc):
 
     assert isc._pending_commands == {}
     assert isc._pending_command_peers == {}
+
+
+# ---------------------------------------------------------------------------
+# Registration cleanup + remote-command concurrency
+# ---------------------------------------------------------------------------
+
+
+async def test_accept_inbound_unregisters_on_welcome_failure(isc_with_auth):
+    """If the socket dies after registration (welcome send fails), the peer is
+    unregistered — a leaked entry would block a legitimate reconnection."""
+
+    class WelcomeFailWS(FakeWebSocket):
+        async def send_text(self, data: str) -> None:
+            if json.loads(data).get("type") == "isc.welcome":
+                raise RuntimeError("socket closed")
+            await super().send_text(data)
+
+    hello = {"type": "isc.hello", "instance_id": "cccc-3333", "name": "Room C"}
+    peer_id = await isc_with_auth.accept_inbound(WelcomeFailWS(auth_key="secret123"), hello)
+    assert peer_id is None
+    assert "cccc-3333" not in isc_with_auth._connections
+    peer = isc_with_auth._peers.get("cccc-3333")
+    assert peer is None or peer.connected is False
+
+    # A reconnection from the same peer must now succeed (with a leaked
+    # entry it would be rejected as a duplicate).
+    peer_id = await isc_with_auth.accept_inbound(FakeWebSocket(auth_key="secret123"), hello)
+    assert peer_id == "cccc-3333"
+
+
+async def test_remote_command_in_flight_cap(isc, monkeypatch):
+    """Concurrent isc.command executions are capped globally; over-cap
+    requests get an error result instead of piling onto device I/O."""
+    from server.core import isc as isc_mod
+    monkeypatch.setattr(isc_mod, "MAX_REMOTE_COMMANDS_IN_FLIGHT", 1)
+
+    release = asyncio.Event()
+
+    class BlockingDevices(FakeDeviceManager):
+        async def send_command(self, device_id, command, params=None):
+            self.commands.append((device_id, command, params))
+            await release.wait()
+            return "ok"
+
+    devices = BlockingDevices()
+    isc.devices = devices
+    isc._allowed_remote_commands = ["*"]
+
+    ws = FakeWebSocket(auth_key="testkey")
+    await isc.accept_inbound(ws, {
+        "type": "isc.hello", "instance_id": "peer-cap", "name": "Cap",
+    })
+    ws.sent.clear()
+
+    def cmd(rid):
+        return {"type": "isc.command", "id": rid, "device": "proj1",
+                "command": "power_on", "params": {}}
+
+    first = asyncio.create_task(isc.handle_message("peer-cap", cmd("req-1")))
+    await asyncio.sleep(0)  # let req-1 reach the blocking send_command
+    assert isc._remote_commands_in_flight == 1
+
+    await isc.handle_message("peer-cap", cmd("req-2"))  # over cap — rejected
+    rejected = next(m for m in ws.get_sent_msgs() if m["type"] == "isc.command_result")
+    assert rejected["id"] == "req-2"
+    assert rejected["success"] is False
+    assert "limit" in rejected["error"]
+    assert len(devices.commands) == 1  # req-2 never reached the device
+
+    release.set()
+    await first
+    done = next(m for m in ws.get_sent_msgs()
+                if m["type"] == "isc.command_result" and m["id"] == "req-1")
+    assert done["success"] is True
+    assert isc._remote_commands_in_flight == 0
+
+    # Capacity freed — the next command executes normally.
+    await isc.handle_message("peer-cap", cmd("req-3"))
+    assert len(devices.commands) == 2
+
+
+# ---------------------------------------------------------------------------
+# ISC WebSocket endpoint (server/api/isc_ws.py)
+# ---------------------------------------------------------------------------
+
+
+class ScriptedWS(FakeWebSocket):
+    """Drives the real isc_websocket_endpoint with a scripted message list,
+    auto-answering the auth challenge, then disconnecting."""
+
+    def __init__(self, auth_key: str, script: list[dict]):
+        super().__init__(auth_key)
+        self._script = list(script)
+
+    async def accept(self) -> None:
+        pass
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self._closed = True
+
+    async def receive_text(self) -> str:
+        last_msg = json.loads(self.sent[-1]) if self.sent else {}
+        if last_msg.get("type") == "isc.challenge" and self._auth_key:
+            return json.dumps({
+                "type": "isc.auth",
+                "response": _client_proof(self._auth_key, last_msg["nonce"]),
+            })
+        if self._script:
+            return json.dumps(self._script.pop(0))
+        from fastapi import WebSocketDisconnect
+        raise WebSocketDisconnect(1000)
+
+
+async def test_isc_ws_rate_limit_survives_reconnect(isc, state, monkeypatch):
+    """The per-peer message budget is keyed by peer id, not connection —
+    reconnect-cycling must not reset the sliding window."""
+    from server.api import isc_ws
+    monkeypatch.setattr(isc_ws, "_ISC_MAX_MESSAGES_PER_MINUTE", 3)
+    monkeypatch.setattr(isc_ws, "_isc_manager", isc)
+    monkeypatch.setattr(isc_ws, "_peer_msg_times", {})
+
+    hello = {"type": "isc.hello", "instance_id": "cccc-3333", "name": "Room C"}
+
+    # Connection 1: burn the whole budget, then disconnect.
+    ws1 = ScriptedWS("testkey", [hello] + [{"type": "isc.ping"}] * 3)
+    await isc_ws.isc_websocket_endpoint(ws1)
+    assert "cccc-3333" not in isc._connections  # cleanly disconnected
+
+    # Connection 2, same peer id: still over budget — the message is dropped.
+    ws2 = ScriptedWS("testkey", [hello, {"type": "isc.state", "changes": {"var.x": 42}}])
+    await isc_ws.isc_websocket_endpoint(ws2)
+    assert state.get("isc.cccc-3333.var.x") is None

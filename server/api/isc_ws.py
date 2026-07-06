@@ -17,9 +17,26 @@ from server.utils.logger import get_logger
 router = APIRouter()
 log = get_logger(__name__)
 
-# Per-peer rate limiting for ISC messages
+# Per-peer rate limiting for ISC messages. The sliding windows are keyed by
+# peer id and survive reconnects, so a peer can't reset its budget by cycling
+# the connection.
 _ISC_MAX_MESSAGES_PER_MINUTE = 300
-_ISC_MAX_QUEUE_DEPTH = 100
+_ISC_RATE_WINDOW = 60.0
+_peer_msg_times: dict[str, list[float]] = {}
+
+
+def _sweep_stale_windows(now: float) -> None:
+    """Drop rate-limit entries for peers with no traffic inside the window.
+
+    Peer ids are authenticated but still peer-chosen strings, so without a
+    sweep the map would grow one entry per id ever seen.
+    """
+    stale = [
+        peer_id for peer_id, times in _peer_msg_times.items()
+        if not times or now - times[-1] >= _ISC_RATE_WINDOW
+    ]
+    for peer_id in stale:
+        del _peer_msg_times[peer_id]
 
 # ISCManager reference — set by main.py after engine starts
 _isc_manager = None
@@ -65,24 +82,30 @@ async def isc_websocket_endpoint(ws: WebSocket) -> None:
             pass  # Catch-all: socket may already be closed
         return
 
-    # Capture the exact PeerConnection instance so peer_disconnected can
-    # identity-check it: an orphan socket's late disconnect must not pop
-    # a fresh reconnection that's taken its place (A55).
-    conn = _isc_manager.get_connection(peer_id)
-
-    # --- Message loop with rate limiting ---
-    msg_timestamps: list[float] = []
+    # Everything after registration runs inside try/finally so any failure
+    # (including between registration and the loop) still unregisters the
+    # peer — a leaked entry would block a legitimate reconnection.
+    conn = None
     try:
+        # Capture the exact PeerConnection instance so peer_disconnected can
+        # identity-check it: an orphan socket's late disconnect must not pop
+        # a fresh reconnection that's taken its place (A55).
+        conn = _isc_manager.get_connection(peer_id)
+
+        _sweep_stale_windows(time.monotonic())
+
+        # --- Message loop with rate limiting ---
         while True:
             text = await ws.receive_text()
 
-            # Rate limit: sliding window of 60 seconds
+            # Rate limit: sliding window, keyed by peer id (reconnect-proof)
             now = time.monotonic()
-            msg_timestamps = [t for t in msg_timestamps if now - t < 60]
-            if len(msg_timestamps) >= _ISC_MAX_MESSAGES_PER_MINUTE:
+            times = _peer_msg_times.setdefault(peer_id, [])
+            times[:] = [t for t in times if now - t < _ISC_RATE_WINDOW]
+            if len(times) >= _ISC_MAX_MESSAGES_PER_MINUTE:
                 log.warning("ISC: Rate limit exceeded for peer %s, dropping message", peer_id[:8])
                 continue
-            msg_timestamps.append(now)
+            times.append(now)
 
             msg = json.loads(text)
             await _isc_manager.handle_message(peer_id, msg)

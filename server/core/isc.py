@@ -78,6 +78,13 @@ PING_TIMEOUT = 10.0
 # state, so it's safe to drop wholesale once the cap is hit.
 MAX_AUTH_FAIL_ENTRIES = 1024
 
+# Cap on concurrently-executing remote device commands (all peers combined).
+# Each accepted isc.command awaits DeviceManager.send_command; without a cap,
+# a peer that drops its socket mid-command and reconnects can stack unbounded
+# in-flight commands and saturate device I/O. Over-cap requests are rejected
+# with a command_result error rather than queued.
+MAX_REMOTE_COMMANDS_IN_FLIGHT = 8
+
 # State batch window (seconds)
 STATE_BATCH_INTERVAL = 0.2
 
@@ -299,6 +306,9 @@ class ISCManager:
         # Pending remote-command futures
         self._pending_commands: dict[str, asyncio.Future] = {}
         self._pending_command_peers: dict[str, tuple[asyncio.Future, str]] = {}  # request_id -> (future, peer_id)
+
+        # Remote commands currently executing on our devices (all peers)
+        self._remote_commands_in_flight = 0
 
         # UDP discovery
         self._discovery_sock: socket.socket | None = None
@@ -732,24 +742,32 @@ class ISCManager:
             conn = PeerConnection(ws, "inbound")
             self._connections[peer_id] = conn
 
-        # Send welcome
-        await _ws_send_fastapi(ws, {
-            "type": "isc.welcome",
-            "instance_id": self.instance_id,
-            "name": self.instance_name,
-            "version": _platform_version,
-            "protocol": ISC_PROTOCOL_VERSION,
-        })
+        # The peer is registered from here on — if any post-registration step
+        # fails (socket died before the welcome, etc.), unregister it before
+        # returning, or the stale entry blocks a legitimate reconnection.
+        try:
+            # Send welcome
+            await _ws_send_fastapi(ws, {
+                "type": "isc.welcome",
+                "instance_id": self.instance_id,
+                "name": self.instance_name,
+                "version": _platform_version,
+                "protocol": ISC_PROTOCOL_VERSION,
+            })
 
-        # Send initial shared state
-        shared = self._get_shared_state()
-        if shared:
-            await _ws_send_fastapi(ws, {"type": "isc.state", "changes": shared})
+            # Send initial shared state
+            shared = self._get_shared_state()
+            if shared:
+                await _ws_send_fastapi(ws, {"type": "isc.state", "changes": shared})
 
-        await self.events.emit("isc.peer_connected", {
-            "instance_id": peer_id, "name": peer_name,
-        })
-        self._push_isc_update()
+            await self.events.emit("isc.peer_connected", {
+                "instance_id": peer_id, "name": peer_name,
+            })
+            self._push_isc_update()
+        except Exception:
+            log.debug(f"ISC: Inbound peer {peer_id[:8]} dropped during welcome — unregistering")
+            await self._close_peer(peer_id, emit=False, conn=conn)
+            return None
         return peer_id
 
     async def handle_message(self, peer_id: str, msg: dict[str, Any]) -> None:
@@ -1238,6 +1256,20 @@ class ISCManager:
             })
             return
 
+        if self._remote_commands_in_flight >= MAX_REMOTE_COMMANDS_IN_FLIGHT:
+            log.warning(
+                "ISC: peer %s command %s.%s rejected (%d remote commands already in flight)",
+                peer_id[:8], device_id, command, self._remote_commands_in_flight,
+            )
+            await conn.send({
+                "type": "isc.command_result",
+                "id": request_id,
+                "success": False,
+                "error": "remote instance is at its concurrent command limit",
+            })
+            return
+
+        self._remote_commands_in_flight += 1
         try:
             result = await self.devices.send_command(device_id, command, params)
             await conn.send({
@@ -1253,6 +1285,8 @@ class ISCManager:
                 "success": False,
                 "error": str(e),
             })
+        finally:
+            self._remote_commands_in_flight -= 1
 
     def _handle_command_result(self, msg: dict[str, Any]) -> None:
         """Resolve a pending remote-command future."""
