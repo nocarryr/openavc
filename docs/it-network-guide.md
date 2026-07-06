@@ -198,6 +198,8 @@ When deploying multiple OpenAVC instances (e.g., one per room), ISC allows them 
 | Beacon interval | Every 5 seconds |
 | Auto-discovery scope | Same subnet/VLAN only |
 | Cross-subnet support | Manual peer addressing (no broadcast required) |
+| Inbound message limit | 300 messages per minute per peer (the budget persists across reconnects) |
+| Remote command limit | At most 8 peer-requested device commands execute at once (all peers combined) |
 
 **To disable ISC entirely**, set `isc.enabled: false` in `system.json`. No UDP traffic will be sent or received on port 19872.
 
