@@ -7,97 +7,21 @@ import type {
   DriverResponseDef,
   DriverResponseMapping,
 } from "../../api/types";
+import { IdRenameInput, type RenameResult } from "./IdRenameInput";
+import {
+  addValueMapEntry,
+  buildResponse,
+  checkValueMapKeyRename,
+  getMappings,
+  getPattern,
+  renameValueMapKey,
+} from "./responseBuilderHelpers";
 
 function _ordinal(n: number): string {
   if (n === 1) return "1st";
   if (n === 2) return "2nd";
   if (n === 3) return "3rd";
   return `${n}th`;
-}
-
-/** Read the pattern from whichever key is present. */
-function getPattern(resp: DriverResponseDef): string {
-  return resp.address ?? resp.pattern ?? resp.match ?? "";
-}
-
-/** Read mappings, converting set shorthand if needed. Preserves static
- *  literal values (so round-trip doesn't lose them on edit). */
-function getMappings(resp: DriverResponseDef): DriverResponseMapping[] {
-  if (resp.mappings) return resp.mappings;
-  if (!resp.set) return [];
-  const mappings: DriverResponseMapping[] = [];
-  for (const [stateKey, valueExpr] of Object.entries(resp.set)) {
-    if (typeof valueExpr === "string" && /^\$\d+$/.test(valueExpr)) {
-      // Capture-group reference like "$1"
-      const group = parseInt(valueExpr.slice(1), 10);
-      mappings.push({ group, state: stateKey, type: "string" });
-    } else {
-      // Static literal — preserve the value verbatim under `value`
-      mappings.push({ group: 0, state: stateKey, value: valueExpr });
-    }
-  }
-  return mappings;
-}
-
-/** True if every mapping fits the `set:` shorthand: each is either a
- *  pure capture-group reference (no `type`/`map`/`arg` extras) or a
- *  static literal. Used to decide which output form preserves the
- *  driver author's original intent. */
-function canUseSetShorthand(mappings: DriverResponseMapping[]): boolean {
-  if (mappings.length === 0) return false;
-  const seenStates = new Set<string>();
-  for (const m of mappings) {
-    if (!m.state) return false;
-    if (seenStates.has(m.state)) return false;
-    seenStates.add(m.state);
-    if (m.arg !== undefined) return false;
-    if (m.map !== undefined) return false;
-    // Static literal mapping: group=0, value present
-    if (m.group === 0 && m.value !== undefined) continue;
-    // Capture-group mapping: group>0, no `type` or default string type
-    if (m.group > 0 && (m.type === undefined || m.type === "string")) continue;
-    return false;
-  }
-  return true;
-}
-
-/** Build a response def, preserving the original form (set: shorthand or
- *  mappings:) of the loaded response when the new mappings still fit.
- *  `child_set` rides along untouched — rebuilding from a pattern/mapping
- *  edit must never drop the child routing. */
-function buildResponse(
-  pattern: string,
-  mappings: DriverResponseMapping[],
-  original: DriverResponseDef,
-): DriverResponseDef {
-  const childSet = original.child_set?.length
-    ? { child_set: original.child_set }
-    : {};
-  // OSC responses always use mappings + address (no child_set — the loader
-  // rejects it there).
-  if (original.address !== undefined) {
-    return { address: pattern, mappings };
-  }
-  // A child_set-only response keeps its YAML clean: no empty mappings key.
-  if (mappings.length === 0 && original.mappings === undefined && original.set === undefined) {
-    return { match: pattern, ...childSet };
-  }
-  // Choose set: shorthand when (a) the original used it AND (b) the
-  // current mapping shape still fits the shorthand. Otherwise fall back
-  // to the explicit mappings form.
-  const originalWasSet = original.set !== undefined && original.mappings === undefined;
-  if (originalWasSet && canUseSetShorthand(mappings)) {
-    const set: Record<string, unknown> = {};
-    for (const m of mappings) {
-      if (m.group === 0 && m.value !== undefined) {
-        set[m.state] = m.value;
-      } else {
-        set[m.state] = `$${m.group}`;
-      }
-    }
-    return { match: pattern, set, ...childSet };
-  }
-  return { match: pattern, mappings, ...childSet };
 }
 
 interface ResponseBuilderProps {
@@ -107,6 +31,7 @@ interface ResponseBuilderProps {
 
 export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
   const responses = draft.responses ?? [];
+  const stateVars = draft.state_variables;
 
   const addResponse = () => {
     if (draft.transport === "osc") {
@@ -120,7 +45,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
       onUpdate({
         responses: [
           ...responses,
-          buildResponse("", [{ group: 1, state: "", type: "string" }], {}),
+          buildResponse("", [{ group: 1, state: "", type: "string" }], {}, stateVars),
         ],
       });
     }
@@ -181,7 +106,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
 
       {responses.map((resp, i) => {
         const pattern = getPattern(resp);
-        const mappings = getMappings(resp);
+        const mappings = getMappings(resp, stateVars);
         return (
         <div
           key={i}
@@ -248,7 +173,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
               <input
                 value={pattern}
                 onChange={(e) =>
-                  updateResponse(i, buildResponse(e.target.value, mappings, resp))
+                  updateResponse(i, buildResponse(e.target.value, mappings, resp, stateVars))
                 }
                 placeholder="e.g., In(\d+) All"
                 style={{
@@ -304,7 +229,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 onChange={(e) => {
                   const next = [...mappings];
                   next[mi] = { ...mapping, state: e.target.value };
-                  updateResponse(i, buildResponse(pattern, next, resp));
+                  updateResponse(i, buildResponse(pattern, next, resp, stateVars));
                 }}
                 style={{ flex: 1, fontSize: "var(--font-size-sm)" }}
               >
@@ -320,7 +245,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 onChange={(e) => {
                   const next = [...mappings];
                   next[mi] = { ...mapping, type: e.target.value };
-                  updateResponse(i, buildResponse(pattern, next, resp));
+                  updateResponse(i, buildResponse(pattern, next, resp, stateVars));
                 }}
                 style={{ width: 90, fontSize: "var(--font-size-sm)" }}
               >
@@ -332,7 +257,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
               <button
                 onClick={() => {
                   const next = mappings.filter((_, j) => j !== mi);
-                  updateResponse(i, buildResponse(pattern, next, resp));
+                  updateResponse(i, buildResponse(pattern, next, resp, stateVars));
                 }}
                 style={{ padding: "2px", color: "var(--text-muted)" }}
               >
@@ -343,7 +268,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 onChange={(updated) => {
                   const next = [...mappings];
                   next[mi] = updated;
-                  updateResponse(i, buildResponse(pattern, next, resp));
+                  updateResponse(i, buildResponse(pattern, next, resp, stateVars));
                 }}
               />
             </div>
@@ -366,7 +291,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 updateResponse(i, buildResponse(pattern, [
                   ...mappings,
                   { group: nextGroup, state: "", type: "string" },
-                ], resp));
+                ], resp, stateVars));
               }
             }}
             style={{
@@ -383,7 +308,7 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 entries={resp.child_set ?? []}
                 childTypes={draft.child_entity_types ?? {}}
                 onChange={(entries) => {
-                  const rebuilt = buildResponse(pattern, mappings, resp);
+                  const rebuilt = buildResponse(pattern, mappings, resp, stateVars);
                   if (entries.length) {
                     rebuilt.child_set = entries;
                   } else {
@@ -653,7 +578,10 @@ function ValueMapEditor({
   };
 
   const addEntry = () => {
-    onChange({ ...mapping, map: { ...map, "": "" } });
+    // No-op while a blank draft row is pending — a second "" key would
+    // silently reset the first draft's value in the backing record.
+    const next = addValueMapEntry(map);
+    if (next) onChange({ ...mapping, map: next });
     if (!open) setOpen(true);
   };
 
@@ -663,12 +591,15 @@ function ValueMapEditor({
     onChange({ ...mapping, map: Object.keys(next).length > 0 ? next : undefined });
   };
 
-  const updateEntry = (oldKey: string, newKey: string, value: string) => {
-    const next: Record<string, string> = {};
-    for (const [k, v] of Object.entries(map)) {
-      next[k === oldKey ? newKey : k] = k === oldKey ? value : v;
-    }
-    onChange({ ...mapping, map: next });
+  const setEntryValue = (key: string, value: string) => {
+    onChange({ ...mapping, map: { ...map, [key]: value } });
+  };
+
+  const renameEntry = (oldKey: string, newKey: string): RenameResult => {
+    const check = checkValueMapKeyRename(newKey, oldKey, Object.keys(map));
+    if (!check.ok || newKey === oldKey) return check;
+    onChange({ ...mapping, map: renameValueMapKey(map, oldKey, newKey) });
+    return { ok: true };
   };
 
   return (
@@ -706,17 +637,18 @@ function ValueMapEditor({
             Map raw values to friendly names (e.g., &quot;01&quot; → &quot;on&quot;)
           </div>
           {entries.map(([key, value], i) => (
-            <div key={i} style={{ display: "flex", gap: 4, marginBottom: 2, alignItems: "center" }}>
-              <input
+            <div key={i} style={{ display: "flex", gap: 4, marginBottom: 2, alignItems: "flex-start" }}>
+              <IdRenameInput
                 value={key}
-                onChange={(e) => updateEntry(key, e.target.value, value)}
+                sanitize={(raw) => raw}
+                onCommit={(next) => renameEntry(key, next)}
                 placeholder="raw"
                 style={{ width: 80, fontFamily: "var(--font-mono)", fontSize: "11px" }}
               />
               <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>→</span>
               <input
                 value={value}
-                onChange={(e) => updateEntry(key, key, e.target.value)}
+                onChange={(e) => setEntryValue(key, e.target.value)}
                 placeholder="mapped"
                 style={{ width: 80, fontFamily: "var(--font-mono)", fontSize: "11px" }}
               />

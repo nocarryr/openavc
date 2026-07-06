@@ -18,12 +18,14 @@ export function IdRenameInput({
   sanitize,
   onCommit,
   style,
+  placeholder,
   "data-testid": testid,
 }: {
   value: string;
   sanitize: (raw: string) => string;
   onCommit: (next: string) => RenameResult;
   style?: React.CSSProperties;
+  placeholder?: string;
   "data-testid"?: string;
 }) {
   const [draft, setDraft] = useState(value);
@@ -54,6 +56,7 @@ export function IdRenameInput({
       <input
         data-testid={testid}
         value={draft}
+        placeholder={placeholder}
         onChange={(e) => setDraft(sanitize(e.target.value))}
         onBlur={commit}
         onKeyDown={(e) => {
