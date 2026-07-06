@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 import type { UIElement, ProjectConfig } from "../../../api/types";
-import { BINDING_CAPABILITIES, type BindingCapability, slotActions, actionsCommandDevice } from "../uiBuilderHelpers";
+import { BINDING_CAPABILITIES, type BindingCapability, slotActions, actionsCommandDevice, actionDanglingRef, actionIncompleteCheck } from "../uiBuilderHelpers";
 import { ButtonBindingEditor, type ButtonBindings } from "../../shared/ButtonBindingEditor";
 import { PressBindingEditor } from "../BindingEditor/PressBindingEditor";
 import { TextBindingEditor } from "../BindingEditor/TextBindingEditor";
@@ -90,27 +90,14 @@ export function BindingProperties({ element, project, onChange }: BindingPropert
   };
 
   // --- status helpers (inline broken/incomplete badges, matching the old panel) ---
-  const actionDangling = (a: Record<string, unknown>): string | null => {
-    if (a.action === "device.command" && a.device && !deviceIds.has(a.device as string)) return `Device "${a.device}" not found`;
-    if (a.action === "macro" && a.macro && !macroIds.has(a.macro as string)) return `Macro "${a.macro}" not found`;
-    if (a.action === "navigate" && a.page && !pageIds.has(a.page as string)) return `Page "${a.page}" not found`;
-    return null;
-  };
-  const actionIncomplete = (a: Record<string, unknown>): boolean => {
-    if (a.action === "device.command") return !a.device || !a.command;
-    if (a.action === "macro") return !a.macro;
-    if (a.action === "state.set") return !a.key;
-    if (a.action === "navigate") return !a.page;
-    if (a.action === "value_map") return !a.map || Object.keys(a.map as object).length === 0;
-    return !a.action;
-  };
+  const refIds = { deviceIds, macroIds, pageIds };
   const actionsStatus = (raw: unknown): CardStatus | null => {
     const actions = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
     for (const a of actions as Record<string, unknown>[]) {
-      const d = actionDangling(a);
+      const d = actionDanglingRef(a, refIds);
       if (d) return { kind: "broken", text: d };
     }
-    if ((actions as Record<string, unknown>[]).some(actionIncomplete)) return { kind: "incomplete", text: "Incomplete" };
+    if ((actions as Record<string, unknown>[]).some(actionIncompleteCheck)) return { kind: "incomplete", text: "Incomplete" };
     return null;
   };
   const keyStatus = (binding: Record<string, unknown> | undefined): CardStatus | null => {

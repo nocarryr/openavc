@@ -496,4 +496,72 @@ const AREA = { col: 1, row: 1, col_span: 2, row_span: 1 };
   };
 }
 
+// --- L-146 / L-147: Broken/Incomplete checks match what the runtime runs ---
+const REF_IDS = {
+  deviceIds: new Set(["proj"]),
+  macroIds: new Set(["all_on"]),
+  pageIds: new Set(["main"]),
+};
+const statusScenario = (name, fnBody) => {
+  try {
+    results[name] = fnBody();
+  } catch (e) {
+    results[name] = { pass: false, detail: String(e) };
+  }
+};
+statusScenario("l147_page_alias_dangling", () => {
+  // engine.py accepts "page" as an alias for "navigate"; a dead page ref via
+  // the alias must badge Broken like the canonical spelling does.
+  const d = H.actionDanglingRef({ action: "page", page: "ghost" }, REF_IDS);
+  return { pass: typeof d === "string" && d.includes("ghost"), detail: d };
+});
+statusScenario("l147_value_map_dangling_descends", () => {
+  // value_map branches run real actions — a dangling device ref inside an
+  // option branch (array or single-dict form) must surface.
+  const arr = H.actionDanglingRef(
+    { action: "value_map", map: { hdmi1: [{ action: "device.command", device: "ghost_dev", command: "input" }] } },
+    REF_IDS,
+  );
+  const single = H.actionDanglingRef(
+    { action: "value_map", map: { hdmi1: { action: "macro", macro: "ghost_macro" } } },
+    REF_IDS,
+  );
+  return {
+    pass: !!arr && arr.includes("ghost_dev") && !!single && single.includes("ghost_macro"),
+    detail: { arr, single },
+  };
+});
+statusScenario("l146_script_call_incomplete", () => {
+  // engine.py only emits script.call when `function` is set — an empty
+  // function must badge Incomplete, a filled one must not.
+  const empty = H.actionIncompleteCheck({ action: "script.call", function: "" });
+  const filled = H.actionIncompleteCheck({ action: "script.call", function: "do_thing" });
+  return { pass: empty === true && filled === false, detail: { empty, filled } };
+});
+statusScenario("l147_page_alias_incomplete", () => {
+  return {
+    pass: H.actionIncompleteCheck({ action: "page" }) === true &&
+      H.actionIncompleteCheck({ action: "page", page: "main" }) === false,
+    detail: null,
+  };
+});
+statusScenario("l147_value_map_branch_incomplete", () => {
+  // An option branch missing its command is half-finished even though the
+  // map itself is non-empty.
+  const broken = H.actionIncompleteCheck({ action: "value_map", map: { a: { action: "device.command", device: "proj" } } });
+  const ok = H.actionIncompleteCheck({ action: "value_map", map: { a: { action: "device.command", device: "proj", command: "input" } } });
+  const emptyMap = H.actionIncompleteCheck({ action: "value_map", map: {} });
+  return { pass: broken === true && ok === false && emptyMap === true, detail: { broken, ok, emptyMap } };
+});
+statusScenario("l147_valid_actions_clean", () => {
+  // Guard: fully-configured actions with live refs stay unbadged.
+  const checks = [
+    H.actionDanglingRef({ action: "navigate", page: "main" }, REF_IDS) === null,
+    H.actionDanglingRef({ action: "device.command", device: "proj", command: "power_on" }, REF_IDS) === null,
+    H.actionIncompleteCheck({ action: "navigate", page: "main" }) === false,
+    H.actionIncompleteCheck({ action: "macro", macro: "all_on" }) === false,
+  ];
+  return { pass: checks.every(Boolean), detail: checks };
+});
+
 process.stdout.write(JSON.stringify(results));

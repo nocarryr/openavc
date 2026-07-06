@@ -580,6 +580,70 @@ export function actionsCommandDevice(actions: Record<string, unknown>[]): boolea
   });
 }
 
+/** Reference ids an action can dangle against. */
+export interface BindingRefIds {
+  deviceIds: ReadonlySet<string>;
+  macroIds: ReadonlySet<string>;
+  pageIds: ReadonlySet<string>;
+}
+
+/** First broken reference in an action — a device/macro/page id that no
+ *  longer exists. The runtime accepts "page" as an alias for "navigate"
+ *  (engine.py executes both), and a value_map runs the per-option action
+ *  branches, so both are checked here too — AI tools and imports emit them,
+ *  and a Broken badge that misses them lets a dead reference look fine. */
+export function actionDanglingRef(
+  a: Record<string, unknown>,
+  ids: BindingRefIds,
+): string | null {
+  const act = a.action;
+  if (act === "device.command" && a.device && !ids.deviceIds.has(a.device as string)) {
+    return `Device "${a.device}" not found`;
+  }
+  if (act === "macro" && a.macro && !ids.macroIds.has(a.macro as string)) {
+    return `Macro "${a.macro}" not found`;
+  }
+  if ((act === "navigate" || act === "page") && a.page && !ids.pageIds.has(a.page as string)) {
+    return `Page "${a.page}" not found`;
+  }
+  if (act === "value_map" && a.map && typeof a.map === "object") {
+    for (const branch of Object.values(a.map as Record<string, unknown>)) {
+      const subs = Array.isArray(branch) ? branch : [branch];
+      for (const sub of subs) {
+        if (sub && typeof sub === "object") {
+          const d = actionDanglingRef(sub as Record<string, unknown>, ids);
+          if (d) return d;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** True when an action is missing the field it can't run without — the
+ *  runtime silently skips these (e.g. script.call only fires when `function`
+ *  is set), so the editor badges them Incomplete instead. Descends into a
+ *  value_map's per-option branches like the runtime does. */
+export function actionIncompleteCheck(a: Record<string, unknown>): boolean {
+  const act = a.action;
+  if (act === "device.command") return !a.device || !a.command;
+  if (act === "macro") return !a.macro;
+  if (act === "state.set") return !a.key;
+  if (act === "navigate" || act === "page") return !a.page;
+  if (act === "script.call") return !a.function;
+  if (act === "value_map") {
+    const map = a.map as Record<string, unknown> | undefined;
+    if (!map || Object.keys(map).length === 0) return true;
+    return Object.values(map).some((branch) => {
+      const subs = Array.isArray(branch) ? branch : [branch];
+      return subs.some(
+        (sub) => !!sub && typeof sub === "object" && actionIncompleteCheck(sub as Record<string, unknown>),
+      );
+    });
+  }
+  return !a.action;
+}
+
 /** Remove navigate actions targeting a deleted page from every `do.<interaction>`
  *  action list. */
 function scrubNavigateActions(el: UIElement, pageId: string): UIElement {

@@ -141,7 +141,9 @@ export function ButtonBindingEditor({
     if (action.action === "macro") return `Macro: ${action.macro}`;
     if (action.action === "device.command") return `${action.device}.${action.command}`;
     if (action.action === "state.set") return `Set ${action.key}`;
-    if (action.action === "navigate") {
+    if (action.action === "navigate" || action.action === "page") {
+      // "page" is the runtime's alias for navigate (engine.py) — AI tools
+      // and imports emit it; without this branch it summarized as raw "page".
       const p = String(action.page ?? "");
       if (p === "__next_page__") return "Next page";
       if (p === "__prev_page__") return "Previous page";

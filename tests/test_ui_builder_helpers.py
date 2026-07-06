@@ -103,6 +103,12 @@ SCENARIOS = [
     "m231_span_shrinks_to_grid",
     "l142_scrub_identity_when_untouched",
     "l142_scrub_new_when_changed",
+    "l147_page_alias_dangling",
+    "l147_value_map_dangling_descends",
+    "l146_script_call_incomplete",
+    "l147_page_alias_incomplete",
+    "l147_value_map_branch_incomplete",
+    "l147_valid_actions_clean",
 ]
 
 
