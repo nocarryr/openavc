@@ -26,8 +26,10 @@ from server.updater.rollback import (
     read_pending_marker,
     increment_marker_attempts,
     clear_pending_marker,
+    clear_stale_rollback_marker,
     check_rollback_needed,
     perform_rollback,
+    reset_marker_attempts,
     _rollback_linux,
 )
 
@@ -289,6 +291,79 @@ class TestRollbackLinuxWritesMarker:
         with patch.object(Path, "write_text", side_effect=OSError("disk full")):
             result = _rollback_linux(tmp_path, "1.0.0", "2.0.0")
         assert result is False
+        # No marker (or staging leftover) may exist after a failed write:
+        # the helper consumes apply-rollback unconditionally on the next
+        # start, so a leftover here means a silent downgrade later.
+        assert list(tmp_path.iterdir()) == []
+
+    def test_failed_finalize_leaves_no_marker(self, tmp_path):
+        """The marker is staged and renamed into place. If the rename fails,
+        nothing may be left behind — a marker on disk while the caller was
+        told rollback failed (so it keeps running) would downgrade the
+        install on the next unrelated restart."""
+        with patch("server.updater.rollback.os.replace",
+                   side_effect=OSError("disk full")):
+            result = _rollback_linux(tmp_path, "1.0.0", "2.0.0")
+        assert result is False
+        assert not (tmp_path / "apply-rollback").exists()
+        assert list(tmp_path.glob("apply-rollback*")) == []
+
+
+class TestStaleRollbackMarkerCleanup:
+    """clear_stale_rollback_marker() — startup defense against a leftover
+    apply-rollback marker.
+
+    The pre-start wrapper (update-helper.sh, macOS run wrapper) consumes the
+    marker before Python runs, so one still present at startup was never
+    consumed (writer didn't exit, or no wrapper exists: dev, Docker). Left
+    alone it would apply on a later unrelated restart — a silent downgrade."""
+
+    def test_removes_leftover_marker(self, tmp_path):
+        (tmp_path / "apply-rollback").write_text("")
+        assert clear_stale_rollback_marker(tmp_path) is True
+        assert not (tmp_path / "apply-rollback").exists()
+
+    def test_noop_when_absent(self, tmp_path):
+        assert clear_stale_rollback_marker(tmp_path) is False
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestCleanShutdownResetsAttempts:
+    """reset_marker_attempts() — a deliberate restart inside the 60s
+    confirmation window must not count as a crashed startup.
+
+    Before the fix, check_rollback_needed() treated any second boot in the
+    window as a crash: a good update followed by an operator/cloud restart
+    within 60s was rolled back."""
+
+    def test_clean_restart_in_window_does_not_trigger_rollback(self, tmp_path):
+        write_pending_marker(tmp_path, "1.0.0", "2.0.0")
+        # Boot 1 after the update: attempt 1, no rollback
+        assert check_rollback_needed(tmp_path) is False
+        # Operator restarts inside the 60s window: graceful shutdown resets
+        reset_marker_attempts(tmp_path)
+        # Boot 2 is a fresh first attempt, not a crash
+        assert check_rollback_needed(tmp_path) is False
+        assert read_pending_marker(tmp_path)["attempts"] == 1
+
+    def test_crash_loop_still_triggers_rollback(self, tmp_path):
+        """A crashed process never runs the reset, so two boots without a
+        clean shutdown between them still trigger rollback."""
+        write_pending_marker(tmp_path, "1.0.0", "2.0.0")
+        assert check_rollback_needed(tmp_path) is False
+        # (crash: no reset_marker_attempts call)
+        assert check_rollback_needed(tmp_path) is True
+
+    def test_reset_is_noop_without_marker(self, tmp_path):
+        reset_marker_attempts(tmp_path)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_reset_is_noop_at_zero_attempts(self, tmp_path):
+        write_pending_marker(tmp_path, "1.0.0", "2.0.0")
+        reset_marker_attempts(tmp_path)
+        marker = read_pending_marker(tmp_path)
+        assert marker["attempts"] == 0
+        assert marker["from_version"] == "1.0.0"
 
 
 # ===========================================================================

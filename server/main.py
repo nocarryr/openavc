@@ -115,6 +115,12 @@ async def _initialize_engine(app: FastAPI) -> None:
             except OSError:
                 log.exception("Could not remove stale apply-update.json at startup")
 
+        # Same defense for a leftover apply-rollback marker: one that survives
+        # to this point was never consumed by the pre-start wrapper, and would
+        # silently downgrade the install on a later unrelated restart.
+        from server.updater.rollback import clear_stale_rollback_marker
+        clear_stale_rollback_marker(data_dir)
+
         await engine.start()
 
         # Load driver hints into discovery engine after drivers are registered

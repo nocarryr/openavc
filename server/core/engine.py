@@ -464,6 +464,17 @@ class Engine:
             except asyncio.CancelledError:
                 pass
 
+        # This is a deliberate shutdown, not a crash: zero the pending-update
+        # attempt counter so a restart inside the 60s confirmation window
+        # doesn't read as a failed startup and roll back a good update. A
+        # crashed process never gets here, so crash detection still works.
+        try:
+            from server.system_config import get_system_config
+            from server.updater.rollback import reset_marker_attempts
+            reset_marker_attempts(get_system_config().data_dir)
+        except Exception:
+            log.exception("Could not reset pending-update attempts on shutdown")
+
         # Stop update manager
         if self.update_manager:
             await self.update_manager.stop_auto_check()

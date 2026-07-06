@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -17,6 +18,30 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 PENDING_UPDATE_MARKER = "pending-update"
+ROLLBACK_MARKER = "apply-rollback"
+
+
+def clear_stale_rollback_marker(data_dir: Path) -> bool:
+    """Drop a leftover apply-rollback marker at server startup.
+
+    The marker is consumed (and removed) by the root-level wrapper that runs
+    before this process on every supported deployment (update-helper.sh via
+    ExecStartPre on Linux, the launchd run wrapper on macOS). One still
+    present when Python starts was never consumed — the process that wrote
+    it didn't exit, or the deployment has no wrapper (dev, Docker). Left in
+    place, the next unrelated restart would apply it and silently downgrade
+    the install. Returns True if a stale marker was removed.
+    """
+    marker = data_dir / ROLLBACK_MARKER
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        log.exception("Could not remove stale apply-rollback marker at startup")
+        return False
+    log.warning("Removed stale apply-rollback marker at startup")
+    return True
 
 
 def _launch_installer_via_scheduler(installer: Path, label: str) -> bool:
@@ -135,6 +160,28 @@ def increment_marker_attempts(data_dir: Path) -> int:
     return data["attempts"]
 
 
+def reset_marker_attempts(data_dir: Path) -> None:
+    """Zero the attempt counter on the pending marker (clean shutdown).
+
+    Called from graceful engine shutdown. A deliberate restart inside the
+    60-second confirmation window (operator, API, cloud command) is not a
+    crash, so the boot that follows it must count as a fresh first attempt —
+    otherwise the attempts>=2 check reads any second boot in the window as
+    a failed startup and rolls back a good update. A real crash never runs
+    this, so crash-loop detection is unaffected.
+    """
+    marker_path = data_dir / PENDING_UPDATE_MARKER
+    data = read_pending_marker(data_dir)
+    if data is None or data.get("attempts", 0) == 0:
+        return
+    data["attempts"] = 0
+    try:
+        marker_path.write_text(json.dumps(data), encoding="utf-8")
+        log.info("Reset pending-update attempt counter (clean shutdown)")
+    except OSError as e:
+        log.warning("Could not reset pending-update marker attempts: %s", e)
+
+
 def clear_pending_marker(data_dir: Path) -> None:
     """Remove the pending-update marker (server started successfully)."""
     marker_path = data_dir / PENDING_UPDATE_MARKER
@@ -148,7 +195,9 @@ def check_rollback_needed(data_dir: Path) -> bool:
 
     Called early in server startup. Returns True if the marker exists
     and attempts >= 2 (meaning the server has crashed at least once
-    after applying the update).
+    after applying the update — graceful shutdowns reset the counter
+    via reset_marker_attempts, so only boots that follow a non-clean
+    exit accumulate).
     """
     marker = read_pending_marker(data_dir)
     if marker is None:
@@ -305,10 +354,17 @@ def _rollback_linux(data_dir: Path, from_version: str, to_version: str) -> bool:
     bypassing ProtectSystem=strict. The caller must exit the process after this
     returns True so systemd restarts the service and triggers the helper script.
     """
-    rollback_marker = data_dir / "apply-rollback"
+    rollback_marker = data_dir / ROLLBACK_MARKER
+    tmp = data_dir / f"{ROLLBACK_MARKER}.tmp"
+    # Stage-and-rename so a failed write can't leave the marker behind: the
+    # helper consumes it unconditionally on the next service start, so a
+    # marker that exists while this function reports failure (caller keeps
+    # running) would silently downgrade on a later unrelated restart.
     try:
-        rollback_marker.write_text("", encoding="utf-8")
+        tmp.write_text("", encoding="utf-8")
+        os.replace(tmp, rollback_marker)
     except OSError as e:
+        tmp.unlink(missing_ok=True)
         log.error("Rollback failed: could not write rollback marker: %s", e)
         return False
 
