@@ -200,6 +200,7 @@ export function ScriptView() {
           timestamp: Date.now() / 1000,
           level: "ERROR",
           source: "openavc.programmer",
+          device: "",
           category: "script",
           message: `Script '${selectedId}' reload failed: ${result.error}${preserved}`,
         });
@@ -209,6 +210,7 @@ export function ScriptView() {
           timestamp: Date.now() / 1000,
           level: "INFO",
           source: "openavc.programmer",
+          device: "",
           category: "script",
           message: `Script '${selectedId}' reloaded — ${result.handlers ?? 0} handler(s) registered`,
         });
@@ -219,6 +221,7 @@ export function ScriptView() {
         timestamp: Date.now() / 1000,
         level: "ERROR",
         source: "openavc.programmer",
+        device: "",
         category: "script",
         message: `Script reload failed: ${e}`,
       });
@@ -264,6 +267,7 @@ export function ScriptView() {
           timestamp: Date.now() / 1000,
           level: "ERROR",
           source: "openavc.programmer",
+          device: "",
           category: "driver",
           message: `Driver reload failed: ${result.error}${preserved}`,
         });
@@ -277,6 +281,7 @@ export function ScriptView() {
           timestamp: Date.now() / 1000,
           level: "INFO",
           source: "openavc.programmer",
+          device: "",
           category: "driver",
           message: devCount > 0
             ? `Driver '${result.driver_id}' reloaded — ${devCount} device(s) reconnected: ${result.devices_reconnected!.join(", ")}`
@@ -291,6 +296,7 @@ export function ScriptView() {
         timestamp: Date.now() / 1000,
         level: "ERROR",
         source: "openavc.programmer",
+        device: "",
         category: "driver",
         message: `Driver reload failed: ${e}`,
       });

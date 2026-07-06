@@ -123,11 +123,15 @@ export function useWebSocket() {
           source: msg.source as string,
           category: msg.category as string,
           message: msg.message as string,
+          device: (msg.device as string) ?? "",
         });
       }
 
       if (msg.type === "log.history" && Array.isArray(msg.entries)) {
-        useLogStore.getState().addLogBatch(msg.entries as LogEntry[]);
+        const entries = msg.entries as Array<Omit<LogEntry, "id" | "device"> & { device?: string }>;
+        useLogStore.getState().addLogBatch(
+          entries.map((e) => ({ ...e, device: e.device ?? "" })),
+        );
       }
 
       // Command / state ack — show toast on failure

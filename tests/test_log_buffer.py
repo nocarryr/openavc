@@ -191,3 +191,67 @@ def test_buffer_handler_categorizes_from_logger_name():
     handler.emit(record)
     recent = buf.get_recent(1)
     assert recent[0]["category"] == "macro"
+
+
+# --- Device extraction (System Log Device filter depends on this field) ---
+
+
+def _emit(buf: LogBuffer, name: str, msg: str) -> dict:
+    handler = BufferHandler(buf)
+    record = logging.LogRecord(
+        name=name,
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg=msg,
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(record)
+    return buf.get_recent(1)[0]
+
+
+def test_device_extracted_from_driver_prefix():
+    buf = LogBuffer()
+    entry = _emit(buf, "server.drivers.pjlink", "[proj1] Poll failed - not connected")
+    assert entry["device"] == "proj1"
+
+
+def test_device_extracted_from_transport_prefix():
+    buf = LogBuffer()
+    entry = _emit(buf, "server.transport.tcp", "[hdmi_matrix] Connected")
+    assert entry["device"] == "hdmi_matrix"
+
+
+def test_device_empty_without_prefix():
+    buf = LogBuffer()
+    entry = _emit(buf, "server.core.device_manager", "Failed to connect 'proj1': timeout")
+    assert entry["device"] == ""
+
+
+def test_device_not_extracted_for_non_device_categories():
+    # Macro/script/system lines may use their own [tag] prefixes — those are
+    # not device ids and must not populate the device field
+    buf = LogBuffer()
+    entry = _emit(buf, "server.core.macro_engine", "[room_on] Executing step 2")
+    assert entry["device"] == ""
+    entry = _emit(buf, "server.core.engine", "[startup] Ready")
+    assert entry["device"] == ""
+
+
+def test_device_prefix_with_spaces_not_treated_as_id():
+    buf = LogBuffer()
+    entry = _emit(buf, "server.drivers.pjlink", "[not an id] message")
+    assert entry["device"] == ""
+
+
+def test_device_field_in_to_dict():
+    entry = LogEntry(
+        timestamp=1000.0,
+        level="INFO",
+        source="server.drivers.pjlink",
+        category="device",
+        message="[proj1] Connected",
+        device="proj1",
+    )
+    assert entry.to_dict()["device"] == "proj1"

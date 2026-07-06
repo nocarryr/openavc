@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections import deque
@@ -25,9 +26,22 @@ class LogEntry:
     source: str
     category: str  # "system", "device", "script", "macro"
     message: str
+    device: str = ""  # device id for device-category entries, "" otherwise
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# Drivers, transports, and BaseDriver all prefix their log lines with
+# "[<device_id>] " — the one place a device id reliably appears in a record.
+_DEVICE_PREFIX = re.compile(r"^\[([^\]\s]+)\]")
+
+
+def _extract_device(category: str, message: str) -> str:
+    if category != "device":
+        return ""
+    m = _DEVICE_PREFIX.match(message)
+    return m.group(1) if m else ""
 
 
 def _categorize_source(name: str, message: str) -> str:
@@ -105,12 +119,14 @@ class BufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             message = self.format(record) if self.formatter else record.getMessage()
+            category = _categorize_source(record.name, message)
             entry = LogEntry(
                 timestamp=time.time(),
                 level=record.levelname,
                 source=record.name,
-                category=_categorize_source(record.name, message),
+                category=category,
                 message=message,
+                device=_extract_device(category, record.getMessage()),
             )
             self._buffer.append(entry)
         except Exception:

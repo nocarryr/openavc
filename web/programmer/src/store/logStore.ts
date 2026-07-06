@@ -1,11 +1,15 @@
 import { create } from "zustand";
 
 export interface LogEntry {
+  /** Client-assigned monotonic id — stable React key on the sliding window */
+  id: number;
   timestamp: number;
   level: string;
   source: string;
   category: string;
   message: string;
+  /** Device id for device-category entries (server-extracted), "" otherwise */
+  device: string;
 }
 
 export type StepPathSegment = number | "then" | "else";
@@ -85,8 +89,8 @@ interface LogStore {
   // Trigger pending states (trigger_id -> pending info)
   triggerPending: Record<string, TriggerPending>;
 
-  addLogEntry: (entry: LogEntry) => void;
-  addLogBatch: (entries: LogEntry[]) => void;
+  addLogEntry: (entry: Omit<LogEntry, "id">) => void;
+  addLogBatch: (entries: Omit<LogEntry, "id">[]) => void;
   setLogPaused: (v: boolean) => void;
   clearLogEntries: () => void;
   setLogSubscribed: (v: boolean) => void;
@@ -100,6 +104,8 @@ interface LogStore {
   finishMacroRun: (status: "completed" | "error", error?: string) => void;
   setTriggerPending: (triggerId: string, pending: TriggerPending | null) => void;
 }
+
+let nextLogEntryId = 1;
 
 const INITIAL_MACRO: MacroProgress = {
   macroId: null,
@@ -125,14 +131,15 @@ export const useLogStore = create<LogStore>((set, get) => ({
   addLogEntry: (entry) =>
     set((s) => {
       if (s.logPaused) return s;
-      const next = [...s.logEntries, entry];
+      const next = [...s.logEntries, { ...entry, id: nextLogEntryId++ }];
       return { logEntries: next.length > 500 ? next.slice(-500) : next };
     }),
 
   addLogBatch: (entries) =>
     set((s) => {
       if (s.logPaused) return s;
-      const next = [...s.logEntries, ...entries];
+      const stamped = entries.map((e) => ({ ...e, id: nextLogEntryId++ }));
+      const next = [...s.logEntries, ...stamped];
       return { logEntries: next.length > 500 ? next.slice(-500) : next };
     }),
 

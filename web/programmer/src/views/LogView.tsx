@@ -5,6 +5,7 @@ import { useConnectionStore } from "../store/connectionStore";
 import { useLogStore } from "../store/logStore";
 import * as api from "../api/restClient";
 import { useProjectStore } from "../store/projectStore";
+import { deviceFilterPredicate } from "./logViewHelpers";
 
 type TabId = "log" | "state";
 
@@ -81,10 +82,12 @@ function SystemLogTab() {
   const [entries, setEntries] = useState(() => useLogStore.getState().logEntries);
   useEffect(() => {
     let rafId: number | null = null;
-    const unsub = useLogStore.subscribe((state) => {
+    const unsub = useLogStore.subscribe(() => {
       if (rafId !== null) return;
       rafId = requestAnimationFrame(() => {
-        setEntries(state.logEntries);
+        // Read the store fresh — the subscription snapshot can be stale by
+        // the time the frame fires
+        setEntries(useLogStore.getState().logEntries);
         rafId = null;
       });
     });
@@ -112,12 +115,7 @@ function SystemLogTab() {
       result = result.filter((e) => e.level === levelFilter);
     }
     if (deviceFilter !== "all") {
-      // Match on source field (contains device ID) or message mentioning the device
-      const df = deviceFilter.toLowerCase();
-      result = result.filter((e) => {
-        const parts = e.source.toLowerCase().split(".");
-        return parts.includes(df);
-      });
+      result = result.filter(deviceFilterPredicate(deviceFilter));
     }
     return result;
   }, [entries, categoryFilter, levelFilter, deviceFilter]);
@@ -222,8 +220,8 @@ function SystemLogTab() {
                   Showing last 200 of {filtered.length} entries
                 </td></tr>
               )}
-              {filtered.slice(-200).map((e, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid var(--border-color)" }}>
+              {filtered.slice(-200).map((e) => (
+                <tr key={e.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
                   <td style={tdStyle}>{formatTime(e.timestamp)}</td>
                   <td style={tdStyle}>
                     <span style={{
@@ -252,6 +250,7 @@ function SystemLogTab() {
 // --- State Change Tab (original LogView behavior) ---
 
 interface StateLogEntry {
+  id: number;
   key: string;
   oldValue: unknown;
   newValue: unknown;
@@ -265,6 +264,7 @@ function StateChangeTab() {
   const [deviceFilter, setDeviceFilter] = useState("all");
   const liveState = useConnectionStore((s) => s.liveState);
   const prevStateRef = useRef<Record<string, unknown>>({});
+  const nextIdRef = useRef(1);
   const listRef = useRef<HTMLDivElement>(null);
 
   const project = useProjectStore((s) => s.project);
@@ -275,6 +275,7 @@ function StateChangeTab() {
     api.getStateHistory(100).then((history) => {
       setEntries(
         history.map((h) => ({
+          id: nextIdRef.current++,
           key: h.key,
           oldValue: h.old_value,
           newValue: h.new_value,
@@ -285,20 +286,24 @@ function StateChangeTab() {
     }).catch(console.error);
   }, []);
 
-  // Track live state changes
+  // Track live state changes. The snapshot must keep advancing while
+  // paused (changes are dropped, matching the System Log pause) so resume
+  // doesn't log stale old-value pairs.
   useEffect(() => {
-    if (paused) return;
     const prev = prevStateRef.current;
     const newEntries: StateLogEntry[] = [];
-    for (const [key, value] of Object.entries(liveState)) {
-      if (prev[key] !== value && prev[key] !== undefined) {
-        newEntries.push({
-          key,
-          oldValue: prev[key],
-          newValue: value,
-          source: "live",
-          timestamp: Date.now() / 1000,
-        });
+    if (!paused) {
+      for (const [key, value] of Object.entries(liveState)) {
+        if (prev[key] !== value && prev[key] !== undefined) {
+          newEntries.push({
+            id: nextIdRef.current++,
+            key,
+            oldValue: prev[key],
+            newValue: value,
+            source: "live",
+            timestamp: Date.now() / 1000,
+          });
+        }
       }
     }
     prevStateRef.current = { ...liveState };
@@ -384,8 +389,8 @@ function StateChangeTab() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((e, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid var(--border-color)" }}>
+              {filtered.map((e) => (
+                <tr key={e.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
                   <td style={tdStyle}>{formatTime(e.timestamp)}</td>
                   <td style={{ ...tdStyle, color: "var(--accent)" }}>{e.key}</td>
                   <td style={{ ...tdStyle, color: "var(--text-muted)" }}>{formatValue(e.oldValue)}</td>
