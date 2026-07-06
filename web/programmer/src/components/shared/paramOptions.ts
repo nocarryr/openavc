@@ -37,15 +37,13 @@ export function findChildByValue(
  * (`options_state` / `options_source` on device command/action params, plugin
  * macro-action selects, and plugin panel-element config selects).
  */
-export function parseStateOptionList(raw: unknown): ParamOption[] {
-  if (typeof raw !== "string" || !raw) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
+/**
+ * Normalize an already-parsed option list into `{value, label}` rows. Each
+ * entry may be a plain scalar (value === label) or a `{value, label}` object
+ * (label falls back to value). Shared by the static enum `values` path (a
+ * driver's declared option list) and the state-published-list path.
+ */
+export function normalizeOptionList(parsed: unknown[]): ParamOption[] {
   const out: ParamOption[] = [];
   for (const item of parsed) {
     if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
@@ -59,6 +57,18 @@ export function parseStateOptionList(raw: unknown): ParamOption[] {
     }
   }
   return out;
+}
+
+export function parseStateOptionList(raw: unknown): ParamOption[] {
+  if (typeof raw !== "string" || !raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return normalizeOptionList(parsed);
 }
 
 // Platform-managed child state vars — never offered as selectable controls in

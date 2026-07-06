@@ -9,7 +9,12 @@ import type {
 import { useConnectionStore } from "../../store/connectionStore";
 import { InlineError } from "./InlineError";
 import { ParamCombobox } from "./ParamCombobox";
-import { childSchemaOptions, findChildByValue, parseStateOptionList } from "./paramOptions";
+import {
+  childSchemaOptions,
+  findChildByValue,
+  normalizeOptionList,
+  parseStateOptionList,
+} from "./paramOptions";
 import type { ParamOption } from "./paramOptions";
 import { validateParam } from "./paramValidation";
 import { VariableKeyPicker } from "./VariableKeyPicker";
@@ -265,6 +270,9 @@ export function ParamInput({
 
   let widget: React.ReactNode;
   if (effType === "enum" && effValues) {
+    // Options may be plain strings or {value, label} objects — show the label,
+    // send the wire value (the runtime also maps a label back to its value).
+    const enumOptions = normalizeOptionList(effValues);
     widget = (
       <select
         value={value}
@@ -272,9 +280,9 @@ export function ParamInput({
         style={{ flex: 1 }}
       >
         {!def.required && <option value="">(none)</option>}
-        {effValues.map((v) => (
-          <option key={v} value={v}>
-            {v}
+        {enumOptions.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
           </option>
         ))}
       </select>

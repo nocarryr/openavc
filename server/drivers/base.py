@@ -182,6 +182,34 @@ def _as_number(value: Any, ptype: str) -> float | None:
     return f
 
 
+def _resolve_enum_param_value(value: str, options: list[Any]) -> str:
+    """Map a command-param value against an ``enum`` option list whose entries
+    may be plain strings or ``{value, label}`` objects.
+
+    Returns the wire value: a value already matching an option's ``value`` is
+    kept; otherwise a human ``label`` maps to its ``value``; an unrecognized
+    value passes through unchanged (a ``$var`` may resolve to a computed wire
+    value outside the authored set). Lets an author label a hex/code set once
+    (``{value: "0f", label: "Multi Channel Stereo"}``) instead of defining one
+    command per code.
+    """
+    label_map: dict[str, str] = {}
+    for opt in options:
+        if isinstance(opt, dict):
+            v = opt.get("value")
+            if v is None:
+                continue
+            vs = str(v)
+            if value == vs:
+                return value
+            lbl = opt.get("label")
+            if isinstance(lbl, str) and lbl:
+                label_map.setdefault(lbl, vs)
+        elif value == str(opt):
+            return value
+    return label_map.get(value, value)
+
+
 def normalize_and_validate_command_params(
     command: str,
     param_defs: dict[str, Any],
@@ -266,6 +294,17 @@ def normalize_and_validate_command_params(
                 elif isinstance(decimals, int):
                     out[name] = int(round(num)) if decimals <= 0 else round(num, decimals)
         else:
+            # An enum `values` list may carry {value, label} entries. Accept the
+            # caller passing either the wire value or the human label and
+            # normalize to the wire value before it goes on the wire. Applies to
+            # any param that declares `values` (type: enum, or a string param
+            # with a dropdown), so labels work from every caller — picker, macro
+            # $var, or the REST/cloud API.
+            options = pdef.get("values")
+            if isinstance(options, list) and options and isinstance(value, str):
+                value = _resolve_enum_param_value(value, options)
+                out[name] = value
+
             pattern = pdef.get("pattern")
             if pattern and isinstance(value, str):
                 try:
