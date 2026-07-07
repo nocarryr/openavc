@@ -350,6 +350,40 @@ class PluginAPI:
             )
         self._registry.guest_router = router
 
+    def mint_guest_token(self, scope: str, ttl: int = 3600) -> tuple[str, int]:
+        """Mint a short-lived token bound to (this plugin, ``scope``).
+
+        Requires: guest_endpoints.
+
+        The guest-token half of a credential exchange on a guest route: the
+        plugin checks its own credential (a join code, a PIN), then mints a
+        token the guest presents on subsequent guest calls, verified with
+        :meth:`verify_guest_token`. The ``scope`` string is the plugin's to
+        define — bind it to whatever the token should be allowed to do (a
+        session, a resource, a claimed name) so one guest's token can't act
+        as another's. Tokens are HMAC-signed with an in-memory per-process
+        secret: nothing lands on disk, and every token dies on server
+        restart. Returns ``(token, expires_at_unix)``.
+        """
+        self._require("guest_endpoints")
+        from server.api import plugin_ext
+
+        return plugin_ext.mint_guest_token(self._plugin_id, scope, ttl)
+
+    def verify_guest_token(self, token: str, scope: str) -> bool:
+        """Check a guest token's signature, (plugin, scope) binding, and expiry.
+
+        Requires: guest_endpoints.
+
+        Counterpart of :meth:`mint_guest_token`; the ``scope`` must match the
+        one the token was minted with. Return 401 from the route on ``False``
+        so the platform's brute-force accounting sees the failure.
+        """
+        self._require("guest_endpoints")
+        from server.api import plugin_ext
+
+        return plugin_ext.verify_guest_token(token, self._plugin_id, scope)
+
     async def proxy_to(
         self, url: str, request, *, timeout: float = 30.0, allow_internal: bool = False
     ):

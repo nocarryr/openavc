@@ -39,6 +39,19 @@ VALID_CAPABILITIES = {
     "http_endpoints", "guest_endpoints",
 }
 
+# PLUGIN_INFO["guest_alias"] — optional top-level short route for a plugin's
+# guest router (e.g. "present" also mounts it at /present/*, giving guests a
+# short typed URL). One lowercase URL segment; requires guest_endpoints.
+# Static rules live here; runtime uniqueness against other running plugins
+# and live app routes is checked at mount time (api/plugin_ext.py).
+GUEST_ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+# Platform surfaces an alias must never shadow (top-level path segments).
+RESERVED_GUEST_ALIASES = {
+    "api", "panel", "programmer", "pair", "setup", "ws", "isc",
+    "docs", "redoc", "openapi.json", "assets", "themes", "health",
+    "favicon.ico", "static", "simulator",
+}
+
 # Valid category values
 VALID_CATEGORIES = {"control_surface", "integration", "sensor", "utility"}
 
@@ -473,9 +486,10 @@ class PluginLoader:
 
         mount_fn(plugin_id, router) is called after a plugin that called
         api.register_router() starts; unmount_fn(plugin_id) is called on stop.
-        mount_guest_fn/unmount_guest_fn are the same pair for the open guest
-        router (api.register_guest_router). Wired by main.py because the
-        FastAPI app lives there, not in the loader.
+        mount_guest_fn(plugin_id, router, alias)/unmount_guest_fn(plugin_id)
+        are the same pair for the open guest router (api.register_guest_router);
+        alias is the plugin's validated PLUGIN_INFO guest_alias or None. Wired
+        by main.py because the FastAPI app lives there, not in the loader.
         """
         self._mount_router_fn = mount_fn
         self._unmount_router_fn = unmount_fn
@@ -628,6 +642,19 @@ class PluginLoader:
         invalid_caps = set(capabilities) - VALID_CAPABILITIES
         if invalid_caps:
             return False, f"Unknown capabilities: {sorted(invalid_caps)}"
+
+        # guest_alias check (top-level short route for the guest router)
+        guest_alias = info.get("guest_alias")
+        if guest_alias is not None:
+            if not isinstance(guest_alias, str) or not GUEST_ALIAS_RE.fullmatch(guest_alias):
+                return False, (
+                    f"Invalid guest_alias '{guest_alias}': must be one lowercase URL "
+                    "segment (letters, digits, hyphens, underscores; max 32 chars)"
+                )
+            if guest_alias in RESERVED_GUEST_ALIASES:
+                return False, f"guest_alias '{guest_alias}' is a reserved platform path"
+            if "guest_endpoints" not in capabilities:
+                return False, "guest_alias requires the guest_endpoints capability"
 
         # Platform check
         platforms = info.get("platforms", ["all"])
@@ -888,7 +915,9 @@ class PluginLoader:
                     )
             if registry.guest_router is not None and self._mount_guest_router_fn:
                 try:
-                    self._mount_guest_router_fn(plugin_id, registry.guest_router)
+                    self._mount_guest_router_fn(
+                        plugin_id, registry.guest_router, info.get("guest_alias")
+                    )
                 except Exception:  # Same isolation as the ext router above
                     log.exception(
                         f"Failed to mount guest HTTP router for plugin '{plugin_id}'"
@@ -1166,6 +1195,7 @@ class PluginLoader:
                 "status": status,
                 "platforms": info.get("platforms", ["all"]),
                 "capabilities": info.get("capabilities", []),
+                "guest_alias": info.get("guest_alias", ""),
                 "installed": True,
                 "compatible": self.is_platform_compatible(plugin_class),
             }

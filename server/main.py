@@ -263,7 +263,7 @@ from server.api.plugin_ext import (
 engine.plugin_loader.set_router_hooks(
     lambda plugin_id, router: mount_plugin_router(app, plugin_id, router),
     lambda plugin_id: unmount_plugin_router(app, plugin_id),
-    lambda plugin_id, router: mount_plugin_guest_router(app, plugin_id, router),
+    lambda plugin_id, router, alias=None: mount_plugin_guest_router(app, plugin_id, router, alias),
     lambda plugin_id: unmount_plugin_guest_router(app, plugin_id),
 )
 

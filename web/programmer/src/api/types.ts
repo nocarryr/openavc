@@ -364,6 +364,8 @@ export interface PluginInfo {
   status: string; // "running" | "stopped" | "error" | "missing" | "incompatible"
   platforms: string[];
   capabilities: string[];
+  /** Top-level short route for the plugin's guest router (e.g. "present" -> /present). */
+  guest_alias?: string;
   installed: boolean;
   compatible: boolean;
   error?: string;

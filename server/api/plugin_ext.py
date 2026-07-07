@@ -34,6 +34,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from server.api import auth as _auth
 from server.api.auth import programmer_auth_satisfied
+from server.middleware import rate_limit as _rate_limit
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -94,6 +95,56 @@ def verify_plugin_token(token: str, plugin_id: str) -> bool:
     return expires_at >= int(time.time())
 
 
+# ---------------------------------------------------------------------------
+# Guest tokens
+# ---------------------------------------------------------------------------
+# A second token family for the guest routes: a plugin exchanges its own
+# credential check (a join code, a PIN) for a token bound to (plugin_id,
+# scope), where the scope string is plugin-defined — per session, per
+# resource, per claimed name — so one guest's token can't act as another's.
+# Same in-memory per-process secret as the plugin tokens (nothing on disk;
+# every token dies on restart), domain-separated by the "guest:" message
+# prefix so the two families can never verify as each other.
+
+_GUEST_TOKEN_PREFIX = "guest"
+_DEFAULT_GUEST_TTL_SECONDS = 3600
+
+
+def mint_guest_token(
+    plugin_id: str, scope: str, ttl: int = _DEFAULT_GUEST_TTL_SECONDS
+) -> tuple[str, int]:
+    """Mint a guest token bound to (plugin_id, scope). Returns (token, expires_at)."""
+    if not scope or not isinstance(scope, str):
+        raise ValueError("Guest token scope must be a non-empty string")
+    expires_at = int(time.time()) + int(ttl)
+    msg = f"{_GUEST_TOKEN_PREFIX}:{plugin_id}:{scope}:{expires_at}".encode("utf-8")
+    sig = hmac.new(_SECRET, msg, hashlib.sha256).digest()
+    return f"{_b64(msg)}.{_b64(sig)}", expires_at
+
+
+def verify_guest_token(token: str, plugin_id: str, scope: str) -> bool:
+    """Validate a guest token's signature, (plugin_id, scope) binding, and expiry."""
+    try:
+        msg_b64, sig_b64 = token.split(".", 1)
+        msg = _unb64(msg_b64)
+        sig = _unb64(sig_b64)
+    except (ValueError, TypeError):  # binascii.Error subclasses ValueError
+        return False
+    expected = hmac.new(_SECRET, msg, hashlib.sha256).digest()
+    if not hmac.compare_digest(sig, expected):
+        return False
+    try:
+        head, exp_str = msg.decode("utf-8").rsplit(":", 1)
+        expires_at = int(exp_str)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    # Exact-match the whole binding head rather than parsing fields out of it:
+    # the scope is plugin-defined and may itself contain ":" separators.
+    if head != f"{_GUEST_TOKEN_PREFIX}:{plugin_id}:{scope}":
+        return False
+    return expires_at >= int(time.time())
+
+
 def require_plugin_access(plugin_id: str):
     """Build a FastAPI dependency guarding one plugin's ``/ext/*`` routes."""
 
@@ -147,7 +198,7 @@ def _guest_prefix(plugin_id: str) -> str:
     return f"/api/plugins/{plugin_id}/guest"
 
 
-def mount_plugin_guest_router(app, plugin_id: str, router) -> None:
+def mount_plugin_guest_router(app, plugin_id: str, router, alias: str | None = None) -> None:
     """Mount a plugin's guest APIRouter under ``/api/plugins/{id}/guest/*``.
 
     Idempotent, like :func:`mount_plugin_router`. Deliberately mounted with
@@ -156,21 +207,78 @@ def mount_plugin_guest_router(app, plugin_id: str, router) -> None:
     the platform's own open routes (``/pair``, ``/setup``). The plugin gates
     these routes itself; registration requires the ``guest_endpoints``
     capability, checked in ``PluginAPI.register_guest_router``.
+
+    ``alias`` (PLUGIN_INFO ``guest_alias``, loader-validated) additionally
+    mounts the same router at the top-level ``/<alias>/*`` so humans get a
+    short typed URL. The alias mount is best-effort: on a collision the
+    canonical ``/api/plugins/{id}/guest/*`` mount still stands.
     """
     prefix = _guest_prefix(plugin_id)
     unmount_plugin_guest_router(app, plugin_id)
     app.include_router(router, prefix=prefix)
     log.info("Mounted plugin '%s' guest HTTP router at %s/*", plugin_id, prefix)
+    if alias:
+        _mount_guest_alias(app, plugin_id, router, alias)
 
 
 def unmount_plugin_guest_router(app, plugin_id: str) -> None:
-    """Remove all routes previously mounted under this plugin's ``/guest`` prefix."""
+    """Remove this plugin's ``/guest`` routes and any top-level alias mount."""
     _unmount_prefix(app, plugin_id, _guest_prefix(plugin_id))
+    for alias, owner in list(_active_aliases.items()):
+        if owner == plugin_id:
+            _unmount_prefix(app, plugin_id, f"/{alias}")
+            _active_aliases.pop(alias, None)
+            _rate_limit.unregister_standard_prefix(f"/{alias}")
+
+
+# Active top-level aliases: alias -> owning plugin_id. Runtime uniqueness —
+# the loader's static validation can't see which other plugin is running.
+_active_aliases: dict[str, str] = {}
+
+
+def _mount_guest_alias(app, plugin_id: str, router, alias: str) -> None:
+    """Mount ``router`` at ``/<alias>/*`` if nothing else owns that path.
+
+    Two runtime checks on top of the loader's static validation (charset,
+    reserved platform names, capability): another running plugin may already
+    hold the alias, and the app may carry a live route whose first path
+    segment matches (a platform surface the reserved list didn't anticipate).
+    The alias prefix is registered with the rate limiter so guest traffic
+    outside ``/api/`` still classifies as the standard tier — without that,
+    non-``/api/`` paths skip rate limiting entirely, including the 401
+    brute-force accounting that guest credential checks rely on.
+    """
+    claimed_by = _active_aliases.get(alias)
+    if claimed_by and claimed_by != plugin_id:
+        log.error(
+            "Guest alias '/%s' for plugin '%s' is already claimed by plugin '%s'; "
+            "alias not mounted (canonical /api/plugins/%s/guest/* routes still work)",
+            alias, plugin_id, claimed_by, plugin_id,
+        )
+        return
+    for r in app.router.routes:
+        first_segment = getattr(r, "path", "").lstrip("/").split("/", 1)[0]
+        if first_segment == alias:
+            log.error(
+                "Guest alias '/%s' for plugin '%s' collides with an existing route "
+                "(%s); alias not mounted",
+                alias, plugin_id, getattr(r, "path", "?"),
+            )
+            return
+    app.include_router(router, prefix=f"/{alias}")
+    _active_aliases[alias] = plugin_id
+    _rate_limit.register_standard_prefix(f"/{alias}")
+    log.info("Mounted plugin '%s' guest alias at /%s/*", plugin_id, alias)
 
 
 def _unmount_prefix(app, plugin_id: str, prefix: str) -> None:
+    # Match on a path-segment boundary: a short alias prefix like "/present"
+    # must not sweep an unrelated "/presentation" route.
+    def _under(path: str) -> bool:
+        return path == prefix or path.startswith(prefix + "/")
+
     routes = app.router.routes
-    keep = [r for r in routes if not getattr(r, "path", "").startswith(prefix)]
+    keep = [r for r in routes if not _under(getattr(r, "path", ""))]
     removed = len(routes) - len(keep)
     if removed:
         routes[:] = keep

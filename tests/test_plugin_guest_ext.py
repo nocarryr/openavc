@@ -10,6 +10,13 @@ Covers:
 4. Loader integration: a plugin's guest router is mounted on start and
    unmounted on stop via the extended router hooks; the two-argument
    set_router_hooks form (no guest hooks) keeps working.
+5. Guest tokens: mint/verify bound to (plugin_id, scope), domain-separated
+   from the plugin-iframe tokens, PluginAPI capability gating.
+6. Guest alias: a validated PLUGIN_INFO guest_alias additionally mounts the
+   guest router at /<alias>/* — uniqueness, collision refusal, unmount, and
+   the rate-limiter prefix registration (non-/api paths otherwise skip).
+7. Loader manifest validation of guest_alias (shape, reserved names,
+   capability requirement) and alias pass-through to the mount hook.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -20,10 +27,14 @@ from fastapi.testclient import TestClient
 
 import server.api.auth as auth_mod
 from server.api.plugin_ext import (
+    mint_guest_token,
+    mint_plugin_token,
     mount_plugin_guest_router,
     mount_plugin_router,
     unmount_plugin_guest_router,
     unmount_plugin_router,
+    verify_guest_token,
+    verify_plugin_token,
 )
 from server.core.event_bus import EventBus
 from server.core.plugin_api import PluginAPI, PluginPermissionError
@@ -35,6 +46,7 @@ from server.core.plugin_loader import (
 )
 from server.core.plugin_registry import PluginRegistry
 from server.core.state_store import StateStore
+from server.middleware import rate_limit as rate_limit_mod
 
 
 def _set_auth(monkeypatch, password="", api_key="", username=""):
@@ -281,7 +293,7 @@ class TestLoaderGuestRouterHooks:
         loader.set_router_hooks(
             lambda pid, router: mount_calls.append(pid),
             lambda pid: unmount_calls.append(pid),
-            lambda pid, router: guest_mount_calls.append((pid, router)),
+            lambda pid, router, alias=None: guest_mount_calls.append((pid, router, alias)),
             lambda pid: guest_unmount_calls.append(pid),
         )
 
@@ -291,6 +303,7 @@ class TestLoaderGuestRouterHooks:
         assert len(guest_mount_calls) == 1
         assert guest_mount_calls[0][0] == "acme_guest"
         assert isinstance(guest_mount_calls[0][1], APIRouter)
+        assert guest_mount_calls[0][2] is None  # no guest_alias declared
 
         await loader.stop_plugin("acme_guest")
         assert guest_unmount_calls == ["acme_guest"]
@@ -305,7 +318,7 @@ class TestLoaderGuestRouterHooks:
         loader.set_router_hooks(
             lambda pid, router: mount_calls.append(pid),
             lambda pid: None,
-            lambda pid, router: guest_mount_calls.append(pid),
+            lambda pid, router, alias=None: guest_mount_calls.append(pid),
             lambda pid: None,
         )
 
@@ -325,3 +338,246 @@ class TestLoaderGuestRouterHooks:
 
         assert await loader.start_plugin("acme_guest", {}) is True
         await loader.stop_plugin("acme_guest")
+
+
+# ═══════════════════════════════════════════════════════════
+#  5. Guest tokens
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGuestTokens:
+    def test_mint_verify_roundtrip(self):
+        token, expires_at = mint_guest_token("acme", "session-1")
+        assert verify_guest_token(token, "acme", "session-1")
+        assert expires_at > 0
+
+    def test_scope_may_contain_colons(self):
+        """Scopes are plugin-defined and may be structured (e.g. whip:alice)."""
+        token, _ = mint_guest_token("acme", "whip:alice")
+        assert verify_guest_token(token, "acme", "whip:alice")
+        assert not verify_guest_token(token, "acme", "whip:bob")
+        assert not verify_guest_token(token, "acme", "alice")
+
+    def test_wrong_scope_rejected(self):
+        token, _ = mint_guest_token("acme", "session-1")
+        assert not verify_guest_token(token, "acme", "session-2")
+
+    def test_wrong_plugin_rejected(self):
+        token, _ = mint_guest_token("acme", "session-1")
+        assert not verify_guest_token(token, "other", "session-1")
+
+    def test_expired_rejected(self):
+        token, _ = mint_guest_token("acme", "session-1", ttl=-1)
+        assert not verify_guest_token(token, "acme", "session-1")
+
+    def test_tampered_rejected(self):
+        token, _ = mint_guest_token("acme", "session-1")
+        msg_b64, sig_b64 = token.split(".", 1)
+        assert not verify_guest_token(f"{msg_b64}x.{sig_b64}", "acme", "session-1")
+        assert not verify_guest_token("not-a-token", "acme", "session-1")
+        assert not verify_guest_token("", "acme", "session-1")
+
+    def test_empty_scope_raises(self):
+        with pytest.raises(ValueError):
+            mint_guest_token("acme", "")
+
+    def test_domain_separation_from_plugin_tokens(self):
+        """The two token families must never verify as each other."""
+        guest_token, _ = mint_guest_token("acme", "session-1")
+        plugin_token, _ = mint_plugin_token("acme")
+        assert not verify_plugin_token(guest_token, "acme")
+        assert not verify_guest_token(plugin_token, "acme", "session-1")
+
+
+class TestPluginApiGuestTokens:
+    def test_requires_guest_capability(self):
+        api, _ = _make_api("acme", capabilities=["http_endpoints"])
+        with pytest.raises(PluginPermissionError):
+            api.mint_guest_token("session-1")
+        with pytest.raises(PluginPermissionError):
+            api.verify_guest_token("whatever", "session-1")
+
+    def test_roundtrip_via_api_is_plugin_bound(self):
+        api, _ = _make_api("acme", capabilities=["guest_endpoints"])
+        other, _ = _make_api("other", capabilities=["guest_endpoints"])
+        token, _ = api.mint_guest_token("session-1", ttl=60)
+        assert api.verify_guest_token(token, "session-1")
+        assert not api.verify_guest_token(token, "session-2")
+        assert not other.verify_guest_token(token, "session-1")
+
+
+# ═══════════════════════════════════════════════════════════
+#  6. Guest alias (top-level short route)
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGuestAlias:
+    def test_alias_mounts_alongside_canonical_prefix(self):
+        app = FastAPI()
+        try:
+            mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+            client = TestClient(app)
+            assert client.get("/shortcut/ping").status_code == 200
+            assert client.get("/api/plugins/acme/guest/ping").status_code == 200
+        finally:
+            unmount_plugin_guest_router(app, "acme")
+
+    def test_unmount_removes_alias_and_rate_limit_prefix(self):
+        app = FastAPI()
+        mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+        assert rate_limit_mod._classify("GET", "/shortcut/ping") == "standard"
+        unmount_plugin_guest_router(app, "acme")
+        assert not any(
+            getattr(r, "path", "").startswith("/shortcut")
+            for r in app.router.routes
+        )
+        assert rate_limit_mod._classify("GET", "/shortcut/ping") == "skip"
+
+    def test_remount_is_idempotent(self):
+        app = FastAPI()
+        try:
+            mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+            mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+            alias_routes = [
+                r for r in app.router.routes
+                if getattr(r, "path", "").startswith("/shortcut")
+            ]
+            assert len(alias_routes) == 1
+            assert TestClient(app).get("/shortcut/ping").status_code == 200
+        finally:
+            unmount_plugin_guest_router(app, "acme")
+
+    def test_alias_taken_by_other_plugin_refused(self):
+        """First plugin wins; the loser keeps its canonical guest routes."""
+        app = FastAPI()
+        try:
+            mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+            mount_plugin_guest_router(app, "other", _ping_router(), alias="shortcut")
+            client = TestClient(app)
+            assert client.get("/api/plugins/other/guest/ping").status_code == 200
+            # The alias still routes to the first claimant only.
+            unmount_plugin_guest_router(app, "other")
+            assert client.get("/shortcut/ping").status_code == 200
+        finally:
+            unmount_plugin_guest_router(app, "acme")
+            unmount_plugin_guest_router(app, "other")
+
+    def test_alias_colliding_with_live_route_refused(self):
+        app = FastAPI()
+
+        @app.get("/shortcut/existing")
+        async def existing():
+            return {"platform": True}
+
+        try:
+            mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+            client = TestClient(app)
+            assert client.get("/shortcut/ping").status_code == 404  # alias refused
+            assert client.get("/api/plugins/acme/guest/ping").status_code == 200
+            assert client.get("/shortcut/existing").status_code == 200
+        finally:
+            unmount_plugin_guest_router(app, "acme")
+
+    def test_unmount_does_not_sweep_lookalike_paths(self):
+        """Removing alias /shortcut must not remove /shortcut2 or /shortcutx."""
+        app = FastAPI()
+
+        @app.get("/shortcut2/thing")
+        async def lookalike():
+            return {"ok": True}
+
+        try:
+            mount_plugin_guest_router(app, "acme", _ping_router(), alias="shortcut")
+            unmount_plugin_guest_router(app, "acme")
+            assert TestClient(app).get("/shortcut2/thing").status_code == 200
+        finally:
+            unmount_plugin_guest_router(app, "acme")
+
+
+class TestRateLimitPrefixRegistration:
+    def test_registered_prefix_classifies_standard(self):
+        rate_limit_mod.register_standard_prefix("/shortcut")
+        try:
+            assert rate_limit_mod._classify("GET", "/shortcut") == "standard"
+            assert rate_limit_mod._classify("POST", "/shortcut/whip/x") == "standard"
+            # Segment boundary: a lookalike path is not captured.
+            assert rate_limit_mod._classify("GET", "/shortcutx/whip") == "skip"
+        finally:
+            rate_limit_mod.unregister_standard_prefix("/shortcut")
+        assert rate_limit_mod._classify("GET", "/shortcut") == "skip"
+
+
+# ═══════════════════════════════════════════════════════════
+#  7. Loader validation + alias pass-through
+# ═══════════════════════════════════════════════════════════
+
+
+def _alias_plugin_class(alias, capabilities=("guest_endpoints",)):
+    class AliasPlugin:
+        PLUGIN_INFO = {
+            "id": "acme_alias",
+            "name": "Acme Alias",
+            "version": "1.0.0",
+            "author": "Test",
+            "description": "Guest router with a top-level alias.",
+            "category": "utility",
+            "license": "MIT",
+            "platforms": ["all"],
+            "capabilities": list(capabilities),
+            "guest_alias": alias,
+        }
+
+        async def start(self, api):
+            api.register_guest_router(_ping_router())
+
+        async def stop(self):
+            pass
+
+    return AliasPlugin
+
+
+class TestGuestAliasManifestValidation:
+    def _validate(self, alias, capabilities=("guest_endpoints",)):
+        loader = _make_loader()
+        return loader.validate_manifest(_alias_plugin_class(alias, capabilities))
+
+    def test_valid_alias_passes(self):
+        valid, error = self._validate("acme-go")
+        assert valid, error
+
+    @pytest.mark.parametrize(
+        "alias",
+        ["", "Has-Upper", "with/slash", "with space", "1leading-digit", "x" * 33, 42],
+    )
+    def test_bad_shape_rejected(self, alias):
+        valid, error = self._validate(alias)
+        assert not valid
+        assert "guest_alias" in error
+
+    @pytest.mark.parametrize("alias", ["api", "panel", "programmer", "pair", "setup"])
+    def test_reserved_names_rejected(self, alias):
+        valid, error = self._validate(alias)
+        assert not valid
+        assert "reserved" in error
+
+    def test_requires_guest_endpoints_capability(self):
+        valid, error = self._validate("shortcut", capabilities=("http_endpoints",))
+        assert not valid
+        assert "guest_endpoints" in error
+
+    @pytest.mark.asyncio
+    async def test_loader_passes_alias_to_mount_hook(self):
+        loader = _make_loader()
+        register_plugin_class(_alias_plugin_class("shortcut"))
+
+        guest_mount_calls = []
+        loader.set_router_hooks(
+            lambda pid, router: None,
+            lambda pid: None,
+            lambda pid, router, alias=None: guest_mount_calls.append((pid, alias)),
+            lambda pid: None,
+        )
+
+        assert await loader.start_plugin("acme_alias", {}) is True
+        assert guest_mount_calls == [("acme_alias", "shortcut")]
+        await loader.stop_plugin("acme_alias")

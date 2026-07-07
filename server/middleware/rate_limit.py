@@ -37,9 +37,26 @@ _SKIP_PREFIXES = ("/panel", "/programmer", "/docs", "/openapi.json", "/ws", "/is
 _OPEN_EXACT = {"/api/status", "/api/health", "/api/cloud/status", "/api/startup-status", "/api/auth/required", "/api/setup/status"}
 _OPEN_PREFIXES = ()
 
+# Registered prefixes outside /api/ that classify as the standard tier.
+# Plugin guest aliases (api/plugin_ext.py) register here when mounted so
+# their traffic is rate-limited and their 401s feed the brute-force counter
+# — every other non-/api path is skipped by design.
+_extra_standard_prefixes: set[str] = set()
+
+
+def register_standard_prefix(prefix: str) -> None:
+    """Classify paths under ``prefix`` (segment-bounded) as the standard tier."""
+    _extra_standard_prefixes.add(prefix)
+
+
+def unregister_standard_prefix(prefix: str) -> None:
+    _extra_standard_prefixes.discard(prefix)
+
 
 def _classify(method: str, path: str) -> str:
     """Classify a request into a rate-limit tier."""
+    if any(path == p or path.startswith(p + "/") for p in _extra_standard_prefixes):
+        return "standard"
     if any(path.startswith(p) for p in _SKIP_PREFIXES):
         return "skip"
     if not path.startswith("/api/"):

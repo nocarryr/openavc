@@ -727,12 +727,29 @@ function PluginDetail({ plugin }: { plugin: PluginInfo }) {
 
       {/* Developer-facing metadata, tucked away */}
       {((info.capabilities && info.capabilities.length > 0) ||
-        (info.platforms && info.platforms.length > 0)) && (
+        (info.platforms && info.platforms.length > 0) ||
+        !!info.guest_alias) && (
         <CollapsibleSection
           title="Plugin Details"
           subtitle="Granted capabilities and supported platforms"
           defaultOpen={false}
         >
+          {info.guest_alias && (
+            <div style={{ marginBottom: "var(--space-md)" }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-secondary)", marginBottom: "var(--space-xs)" }}>
+                Guest URL
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
+                <code style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  /{info.guest_alias}
+                </code>
+                <CopyButton
+                  value={`${window.location.origin}/${info.guest_alias}`}
+                  title="Copy guest URL"
+                />
+              </div>
+            </div>
+          )}
           {info.capabilities && info.capabilities.length > 0 && (
             <div style={{ marginBottom: "var(--space-md)" }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-secondary)", marginBottom: "var(--space-xs)" }}>
