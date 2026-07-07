@@ -1,19 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { Plus, Trash2, Pencil, RefreshCw, ExternalLink, KeyRound } from "lucide-react";
+import { Plus, Trash2, Pencil, RefreshCw, ExternalLink, KeyRound, ShieldAlert } from "lucide-react";
 import { Dialog } from "../shared/Dialog";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { CopyButton } from "../shared/CopyButton";
 import { showError, showSuccess } from "../../store/toastStore";
 import { useProjectStore } from "../../store/projectStore";
+import { getTlsStatus } from "../../api/systemClient";
 import * as presentApi from "../../api/presentClient";
 import type { PresentDisplay, PresentStatus } from "../../api/presentClient";
 
 // The Present plugin's management panel, rendered on its detail page in the
-// Plugins view: the space's displays (add/edit/delete, display links, keys)
-// and the routing matrix (per-display source). Platform-side component keyed
-// to the plugin id; generalize a plugin-management-panel slot only if a
-// second plugin needs one.
+// Plugins view: the connect address guests type (with an HTTPS warning when
+// screen capture would be blocked), the space's displays (add/edit/delete,
+// display links, keys), and the routing matrix (per-display source).
+// Platform-side component keyed to the plugin id; generalize a
+// plugin-management-panel slot only if a second plugin needs one.
 
 // How often the panel refreshes who's presenting and what each display shows
 // while it is on screen. Matches the plugin's own presence poll cadence
@@ -239,9 +241,22 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
   const [editing, setEditing] = useState<PresentDisplay | "new" | null>(null);
   const [deleting, setDeleting] = useState<PresentDisplay | null>(null);
   const [rekeying, setRekeying] = useState<PresentDisplay | null>(null);
+  // null = unknown (fetch failed): show nothing rather than warn wrongly.
+  const [tlsEnabled, setTlsEnabled] = useState<boolean | null>(null);
   // Background refreshes must not flash the loading state or toast transient
   // errors; only the first load and manual refreshes report.
   const firstLoad = useRef(true);
+
+  // Screen capture in a guest's browser needs a secure context, so the
+  // integrator should hear about a disabled-HTTPS instance here, next to the
+  // connect address — not from a confused guest. One fetch per mount is
+  // enough (TLS changes require a server restart anyway).
+  useEffect(() => {
+    if (!running) return;
+    getTlsStatus()
+      .then((s) => setTlsEnabled(!!s.enabled))
+      .catch(() => setTlsEnabled(null));
+  }, [running]);
 
   const refresh = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -338,8 +353,8 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
       <div
         style={{
           display: "flex",
-          alignItems: "center",
-          gap: "var(--space-lg)",
+          flexDirection: "column",
+          gap: "var(--space-xs)",
           padding: "var(--space-sm) var(--space-md)",
           marginBottom: "var(--space-sm)",
           borderRadius: "var(--border-radius)",
@@ -349,18 +364,70 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
           color: "var(--text-secondary)",
         }}
       >
-        <span>
-          Join code{" "}
-          <strong style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)", letterSpacing: "0.15em" }}>
-            {status?.code || "—"}
-          </strong>
-        </span>
-        <span style={{ color: presenting.length ? "var(--color-success, #2e7d32)" : "var(--text-muted)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-lg)" }}>
+          <span style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            Guests connect at{" "}
+            <strong
+              style={{
+                fontFamily: "var(--font-mono)",
+                color: "var(--text-primary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {status?.join_url || "—"}
+            </strong>
+            {status?.join_url && (
+              <>
+                <CopyButton value={status.join_url} title="Copy connect address" />
+                <button
+                  onClick={() => window.open(`http://${status.join_url}`, "_blank", "noopener")}
+                  title="Open connect page"
+                  style={iconBtnStyle}
+                >
+                  <ExternalLink size={13} />
+                </button>
+              </>
+            )}
+          </span>
+          <span style={{ flexShrink: 0 }}>
+            Join code{" "}
+            <strong style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)", letterSpacing: "0.15em" }}>
+              {status?.code || "—"}
+            </strong>
+          </span>
+        </div>
+        <div style={{ color: presenting.length ? "var(--color-success, #2e7d32)" : "var(--text-muted)" }}>
           {presenting.length
-            ? `Presenting: ${presenting.map((p) => p.name).join(", ")}`
+            ? `Presenting: ${presenting.map((p) => p.label || p.name).join(", ")}`
             : "No one is presenting"}
-        </span>
+        </div>
       </div>
+
+      {tlsEnabled === false && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: "var(--space-sm)",
+            padding: "var(--space-sm) var(--space-md)",
+            marginBottom: "var(--space-sm)",
+            borderRadius: "var(--border-radius)",
+            border: "1px solid var(--color-warning, #b26a00)",
+            color: "var(--text-secondary)",
+            fontSize: "var(--font-size-sm)",
+            lineHeight: 1.5,
+          }}
+        >
+          <ShieldAlert size={16} style={{ flexShrink: 0, marginTop: 2, color: "var(--color-warning, #b26a00)" }} />
+          <span>
+            Guests can&apos;t share their screen yet: browsers only allow screen
+            capture over HTTPS, and HTTPS is off on this system. Enable it in
+            Settings &gt; Security. Displays are not affected.
+          </span>
+        </div>
+      )}
 
       <div style={{ background: "var(--bg-surface)", borderRadius: "var(--border-radius)", border: "1px solid var(--border-color)", overflow: "hidden" }}>
         {loading && firstLoad.current ? (
@@ -430,7 +497,10 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
         open it, full screen, in a browser on the device driving that screen.
         The link includes the display&apos;s key — treat it like a password.
         Source picks what a display shows: Auto follows the active presenter;
-        pinning a presenter holds their screen there.
+        pinning a presenter holds their screen there. If the connect address
+        above isn&apos;t reachable from guests&apos; laptops (multiple
+        networks, VLANs), set Join Address in the plugin&apos;s configuration
+        below.
       </p>
 
       {editing && (

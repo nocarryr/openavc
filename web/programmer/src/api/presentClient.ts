@@ -14,7 +14,8 @@ export interface PresentDisplay {
 }
 
 export interface PresentPresenter {
-  name: string;
+  name: string; // path-safe ingest name (the routable value)
+  label: string; // the display name the guest typed
   since: number;
 }
 
@@ -28,6 +29,7 @@ export interface PresentStatus {
   mediamtx_version: string;
   space_name: string;
   code: string; // the join code shown on every connect card
+  join_url: string; // what guests type, exactly as the connect cards show it
   presenters: PresentPresenter[];
   active_presenters: number;
   sources: PresentSourceOption[];
