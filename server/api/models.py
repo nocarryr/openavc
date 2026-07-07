@@ -142,6 +142,11 @@ class DriverDefinitionRequest(BaseModel):
     responses: list[dict[str, Any]] = []
     polling: dict[str, Any] = {}
     frame_parser: dict[str, Any] | None = None
+    # Send-side packet framing — the send twin of frame_parser. Wraps every
+    # byte-stream command in a computed-length binary header (e.g. eISCP).
+    # Declared explicitly (like frame_parser) so the Driver Builder round-trips
+    # it; the model is also extra='allow'.
+    send_frame: dict[str, Any] | None = None
     # Quick Action strip declarations. Declared explicitly (the model is also
     # extra='allow') so the Driver Builder round-trips them to disk: actions is
     # the full form (kind:"command" promotes a command, kind:"setup" is a

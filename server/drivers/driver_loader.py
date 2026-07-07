@@ -631,6 +631,25 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                     errors.append(
                         f"frame_parser: header_offset must be an integer (got {offset!r})"
                     )
+                # Length field not at byte 0 (e.g. eISCP: length at offset 8,
+                # behind magic + header-size, followed by version/reserved).
+                for extra_key in ("length_offset", "header_extra"):
+                    extra_val = frame_parser.get(extra_key, 0)
+                    if (
+                        isinstance(extra_val, bool)
+                        or not isinstance(extra_val, int)
+                        or extra_val < 0
+                    ):
+                        errors.append(
+                            f"frame_parser: {extra_key} must be a non-negative "
+                            f"integer (got {extra_val!r})"
+                        )
+                endian = frame_parser.get("length_endian", "big")
+                if endian not in ("big", "little"):
+                    errors.append(
+                        f"frame_parser: length_endian must be 'big' or 'little' "
+                        f"(got {endian!r})"
+                    )
             elif fp_type == "fixed_length":
                 length = frame_parser.get("length", 1)
                 if isinstance(length, bool) or not isinstance(length, int) or length <= 0:
@@ -644,6 +663,43 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                 )
             else:
                 errors.append("frame_parser: missing 'type'")
+
+    # Validate the optional send_frame block (send-side packet framing — the
+    # send twin of frame_parser). Only length_prefix is supported; the header
+    # bytes are literal-escape strings and length_size must be a positive int.
+    send_frame = driver_def.get("send_frame")
+    if send_frame is not None:
+        if not isinstance(send_frame, dict):
+            errors.append("send_frame: must be a mapping")
+        else:
+            sf_type = send_frame.get("type", "length_prefix")
+            if sf_type != "length_prefix":
+                errors.append(
+                    f"send_frame: unknown type '{sf_type}' (expected 'length_prefix')"
+                )
+            else:
+                length_size = send_frame.get("length_size", 4)
+                if (
+                    isinstance(length_size, bool)
+                    or not isinstance(length_size, int)
+                    or length_size < 1
+                ):
+                    errors.append(
+                        f"send_frame: length_size must be a positive integer "
+                        f"(got {length_size!r})"
+                    )
+                sf_endian = send_frame.get("length_endian", "big")
+                if sf_endian not in ("big", "little"):
+                    errors.append(
+                        f"send_frame: length_endian must be 'big' or 'little' "
+                        f"(got {sf_endian!r})"
+                    )
+                for byte_key in ("header", "after_length"):
+                    byte_val = send_frame.get(byte_key)
+                    if byte_val is not None and not isinstance(byte_val, str):
+                        errors.append(
+                            f"send_frame: {byte_key} must be a string (got {byte_val!r})"
+                        )
 
     # Validate child_entity_types keys. The child type name becomes a key
     # segment — device.<id>.<child_type>.<local_id>.<prop> — and feeds

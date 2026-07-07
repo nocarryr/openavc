@@ -445,7 +445,8 @@ The tables below document each field in detail.
 | `auth` | No | Login handshake performed between TCP connect and `on_connect`. See `auth` section below. |
 | `on_connect` | No | List of raw commands sent immediately after connecting. Use for enabling verbose/feedback mode or requesting initial state. |
 | `polling` | No | Periodic status query configuration. |
-| `frame_parser` | No | Advanced: custom framing (see below). |
+| `frame_parser` | No | Advanced: custom receive framing (see below). |
+| `send_frame` | No | Advanced: send-side packet framing — wraps every command in a binary header with a computed data length (e.g. eISCP). The send twin of `frame_parser` (see below). Byte-stream transports only. |
 | `protocols` | No | Protocol names this driver speaks (e.g., `["pjlink"]`, `["extron_sis"]`). Helps discovery match devices to drivers. |
 | `discovery` | No | Discovery declarations — fingerprints and hints. See Discovery below. |
 
@@ -950,11 +951,41 @@ Types: `length_prefix` (reads a length header then N bytes), `fixed_length` (mes
 
 For `length_prefix`:
 
-- `header_size` — big-endian bytes that hold the body length. Must be `1`, `2`, or `4`.
+- `header_size` — bytes that hold the body length. Must be `1`, `2`, or `4`.
 - `header_offset` — added to the length the header decodes to. Use a negative value (e.g. `-2`) when the length field counts the header bytes themselves, so only the body is read. Default `0`.
 - `include_header` — `true` keeps the header bytes in the parsed frame; `false` (default) returns just the body.
+- `length_offset` — constant bytes **before** the length field, when the length isn't the first thing on the wire. Default `0`. eISCP, for example, puts its 4-byte length at offset 8, behind the `ISCP` magic and a header-size field.
+- `header_extra` — constant bytes **after** the length field, before the data (e.g. eISCP's version + reserved = 4). Default `0`. The full fixed header consumed per frame is `length_offset + header_size + header_extra`.
+- `length_endian` — `big` (default) or `little`. Byte order of the length field.
 
 For `fixed_length`, set `length` to the byte count of every frame.
+
+#### `send_frame` (advanced)
+
+The send-side twin of `frame_parser`. Use it when a protocol wraps every command in a binary packet header whose data-length is **computed per message** — something a static `command_prefix` can't express, because the length changes with each command (a feedback query like `PWRQSTN` is longer than a set like `PWR01`). The canonical case is **eISCP** (Onkyo / Integra / Pioneer receivers over TCP 60128): a 16-byte header of `ISCP` magic + header-size + a 4-byte data length + version/reserved, wrapping the `!1…<CR>` ISCP command.
+
+```yaml
+send_frame:
+  type: length_prefix
+  header: "ISCP\x00\x00\x00\x10"     # magic + fixed header-size (16), big-endian
+  length_size: 4                     # width of the computed data-length field
+  length_endian: big                 # big (default) | little
+  after_length: "\x01\x00\x00\x00"   # version + 3 reserved bytes, before the data
+```
+
+On the wire each command becomes `header + <computed length> + after_length + (command_prefix + send + command_suffix)`. The length is the byte length of the framed command data (e.g. `!1PWR01\r` = 8). `header` and `after_length` are literal-escape byte strings (`\r`, `\n`, `\xHH`). `send_frame` applies to every byte-stream send origin — commands, raw poll/on_connect queries, the liveness probe, and device-setting writes — so a length-framed device answers all of them.
+
+Pair it with a matching `frame_parser` to read the device's replies. For eISCP the reply header is identical, so the parser is `length_prefix` with the 4-byte length at offset 8:
+
+```yaml
+frame_parser:
+  type: length_prefix
+  length_offset: 8    # skip "ISCP" + header-size
+  header_size: 4      # 4-byte length field
+  header_extra: 4     # skip version + reserved
+```
+
+`command_prefix` / `command_suffix` still handle the inner ISCP framing (`!1` and `\r`); `send_frame` adds the outer packet header on top. For a serial protocol that uses the same `!1…\r` command bodies but no packet header, drop `send_frame` and keep just `command_prefix` / `command_suffix`.
 
 ### Discovery
 

@@ -33,7 +33,7 @@ from server.drivers.inline_protocol import (
     _normalize_config_responses,
     _normalize_config_state_vars,
 )
-from server.transport.binary_helpers import encode_escape_sequences
+from server.transport.binary_helpers import encode_escape_sequences, pack_length_prefix
 from simulator.tcp_simulator import TCPSimulator
 
 logger = logging.getLogger(__name__)
@@ -176,6 +176,16 @@ class YAMLAutoSimulator(TCPSimulator):
         # so the simulator accepts \r, \n, or \r\n regardless of the
         # response delimiter configured in the driver definition.
         self._line_mode = True
+
+        # Send-side packet framing (send_frame): a driver whose commands ride
+        # inside a computed-length binary header (e.g. eISCP) sends frames the
+        # line reader would mis-split (the length byte can be 0x0a/0x0d). When
+        # present, read length-prefixed frames instead and strip the header
+        # before matching / re-wrap it on every response, so a simulated device
+        # answers the framed commands exactly as real hardware does.
+        self._send_frame = self._build_sim_send_frame(driver_def.get("send_frame"))
+        if self._send_frame:
+            self._line_mode = False
 
         self._driver_def = driver_def
 
@@ -725,10 +735,88 @@ class YAMLAutoSimulator(TCPSimulator):
 
     # ── Protocol handling ──
 
+    @staticmethod
+    def _build_sim_send_frame(cfg: Any) -> dict[str, Any] | None:
+        """Precompute send_frame header bytes + offsets for build/strip, or None.
+
+        Mirrors ConfigurableDriver._build_send_frame on the driver side. The
+        length_offset / total_header are derived from the constant byte lengths
+        so the simulator strips exactly what the driver's frame_parser skips.
+        """
+        if not cfg or not isinstance(cfg, dict):
+            return None
+        if cfg.get("type", "length_prefix") != "length_prefix":
+            return None
+        header = encode_escape_sequences(str(cfg.get("header", "") or ""))
+        after_length = encode_escape_sequences(str(cfg.get("after_length", "") or ""))
+        length_size = int(cfg.get("length_size", 4))
+        length_endian = "little" if cfg.get("length_endian") == "little" else "big"
+        return {
+            "header": header,
+            "after_length": after_length,
+            "length_size": length_size,
+            "length_endian": length_endian,
+            "length_offset": len(header),
+            "total_header": len(header) + length_size + len(after_length),
+        }
+
+    def _wrap_send_frame(self, data: bytes) -> bytes:
+        """Wrap a response body in the send_frame packet header (computed length)."""
+        sf = self._send_frame
+        length = pack_length_prefix(len(data), sf["length_size"], sf["length_endian"])
+        return sf["header"] + length + sf["after_length"] + data
+
+    async def _read_send_frame_messages(
+        self, reader: asyncio.StreamReader, buffer: bytearray | None,
+    ) -> list[bytes] | None:
+        """Read length-prefixed send_frame frames; return the stripped bodies.
+
+        The send_frame binary header can carry 0x0a/0x0d bytes in its length
+        field, which the line reader would treat as terminators and mis-split —
+        so length-framed drivers read here instead. Skips the fixed header,
+        reads the computed-length body, and hands the bare payload (e.g. the
+        ISCP "!1PWR01\\r") to the normal dispatch, exactly as the driver's
+        receive-side LengthPrefixFrameParser does.
+        """
+        sf = self._send_frame
+        if buffer is None:
+            buffer = bytearray()
+        try:
+            raw = await asyncio.wait_for(reader.read(4096), timeout=30.0)
+        except asyncio.TimeoutError:
+            return []
+        if not raw:
+            return None
+        buffer.extend(raw)
+        messages: list[bytes] = []
+        total_header = sf["total_header"]
+        lo = sf["length_offset"]
+        lsize = sf["length_size"]
+        while len(buffer) >= total_header:
+            data_len = int.from_bytes(buffer[lo : lo + lsize], sf["length_endian"])
+            total = total_header + data_len
+            if len(buffer) < total:
+                break
+            messages.append(bytes(buffer[total_header:total]))
+            del buffer[:total]
+        return messages
+
+    async def _read_messages(
+        self, reader: asyncio.StreamReader, buffer: bytearray | None = None,
+    ) -> list[bytes] | None:
+        if self._send_frame:
+            return await self._read_send_frame_messages(reader, buffer)
+        return await super()._read_messages(reader, buffer)
+
     def handle_command(self, data: bytes) -> bytes | None:
         self._handling_command = True
         try:
-            return self._dispatch_command(data)
+            resp = self._dispatch_command(data)
+            # Re-wrap the reply in the send_frame packet header so the driver's
+            # receive-side length-prefix parser can read it (build/strip parity).
+            if resp is not None and self._send_frame:
+                resp = self._wrap_send_frame(resp)
+            return resp
         finally:
             self._handling_command = False
 

@@ -100,6 +100,55 @@ def test_length_prefix_reset():
     assert p.feed(b"\x02ok") == [b"ok"]
 
 
+def _eiscp_frame(data: bytes) -> bytes:
+    # 16-byte eISCP header: "ISCP" + header-size(16) + 4-byte data length + version/reserved.
+    return b"ISCP\x00\x00\x00\x10" + len(data).to_bytes(4, "big") + b"\x01\x00\x00\x00" + data
+
+
+def test_length_prefix_offset_reads_eiscp_header():
+    # eISCP: the 4-byte length sits at offset 8, behind magic + header-size, and
+    # is followed by 4 version/reserved bytes before the data.
+    p = LengthPrefixFrameParser(
+        header_size=4, length_offset=8, header_extra=4, length_endian="big",
+    )
+    # Two different-length bodies back to back exercise the computed length.
+    stream = _eiscp_frame(b"!1PWR01\r") + _eiscp_frame(b"!1PWRQSTN\r")
+    assert p.feed(stream) == [b"!1PWR01\r", b"!1PWRQSTN\r"]
+
+
+def test_length_prefix_offset_partial_across_reads():
+    p = LengthPrefixFrameParser(header_size=4, length_offset=8, header_extra=4)
+    frame = _eiscp_frame(b"!1MVL28\r")
+    # Split mid-header and mid-body; the parser must reassemble.
+    assert p.feed(frame[:6]) == []
+    assert p.feed(frame[6:20]) == []
+    assert p.feed(frame[20:]) == [b"!1MVL28\r"]
+
+
+def test_length_prefix_include_header_with_offset():
+    p = LengthPrefixFrameParser(
+        header_size=4, length_offset=8, header_extra=4, include_header=True,
+    )
+    frame = _eiscp_frame(b"!1PWR01\r")
+    assert p.feed(frame) == [frame]
+
+
+def test_length_prefix_little_endian():
+    p = LengthPrefixFrameParser(header_size=2, length_endian="little")
+    assert p.feed(b"\x03\x00abc") == [b"abc"]
+
+
+def test_length_prefix_negative_offset_rejected():
+    with pytest.raises(ValueError):
+        LengthPrefixFrameParser(header_size=4, length_offset=-1)
+
+
+def test_length_prefix_defaults_unchanged():
+    # New params default to the pre-existing behavior (length at offset 0).
+    p = LengthPrefixFrameParser(header_size=2)
+    assert p.feed(b"\x00\x03abc\x00\x01z") == [b"abc", b"z"]
+
+
 # --- FixedLengthFrameParser ---
 
 

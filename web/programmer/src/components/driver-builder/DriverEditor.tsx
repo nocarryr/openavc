@@ -17,6 +17,7 @@ import { LiveTestPanel } from "./LiveTestPanel";
 import { LifecycleEditor } from "./LifecycleEditor";
 import { AuthEditor } from "./AuthEditor";
 import { FrameParserEditor } from "./FrameParserEditor";
+import { SendFrameEditor } from "./SendFrameEditor";
 import { ConfigSchemaEditor } from "./ConfigSchemaEditor";
 import { CollapsibleSection } from "./CollapsibleSection";
 import { IssueList } from "./IssueList";
@@ -156,6 +157,7 @@ export function DriverEditor({
   const onConnectCount = (draft.on_connect ?? []).length;
   const authEnabled = !!draft.auth;
   const frameParserEnabled = !!draft.frame_parser;
+  const sendFrameEnabled = !!draft.send_frame;
   // Command framing wraps byte-stream sends only — OSC uses an address, HTTP a
   // path/body, so neither is line-framed and the section is hidden for them.
   const isByteStream = ["tcp", "serial", "udp"].includes(draft.transport);
@@ -632,6 +634,18 @@ export function DriverEditor({
             >
               <FrameParserEditor draft={draft} onUpdate={onUpdate} />
             </CollapsibleSection>
+
+            {isByteStream && (
+              <CollapsibleSection
+                title="Send Frame"
+                subtitle="Advanced — wraps every command in a binary packet header whose data-length is computed per message (e.g. eISCP). The send twin of Frame Parser. Most drivers leave this off."
+                meta={sendFrameEnabled ? "enabled" : "disabled"}
+                defaultOpen={sendFrameEnabled}
+                helpHref={DOCS.frameParser}
+              >
+                <SendFrameEditor draft={draft} onUpdate={onUpdate} />
+              </CollapsibleSection>
+            )}
 
             <CollapsibleSection
               title="Configuration Fields"

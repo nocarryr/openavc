@@ -931,6 +931,7 @@ export function validateDriver(
   //    Connection tab at author time, not as a ValueError raised in connect()
   //    that wedges the device in a permanent reconnect loop. ───────────────
   validateFrameParser(draft, issues);
+  validateSendFrame(draft, issues);
 
   // ── Discovery hints (mirror server/discovery/hints.py rules so the user
   //    sees them here, not as an opaque 422 at save) ──────────────────────
@@ -971,6 +972,26 @@ function validateFrameParser(
         message: `Frame parser header offset must be a whole number (got ${String(offset)}).`,
       });
     }
+    for (const key of ["length_offset", "header_extra"] as const) {
+      const v = fp[key] as number | undefined;
+      if (v !== undefined && (!Number.isInteger(v) || v < 0)) {
+        issues.push({
+          severity: "error",
+          section: "connection",
+          field: `frame_parser.${key}`,
+          message: `Frame parser ${key} must be a non-negative whole number (got ${String(v)}).`,
+        });
+      }
+    }
+    const endian = fp.length_endian as string | undefined;
+    if (endian !== undefined && endian !== "big" && endian !== "little") {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "frame_parser.length_endian",
+        message: `Frame parser length byte order must be "big" or "little" (got ${String(endian)}).`,
+      });
+    }
   } else if (type === "fixed_length") {
     const length = (fp.length as number | undefined) ?? 1;
     if (!Number.isInteger(length) || length <= 0) {
@@ -994,6 +1015,44 @@ function validateFrameParser(
       section: "connection",
       field: "frame_parser.type",
       message: "Frame parser is enabled but has no type set.",
+    });
+  }
+}
+
+/** Mirror server/drivers/driver_loader.py's send_frame load-time checks — the
+ *  send twin of the frame_parser validation above. */
+function validateSendFrame(
+  draft: DriverDefinition,
+  issues: ValidationIssue[],
+): void {
+  const sf = draft.send_frame;
+  if (!sf) return;
+  const type = sf.type ?? "length_prefix";
+  if (type !== "length_prefix") {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "send_frame.type",
+      message: `Send frame type "${String(type)}" isn't supported — use length-prefix.`,
+    });
+    return;
+  }
+  const lengthSize = (sf.length_size as number | undefined) ?? 4;
+  if (!Number.isInteger(lengthSize) || lengthSize < 1) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "send_frame.length_size",
+      message: `Send frame length field size must be a positive whole number (got ${String(lengthSize)}).`,
+    });
+  }
+  const endian = sf.length_endian as string | undefined;
+  if (endian !== undefined && endian !== "big" && endian !== "little") {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "send_frame.length_endian",
+      message: `Send frame length byte order must be "big" or "little" (got ${String(endian)}).`,
     });
   }
 }

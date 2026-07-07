@@ -160,6 +160,58 @@ export function FrameParserEditor({ draft, onUpdate }: FrameParserEditorProps) {
                   </div>
                 </div>
               </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-md)" }}>
+                <div>
+                  <label style={labelStyle}>Length Field Offset (bytes)</label>
+                  <input
+                    type="number"
+                    value={(fp.length_offset as number | undefined) ?? 0}
+                    onChange={(e) =>
+                      update({ length_offset: parseInt(e.target.value) || 0 })
+                    }
+                    min={0}
+                    max={64}
+                    style={{ width: "100%" }}
+                  />
+                  <div style={helpStyle}>
+                    Constant bytes before the length field (magic + fixed header
+                    fields). For eISCP the 4-byte length sits at offset 8, behind
+                    the "ISCP" magic and header-size field. Default 0.
+                  </div>
+                </div>
+                <div>
+                  <label style={labelStyle}>Header Extra (bytes)</label>
+                  <input
+                    type="number"
+                    value={(fp.header_extra as number | undefined) ?? 0}
+                    onChange={(e) =>
+                      update({ header_extra: parseInt(e.target.value) || 0 })
+                    }
+                    min={0}
+                    max={64}
+                    style={{ width: "100%" }}
+                  />
+                  <div style={helpStyle}>
+                    Constant bytes after the length field, before the data (e.g.
+                    eISCP's version + reserved = 4). Default 0.
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Length Byte Order</label>
+                <select
+                  value={(fp.length_endian as string | undefined) ?? "big"}
+                  onChange={(e) => update({ length_endian: e.target.value })}
+                  style={{ width: "100%" }}
+                >
+                  <option value="big">Big-endian (most binary AV protocols)</option>
+                  <option value="little">Little-endian</option>
+                </select>
+                <div style={helpStyle}>
+                  Byte order of the length field. eISCP and most AV binary
+                  protocols are big-endian. Default big-endian.
+                </div>
+              </div>
               <label
                 style={{
                   display: "flex",

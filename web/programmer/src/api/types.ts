@@ -780,6 +780,11 @@ export interface DriverDefinition {
   responses: DriverResponseDef[];
   polling: { interval?: number; queries?: (string | DriverEachChildQuery)[] };
   frame_parser?: { type: string; [key: string]: unknown } | null;
+  // Send-side packet framing — the send twin of frame_parser. Wraps every
+  // byte-stream command (after command_prefix/suffix) in a binary header whose
+  // data-length field is computed per message (e.g. eISCP's 16-byte header).
+  // `header` and `after_length` are literal-escape byte strings (`\xHH`).
+  send_frame?: { type: string; [key: string]: unknown } | null;
   discovery?: DriverDiscoveryConfig;
   device_settings?: Record<string, DriverDeviceSettingDef>;
   simulator?: DriverSimulatorDef;

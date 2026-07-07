@@ -25,6 +25,7 @@ const EMPTY_DEFINITION: DriverDefinition = {
   responses: [],
   polling: {},
   frame_parser: null,
+  send_frame: null,
 };
 
 // Latest-wins guards for the async list loaders. Overlapping refreshes (e.g. an

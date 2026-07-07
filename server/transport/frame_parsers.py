@@ -78,15 +78,26 @@ class DelimiterFrameParser(FrameParser):
 
 class LengthPrefixFrameParser(FrameParser):
     """
-    Reads a fixed-size length header, then that many bytes of payload.
+    Reads a fixed-size length field, then that many bytes of payload.
 
-    The length header is big-endian unsigned int of ``header_size`` bytes
-    (1, 2, or 4). An optional ``header_offset`` is added to the decoded
-    length value (e.g., if the length field includes the header itself,
-    set header_offset=-header_size).
+    The length field is an unsigned int of ``header_size`` bytes (1, 2, or 4),
+    ``length_endian`` byte order ("big" default). An optional ``header_offset``
+    is added to the decoded length value (e.g., if the length field counts the
+    header itself, set header_offset=-header_size).
 
-    ``include_header`` controls whether the returned message includes the
-    length header bytes or just the payload.
+    For binary protocols whose length field is not the first thing on the wire
+    (e.g. eISCP: a 4-byte length at offset 8, behind an "ISCP" magic + a
+    constant header-size field, followed by version/reserved bytes before the
+    data), ``length_offset`` skips the constant bytes *before* the length field
+    and ``header_extra`` accounts for the constant bytes *after* it, before the
+    data. The full fixed header consumed per frame is
+    ``length_offset + header_size + header_extra``. These mirror the send-side
+    ``send_frame`` block's ``header`` (bytes before the length) and
+    ``after_length`` (bytes after it) — receive skips the byte counts the send
+    side emits as literal bytes.
+
+    ``include_header`` controls whether the returned message includes the fixed
+    header bytes or just the payload.
     """
 
     def __init__(
@@ -94,13 +105,23 @@ class LengthPrefixFrameParser(FrameParser):
         header_size: int = 2,
         header_offset: int = 0,
         include_header: bool = False,
+        length_offset: int = 0,
+        header_extra: int = 0,
+        length_endian: str = "big",
         max_buffer: int = DEFAULT_MAX_BUFFER,
     ) -> None:
         if header_size not in (1, 2, 4):
             raise ValueError("header_size must be 1, 2, or 4")
+        if length_offset < 0 or header_extra < 0:
+            raise ValueError("length_offset and header_extra must be >= 0")
         self._header_size = header_size
         self._header_offset = header_offset
         self._include_header = include_header
+        self._length_offset = length_offset
+        self._length_endian = "little" if length_endian == "little" else "big"
+        # Total fixed header consumed before the data body: the constant bytes
+        # before the length field + the length field + the constant bytes after.
+        self._frame_header = length_offset + header_size + header_extra
         self._buffer = b""
         self._max_buffer = max_buffer
 
@@ -108,14 +129,19 @@ class LengthPrefixFrameParser(FrameParser):
         self._buffer += data
         messages: list[bytes] = []
         while True:
-            if len(self._buffer) < self._header_size:
+            if len(self._buffer) < self._frame_header:
                 break
-            # Decode length from header
-            header = self._buffer[: self._header_size]
-            payload_len = int.from_bytes(header, "big") + self._header_offset
+            # Decode length from the length field (at length_offset within the
+            # fixed header), then add header_offset to reach the payload length.
+            lo = self._length_offset
+            length_field = self._buffer[lo : lo + self._header_size]
+            payload_len = (
+                int.from_bytes(length_field, self._length_endian)
+                + self._header_offset
+            )
             if payload_len < 0:
                 payload_len = 0
-            total = self._header_size + payload_len
+            total = self._frame_header + payload_len
             # A claimed frame larger than the whole buffer cap can never be
             # assembled — it's a desync or garbage. A length-prefixed stream
             # has no in-band resync point, so (like the sibling parsers on
@@ -134,7 +160,7 @@ class LengthPrefixFrameParser(FrameParser):
             if self._include_header:
                 messages.append(self._buffer[:total])
             else:
-                messages.append(self._buffer[self._header_size : total])
+                messages.append(self._buffer[self._frame_header : total])
             self._buffer = self._buffer[total:]
         # Defensive symmetry with the other parsers: never retain more than
         # max_buffer. A stalled partial frame (header received, payload never

@@ -40,6 +40,23 @@ def encode_escape_sequences(s: str) -> bytes:
     return processed.encode("latin-1")
 
 
+def pack_length_prefix(value: int, size: int, endian: str = "big") -> bytes:
+    """Pack an integer length into a fixed-width big/little-endian field.
+
+    The send-side counterpart to :class:`LengthPrefixFrameParser` — used by a
+    driver's ``send_frame`` block to build the computed data-length field of a
+    binary packet header (e.g. eISCP's 4-byte big-endian length that a static
+    ``command_prefix`` can't express, since it varies per message). ``size`` is
+    the field width in bytes; ``endian`` is "big" (default) or "little". A value
+    too large for the field raises OverflowError — a genuine protocol error the
+    author should see, not silently truncate.
+    """
+    if size < 1:
+        raise ValueError("length field size must be >= 1")
+    order = "little" if endian == "little" else "big"
+    return int(value).to_bytes(size, order)
+
+
 def checksum_xor(data: bytes) -> int:
     """XOR all bytes together. Common in Samsung MDC, LG, etc."""
     result = 0

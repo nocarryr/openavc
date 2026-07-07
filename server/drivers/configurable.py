@@ -33,6 +33,7 @@ from server.drivers.inline_protocol import (
     _normalize_ir_codes,
 )
 from server.transport.binary_helpers import encode_escape_sequences as _safe_encode_escapes
+from server.transport.binary_helpers import pack_length_prefix
 from server.transport.frame_parsers import DEFAULT_MAX_BUFFER, FrameParser
 from server.utils.logger import get_logger
 
@@ -423,6 +424,18 @@ class ConfigurableDriver(BaseDriver):
             or ""
         )
 
+        # Send-side packet framing (opt-in, byte-stream only). A length_prefix
+        # send_frame wraps the fully-framed command payload (command_prefix +
+        # send + command_suffix, escape-decoded) in a binary packet header whose
+        # data-length field is COMPUTED per message — the send analog of a
+        # length_prefix frame_parser. Needed for protocols like eISCP whose
+        # 16-byte header carries a computed data-length a static command_prefix
+        # can't express (the length varies once feedback queries and step
+        # commands of different byte lengths are in the set). Applied at every
+        # byte-stream send origin (command, raw query, liveness probe, device
+        # setting write); absent means today's behavior exactly.
+        self._send_frame = self._build_send_frame(self._definition.get("send_frame"))
+
         norm_commands = _normalize_config_commands(
             self.config.get("commands"),
             self._command_suffix or line_ending,
@@ -679,13 +692,18 @@ class ConfigurableDriver(BaseDriver):
         else:  # tcp / serial
             if query in commands:
                 # A query that names a command runs as that command, so send-side
-                # framing (command_prefix/suffix) applies and the response goes
-                # through the matcher — matches the HTTP/UDP branches above. A
-                # raw protocol string (not a command name) is sent as authored.
+                # framing (command_prefix/suffix + send_frame) applies and the
+                # response goes through the matcher — matches the HTTP/UDP
+                # branches above. A raw protocol string (not a command name) is
+                # sent as authored, still wrapped in the send_frame packet header
+                # (no-op unless declared) so a length-framed protocol's raw
+                # queries reach the device correctly.
                 await self.send_command(query)
             else:
                 formatted = self._safe_substitute(query, self.config) if "{" in query else query
-                await self.transport.send(_safe_encode_escapes(formatted))
+                await self.transport.send(
+                    self._apply_send_frame(_safe_encode_escapes(formatted))
+                )
 
     def _expand_query(self, query: Any) -> list[str]:
         """Expand one polling/on_connect entry. Strings pass through
@@ -1153,8 +1171,9 @@ class ConfigurableDriver(BaseDriver):
         all_params = {**self.config, **params}
         formatted = self._safe_substitute(raw, all_params)
 
-        # Encode (handle explicit escape sequences only — safe subset)
-        data = _safe_encode_escapes(formatted)
+        # Encode (handle explicit escape sequences only — safe subset), then
+        # wrap in the send_frame packet header (no-op unless declared).
+        data = self._apply_send_frame(_safe_encode_escapes(formatted))
         await self.transport.send(data)
         log.debug(f"[{self.device_id}] Sent command '{command}': {data!r}")
         return True
@@ -1464,7 +1483,14 @@ class ConfigurableDriver(BaseDriver):
             payload = lv["send"]
             if "{" in payload:
                 payload = self._safe_substitute(payload, self.config)
-            await self.transport.send(_safe_encode_escapes(payload))
+            # command_prefix/suffix are NOT applied (the probe is a raw string —
+            # the author writes any application-layer framing into it), but the
+            # send_frame packet header IS wrapped (no-op unless declared): a
+            # length-framed transport like eISCP needs its header on every
+            # message, or the probe never elicits a reply and liveness fails.
+            await self.transport.send(
+                self._apply_send_frame(_safe_encode_escapes(payload))
+            )
 
     def _liveness_note_data(self, data: bytes) -> None:
         """Resolve a waiting liveness probe when qualifying data arrives.
@@ -1969,7 +1995,7 @@ class ConfigurableDriver(BaseDriver):
                 raise ConnectionError(f"[{self.device_id}] Not connected")
 
             formatted = self._safe_substitute(raw_send, all_params)
-            data = _safe_encode_escapes(formatted)
+            data = self._apply_send_frame(_safe_encode_escapes(formatted))
             await self.transport.send(data)
             log.debug(
                 f"[{self.device_id}] Set device setting '{key}' = {value!r}"
@@ -2043,6 +2069,45 @@ class ConfigurableDriver(BaseDriver):
                     except Exception:
                         log.exception(f"[{self.device_id}] Failed to emit device.error")
 
+    @staticmethod
+    def _build_send_frame(cfg: Any) -> dict[str, Any] | None:
+        """Precompute a send_frame block's constant header bytes, or None.
+
+        The header/after_length strings are escape-decoded once here (they carry
+        raw bytes like eISCP's ``ISCP\\x00\\x00\\x00\\x10`` magic + header-size).
+        Only ``length_prefix`` is supported; any other type is ignored with a
+        warning so an unknown block never silently breaks sends.
+        """
+        if not cfg or not isinstance(cfg, dict):
+            return None
+        frame_type = cfg.get("type", "length_prefix")
+        if frame_type != "length_prefix":
+            log.warning(
+                "Unsupported send_frame type %r; ignoring (only 'length_prefix')",
+                frame_type,
+            )
+            return None
+        return {
+            "header": _safe_encode_escapes(str(cfg.get("header", "") or "")),
+            "after_length": _safe_encode_escapes(str(cfg.get("after_length", "") or "")),
+            "length_size": int(cfg.get("length_size", 4)),
+            "length_endian": "little" if cfg.get("length_endian") == "little" else "big",
+        }
+
+    def _apply_send_frame(self, data: bytes) -> bytes:
+        """Wrap escape-decoded byte-stream payload in the send_frame header.
+
+        No-op unless the driver declares a send_frame block. The data-length
+        field is computed from ``len(data)`` per message — the piece a static
+        command_prefix can't express. Output is
+        ``header + packed_length + after_length + data``.
+        """
+        sf = self._send_frame
+        if not sf:
+            return data
+        length = pack_length_prefix(len(data), sf["length_size"], sf["length_endian"])
+        return sf["header"] + length + sf["after_length"] + data
+
     def _create_frame_parser(self) -> FrameParser | None:
         """Check definition for frame parser config."""
         parser_config = self._definition.get("frame_parser")
@@ -2057,6 +2122,9 @@ class ConfigurableDriver(BaseDriver):
                 header_size=parser_config.get("header_size", 2),
                 header_offset=parser_config.get("header_offset", 0),
                 include_header=parser_config.get("include_header", False),
+                length_offset=parser_config.get("length_offset", 0),
+                header_extra=parser_config.get("header_extra", 0),
+                length_endian=parser_config.get("length_endian", "big"),
             )
         elif parser_type == "fixed_length":
             from server.transport.frame_parsers import FixedLengthFrameParser
