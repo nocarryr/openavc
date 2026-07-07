@@ -11,6 +11,7 @@ import { InlineError } from "../components/shared/InlineError";
 import type { PluginInfo } from "../api/types";
 import { SurfaceConfigurator } from "../components/plugins/SurfaceConfigurator";
 import { SchemaFormRenderer } from "../components/plugins/PluginConfigForm";
+import { PresentManagementPanel } from "../components/present/PresentManagementPanel";
 import { CollapsibleSection } from "../components/driver-builder/CollapsibleSection";
 import { BrowsePlugins } from "../components/plugins/BrowsePlugins";
 import { MarkdownContent } from "../components/ai/MarkdownContent";
@@ -609,6 +610,13 @@ function PluginDetail({ plugin }: { plugin: PluginInfo }) {
         >
           <strong>Error:</strong> {info.error}
         </div>
+      )}
+
+      {/* Present's displays + routing live on its plugin page. Keyed to the
+          plugin id; generalize a plugin-management-panel slot only if a
+          second plugin needs one. */}
+      {plugin.plugin_id === "present" && !isMissing && !isIncompat && (
+        <PresentManagementPanel running={isRunning} />
       )}
 
       {/* Control surface authoring. A plugin with its own surface view gets

@@ -1,52 +1,84 @@
-// Client for the Present plugin's room endpoints, mounted by the plugin at
-// /api/plugins/present/ext/*. These are only reachable when the plugin is
-// enabled for the current project; callers gate the UI on that.
+// Client for the Present plugin's display + routing endpoints, mounted by the
+// plugin at /api/plugins/present/ext/*. These are only reachable when the
+// plugin is enabled for the current project; callers gate the UI on that.
 import { request } from "./base";
 
-export interface Room {
+export interface PresentDisplay {
   id: string;
   label: string;
   display_key: string;
   display_path: string; // site-relative Display URL (key included)
-  code: string;
+  source: string; // routing assignment: "auto" or a pinned presenter
+  showing: string; // who it is actually showing ("" = the connect card)
   output_state: string; // idle | live
-  active_presenters: number;
 }
 
-export interface RoomInput {
+export interface PresentPresenter {
+  name: string;
+  since: number;
+}
+
+export interface PresentSourceOption {
+  value: string; // "auto" or a presenter name
   label: string;
-  room_id?: string;
+}
+
+export interface PresentStatus {
+  running: boolean;
+  mediamtx_version: string;
+  space_name: string;
+  code: string; // the join code shown on every connect card
+  presenters: PresentPresenter[];
+  active_presenters: number;
+  sources: PresentSourceOption[];
+  display_ids: string[];
+}
+
+export interface DisplayInput {
+  label: string;
+  display_id?: string;
 }
 
 const EXT = "/plugins/present/ext";
 
-export function listRooms(): Promise<Room[]> {
-  return request<Room[]>(`${EXT}/rooms`);
+export function getStatus(): Promise<PresentStatus> {
+  return request<PresentStatus>(`${EXT}/status`);
 }
 
-export function createRoom(data: RoomInput): Promise<Room> {
-  return request<Room>(`${EXT}/rooms`, {
+export function listDisplays(): Promise<PresentDisplay[]> {
+  return request<PresentDisplay[]>(`${EXT}/displays`);
+}
+
+export function createDisplay(data: DisplayInput): Promise<PresentDisplay> {
+  return request<PresentDisplay>(`${EXT}/displays`, {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
 
-export function updateRoom(roomId: string, data: RoomInput): Promise<Room> {
-  return request<Room>(`${EXT}/rooms/${encodeURIComponent(roomId)}`, {
+export function updateDisplay(displayId: string, data: DisplayInput): Promise<PresentDisplay> {
+  return request<PresentDisplay>(`${EXT}/displays/${encodeURIComponent(displayId)}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
 }
 
-export function deleteRoom(roomId: string): Promise<{ ok: boolean; room_id: string }> {
-  return request(`${EXT}/rooms/${encodeURIComponent(roomId)}`, {
+export function deleteDisplay(displayId: string): Promise<{ ok: boolean; display_id: string }> {
+  return request(`${EXT}/displays/${encodeURIComponent(displayId)}`, {
     method: "DELETE",
   });
 }
 
-export function regenerateKey(roomId: string): Promise<Room> {
-  return request<Room>(`${EXT}/rooms/${encodeURIComponent(roomId)}/regenerate_key`, {
+export function regenerateKey(displayId: string): Promise<PresentDisplay> {
+  return request<PresentDisplay>(`${EXT}/displays/${encodeURIComponent(displayId)}/regenerate_key`, {
     method: "POST",
+  });
+}
+
+export function routeDisplay(displayId: string, source: string): Promise<PresentDisplay> {
+  return request<PresentDisplay>(`${EXT}/displays/${encodeURIComponent(displayId)}/route`, {
+    method: "POST",
+    body: JSON.stringify({ source }),
   });
 }
 
