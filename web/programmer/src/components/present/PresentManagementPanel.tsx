@@ -376,6 +376,9 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
   const [rekeying, setRekeying] = useState<PresentDisplay | null>(null);
   // null = unknown (fetch failed): show nothing rather than warn wrongly.
   const [tlsEnabled, setTlsEnabled] = useState<boolean | null>(null);
+  // Cloud-paired systems can install a trusted certificate, which removes
+  // the guest browser warning — worth a pointer in the HTTPS-off warning.
+  const [cloudCertPaired, setCloudCertPaired] = useState(false);
   // Background refreshes must not flash the loading state or toast transient
   // errors; only the first load and manual refreshes report.
   const firstLoad = useRef(true);
@@ -387,7 +390,10 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
   useEffect(() => {
     if (!running) return;
     getTlsStatus()
-      .then((s) => setTlsEnabled(!!s.enabled))
+      .then((s) => {
+        setTlsEnabled(!!s.enabled);
+        setCloudCertPaired(!!s.cloud_cert?.paired);
+      })
       .catch(() => setTlsEnabled(null));
   }, [running]);
 
@@ -563,6 +569,13 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
             Guests can&apos;t share their screen yet: browsers only allow screen
             capture over HTTPS, and HTTPS is off on this system. Enable it in
             Settings &gt; Security. Displays are not affected.
+            {cloudCertPaired && (
+              <>
+                {" "}This system is paired with the cloud, so a trusted
+                certificate (same Settings page) can also remove the guest
+                browser warning entirely.
+              </>
+            )}
           </span>
         </div>
       )}
