@@ -116,6 +116,14 @@ def test_install_writes_files_and_swaps_holder(tmp_path):
     assert leftovers == {cert_path.name, key_path.name}
 
 
+def test_cloud_context_is_hardened(tmp_path):
+    """The SNI-selected context carries the same TLS 1.2 floor as the
+    listener's default context — the hardening guarantee must not silently
+    drop away when a handshake swaps to the cloud cert."""
+    state = _install(tmp_path)
+    assert state.context.minimum_version == ssl.TLSVersion.TLSv1_2
+
+
 def test_install_invalid_input_raises_and_preserves_existing(tmp_path):
     """A bad renewal payload must not clobber the working cert on disk."""
     good = _install(tmp_path)

@@ -41,6 +41,27 @@ _RSA_KEY_SIZE = 2048
 _EXPIRY_WARNING_DAYS = 30
 
 
+# TLS 1.2 floor plus a modern ECDHE (GCM / CHACHA20) cipher suite. uvicorn's
+# default cipher string ("TLSv1") resolves to ZERO usable TLS 1.2 suites on
+# modern OpenSSL (SECLEVEL 2), which would leave the listener TLS-1.3-only and
+# unable to serve TLS-1.2-only clients (e.g. older Android panel tablets). This
+# restores TLS 1.2 while keeping 1.3 intact (TLS 1.3 suites are fixed and
+# unaffected by set_ciphers).
+TLS_CIPHERS = "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
+
+
+def harden_tls_context(context: ssl.SSLContext) -> None:
+    """Pin a TLS 1.2 floor and a modern cipher suite on a built SSLContext.
+
+    TLS 1.0/1.1 are never negotiated — a guarantee of ours, not an accident
+    of the stdlib default. Applied to every context this server serves TLS
+    with: the HTTPS listener's default (self-signed / provided) context and
+    the cloud-issued cert's SNI-selected context alike.
+    """
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.set_ciphers(TLS_CIPHERS)
+
+
 class TLSConfigError(Exception):
     """Raised when TLS is enabled but cannot be configured.
 
@@ -578,6 +599,7 @@ def _build_cloud_state(cert_path: Path, key_path: Path) -> CloudCertState:
         raise TLSConfigError("Cloud certificate has no DNS names")
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    harden_tls_context(context)
     try:
         # Loads the whole chain from the PEM (leaf + intermediates) and
         # verifies the key pairs with the leaf.

@@ -698,25 +698,17 @@ def _build_redirect_app(tls_port: int):
     ])
 
 
-# TLS 1.2 floor plus a modern ECDHE (GCM / CHACHA20) cipher suite. uvicorn's
-# default cipher string ("TLSv1") resolves to ZERO usable TLS 1.2 suites on
-# modern OpenSSL (SECLEVEL 2), which would leave the listener TLS-1.3-only and
-# unable to serve TLS-1.2-only clients (e.g. older Android panel tablets). This
-# restores TLS 1.2 while keeping 1.3 intact (TLS 1.3 suites are fixed and
-# unaffected by set_ciphers).
-_TLS_CIPHERS = "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
-
-
 def _harden_tls_context(context) -> None:
     """Pin a TLS 1.2 floor and a modern cipher suite on a built SSLContext.
 
     TLS 1.0/1.1 are never negotiated — a guarantee of ours, not an accident of
-    the stdlib default. Applied to the HTTPS listener's context in `_run_tls`.
+    the stdlib default. The logic lives in ``server.tls`` (one home) so the
+    cloud-issued cert's SNI-selected context gets the identical guarantee;
+    applied to the HTTPS listener's context in `_run_tls`.
     """
-    import ssl
+    from server import tls as tls_module
 
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.set_ciphers(_TLS_CIPHERS)
+    tls_module.harden_tls_context(context)
 
 
 async def _run_tls() -> None:
