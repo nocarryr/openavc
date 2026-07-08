@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power, Upload, FileCheck2, ChevronDown, ChevronRight, Copy, Smartphone } from "lucide-react";
+import { Save, AlertTriangle, Eye, EyeOff, RefreshCw, Download, Lock, Power, Upload, FileCheck2, ChevronDown, ChevronRight, Copy, Smartphone, ShieldCheck } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { copyToClipboard } from "../components/shared/clipboard";
@@ -10,6 +10,21 @@ import * as api from "../api/restClient";
 import type { SystemConfig, NetworkAdapter, TlsStatus, TlsUploadResult, SshStatus } from "../api/restClient";
 
 const REDACTED = "***";
+
+/** Friendly text for the typed error codes a failed certificate issuance
+ *  reports through tls-status. Unknown codes fall back to the raw code. */
+const CLOUD_CERT_ERROR_LABELS: Record<string, string> = {
+  rate_limited: "Too many certificate requests today — an automatic retry is scheduled.",
+  acme_failed: "The certificate authority could not complete issuance — an automatic retry is scheduled.",
+  dns_failed: "Certificate validation failed at the DNS step — an automatic retry is scheduled.",
+  not_available: "The cloud service does not offer trusted certificates for this system.",
+  busy: "A certificate request is already in progress.",
+  timeout: "No response from the cloud — an automatic retry is scheduled.",
+  install_failed: "The issued certificate could not be installed on this system.",
+  invalid_csr: "The cloud rejected the certificate request.",
+  invalid_enrollment: "The cloud sent an unexpected enrollment response.",
+  internal: "The cloud hit an internal error during issuance — an automatic retry is scheduled.",
+};
 
 const cardStyle: React.CSSProperties = {
   background: "var(--bg-surface)",
@@ -359,6 +374,38 @@ export function SystemSettingsView() {
     api.getTlsStatus().then(setTlsStatus).catch(() => setTlsStatus(null));
   }, []);
 
+  // Trusted-certificate (cloud-issued) card state. Issuance is asynchronous
+  // over the cloud connection, so after kicking it off we poll tls-status
+  // until the phase settles back to idle (success or typed error).
+  const [cloudCertBusy, setCloudCertBusy] = useState(false);
+  const cloudCertPollRef = useRef<number | null>(null);
+
+  const pollCloudCert = useCallback(() => {
+    if (cloudCertPollRef.current !== null) return;
+    let ticks = 0;
+    cloudCertPollRef.current = window.setInterval(async () => {
+      ticks += 1;
+      try {
+        const fresh = await api.getTlsStatus();
+        setTlsStatus(fresh);
+        const cc = fresh.cloud_cert;
+        if (!cc || cc.phase === "idle" || ticks > 60) {
+          window.clearInterval(cloudCertPollRef.current!);
+          cloudCertPollRef.current = null;
+        }
+      } catch {
+        if (ticks > 60 && cloudCertPollRef.current !== null) {
+          window.clearInterval(cloudCertPollRef.current);
+          cloudCertPollRef.current = null;
+        }
+      }
+    }, 2000);
+  }, []);
+
+  useEffect(() => () => {
+    if (cloudCertPollRef.current !== null) window.clearInterval(cloudCertPollRef.current);
+  }, []);
+
   useEffect(() => {
     api.getSystemConfig().then(setConfig).catch((e) => showError("Failed to load config: " + e));
     api.getSystemVersion().then((v) => setKioskAvailable(v.kiosk_available)).catch(() => {});
@@ -453,6 +500,58 @@ export function SystemSettingsView() {
       showError("SSH change failed: " + String(e));
     } finally {
       setSshBusy(false);
+    }
+  };
+
+  const handleGetTrustedCert = async () => {
+    if (cloudCertBusy) return;
+    setCloudCertBusy(true);
+    try {
+      if (!config?.tls?.enabled) {
+        // HTTPS is off: turn it on and record the enrollment intent in one
+        // save. After the restart the cloud connection sees the intent and
+        // installs the certificate on its own.
+        await api.updateSystemConfig({
+          tls: { enabled: true, cloud_cert: true },
+        } as unknown as Partial<SystemConfig>);
+        const fresh = await api.getSystemConfig();
+        setConfig(fresh);
+        loadTlsStatus();
+        showSuccess(
+          "HTTPS enabled. Restart to finish — the trusted certificate installs automatically after the restart."
+        );
+        setShowRestartPrompt(true);
+        return;
+      }
+      const r = await api.enableCloudCert();
+      if (r.started) {
+        showSuccess("Requesting a trusted certificate...");
+        loadTlsStatus();
+        pollCloudCert();
+      } else {
+        showSuccess(r.message || "Enrollment queued.");
+        loadTlsStatus();
+      }
+    } catch (e) {
+      showError("Could not start enrollment: " + String(e));
+    } finally {
+      setCloudCertBusy(false);
+    }
+  };
+
+  const handleDisableTrustedCert = async () => {
+    if (cloudCertBusy) return;
+    setCloudCertBusy(true);
+    try {
+      await api.disableCloudCert();
+      showSuccess("Trusted certificate turned off.");
+      loadTlsStatus();
+      const fresh = await api.getSystemConfig().catch(() => null);
+      if (fresh) setConfig(fresh);
+    } catch (e) {
+      showError("Could not turn off the trusted certificate: " + String(e));
+    } finally {
+      setCloudCertBusy(false);
     }
   };
 
@@ -551,6 +650,23 @@ export function SystemSettingsView() {
   const pageIsHttps = typeof window !== "undefined" && window.location.protocol === "https:";
   const switchingOff = pageIsHttps && tls && tls.enabled === false && config?.tls?.enabled === true;
   const switchingOn = !pageIsHttps && tls && tls.enabled === true && config?.tls?.enabled === false;
+
+  // Trusted-certificate card facts. The certified address encodes the IPv4
+  // the browser is using (dash-for-dot) under the certificate's wildcard;
+  // fall back to the first adapter IP when the page is open by hostname.
+  const cloudCert = tlsStatus?.cloud_cert ?? null;
+  const ipv4Re = /^\d{1,3}(\.\d{1,3}){3}$/;
+  const certHostIp = (() => {
+    const h = typeof window !== "undefined" ? window.location.hostname : "";
+    if (ipv4Re.test(h)) return h;
+    return adapters.find((a) => ipv4Re.test(a.ip))?.ip ?? null;
+  })();
+  const certTlsPort = tlsStatus?.port ?? tls?.port ?? 8443;
+  const certifiedUrl =
+    cloudCert?.hostname_suffix && certHostIp
+      ? `https://${certHostIp.split(".").join("-")}.${cloudCert.hostname_suffix}:${certTlsPort}/`
+      : null;
+  const certifiedFallbackUrl = certHostIp ? `https://${certHostIp}:${certTlsPort}/` : null;
 
   if (!config) {
     return (
@@ -1213,6 +1329,161 @@ export function SystemSettingsView() {
             </>
           )}
         </div>
+
+        {/* Trusted certificate (cloud-issued, browser-trusted — no warnings).
+            Prominent callout when paired-but-not-enrolled (this must be
+            impossible to miss); status card once enrolled. Hidden entirely
+            when there's no cloud pairing and nothing enrolled. */}
+        {cloudCert && (cloudCert.paired || cloudCert.enabled) && (
+          <div
+            style={{
+              ...cardStyle,
+              ...(cloudCert.paired && !cloudCert.enabled
+                ? {
+                    border: "1px solid rgba(76, 175, 80, 0.45)",
+                    background: "rgba(76, 175, 80, 0.06)",
+                  }
+                : {}),
+            }}
+          >
+            <h4 style={subCardTitle}>
+              <ShieldCheck
+                size={16}
+                style={{ verticalAlign: "text-bottom", marginRight: 6, color: "rgb(76, 175, 80)" }}
+              />
+              Trusted certificate
+            </h4>
+
+            {!cloudCert.enabled ? (
+              <>
+                <div style={subCardDescription}>
+                  Serve a real, browser-trusted HTTPS certificate for this system — no security
+                  warnings for anyone on this network, and nothing to install on devices. Included
+                  with your cloud pairing; the certificate issues and renews automatically.
+                </div>
+                {!config?.tls?.enabled && (
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: "var(--space-md)" }}>
+                    HTTPS is currently off. This turns it on (one restart), then the certificate
+                    installs automatically.
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleGetTrustedCert}
+                  disabled={cloudCertBusy}
+                  style={{ ...btnStyle, opacity: cloudCertBusy ? 0.5 : 1 }}
+                >
+                  <ShieldCheck size={14} />
+                  <span>
+                    {cloudCertBusy
+                      ? "Working..."
+                      : config?.tls?.enabled
+                        ? "Get a trusted certificate"
+                        : "Turn on HTTPS & get a trusted certificate"}
+                  </span>
+                </button>
+              </>
+            ) : (
+              <>
+                {cloudCert.phase !== "idle" ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", fontSize: "var(--font-size-sm)", marginBottom: "var(--space-md)" }}>
+                    <RefreshCw size={14} style={{ color: "var(--text-muted)" }} />
+                    <span>Requesting a certificate from the cloud... this usually takes under a minute.</span>
+                  </div>
+                ) : !tlsStatus?.enabled ? (
+                  <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", marginBottom: "var(--space-md)" }}>
+                    Waiting for HTTPS to start (restart pending). The trusted certificate will be
+                    served as soon as the HTTPS listener is running.
+                  </div>
+                ) : cloudCert.active ? (
+                  <div style={{ fontSize: "var(--font-size-sm)", lineHeight: 1.7, marginBottom: "var(--space-md)" }}>
+                    <div style={{ color: "rgb(76, 175, 80)", marginBottom: "var(--space-xs)" }}>
+                      Serving a trusted certificate for <code>*.{cloudCert.hostname_suffix}</code>
+                    </div>
+                    {certifiedUrl && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", flexWrap: "wrap" }}>
+                        <span>Certified address:</span>
+                        <code style={{ wordBreak: "break-all" }}>{certifiedUrl}</code>
+                        <button
+                          type="button"
+                          title="Copy certified address"
+                          onClick={() => { copyToClipboard(certifiedUrl).then((ok) => { if (ok) showSuccess("Copied."); }); }}
+                          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-secondary)", padding: 2, display: "inline-flex" }}
+                        >
+                          <Copy size={12} />
+                        </button>
+                      </div>
+                    )}
+                    {certifiedFallbackUrl && (
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        Manual fallback if a device can't resolve the certified address (no internet,
+                        or the router blocks it): <code>{certifiedFallbackUrl}</code> (shows the usual
+                        browser warning).
+                      </div>
+                    )}
+                    {cloudCert.expires_at && (
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        Expires {new Date(cloudCert.expires_at).toLocaleDateString()}
+                        {cloudCert.renews_at && (
+                          <> — renews automatically around {new Date(cloudCert.renews_at).toLocaleDateString()}</>
+                        )}
+                        .
+                      </div>
+                    )}
+                  </div>
+                ) : cloudCert.last_error ? (
+                  <div style={{ marginBottom: "var(--space-md)" }}>
+                    <div style={warningBox}>
+                      <AlertTriangle size={16} style={{ color: "rgb(255, 152, 0)", flexShrink: 0, marginTop: 2 }} />
+                      <span>
+                        {CLOUD_CERT_ERROR_LABELS[cloudCert.last_error] ?? `Issuance failed (${cloudCert.last_error}).`}
+                        {cloudCert.last_error_detail && (
+                          <>
+                            {" "}
+                            <span style={{ color: "var(--text-muted)" }}>{cloudCert.last_error_detail}</span>
+                          </>
+                        )}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleGetTrustedCert}
+                      disabled={cloudCertBusy}
+                      style={{ ...btnStyle, opacity: cloudCertBusy ? 0.5 : 1, marginTop: "var(--space-sm)" }}
+                    >
+                      <RefreshCw size={14} />
+                      <span>{cloudCertBusy ? "Working..." : "Try again now"}</span>
+                    </button>
+                  </div>
+                ) : !cloudCert.available ? (
+                  <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", marginBottom: "var(--space-md)" }}>
+                    Waiting for the cloud connection — the certificate installs automatically once
+                    this system is connected.
+                  </div>
+                ) : (
+                  <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-muted)", marginBottom: "var(--space-md)" }}>
+                    Preparing the certificate...
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleDisableTrustedCert}
+                  disabled={cloudCertBusy}
+                  style={{
+                    ...btnStyle,
+                    background: "transparent",
+                    border: "1px solid var(--border-color)",
+                    color: "var(--text-primary)",
+                    opacity: cloudCertBusy ? 0.5 : 1,
+                  }}
+                >
+                  Turn off trusted certificate
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Access */}
         <h3 style={sectionTitle}>Access</h3>

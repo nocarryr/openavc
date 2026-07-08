@@ -231,7 +231,7 @@ export interface SystemConfig {
   updates: { check_enabled: boolean; channel: string; auto_check_interval_hours: number; auto_backup_before_update: boolean; notify_only: boolean };
   cloud: { enabled: boolean; endpoint: string; system_key: string; system_id: string };
   kiosk: { enabled: boolean; target_url: string; cursor_visible: boolean };
-  tls: { enabled: boolean; port: number; auto_generate: boolean; cert_file: string; key_file: string; redirect_http: boolean };
+  tls: { enabled: boolean; port: number; auto_generate: boolean; cert_file: string; key_file: string; redirect_http: boolean; cloud_cert: boolean };
 }
 
 export async function getSystemVersion(): Promise<{
@@ -316,17 +316,66 @@ export interface TlsCertInfo {
   warnings: string[];
 }
 
+/** State of the cloud-issued trusted certificate (browser-trusted, no
+ *  warnings). Present even when TLS is off so the Settings callout can
+ *  offer the enable flow before HTTPS exists. */
+export interface CloudCertStatus {
+  /** The user opted in (tls.cloud_cert flag). */
+  enabled: boolean;
+  /** A cloud pairing exists on this system. */
+  paired: boolean;
+  /** Connected to the cloud and the session offers trusted certificates. */
+  available: boolean;
+  /** A valid cloud certificate is being served (via SNI) right now. */
+  active: boolean;
+  /** "<label>.<zone>" — the wildcard base of the certified hostname. */
+  hostname_suffix: string;
+  expires_at: string | null;
+  renews_at: string | null;
+  phase: "idle" | "enrolling" | "issuing";
+  /** Typed error code from the last failed issuance ("" when none). */
+  last_error: string;
+  last_error_detail: string;
+  last_attempt_at: string;
+  retry_pending: boolean;
+}
+
 export interface TlsStatus {
   enabled: boolean;
   port?: number;
   redirect_http?: boolean;
   mode?: "auto" | "provided";
   cert?: TlsCertInfo | null;
+  cloud_cert?: CloudCertStatus;
   error?: string;
 }
 
 export async function getTlsStatus(): Promise<TlsStatus> {
   return request<TlsStatus>("/system/tls-status");
+}
+
+export interface CloudCertEnableResult {
+  enabled: boolean;
+  started: boolean;
+  reason?: string;
+  message?: string;
+}
+
+/** Enroll for a cloud-issued trusted certificate, or retry after a failed
+ *  issuance (bypasses the daily retry backoff). Issuance is asynchronous —
+ *  poll getTlsStatus() until cloud_cert.phase returns to "idle". */
+export async function enableCloudCert(): Promise<CloudCertEnableResult> {
+  return request<CloudCertEnableResult>("/system/tls/cloud-cert/enable", {
+    method: "POST",
+  });
+}
+
+/** Turn the trusted certificate off: stops serving it, deletes it, and
+ *  notifies the cloud best-effort. Never blocked by cloud reachability. */
+export async function disableCloudCert(): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>("/system/tls/cloud-cert/disable", {
+    method: "POST",
+  });
 }
 
 /** Fetch the auto-generated CA cert so it can be installed on panel devices.

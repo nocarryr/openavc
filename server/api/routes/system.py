@@ -666,7 +666,7 @@ async def get_tls_status() -> dict[str, Any]:
     """Surface current TLS state for the Programmer IDE's Security card.
 
     Shape:
-      - TLS off: {"enabled": false}
+      - TLS off: {"enabled": false, cloud_cert: {...}}
       - TLS on:  {enabled, port, redirect_http, mode, cert: {...},
                   cloud_cert: {...}, [error]}
 
@@ -679,7 +679,10 @@ async def get_tls_status() -> dict[str, Any]:
     cloud_cert covers the cloud-issued trusted certificate: enabled (the
     user opted in), paired/available (a cloud pairing exists / the session
     offers the feature), active (currently served via SNI), hostname_suffix,
-    expires_at/renews_at, plus the issuance phase and last typed error.
+    expires_at/renews_at, plus the issuance phase and last typed error. It
+    is present even with TLS off — the Settings card's "get a trusted
+    certificate" callout (which starts by turning HTTPS on) needs the
+    pairing/enrollment state before HTTPS exists.
 
     Reads live config (not the import-time constants) so the Security card's
     immediate re-fetch after a PATCH reflects the just-saved cert/mode rather
@@ -689,7 +692,7 @@ async def get_tls_status() -> dict[str, Any]:
 
     sys_cfg = get_system_config()
     if not sys_cfg.get("tls", "enabled"):
-        return {"enabled": False}
+        return {"enabled": False, "cloud_cert": _cloud_cert_block(sys_cfg)}
 
     cert_file = str(sys_cfg.get("tls", "cert_file") or "")
     key_file = str(sys_cfg.get("tls", "key_file") or "")

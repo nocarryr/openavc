@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
+import { ShieldCheck } from "lucide-react";
 import { ViewContainer } from "../components/layout/ViewContainer";
 import { ConfirmDialog } from "../components/shared/ConfirmDialog";
 import { CopyButton } from "../components/shared/CopyButton";
+import { useNavigationStore } from "../store/navigationStore";
 import {
   getCloudStatus,
   cloudPair,
@@ -248,6 +250,33 @@ export function CloudSettingsView() {
             }}
           >
             {success}
+          </div>
+        )}
+        {/* Pairing-success next step: the trusted certificate is the thing a
+            fresh pairing unlocks — point at it right at the success moment. */}
+        {success?.startsWith("Paired successfully") && (
+          <div
+            style={{
+              ...cardStyle,
+              borderColor: "rgba(76, 175, 80, 0.45)",
+              background: "rgba(76, 175, 80, 0.06)",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: "var(--space-xs)", display: "flex", alignItems: "center", gap: 6 }}>
+              <ShieldCheck size={16} style={{ color: "rgb(76, 175, 80)" }} />
+              Next step: get a trusted certificate
+            </div>
+            <p style={{ ...helpTextStyle, marginTop: 0 }}>
+              Your cloud pairing can now issue this system a real, browser-trusted HTTPS
+              certificate — no more security warnings for anyone on this network, nothing to
+              install on devices, and it renews automatically.
+            </p>
+            <button
+              style={{ ...btnStyle, marginTop: "var(--space-sm)" }}
+              onClick={() => useNavigationStore.getState().navigateTo("settings")}
+            >
+              Open Security settings
+            </button>
           </div>
         )}
 

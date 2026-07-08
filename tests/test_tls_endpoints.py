@@ -91,7 +91,12 @@ def test_tls_status_off(client, monkeypatch):
     _set_cfg(monkeypatch, "tls", enabled=False)
     resp = client.get("/api/system/tls-status")
     assert resp.status_code == 200
-    assert resp.json() == {"enabled": False}
+    body = resp.json()
+    assert body["enabled"] is False
+    # cloud_cert is present even with TLS off — the Settings enrollment
+    # callout needs the pairing state before HTTPS is turned on.
+    assert "cloud_cert" in body
+    assert body["cloud_cert"]["active"] is False
 
 
 def test_tls_status_on_auto(client, monkeypatch, tls_dir):
