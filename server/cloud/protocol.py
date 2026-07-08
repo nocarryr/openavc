@@ -54,6 +54,8 @@ AI_TOOL_RESULT = "ai_tool_result"
 PROJECT_DATA = "project_data"
 DEVICE_COMMANDS_DATA = "device_commands_data"
 GAP_REPORT = "gap_report"
+CERT_REQUEST = "cert_request"
+CERT_STATUS = "cert_status"
 
 # Steady-state downstream (cloud → agent)
 ACK = "ack"
@@ -75,6 +77,8 @@ ALERT_RULES_UPDATE = "alert_rules_update"
 AI_TOOL_CALL = "ai_tool_call"
 GET_PROJECT = "get_project"
 GET_DEVICE_COMMANDS = "get_device_commands"
+CERT_RESULT = "cert_result"
+CERT_RENEW_DUE = "cert_renew_due"
 
 # Sets for validation
 HANDSHAKE_TYPES = {
@@ -86,6 +90,7 @@ UPSTREAM_TYPES = {
     HEARTBEAT, STATE_BATCH, ALERT, ALERT_RESOLVED, LOG,
     COMMAND_RESULT, TUNNEL_READY, TUNNEL_FAILED, DIAGNOSTIC_RESULT, PONG,
     AI_TOOL_RESULT, PROJECT_DATA, DEVICE_COMMANDS_DATA, GAP_REPORT,
+    CERT_REQUEST, CERT_STATUS,
 }
 
 DOWNSTREAM_TYPES = {
@@ -93,7 +98,7 @@ DOWNSTREAM_TYPES = {
     CAPABILITIES_UPDATE, THROTTLE, ERROR, COMMAND, CONFIG_PUSH,
     DIAGNOSTIC, SOFTWARE_UPDATE, TUNNEL_OPEN, TUNNEL_CLOSE,
     RESTART, PING, ALERT_RULES_UPDATE, AI_TOOL_CALL,
-    GET_PROJECT, GET_DEVICE_COMMANDS,
+    GET_PROJECT, GET_DEVICE_COMMANDS, CERT_RESULT, CERT_RENEW_DUE,
 }
 
 # Message priority for buffer overflow (lower = dropped first)
@@ -111,6 +116,8 @@ MESSAGE_PRIORITY = {
     PROJECT_DATA: 5,
     DEVICE_COMMANDS_DATA: 5,
     GAP_REPORT: 7,
+    CERT_REQUEST: 5,
+    CERT_STATUS: 5,
     PONG: 6,
     # Downstream message priorities (for buffer overflow decisions)
     SESSION_ROTATE: 10,  # Highest — must never be dropped
@@ -129,6 +136,8 @@ MESSAGE_PRIORITY = {
     ALERT_RULES_UPDATE: 4,
     AI_TOOL_CALL: 5,
     GET_PROJECT: 5,
+    CERT_RESULT: 5,
+    CERT_RENEW_DUE: 4,
     THROTTLE: 3,
     ERROR: 3,
 }

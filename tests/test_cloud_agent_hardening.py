@@ -71,6 +71,7 @@ def _bare_agent() -> CloudAgent:
     agent._tunnel_handler = None
     agent._state_relay = None
     agent._alert_monitor = None
+    agent._cert_manager = None
     agent._ws = None
     agent._session = None
     agent._sig_failure_count = 0

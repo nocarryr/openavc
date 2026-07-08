@@ -26,6 +26,7 @@ from server.cloud.protocol import (
     COMMAND, CONFIG_PUSH, RESTART, DIAGNOSTIC,
     SOFTWARE_UPDATE, TUNNEL_OPEN, TUNNEL_CLOSE, ALERT_RULES_UPDATE,
     AI_TOOL_CALL, GAP_REPORT, GET_PROJECT, GET_DEVICE_COMMANDS,
+    CERT_RESULT, CERT_RENEW_DUE,
     build_pong, build_signed_message,
     parse_message, is_handshake_message,
     extract_payload, ProtocolError,
@@ -66,6 +67,7 @@ DEFAULT_CAPABILITIES = [
     "fleet_update",
     "diagnostics",
     "tunnel",
+    "trusted_certs",
 ]
 
 # Downstream messages that require a specific capability before the agent will
@@ -94,6 +96,11 @@ _CAPABILITY_GATED: dict[str, str] = {
     "command": "remote_access",
     "config_push": "remote_access",
     "restart": "remote_access",
+    # Renewal nudges are cloud-initiated; if the plan/session doesn't include
+    # trusted certs, don't act on them. `cert_result` stays ungated — it only
+    # answers a request this agent chose to send, and without the in-memory
+    # pending key a pushed chain can't install anything anyway.
+    "cert_renew_due": "trusted_certs",
 }
 
 
@@ -156,6 +163,7 @@ class CloudAgent:
         self._ai_tool_handler: Any = None  # AIToolHandler
         self._alert_monitor: Any = None  # AlertMonitor
         self._tunnel_handler: Any = None  # TunnelHandler
+        self._cert_manager: Any = None  # CertificateManager
 
         # Tasks
         self._recv_task: asyncio.Task | None = None
@@ -328,6 +336,8 @@ class CloudAgent:
             await self._state_relay.stop()
         if self._alert_monitor:
             await self._alert_monitor.stop()
+        if self._cert_manager:
+            await self._cert_manager.stop()
 
         # Close WebSocket
         if self._ws:
@@ -545,6 +555,11 @@ class CloudAgent:
             if self._alert_monitor and self._config["features"].get("alerts_enabled"):
                 await self._alert_monitor.start()
 
+            # Trusted-certificate connect-time self-check (renews certs for
+            # instances that were offline through their renewal window).
+            if self._cert_manager:
+                await self._cert_manager.start()
+
             # Run until either steady-state task finishes (a clean disconnect
             # returns from the receive loop; an error raises), then re-raise the
             # first real error to drive reconnect.
@@ -557,6 +572,8 @@ class CloudAgent:
                 await self._state_relay.stop()
             if self._alert_monitor:
                 await self._alert_monitor.stop()
+            if self._cert_manager:
+                await self._cert_manager.stop()
             if self._ws:
                 try:
                     await self._ws.close()
@@ -789,6 +806,16 @@ class CloudAgent:
                 await self._command_handler.handle(msg)
             else:
                 log.info(f"Cloud agent: received {msg_type} but no command handler")
+        elif msg_type == CERT_RESULT:
+            if self._cert_manager:
+                await self._cert_manager.handle_cert_result(msg)
+            else:
+                log.info("Cloud agent: received cert_result but no certificate manager")
+        elif msg_type == CERT_RENEW_DUE:
+            if self._cert_manager:
+                await self._cert_manager.handle_renew_due(msg)
+            else:
+                log.info("Cloud agent: received cert_renew_due but no certificate manager")
         else:
             log.warning(f"Cloud agent: unknown message type '{msg_type}'")
 
@@ -1042,7 +1069,25 @@ class CloudAgent:
         """Wire the tunnel handler subsystem."""
         self._tunnel_handler = handler
 
+    def set_cert_manager(self, manager: Any) -> None:
+        """Wire the trusted-certificate manager subsystem."""
+        self._cert_manager = manager
+
+    @property
+    def cert_manager(self) -> Any:
+        """The trusted-certificate manager (None when not wired)."""
+        return self._cert_manager
+
     # --- Status ---
+
+    @property
+    def connected(self) -> bool:
+        """True while a session is established and steady state is running."""
+        return self._connected
+
+    def has_capability(self, capability: str) -> bool:
+        """True if the current session negotiated the given capability."""
+        return capability in self._enabled_capabilities
 
     def get_status(self) -> dict[str, Any]:
         """Return cloud agent status info."""

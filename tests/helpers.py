@@ -52,12 +52,15 @@ def make_cloud_cert_pem(
     *,
     expired: bool = False,
     dns_sans: list[str] | None = None,
+    age_days: int = 0,
+    lifetime_days: int = 60,
 ) -> tuple[bytes, bytes]:
     """Build a cloud-style wildcard cert + key PEM pair for TLS tests.
 
     Self-signed stand-in for a cloud-issued certificate: SANs default to
     exactly ``{*.label.zone, label.zone}``, overridable via ``dns_sans``.
-    Returns ``(cert_pem, key_pem)`` bytes.
+    ``age_days``/``lifetime_days`` position the validity window (e.g. an old
+    cert deep in its renewal window). Returns ``(cert_pem, key_pem)`` bytes.
     """
     import datetime as dt
 
@@ -71,7 +74,12 @@ def make_cloud_cert_pem(
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = dt.datetime.now(dt.timezone.utc)
-    not_after = now - dt.timedelta(days=1) if expired else now + dt.timedelta(days=60)
+    if expired:
+        not_before = now - dt.timedelta(days=90, minutes=5)
+        not_after = now - dt.timedelta(days=1)
+    else:
+        not_before = now - dt.timedelta(days=age_days, minutes=5)
+        not_after = not_before + dt.timedelta(days=lifetime_days)
     subject = x509.Name(
         [x509.NameAttribute(NameOID.COMMON_NAME, f"{label}.{zone}")]
     )
@@ -81,7 +89,7 @@ def make_cloud_cert_pem(
         .issuer_name(subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - dt.timedelta(days=90 if expired else 0, minutes=5))
+        .not_valid_before(not_before)
         .not_valid_after(not_after)
         .add_extension(
             x509.SubjectAlternativeName([x509.DNSName(n) for n in dns_sans]),
@@ -96,3 +104,35 @@ def make_cloud_cert_pem(
         encryption_algorithm=serialization.NoEncryption(),
     )
     return cert_pem, key_pem
+
+
+def sign_csr_like_cloud(csr_pem: str, *, lifetime_days: int = 90) -> bytes:
+    """Issue a cert for a CSR the way the cloud would (test stand-in).
+
+    Self-signs with a throwaway CA key over the CSR's public key and SANs.
+    Returns the certificate PEM bytes — pair it with the CSR's private key.
+    """
+    import datetime as dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    csr = x509.load_pem_x509_csr(csr_pem.encode())
+    san = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Issuing CA")])
+    now = dt.datetime.now(dt.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(issuer)
+        .public_key(csr.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=5))
+        .not_valid_after(now + dt.timedelta(days=lifetime_days))
+        .add_extension(san, critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)

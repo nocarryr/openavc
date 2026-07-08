@@ -1891,6 +1891,11 @@ class Engine:
             tunnel_handler = TunnelHandler(self.cloud_agent)
             self.cloud_agent.set_tunnel_handler(tunnel_handler)
 
+            from server.cloud.cert_manager import CertificateManager
+            from server.system_config import get_system_config
+            cert_manager = CertificateManager(self.cloud_agent, get_system_config())
+            self.cloud_agent.set_cert_manager(cert_manager)
+
             # Connect (runs in background)
             await self.cloud_agent.connect()
             log.info("Cloud agent: initialized and connecting")
