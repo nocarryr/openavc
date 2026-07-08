@@ -659,6 +659,27 @@ def _build_redirect_app(tls_port: int):
     ])
 
 
+# TLS 1.2 floor plus a modern ECDHE (GCM / CHACHA20) cipher suite. uvicorn's
+# default cipher string ("TLSv1") resolves to ZERO usable TLS 1.2 suites on
+# modern OpenSSL (SECLEVEL 2), which would leave the listener TLS-1.3-only and
+# unable to serve TLS-1.2-only clients (e.g. older Android panel tablets). This
+# restores TLS 1.2 while keeping 1.3 intact (TLS 1.3 suites are fixed and
+# unaffected by set_ciphers).
+_TLS_CIPHERS = "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
+
+
+def _harden_tls_context(context) -> None:
+    """Pin a TLS 1.2 floor and a modern cipher suite on a built SSLContext.
+
+    TLS 1.0/1.1 are never negotiated — a guarantee of ours, not an accident of
+    the stdlib default. Applied to the HTTPS listener's context in `_run_tls`.
+    """
+    import ssl
+
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.set_ciphers(_TLS_CIPHERS)
+
+
 async def _run_tls() -> None:
     """Run the TLS listener (and optional HTTP redirect listener) concurrently.
 
@@ -693,6 +714,12 @@ async def _run_tls() -> None:
         reload=False,
         log_level="info",
     )
+    # uvicorn builds the SSLContext from the cert/key when the config loads;
+    # load it here so we can harden the built context directly (Server.serve()
+    # then reuses it rather than rebuilding).
+    main_config.load()
+    if main_config.ssl is not None:
+        _harden_tls_context(main_config.ssl)
     main_server = uvicorn.Server(main_config)
     tasks: list[asyncio.Task] = [asyncio.create_task(main_server.serve())]
 

@@ -30,7 +30,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from server import tls
-from server.main import _build_redirect_app
+from server.main import _build_redirect_app, _harden_tls_context
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +108,36 @@ def cert_paths(tmp_path: Path) -> tuple[Path, Path]:
 # ---------------------------------------------------------------------------
 # Integration tests
 # ---------------------------------------------------------------------------
+
+
+def test_harden_tls_context_pins_1_2_floor_and_keeps_1_2_ciphers(cert_paths):
+    """`_harden_tls_context` (the exact logic `_run_tls` applies) must enforce a
+    TLS 1.2 floor AND leave usable TLS 1.2 ciphers.
+
+    The second half is the real regression guard: uvicorn's default cipher
+    string resolves to zero TLS 1.2 suites on modern OpenSSL, which would make
+    the listener TLS-1.3-only and break TLS-1.2-only clients (older Android
+    panels). Build the context the way uvicorn does (Config.load), then harden.
+    """
+    import ssl
+
+    cert_path, key_path = cert_paths
+    cfg = uvicorn.Config(
+        _make_test_app(),
+        host="127.0.0.1",
+        port=_free_port(),
+        ssl_certfile=str(cert_path),
+        ssl_keyfile=str(key_path),
+        log_level="warning",
+    )
+    cfg.load()
+    assert cfg.ssl is not None
+
+    _harden_tls_context(cfg.ssl)
+
+    assert cfg.ssl.minimum_version == ssl.TLSVersion.TLSv1_2
+    tls12 = [c for c in cfg.ssl.get_ciphers() if c["protocol"] == "TLSv1.2"]
+    assert tls12, "no usable TLS 1.2 ciphers — TLS-1.2-only clients would fail"
 
 
 @pytest.mark.asyncio
