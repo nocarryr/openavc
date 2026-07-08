@@ -318,7 +318,10 @@ def test_patch_log_level_applies_live(client, isolated_config):
 
 def test_tls_status_reflects_live_config(client, isolated_config):
     c, engine = client
-    assert c.get("/api/system/tls-status").json() == {"enabled": False}
+    off_body = c.get("/api/system/tls-status").json()
+    assert off_body["enabled"] is False
+    # cloud_cert rides along even with TLS off (Settings enrollment callout).
+    assert off_body["cloud_cert"]["active"] is False
 
     resp = c.patch("/api/system/config", json={"tls": {"enabled": True, "auto_generate": True}})
     assert resp.status_code == 200
