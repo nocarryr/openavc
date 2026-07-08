@@ -50,6 +50,8 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 | **19872** | UDP | ISC auto-discovery (multi-instance setups only) | No |
 | **8189** | UDP | WebRTC media for the Video Panel plugin (live camera/RTSP streams on the panel) | Only when the Video Panel plugin is installed and a panel is viewing a stream |
 | **8190** | UDP | WebRTC media for the Present plugin (wireless presentation) | Only when the Present plugin is installed and someone is presenting or a display is connected |
+| **8554** | TCP (RTSP) | Present plugin stream-display output — hardware decoders pull the presentation stream | Only when the Present plugin is installed and a stream display uses RTSP |
+| **8899** | UDP (SRT) | Present plugin stream-display output — same stream over SRT | Only when the Present plugin is installed and a stream display uses SRT |
 | **22** | TCP (SSH) | Remote console login — Raspberry Pi appliance image only | No — ships disabled; operator-enabled in Settings > Security |
 
 **Port 8080** is the only port that must be accessible for a standard single-room deployment when HTTPS is off (the default). This is configurable via the `OPENAVC_PORT` environment variable or `system.json`.
@@ -64,7 +66,9 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 
 The Video Panel plugin can also show the built-in preview stream of an AV-over-IP encoder (for example a TurtleAV Chazy encoder), which appears on the panel automatically once its controller is connected. These preview streams usually live on the AV/video network, which is commonly a separate VLAN from the control network. The OpenAVC **host** fetches the preview and passes it to the panel over the host's normal web port, so no extra inbound port is needed on the panel side. What is required is that the OpenAVC host can route to the encoder's video network. A host with a second network interface on the AV fabric is the typical arrangement. The panel browser never connects to the video network directly.
 
-**Port 8190** is opened only when the optional Present plugin (wireless presentation) is installed. Present carries video over WebRTC in both directions: a presenter's laptop sends its screen-share media to UDP 8190 on the OpenAVC host, and the devices driving the space's displays receive video from the same port. As with the Video Panel port, same-subnet traffic usually works without changes; if presenters or display devices are on a different VLAN or subnet — presenters on a guest wireless network is the common case — allow inbound UDP 8190 to the OpenAVC host from those networks. The signaling and the join pages ride the normal web ports (8080/8443); no other port is involved. The port is only active while the plugin is running, and it is never opened if the plugin is not installed.
+**Port 8190** is opened only when the optional Present plugin (wireless presentation) is installed. Present carries video over WebRTC in both directions: a presenter's laptop sends its screen-share media to UDP 8190 on the OpenAVC host, and the devices driving the space's displays receive video from the same port. As with the Video Panel port, same-subnet traffic usually works without changes; if presenters or display devices are on a different VLAN or subnet — presenters on a guest wireless network is the common case — allow inbound UDP 8190 to the OpenAVC host from those networks. The signaling and the join pages ride the normal web ports (8080/8443). The port is only active while the plugin is running, and it is never opened if the plugin is not installed.
+
+**Ports 8554 and 8899** also belong to the Present plugin and serve its *stream displays*: a hardware IP decoder at a display pulls a continuous presentation stream from the OpenAVC host over RTSP (TCP 8554, TCP-interleaved — no UDP RTP port range) or SRT (UDP 8899). Only decoders need to reach these ports, and only the space's own output streams can be pulled from them: each stream URL embeds a per-display secret key, reads are limited to those output paths, and nothing can be published to the host through these ports without internal credentials that never leave the machine. If a decoder sits on an AV VLAN, allow it inbound TCP 8554 or UDP 8899 to the OpenAVC host (pick the protocol the decoder uses). Like the WebRTC port, these listeners exist only while the plugin runs. A space that uses only browser displays never has a decoder pulling from them, and they can stay blocked.
 
 The application itself does not listen on any other ports by default: no SNMP agent, no embedded database port, and no proprietary discovery protocol that accepts inbound connections. The Raspberry Pi appliance image can optionally run an SSH server (port 22) for remote console access, but it ships **disabled** — an operator turns it on in Settings > Security when it is needed (see [Raspberry Pi appliance](#raspberry-pi-appliance-login-and-ssh) below).
 
@@ -395,6 +399,17 @@ Add to the minimum rules:
 | Driver-declared UDP probes | Outbound + Inbound | OpenAVC host | Subnet broadcast | Vendor-specific | If installed drivers declare a `udp_probe:` or sibling `_discovery.py` Python companion |
 | Driver-declared TCP probes | Outbound | OpenAVC host | Live hosts with port open | Vendor-specific | If installed drivers declare a `tcp_probe:` |
 | Update checks | Outbound | OpenAVC host | api.github.com | 443/tcp | HTTPS |
+
+### With media plugins (Video Panel / Present)
+
+Add for the optional media plugins actually installed:
+
+| Rule | Direction | Source | Destination | Port | Protocol |
+|------|-----------|--------|-------------|------|----------|
+| Video Panel WebRTC media | Inbound | Panel devices | OpenAVC host | 8189/udp | WebRTC (Video Panel plugin) |
+| Present WebRTC media | Inbound | Presenter laptops + display devices | OpenAVC host | 8190/udp | WebRTC (Present plugin) |
+| Present stream display (RTSP) | Inbound | Hardware decoders | OpenAVC host | 8554/tcp | RTSP, TCP-interleaved (Present plugin) |
+| Present stream display (SRT) | Inbound | Hardware decoders | OpenAVC host | 8899/udp | SRT (Present plugin) |
 
 ### With cloud platform
 

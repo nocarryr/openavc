@@ -95,6 +95,18 @@ function displayUrl(display: PresentDisplay): string {
   return `${window.location.origin}${display.display_path}`;
 }
 
+// Stream displays are pulled straight from the media helper's LAN listeners.
+// The plugin supplies the path (stream key included) and ports; the host is
+// whatever this browser reached the server on — the best default a copyable
+// URL can have.
+function rtspUrl(display: PresentDisplay): string {
+  return `rtsp://${window.location.hostname}:${display.rtsp_port ?? 8554}/${display.stream_path ?? ""}`;
+}
+
+function srtUrl(display: PresentDisplay): string {
+  return `srt://${window.location.hostname}:${display.srt_port ?? 8899}?streamid=read:${display.stream_path ?? ""}`;
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
@@ -116,6 +128,7 @@ function DisplayForm({
   const [label, setLabel] = useState(display?.label ?? "");
   const [displayId, setDisplayId] = useState(display?.id ?? "");
   const [idTouched, setIdTouched] = useState(!!display);
+  const [kind, setKind] = useState(display?.kind ?? "browser");
   const [saving, setSaving] = useState(false);
 
   const effectiveId = (idTouched ? displayId : slugify(label)).trim();
@@ -125,7 +138,7 @@ function DisplayForm({
     if (!valid) return;
     setSaving(true);
     try {
-      const payload = { label: label.trim(), display_id: effectiveId };
+      const payload = { label: label.trim(), display_id: effectiveId, kind };
       if (display) await presentApi.updateDisplay(display.id, payload);
       else await presentApi.createDisplay(payload);
       showSuccess(display ? "Display updated." : "Display added.");
@@ -159,10 +172,25 @@ function DisplayForm({
             }}
           />
         </Field>
+        <Field label="Type">
+          <select style={{ ...inputStyle, cursor: "pointer" }} value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="browser">Browser — a device opens the display link in a browser</option>
+            <option value="stream">Stream — a hardware decoder pulls an RTSP/SRT address</option>
+          </select>
+        </Field>
+        {kind === "stream" && (!display || display.kind !== "stream") && (
+          <p style={{ margin: 0, fontSize: "var(--font-size-sm)", color: "var(--text-muted)", lineHeight: 1.5 }}>
+            A stream display runs a continuous encoder on this server and
+            publishes RTSP and SRT addresses for a decoder to pull. Expect
+            about a second of latency; use a browser display where latency
+            matters most.
+          </p>
+        )}
         {display && effectiveId !== display.id && (
           <p style={{ margin: 0, fontSize: "var(--font-size-sm)", color: "var(--color-warning, #b26a00)" }}>
-            Changing the display ID changes its display link. Any device
-            already using the old link will need the new one.
+            Changing the display ID changes its display link
+            {display.kind === "stream" ? " and its stream addresses" : ""}. Any
+            device already using the old one will need the new one.
           </p>
         )}
       </div>
@@ -298,8 +326,13 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
     const d = rekeying;
     setRekeying(null);
     try {
-      await presentApi.regenerateKey(d.id);
-      showSuccess(`New display link created for "${d.label}".`);
+      if (d.kind === "stream") {
+        await presentApi.regenerateStreamKey(d.id);
+        showSuccess(`New stream addresses created for "${d.label}".`);
+      } else {
+        await presentApi.regenerateKey(d.id);
+        showSuccess(`New display link created for "${d.label}".`);
+      }
       refresh(true);
       syncProjectStore();
     } catch (err) {
@@ -434,73 +467,133 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
           <div style={{ padding: "var(--space-lg)", color: "var(--text-muted)", fontSize: "var(--font-size-sm)" }}>Loading displays...</div>
         ) : displays.length === 0 ? (
           <div style={{ padding: "var(--space-lg)", color: "var(--text-muted)", fontSize: "var(--font-size-sm)" }}>
-            No displays yet. Add one, then open its display link on the device
-            driving that screen.
+            No displays yet. Add one, then open its display link in a browser
+            on the device driving that screen — or add a stream display and
+            point a hardware decoder at its address.
           </div>
         ) : (
           displays.map((d, i) => (
             <div
               key={d.id}
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "var(--space-md)",
                 padding: "var(--space-sm) var(--space-md)",
                 borderTop: i === 0 ? "none" : "1px solid var(--border-color)",
               }}
             >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-primary)" }}>{d.label}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.id}</span>
-                  <CopyButton value={displayUrl(d)} title="Copy display link" />
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: "var(--font-size-sm)", color: "var(--text-primary)" }}>{d.label}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.id}</span>
+                    {d.kind !== "stream" && <CopyButton value={displayUrl(d)} title="Copy display link" />}
+                  </div>
                 </div>
+                <span
+                  title={d.showing ? `Showing ${d.showing}` : "Showing the connect card"}
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                    flexShrink: 0,
+                    color: d.output_state === "live" ? "var(--color-success, #2e7d32)" : "var(--text-muted)",
+                  }}
+                >
+                  {d.output_state === "live" ? `Live: ${d.showing}` : "Idle"}
+                </span>
+                <SourceSelect display={d} status={status} onRouted={() => refresh(true)} />
+                {d.kind !== "stream" && (
+                  <button
+                    onClick={() => window.open(displayUrl(d), "_blank", "noopener")}
+                    title="Open display page"
+                    style={iconBtnStyle}
+                  >
+                    <ExternalLink size={15} />
+                  </button>
+                )}
+                <button
+                  onClick={() => setRekeying(d)}
+                  title={d.kind === "stream" ? "Regenerate stream key" : "Regenerate display link"}
+                  style={iconBtnStyle}
+                >
+                  <KeyRound size={15} />
+                </button>
+                <button onClick={() => setEditing(d)} title="Edit" style={iconBtnStyle}>
+                  <Pencil size={15} />
+                </button>
+                <button onClick={() => setDeleting(d)} title="Remove" style={iconBtnStyle}>
+                  <Trash2 size={15} />
+                </button>
               </div>
-              <span
-                title={d.showing ? `Showing ${d.showing}` : "Showing the connect card"}
-                style={{
-                  fontSize: 10,
-                  fontWeight: 600,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.5px",
-                  flexShrink: 0,
-                  color: d.output_state === "live" ? "var(--color-success, #2e7d32)" : "var(--text-muted)",
-                }}
-              >
-                {d.output_state === "live" ? `Live: ${d.showing}` : "Idle"}
-              </span>
-              <SourceSelect display={d} status={status} onRouted={() => refresh(true)} />
-              <button
-                onClick={() => window.open(displayUrl(d), "_blank", "noopener")}
-                title="Open display page"
-                style={iconBtnStyle}
-              >
-                <ExternalLink size={15} />
-              </button>
-              <button onClick={() => setRekeying(d)} title="Regenerate display link" style={iconBtnStyle}>
-                <KeyRound size={15} />
-              </button>
-              <button onClick={() => setEditing(d)} title="Edit" style={iconBtnStyle}>
-                <Pencil size={15} />
-              </button>
-              <button onClick={() => setDeleting(d)} title="Remove" style={iconBtnStyle}>
-                <Trash2 size={15} />
-              </button>
+              {d.kind === "stream" && (
+                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+                  {[
+                    ["RTSP", rtspUrl(d), "Copy RTSP address"],
+                    ["SRT", srtUrl(d), "Copy SRT address"],
+                  ].map(([proto, url, copyTitle]) => (
+                    <div key={proto} style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          letterSpacing: "0.5px",
+                          color: "var(--text-muted)",
+                          width: 32,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {proto}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontFamily: "var(--font-mono)",
+                          color: "var(--text-secondary)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          minWidth: 0,
+                        }}
+                      >
+                        {url}
+                      </span>
+                      <CopyButton value={url} title={copyTitle} />
+                    </div>
+                  ))}
+                  {d.encoder_state && !["idle", "live"].includes(d.encoder_state) && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color:
+                          d.encoder_state === "starting"
+                            ? "var(--text-muted)"
+                            : "var(--color-warning, #b26a00)",
+                      }}
+                    >
+                      {d.encoder_state === "starting"
+                        ? "Encoder starting — the stream appears in a few seconds…"
+                        : d.encoder_state === "error"
+                          ? "Encoder error — check the System Log."
+                          : "Encoder stopped."}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           ))
         )}
       </div>
 
       <p style={{ marginTop: "var(--space-md)", fontSize: "var(--font-size-sm)", color: "var(--text-muted)", lineHeight: 1.5 }}>
-        Each display has its own link that shows the connect card and the
-        routed presenter. Copy it with the icon next to the display ID and
-        open it, full screen, in a browser on the device driving that screen.
-        The link includes the display&apos;s key — treat it like a password.
-        Source picks what a display shows: Auto follows the active presenter;
-        pinning a presenter holds their screen there. If the connect address
-        above isn&apos;t reachable from guests&apos; laptops (multiple
-        networks, VLANs), set Join Address in the plugin&apos;s configuration
-        below.
+        A browser display has a link to open, full screen, in a browser on
+        the device driving that screen. A stream display instead shows RTSP
+        and SRT addresses for a hardware decoder to pull. Both carry a
+        secret (the link&apos;s key, the address&apos;s stream key) — treat
+        them like passwords; the key button issues new ones. Source picks
+        what a display shows: Auto follows the active presenter; pinning a
+        presenter holds their screen there. If the connect address above
+        isn&apos;t reachable from guests&apos; laptops (multiple networks,
+        VLANs), set Join Address in the plugin&apos;s configuration below.
       </p>
 
       {editing && (
@@ -526,8 +619,12 @@ export function PresentManagementPanel({ running }: { running: boolean }) {
       )}
       {rekeying && (
         <ConfirmDialog
-          title="Regenerate display link"
-          message={`Create a new display link for "${rekeying.label}"? Every copy of the current link stops working immediately, including the device that is using it right now.`}
+          title={rekeying.kind === "stream" ? "Regenerate stream key" : "Regenerate display link"}
+          message={
+            rekeying.kind === "stream"
+              ? `Create new stream addresses for "${rekeying.label}"? The current RTSP and SRT addresses stop working immediately — every decoder pulling them must be given the new address.`
+              : `Create a new display link for "${rekeying.label}"? Every copy of the current link stops working immediately, including the device that is using it right now.`
+          }
           confirmLabel="Regenerate"
           destructive
           onConfirm={confirmRekey}

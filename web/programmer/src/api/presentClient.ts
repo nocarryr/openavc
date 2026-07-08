@@ -6,11 +6,17 @@ import { request } from "./base";
 export interface PresentDisplay {
   id: string;
   label: string;
+  kind: string; // "browser" (Display page) | "stream" (decoder pulls RTSP/SRT)
   display_key: string;
   display_path: string; // site-relative Display URL (key included)
   source: string; // routing assignment: "auto" or a pinned presenter
   showing: string; // who it is actually showing ("" = the connect card)
   output_state: string; // idle | live
+  // Stream displays only:
+  stream_path?: string; // sidecar path with the stream key baked in (out/<id>-<key>)
+  rtsp_port?: number;
+  srt_port?: number;
+  encoder_state?: string; // stopped | starting | idle | live | error
 }
 
 export interface PresentPresenter {
@@ -39,6 +45,7 @@ export interface PresentStatus {
 export interface DisplayInput {
   label: string;
   display_id?: string;
+  kind?: string; // "browser" | "stream"
 }
 
 const EXT = "/plugins/present/ext";
@@ -73,6 +80,12 @@ export function deleteDisplay(displayId: string): Promise<{ ok: boolean; display
 
 export function regenerateKey(displayId: string): Promise<PresentDisplay> {
   return request<PresentDisplay>(`${EXT}/displays/${encodeURIComponent(displayId)}/regenerate_key`, {
+    method: "POST",
+  });
+}
+
+export function regenerateStreamKey(displayId: string): Promise<PresentDisplay> {
+  return request<PresentDisplay>(`${EXT}/displays/${encodeURIComponent(displayId)}/regenerate_stream_key`, {
     method: "POST",
   });
 }

@@ -32,10 +32,13 @@ FROM python:3.12-slim
 # requiring a host-level `net.ipv4.ping_group_range` sysctl change. Requires
 # `cap_add: NET_RAW` in the compose file so the capability survives in the
 # container's bounding set.
+# fonts-dejavu-core: plugins that render text into video (wireless
+# presentation connect cards) need at least one system font; slim ships none.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iputils-ping \
     iproute2 \
     libcap2-bin \
+    fonts-dejavu-core \
     && setcap cap_net_raw+ep /usr/bin/ping \
     && rm -rf /var/lib/apt/lists/*
 
