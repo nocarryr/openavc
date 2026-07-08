@@ -48,6 +48,7 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 | **8443** | TCP (HTTPS) | Web interface and REST API over TLS | Only when HTTPS is enabled in Settings > Security |
 | **19500** | TCP (HTTP) | Device Simulator UI (development/testing only) | No |
 | **19872** | UDP | ISC auto-discovery (multi-instance setups only) | No |
+| **5353** | UDP | mDNS advertising — lets OpenAVC Panel apps auto-discover this instance on the LAN | No — on by default; disable with `discovery.advertise: false` |
 | **8189** | UDP | WebRTC media for the Video Panel plugin (live camera/RTSP streams on the panel) | Only when the Video Panel plugin is installed and a panel is viewing a stream |
 | **8190** | UDP | WebRTC media for the Present plugin (wireless presentation) | Only when the Present plugin is installed and someone is presenting or a display is connected |
 | **8554** | TCP (RTSP) | Present plugin stream-display output — hardware decoders pull the presentation stream | Only when the Present plugin is installed and a stream display uses RTSP |
@@ -70,7 +71,7 @@ The Video Panel plugin can also show the built-in preview stream of an AV-over-I
 
 **Ports 8554 and 8899** also belong to the Present plugin and serve its *stream displays*: a hardware IP decoder at a display pulls a continuous presentation stream from the OpenAVC host over RTSP (TCP 8554, TCP-interleaved — no UDP RTP port range) or SRT (UDP 8899). Only decoders need to reach these ports, and only the space's own output streams can be pulled from them: each stream URL embeds a per-display secret key, reads are limited to those output paths, and nothing can be published to the host through these ports without internal credentials that never leave the machine. If a decoder sits on an AV VLAN, allow it inbound TCP 8554 or UDP 8899 to the OpenAVC host (pick the protocol the decoder uses). Like the WebRTC port, these listeners exist only while the plugin runs. A space that uses only browser displays never has a decoder pulling from them, and they can stay blocked.
 
-The application itself does not listen on any other ports by default: no SNMP agent, no embedded database port, and no proprietary discovery protocol that accepts inbound connections. The Raspberry Pi appliance image can optionally run an SSH server (port 22) for remote console access, but it ships **disabled** — an operator turns it on in Settings > Security when it is needed (see [Raspberry Pi appliance](#raspberry-pi-appliance-login-and-ssh) below).
+Apart from the mDNS advertiser noted above (standard multicast DNS, receive-only, no control surface), the application does not listen on any other ports by default: no SNMP agent, no embedded database port, and no proprietary discovery protocol that accepts inbound connections. The Raspberry Pi appliance image can optionally run an SSH server (port 22) for remote console access, but it ships **disabled** — an operator turns it on in Settings > Security when it is needed (see [Raspberry Pi appliance](#raspberry-pi-appliance-login-and-ssh) below).
 
 ### Who can access the web interface
 
@@ -159,11 +160,11 @@ OpenAVC retries automatically with exponential backoff (about an hour) before gi
 
 ### Device discovery (on-demand only)
 
-OpenAVC includes a network discovery feature to help AV integrators find devices during initial setup. Discovery is never automatic. It runs only when an integrator explicitly starts a scan from the Programmer interface. Default scan budgets are 60 s (Quick), 120 s (Standard), and 180 s (Thorough).
+OpenAVC includes a network discovery feature to help AV integrators find devices during initial setup. Discovery is never automatic. It runs only when a scan is explicitly started — by an integrator in the Programmer interface, or by an authenticated request to the discovery API (including from the cloud console). Default scan budgets are 60 s (Quick), 120 s (Standard), and 180 s (Thorough).
 
 During a discovery scan, OpenAVC will:
 
-1. **Ping sweep** the local subnet(s) using ICMP echo requests. The server sends these through an ICMP socket: the packaged Linux service and Docker image are granted the `CAP_NET_RAW` capability so they can open a raw ICMP socket, other environments use an unprivileged ICMP datagram socket where the OS allows it, and it falls back to the system `ping` command otherwise. Firewalls on the AV VLAN must permit ICMP echo request/reply for discovery to see hosts; a host that drops echo can still be found by the mDNS / SSDP listeners or driver probes, but will not be port-scanned.
+1. **Ping sweep** the local subnet(s) using ICMP echo requests. The server prefers an unprivileged ICMP datagram socket where the OS allows it, uses a raw ICMP socket where one is available (the packaged Linux service and Docker image are granted the `CAP_NET_RAW` capability for this), and falls back to the system `ping` command otherwise. Firewalls on the AV VLAN must permit ICMP echo request/reply for discovery to see hosts; a host that drops echo can still be found by the mDNS / SSDP listeners or driver probes, but will not be port-scanned.
 2. **TCP port scan** responding hosts on the AV ports listed above
 3. **SNMP query** (v2c, community string `public`, read-only) on port 161
 4. **mDNS / DNS-SD query** on multicast group 224.0.0.251:5353
@@ -171,11 +172,11 @@ During a discovery scan, OpenAVC will:
 6. **AMX DDP listen** on multicast group 239.255.250.250:9131 (passive — receive only)
 7. **NetBIOS name query** on UDP 137 to live hosts (Standard / Thorough scan only)
 8. **Driver-declared TCP probes** on open AV ports. Each installed driver may declare its own probe; common probes for AV equipment include identification queries against switchers, DSPs, displays, mixers, and cameras (Extron, Biamp Tesira, QSC Q-SYS, Samsung MDC, Yamaha RCP, Sony VISCA, etc.). The exact wire format and port depend on which drivers are installed; the Programmer IDE's Driver Builder shows them per driver.
-9. **Driver-declared UDP probes** if any installed driver declares one. Common examples include PJLink Class 2 SRCH (UDP 4352, broadcast) when the `pjlink_class1` driver is installed, Crestron CIP discovery (UDP 41794, broadcast) when the `utility/crestron_cip` driver is installed, ONVIF WS-Discovery (UDP 3702, multicast 239.255.255.250) when the `onvif_camera` driver is installed, and other vendor-specific broadcasts shipped by individual drivers.
+9. **Driver-declared UDP probes** if any installed driver declares one. These are sent to each scanned subnet's directed-broadcast address. Examples include PJLink Class 2 SRCH (UDP 4352) when the `pjlink_class1` driver is installed and Crestron CIP discovery (UDP 41794) when the `utility/crestron_cip` driver is installed, along with other vendor-specific broadcasts shipped by individual drivers.
 
 All discovery traffic is confined to the local subnet(s) detected on the host's network interfaces. It does not scan remote subnets, public IP ranges, or addresses outside the host's directly-connected networks. Virtual and VPN adapters are excluded automatically.
 
-Driver-declared probes are subject to a global rate limit of 10 probes per second across the whole scan and bind to the configured control adapter. Probes are one-shot per scan with no retries.
+Driver-declared UDP probes are rate-limited to 10 per second across the whole scan; TCP probes are spread with a short per-probe stagger instead. All probes bind to the configured control adapter and are one-shot per scan, with no retries.
 
 ### Internet access (optional)
 
@@ -220,28 +221,31 @@ When deploying multiple OpenAVC instances (e.g., one per room), ISC allows them 
 
 ### Web interface and API
 
-OpenAVC is typically deployed on an isolated AV VLAN where the controller is not reachable from the general corporate network. In this configuration, authentication is not required and is disabled by default. For deployments where the controller is reachable from a broader network, authentication should be enabled before exposing the interface.
+Admin access is **secure by default on every shipped deployment.** An installed instance (Windows, Linux, Docker, Raspberry Pi) refuses the Programmer and the mutating/admin API until an admin password is set on first open — returning HTTP 401 until then, while the room panel and health/status endpoints stay reachable. See [Who can access the web interface](#who-can-access-the-web-interface) above for the full model. (A from-source developer checkout is the one exception: it stays open on localhost for frictionless development. Force either posture explicitly with `OPENAVC_ALLOW_ANONYMOUS`.)
+
+The admin credential is one of the following, set during first-run setup or provisioned ahead of time. You do not need to set both:
 
 | Method | Configuration | When to use |
 |--------|--------------|-------------|
-| HTTP Basic (username + password) | `OPENAVC_PROGRAMMER_USERNAME` and `OPENAVC_PROGRAMMER_PASSWORD` env vars, or `auth.programmer_username` and `auth.programmer_password` in `system.json` | Set this when the server is network-accessible and you want to prevent unauthorized access to the Programmer IDE. The browser prompts for both username and password. This is for humans logging in via a browser. |
+| HTTP Basic (username + password) | `OPENAVC_PROGRAMMER_USERNAME` and `OPENAVC_PROGRAMMER_PASSWORD` env vars, or `auth.programmer_username` and `auth.programmer_password` in `system.json` | The standard admin login, and what the first-run setup screen creates. The browser prompts for both username and password. This is for humans logging in via a browser. |
 | API key (token) | `OPENAVC_API_KEY` env var or `auth.api_key` in `system.json` | Set this if you have third-party integrations (control scripts, middleware, or external software) that connect to the REST API or WebSocket. Provide the key via the `X-API-Key` header. Not needed unless you are building custom integrations. |
 
-You do not need to set both. Either one protects the Programmer IDE and API endpoints. The username/password is for humans (browser login), the API key is for machines (HTTP headers). If both are set, either credential is accepted.
+Either one protects the Programmer IDE and API endpoints. The username/password is for humans (browser login), the API key is for machines (HTTP headers). If both are set, either credential is accepted.
 
-If a programmer password is set without a username, any username entered at the browser prompt is accepted as long as the password matches. Setting a username is recommended when authentication is required.
+If a programmer password is set without a username, any username entered at the browser prompt is accepted as long as the password matches. Setting a username as well is recommended.
 
-When authentication is enabled:
-- The **Panel** (end-user touch interface) remains accessible without credentials
-- The **Programmer** (configuration interface) requires the username and password
-- All configuration-changing API endpoints require authentication
+In all cases:
+- The **Panel** (end-user touch interface) is reachable without credentials
+- The **Programmer** (configuration interface) requires the admin credential
+- All configuration-changing API endpoints require the credential
+- The **code-writing endpoints** (Python drivers, scripts) require a set credential even on a checkout otherwise configured for open access — an unclaimed instance refuses them outright
 - Username and password comparisons both use constant-time algorithms to prevent timing attacks
 
 ### TLS/HTTPS
 
 OpenAVC defaults to plain HTTP because most deployments live on an isolated AV VLAN. HTTPS is available as a built-in opt-in via **Settings > Security** in the Programmer IDE, or by setting `OPENAVC_TLS_ENABLED=true` (or `tls.enabled: true` in `system.json`) and restarting the server.
 
-When enabled, the server runs the HTTPS listener on port 8443 (TLS 1.2 and 1.3, RSA-2048 server keys) and keeps a tiny HTTP listener on port 8080 that redirects to the HTTPS URL (temporary 302/307, so no browser caches a permanent redirect that would outlive a later decision to turn HTTPS back off) and existing clients keep working.
+When enabled, the server runs the HTTPS listener on port 8443 with an enforced **TLS 1.2 floor** — only TLS 1.2 and 1.3 are negotiated, and TLS 1.0/1.1 are refused — using RSA-2048 server keys and a modern ECDHE (GCM / CHACHA20) cipher suite. It keeps a tiny HTTP listener on port 8080 that redirects to the HTTPS URL (temporary 302/307, so no browser caches a permanent redirect that would outlive a later decision to turn HTTPS back off) so existing clients keep working.
 
 Two cert modes are supported:
 
@@ -256,9 +260,9 @@ Rate limiting is enabled by default on the HTTP REST API for remote clients. Req
 
 | Tier | Limit | Applies to |
 |------|-------|-----------|
-| Open | 120 requests/min per IP | Status, health check, library endpoints |
-| Standard | 60 requests/min per IP | General API operations |
-| Strict | 10 requests/min per IP | Device command API, discovery, cloud operations |
+| Open | 120 requests/min per IP | Status, health-check, and setup-state endpoints |
+| Standard | 60 requests/min per IP | General API operations (including library/catalog reads) |
+| Strict | 10 requests/min per IP | Device commands, discovery, cloud operations, driver/plugin install, backup restore, and project save |
 
 Failed authentication attempts count against the strict tier, providing brute-force protection. Volume ramps, rapid command sequences, and multi-room control from the touch panel are unaffected by these limits.
 
@@ -330,30 +334,36 @@ All subsequent messages are signed with HMAC-SHA256 using the session-specific s
 
 ### What data is sent to the cloud
 
-When cloud is enabled, the following data is transmitted:
+When cloud is enabled, the agent streams a small amount of telemetry automatically:
 
 | Data | Frequency | Content |
 |------|-----------|---------|
-| Heartbeat | Every 30 seconds | CPU %, memory %, disk %, uptime, device count, connected device count, error count, WebSocket client count, temperature (if available) |
-| State changes | Batched every 2 seconds | Device state key-value changes (e.g., `device.projector1.power: "on"`) |
-| Alerts | As they occur (max 10/min) | Alert ID, severity, category, message |
-| Logs | As they occur (max 100/min) | Log level, source, message |
+| Heartbeat | Every 30 seconds | CPU %, memory %, disk %, uptime, device count, connected device count, error count, WebSocket client count, temperature (if a sensor is available) |
+| State changes | Batched (2 s for active device state; slower tiers for lower-priority keys) | Device, variable, system, UI, and plugin state key-value changes (e.g., `device.projector1.power: "on"`). Internal cloud/ISC keys are excluded. |
+| Alerts | As they occur (throttled) | Alert ID, severity, category, and message, plus the rule and device that fired it and the state key/value that tripped the threshold |
 
-**What is NOT sent:** Project files, device configurations, system keys, authentication credentials, network topology, or any data from other systems on the network.
+This automatic telemetry is runtime state and metrics only. It never contains the project file, device connection settings, or any credential.
+
+**On-demand pulls.** Separately, an operator working in the cloud console can request specific data from a paired instance. Most significantly, the cloud can pull the **full project file** — which contains device IP addresses, connection parameters, and any device passwords stored in it (for example PJLink or SSH credentials) — along with the device/command list and recent logs. These are returned only in response to an authenticated console action, not streamed continuously. If your policy is that device configuration must never leave the site, do not pair the instance with the cloud.
+
+**Never sent, under any circumstance:** the system's cloud key or derived signing keys, the web-interface admin password or API key, and data from other systems on the network.
 
 ### What the cloud can do
 
-The cloud platform can send the following commands to a connected device:
+When an instance is paired, the cloud console can send it the following:
 
 | Command | Description |
 |---------|-------------|
 | Device command | Execute a device command already defined in the local project (e.g., "turn on projector") |
-| Diagnostic | Request a network diagnostic (ping, TCP check, traceroute) from the device's perspective |
+| Diagnostic | Run a network diagnostic from the device's perspective — ping, TCP port check, DNS lookup, or a port scan of a host |
 | Software update | Trigger a software update check and install |
-| Remote access tunnel | Open a proxied connection to the local web interface |
+| Restart | Restart the OpenAVC service |
+| Configuration push | Replace or update the project file on the device (a backup is taken first, then the engine reloads) |
 | Alert rules | Push alert rule definitions to be evaluated locally |
+| Remote access tunnel | Open a proxied connection to the local web interface (see below) |
+| AI-assisted management | Run the same management actions an administrator has in the Programmer — read project state, change state and send device commands, start a discovery scan, install drivers and plugins, and create or edit drivers and **scripts, which run on the host** |
 
-All remote commands are scoped to actions already available through the local API. The cloud cannot execute arbitrary code, access the filesystem, or modify the network configuration. All commands include the requesting user's identity for audit purposes.
+**This is an administrator-equivalent management plane.** When you pair an instance, the cloud can do what a local administrator can do at the Programmer, reached remotely — including pushing configuration and scripts that execute on the host. It does not exceed local-admin scope: there is no general shell beyond these defined actions, and no command reconfigures the host operating system or its network settings. Because this is full administrative control, pairing is **opt-in and off by default** (see Disabling cloud entirely, below), each instance pairs to a single account, and every message is mutually authenticated (see the handshake under Authentication above). If your security model does not allow an external management plane with this authority over the host, leave cloud disabled — every capability here exists only on a paired instance.
 
 ### Remote access tunnels
 
@@ -392,7 +402,7 @@ Add to the minimum rules:
 | mDNS (discovery) | Outbound + Inbound | OpenAVC host | 224.0.0.251 | 5353/udp | mDNS |
 | SSDP (discovery) | Outbound + Inbound | OpenAVC host | 239.255.255.250 | 1900/udp | SSDP |
 | AMX DDP (discovery) | Inbound | 239.255.250.250 | OpenAVC host | 9131/udp | Passive listen |
-| ONVIF WS-Discovery | Outbound + Inbound | OpenAVC host | 239.255.255.250 | 3702/udp | Opens when the `onvif_camera` driver is installed |
+| Camera WS-Discovery | Outbound + Inbound | OpenAVC host | Subnet broadcast | 3702/udp | Opens when an installed camera driver declares a `udp_probe:` on this port |
 | PJLink Class 2 SRCH | Outbound + Inbound | OpenAVC host | Subnet broadcast | 4352/udp | Opens when the `pjlink_class1` driver is installed |
 | PJLink Class 1 INFO | Outbound | OpenAVC host | Class 2 responders | 4352/tcp | Per-responder follow-up from the PJLink driver |
 | Crestron CIP probe | Outbound + Inbound | OpenAVC host | Subnet broadcast | 41794/udp | Opens when the `utility/crestron_cip` driver is installed |
@@ -448,65 +458,30 @@ OpenAVC does not use UPnP port mapping, NAT traversal, or any technique that mod
 
 | Aspect | Default | Notes |
 |--------|---------|-------|
-| Inbound ports | 1 (HTTP 8080) | Configurable. Adds 8443 when HTTPS is enabled. |
-| Bind address | Localhost only | Only the host PC can access the UI. Change via `OPENAVC_BIND` env var to allow tablets/other devices. |
-| Authentication | Off | Appropriate for isolated AV VLANs. Enable for broader networks. |
-| TLS | Off, opt-in built-in | Enable via Settings > Security. Auto-generated self-signed cert or supply your own. Reverse-proxy TLS also supported. |
+| Inbound ports | HTTP 8080 (+ UDP 5353 for panel auto-discovery) | Configurable. Adds 8443 when HTTPS is enabled. |
+| Bind address | Packaged installs: all interfaces (`0.0.0.0`); source run: localhost | Installers bind all interfaces so panels can reach the host. Force localhost with `OPENAVC_BIND=127.0.0.1`. |
+| Admin authentication | Secure by default | Shipped deployments refuse the Programmer and admin API until an admin password is set; the room panel stays open. A source checkout is open on localhost for development. |
+| TLS | Off, opt-in built-in | Enable via Settings > Security. TLS 1.2/1.3 only (1.0/1.1 refused). Auto-generated self-signed cert or supply your own. Reverse-proxy TLS also supported. |
 | Outbound internet | Not required | Only for optional updates and cloud |
-| Cloud connectivity | Disabled by default | Opt-in with explicit configuration |
+| Cloud connectivity | Disabled by default | Opt-in. When paired, it is an administrator-equivalent management plane (see Cloud Platform above). |
 | Privileged access | None required | Runs as standard user, no root/admin |
 | External dependencies at runtime | None | No external database, message broker, or third-party service required |
-| Discovery scans | On-demand only | Never automatic. Integrator must manually initiate. |
-| Broadcast traffic | ISC only (if enabled) | UDP on port 19872. Disabled by setting `isc.enabled: false`. |
-| Data exfiltration risk | Low | Only sends data externally if cloud is explicitly enabled. All cloud data is itemized above. |
+| Discovery scans | On-demand only | Never automatic. Started by an integrator (or an authenticated cloud request). |
+| Background multicast/broadcast | mDNS advertising; ISC beacons if enabled | mDNS on 5353 (disable with `discovery.advertise: false`); ISC UDP broadcast on 19872 (disable with `isc.enabled: false`). |
+| Data exfiltration risk | Low | No data leaves the site unless cloud is explicitly paired. When paired: automatic telemetry plus on-demand config pulls (both itemized above). |
 
 ---
 
 ## Quick-Start: Evaluating OpenAVC on Your Network
 
-If you want to try OpenAVC before committing to a deployment, you can have it running on any Windows or Linux machine in under five minutes. The fastest way to evaluate it is on a PC you already have.
+You can evaluate OpenAVC on a spare Windows or Linux machine in a few minutes, with no AV hardware. Install it by whichever method suits you — Windows installer, Linux `install.sh`, Docker, or from source — following the [Getting Started guide](getting-started.md), then open `http://localhost:8080/programmer`.
 
-### Option 1: Windows Installer (no network impact)
+Two things matter for a network review:
 
-1. Download the installer from [github.com/open-avc/openavc/releases](https://github.com/open-avc/openavc/releases)
-2. Run the `.exe` installer
-3. Open `http://localhost:8080/programmer` in a browser
+- **Zero traffic until you connect devices.** A fresh install generates no network traffic of its own. You can explore the full interface and test against the built-in device simulator entirely offline.
+- **Reachability is explicit.** A from-source run binds to localhost only. The packaged installers bind to all interfaces so panels can reach the host, and require you to set an admin password the first time you open the Programmer.
 
-OpenAVC is running as a Windows service. It generates zero network traffic until you add and connect to AV devices. You can explore the full Programmer interface, build a project, and test with the built-in simulator without any AV hardware. The touch panel UI is at `http://localhost:8080/panel`.
-
-### Option 1b: From source (any platform, no network impact)
-
-1. Install Python 3.11+ and Node.js 18+ on any Windows or Linux machine
-2. Download OpenAVC from [github.com/open-avc/openavc](https://github.com/open-avc/openavc)
-3. Open a terminal in the downloaded directory and run:
-
-```
-cd openavc
-pip install -r requirements.txt
-cd web/programmer && npm install && npm run build && cd ../..
-python -m server.main
-```
-
-4. Open `http://localhost:8080/programmer` in a browser on the same machine
-
-At this point OpenAVC is running on localhost only. It generates zero network traffic.
-
-### Option 2: Connect to AV devices
-
-If the PC running OpenAVC can already reach the AV equipment on the network (same subnet or routable), you can add devices in the Programmer interface by IP address. OpenAVC will open outbound TCP connections to those devices. No bind address change is needed for this, since device control is outbound traffic from the OpenAVC host.
-
-If you also want a separate tablet or browser on another machine to access the touch panel, enable network access as described in the "Who can access the web interface" section above.
-
-### Option 3: Docker
-
-Download the maintained compose file and start it (Linux Docker hosts only):
-
-```
-curl -fsSL https://raw.githubusercontent.com/open-avc/openavc/main/installer/docker-compose.yml -o docker-compose.yml
-docker compose up -d
-```
-
-Set a programmer password by adding `OPENAVC_PROGRAMMER_PASSWORD` under an `environment:` block in the compose file before starting. Access at `http://<host-ip>:8080/programmer`. The compose file uses host networking so the container's network requirements are identical to a bare-metal installation.
+To point it at real equipment, add devices by IP in the Programmer; OpenAVC then opens outbound connections to just those devices (no inbound change needed, since device control is outbound).
 
 ---
 
@@ -521,9 +496,6 @@ Not by default. Update checks (to GitHub's public API) can be enabled or disable
 **Does it need a database server?**
 No. All data is stored in JSON files on the local filesystem. There is no PostgreSQL, MySQL, Redis, or any external data store.
 
-**Does it need its own dedicated hardware?**
-No. OpenAVC is a lightweight application, not an appliance. It runs alongside other software on any Windows or Linux machine. The most common deployment is on a PC already in the room (lectern PC, digital signage machine, room scheduling display, etc.). It can also run on an existing server, VM, or Docker host. Resource usage is minimal (typically under 100 MB RAM, negligible CPU when idle).
-
 **Does it modify the host system?**
 Minimally. The Windows installer creates a Windows service (via NSSM) and adds a firewall rule for port 8080. The Linux install script creates a systemd service and an `openavc` user. Docker and from-source installations make no system modifications. In all cases, application data is confined to a single data directory.
 
@@ -535,4 +507,4 @@ Yes. OpenAVC is MIT-licensed open source. The full source code, including the cl
 
 ---
 
-*Document version: 1.0. For the latest version, see [docs.openavc.com](https://docs.openavc.com).*
+*Document version: 1.1. For the latest version, see [docs.openavc.com](https://docs.openavc.com).*
