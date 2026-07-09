@@ -17,6 +17,11 @@ install -m 644 "$FILES_DIR/openavc-panel.service" \
 install -m 755 "$FILES_DIR/update-helper.sh" \
     "${ROOTFS_DIR}/opt/openavc/update-helper.sh"
 
+# Copy firewall sync helper (referenced by ExecStartPre in openavc.service;
+# no-op on stock Pi OS, keeps ports open if the integrator enables ufw)
+install -m 755 "$FILES_DIR/firewall-sync.sh" \
+    "${ROOTFS_DIR}/opt/openavc/firewall-sync.sh"
+
 # Copy kiosk launcher script
 mkdir -p "${ROOTFS_DIR}/opt/openavc/scripts"
 install -m 755 "$FILES_DIR/panel-kiosk.sh" \

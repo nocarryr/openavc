@@ -520,7 +520,7 @@ Not by default. Update checks (to GitHub's public API) can be enabled or disable
 No. All data is stored in JSON files on the local filesystem. There is no PostgreSQL, MySQL, Redis, or any external data store.
 
 **Does it modify the host system?**
-Minimally. The Windows installer creates a Windows service (via NSSM) and adds a firewall rule for port 8080. The Linux install script creates a systemd service and an `openavc` user. Docker and from-source installations make no system modifications. In all cases, application data is confined to a single data directory.
+Minimally. The Windows installer creates a Windows service (via NSSM) and one program-scoped Windows Firewall rule for the OpenAVC server executable — inbound traffic is accepted only on ports the server is actually listening on (the HTTP port, plus HTTPS and the port-80 short-URL listener when those features are enabled). The Linux install script creates a systemd service and an `openavc` user, and a root helper syncs ufw/firewalld (when active) with the configured listener ports at each service start — ports it opened are closed again when the feature is disabled, and rules added by an administrator are never touched. Docker and from-source installations make no system modifications. In all cases, application data is confined to a single data directory.
 
 **What if we block all outbound internet?**
 OpenAVC will work normally. Update checks will fail silently and cloud features (if configured) will be dormant. All AV control, automation, and UI functionality is fully local.

@@ -234,10 +234,17 @@ handle_update() {
     # "getcwd: cannot access parent directories" warnings.
     cd / 2>/dev/null || true
 
-    # 6. Self-update: replace this script with the version from the new release
+    # 6. Self-update: replace this script with the version from the new release,
+    #    and place/refresh the firewall sync helper the same way (its
+    #    ExecStartPre line arrives via sync_unit, so an install that predates
+    #    it picks up both the file and the unit line from one normal update).
     if [ -f "$APP_DIR/installer/update-helper.sh" ]; then
         cp "$APP_DIR/installer/update-helper.sh" "$APP_DIR/update-helper.sh"
         chmod 755 "$APP_DIR/update-helper.sh"
+    fi
+    if [ -f "$APP_DIR/installer/firewall-sync.sh" ]; then
+        cp "$APP_DIR/installer/firewall-sync.sh" "$APP_DIR/firewall-sync.sh"
+        chmod 755 "$APP_DIR/firewall-sync.sh"
     fi
 
     # 7. Make the venv functional, then sync dependencies against the new

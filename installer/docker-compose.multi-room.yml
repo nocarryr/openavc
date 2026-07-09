@@ -20,6 +20,9 @@ services:
     container_name: openavc-room-101
     ports:
       - "8081:8080"
+      # Enabling HTTPS in Settings? Publish the TLS port too (one unique
+      # host port per room), e.g.:
+      # - "8444:8443"
     volumes:
       - room-101-data:/data
     restart: unless-stopped

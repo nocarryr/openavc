@@ -118,14 +118,26 @@ begin
   Exec('taskkill.exe', '/F /IM openavc-tray.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-// Add firewall rule during install, remove during uninstall
+// Add firewall rule during install, remove during uninstall.
+//
+// The rule is program-scoped with NO port list: inbound traffic is allowed
+// only while openavc-server.exe itself is listening on a port. That way
+// every port the server can be configured to use — HTTP (8080 or custom),
+// HTTPS (8443 or custom), the optional port-80 Short URLs listener, plugin
+// media ports — works the moment the feature is enabled in Settings, with
+// no firewall edits and nothing left open that the server isn't serving.
+// The delete-first keeps upgrades from stacking rules and replaces the old
+// TCP-8080-only rule shipped by earlier installers.
 
 procedure AddFirewallRule();
 var
   ResultCode: Integer;
 begin
   Exec('netsh.exe',
-    'advfirewall firewall add rule name="OpenAVC" dir=in action=allow protocol=TCP localport=8080 program="' + ExpandConstant('{app}\openavc-server.exe') + '"',
+    'advfirewall firewall delete rule name="OpenAVC"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('netsh.exe',
+    'advfirewall firewall add rule name="OpenAVC" dir=in action=allow program="' + ExpandConstant('{app}\openavc-server.exe') + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 

@@ -92,6 +92,9 @@ jobs:
       - name: Stage update-helper.sh
         run: cp installer/update-helper.sh installer/pi-image/stage-openavc/01-install-openavc/files/update-helper.sh
 
+      - name: Stage firewall-sync.sh
+        run: cp installer/firewall-sync.sh installer/pi-image/stage-openavc/01-install-openavc/files/firewall-sync.sh
+
       # Stage the systemd unit from installer/ (single source of truth). The Pi
       # image no longer ships a bespoke copy; this mirrors build.sh so the unit
       # the image installs matches the one the in-app updater syncs against.

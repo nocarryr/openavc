@@ -361,6 +361,15 @@ install_files() {
         ok "Update helper installed"
     fi
 
+    # Firewall sync helper (ExecStartPre): keeps ufw/firewalld in step with
+    # the configured listeners on every service start, so enabling HTTPS or
+    # Short URLs in Settings opens the port without manual firewall edits.
+    if [ -f "$INSTALL_DIR/installer/firewall-sync.sh" ]; then
+        cp "$INSTALL_DIR/installer/firewall-sync.sh" "$INSTALL_DIR/firewall-sync.sh"
+        chmod 755 "$INSTALL_DIR/firewall-sync.sh"
+        ok "Firewall sync helper installed"
+    fi
+
     # Clean up archive
     rm -f "$ARCHIVE_PATH"
 }
@@ -441,6 +450,7 @@ User=openavc
 Group=openavc
 WorkingDirectory=/opt/openavc
 ExecStartPre=-+/opt/openavc/update-helper.sh /var/lib/openavc
+ExecStartPre=-+/opt/openavc/firewall-sync.sh /var/lib/openavc
 ExecStart=/opt/openavc/venv/bin/python -m server.main
 Restart=always
 RestartSec=5
@@ -477,26 +487,18 @@ UNIT
 }
 
 configure_firewall() {
-    # ufw (Ubuntu/Debian). Match "Status: active" specifically — a bare "active"
-    # grep also matches "Status: inactive", which would open the port (and log
-    # success) on a host whose firewall is actually off.
-    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-        info "Configuring ufw firewall..."
-        ufw allow "$HTTP_PORT/tcp" comment "OpenAVC" >/dev/null 2>&1
-        ok "Firewall: port $HTTP_PORT opened (ufw)"
-        return 0
+    # One source of truth: the same helper that runs at every service start
+    # (ExecStartPre) syncs ufw/firewalld with the configured listeners — the
+    # HTTP port, the HTTPS port when TLS is on, and port 80 when Short URLs
+    # are on. Running it here just opens the ports before the first start.
+    # It no-ops when neither ufw nor firewalld is active.
+    if [ -x "$INSTALL_DIR/firewall-sync.sh" ]; then
+        info "Syncing firewall with configured ports..."
+        "$INSTALL_DIR/firewall-sync.sh" "$DATA_DIR"
+        ok "Firewall synced (ufw/firewalld if active; ports follow Settings from now on)"
+    else
+        warn "Firewall sync helper missing; if ufw/firewalld is active, allow port $HTTP_PORT/tcp manually."
     fi
-
-    # firewalld (Fedora/RHEL)
-    if command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
-        info "Configuring firewalld..."
-        firewall-cmd --permanent --add-port="$HTTP_PORT/tcp" >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-        ok "Firewall: port $HTTP_PORT opened (firewalld)"
-        return 0
-    fi
-
-    warn "No active firewall detected (ufw or firewalld). Port $HTTP_PORT may already be accessible."
 }
 
 # Remove the legacy /opt/openavc/{driver,plugin}_repo dirs once they're drained.
