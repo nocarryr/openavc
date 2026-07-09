@@ -520,6 +520,16 @@ If the system is paired with OpenAVC Cloud, you can skip CA installs entirely: *
 
 If you front OpenAVC with nginx, Caddy, or another reverse proxy that terminates TLS for you, leave OpenAVC's `tls.enabled` at false and let the proxy do the work. Set `tls.redirect_http` to false if you want OpenAVC to skip its own redirect listener (the proxy will handle that too).
 
+## Short URLs (port 80 redirect)
+
+By default, people have to include the port when typing an address: `http://192.168.1.20:8080/panel`. Turning on **Short URLs** in **Settings > Network** adds a small listener on port 80 that forwards every request to the real port, so `http://192.168.1.20/panel` just works. It composes with HTTPS and trusted certificates: with those on, typing the bare IP lands directly on the padlocked page. The listener serves no content, only redirects, and it is best-effort: if something else on the machine owns port 80, OpenAVC logs a warning and starts normally without it. Changing the toggle takes effect after a restart. Also set the environment variable `OPENAVC_PORT80_REDIRECT=true` for headless setups.
+
+Platform notes:
+
+- **Windows:** works as-is when port 80 is free (IIS or other web servers may own it).
+- **Linux (service installs):** binding port 80 as a non-root service needs `CAP_NET_BIND_SERVICE`. Fresh installs and new Raspberry Pi images grant it in the service unit. Existing installs need one line added under `[Service]` in `/etc/systemd/system/openavc.service`: extend `AmbientCapabilities` to `CAP_NET_RAW CAP_NET_BIND_SERVICE`, then `systemctl daemon-reload && systemctl restart openavc`.
+- **Docker:** the container runs as an unprivileged user, so port 80 stays unavailable inside it; if you want short URLs on a Docker deployment, front it with a reverse proxy instead.
+
 ## Health Check
 
 `GET /api/health` returns server health with no authentication required. Use this for monitoring tools, load balancers, and container orchestration health checks.

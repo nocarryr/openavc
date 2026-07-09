@@ -46,6 +46,7 @@ OpenAVC runs on an existing server, VM, or Docker host. It controls AV equipment
 |------|----------|---------|-----------|
 | **8080** | TCP (HTTP) | Web interface and REST API | Yes |
 | **8443** | TCP (HTTPS) | Web interface and REST API over TLS | Only when HTTPS is enabled in Settings > Security |
+| **80** | TCP (HTTP) | Convenience redirect so typed URLs can omit the port (`http://<server>/panel`). Pure redirect to the real HTTP/HTTPS port; serves no content. | No — off by default; enable in Settings > Network |
 | **19500** | TCP (HTTP) | Device Simulator UI (development/testing only) | No |
 | **19872** | UDP | ISC auto-discovery (multi-instance setups only) | No |
 | **5353** | UDP | mDNS advertising — lets OpenAVC Panel apps auto-discover this instance on the LAN | No — on by default; disable with `discovery.advertise: false` |
@@ -409,6 +410,7 @@ Cloud is disabled by default. To confirm it is disabled, verify that `cloud.enab
 |------|-----------|--------|-------------|------|----------|
 | Web UI access | Inbound | Touch panels / browsers | OpenAVC host | 8080/tcp | HTTP |
 | Web UI access (TLS) | Inbound | Touch panels / browsers | OpenAVC host | 8443/tcp | HTTPS (only when enabled) |
+| Short-URL redirect | Inbound | Browsers | OpenAVC host | 80/tcp | HTTP redirect only (only when enabled) |
 | AV device control | Outbound | OpenAVC host | AV device IPs | Per device (see table above) | TCP |
 
 ### Typical (with updates and discovery)

@@ -422,7 +422,7 @@ export function SystemSettingsView() {
         [section]: { ...(prev[section] as Record<string, unknown> ?? {}), [key]: value },
       }));
       // Track restart-required changes (bind_address/port need restart, control_interface does not)
-      if (section === "network" && (key === "bind_address" || key === "http_port")) setRestartNeeded(true);
+      if (section === "network" && (key === "bind_address" || key === "http_port" || key === "port80_redirect")) setRestartNeeded(true);
       // Any TLS change requires a restart — uvicorn only reads cert + ports at startup.
       if (section === "tls") setRestartNeeded(true);
     },
@@ -774,6 +774,21 @@ export function SystemSettingsView() {
               style={inputStyle}
               value={net.http_port}
               onChange={(e) => update("network", "http_port", parseInt(e.target.value) || 8080)}
+            />
+          </div>
+          <div style={toggleRow}>
+            <div>
+              <div style={{ fontSize: "var(--font-size-sm)" }}>Short URLs (port 80 redirect)</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Lets people type addresses without a port: <code>http://&lt;server&gt;/panel</code> forwards
+                to the real port automatically. Needs port 80 free on this machine. On Linux the
+                OpenAVC service also needs permission to bind it (fresh installs have this; see
+                the deployment guide).
+              </div>
+            </div>
+            <Toggle
+              checked={!!net.port80_redirect}
+              onChange={(v) => update("network", "port80_redirect", v)}
             />
           </div>
           <div style={fieldRow}>

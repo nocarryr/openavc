@@ -452,7 +452,8 @@ Environment=OPENAVC_ALLOW_ANONYMOUS=false
 NoNewPrivileges=true
 # CAP_NET_RAW lets the discovery ping sweep open an ICMP/raw socket under the
 # unprivileged user; NoNewPrivileges strips /bin/ping's file cap at exec.
-AmbientCapabilities=CAP_NET_RAW
+# CAP_NET_BIND_SERVICE lets the optional port-80 redirect bind port 80.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
 ProtectSystem=strict
 ReadWritePaths=/var/lib/openavc /var/log/openavc -/opt/openavc/driver_repo -/opt/openavc/plugin_repo
 ProtectHome=true

@@ -240,3 +240,36 @@ def test_enrollment_while_running_flips_redirect(tmp_path):
         "/x", headers={"host": "192.168.1.20"}, follow_redirects=False
     )
     assert after.headers["location"] == "https://192.168.1.20:8443/x"
+
+
+# --- Plain-HTTP mode (the port-80 convenience listener with HTTPS off) ---
+
+
+def test_http_scheme_targets_the_http_port():
+    client = TestClient(_build_redirect_app(8080, scheme="http"))
+    resp = client.get(
+        "/present", headers={"host": "192.168.1.20"}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://192.168.1.20:8080/present"
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+def test_http_scheme_preserves_query_and_method_semantics():
+    client = TestClient(_build_redirect_app(8080, scheme="http"))
+    resp = client.post(
+        "/api/x?y=1", headers={"host": "10.0.0.5"}, follow_redirects=False
+    )
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "http://10.0.0.5:8080/api/x?y=1"
+
+
+def test_http_scheme_never_rewrites_to_certified_name(tmp_path):
+    # An active cloud cert must not leak into plain-HTTP targets — there is
+    # no certificate on the http:// side for the name to match.
+    _install_cloud_cert(tmp_path)
+    client = TestClient(_build_redirect_app(8080, scheme="http"))
+    resp = client.get(
+        "/panel", headers={"host": "192.168.1.20"}, follow_redirects=False
+    )
+    assert resp.headers["location"] == "http://192.168.1.20:8080/panel"

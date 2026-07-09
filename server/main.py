@@ -615,8 +615,12 @@ def _preflight_port(port: int, *, retries: int) -> "OSError | None":
     return last_err
 
 
-def _build_redirect_app(tls_port: int):
-    """Tiny Starlette app: catch-all that 302/307 redirects to https://...:tls_port.
+def _build_redirect_app(target_port: int, scheme: str = "https"):
+    """Tiny Starlette app: catch-all that 302/307 redirects to {scheme}://...:target_port.
+
+    Serves two listeners: the HTTP port when HTTPS is on (scheme "https"),
+    and the optional port-80 convenience listener (scheme "https" when HTTPS
+    is on, "http" otherwise) so typed URLs can drop the port entirely.
 
     Uses temporary redirects (302/307) rather than 301/308 because TLS can be
     toggled off at runtime — a permanent redirect cached by the browser would
@@ -678,8 +682,11 @@ def _build_redirect_app(tls_port: int):
             host = host_header.split(":", 1)[0] if host_header else ""
         if not host or any(c in host for c in _BAD_HOST_CHARS):
             host = request.url.hostname or "localhost"
-        host = _certified_host(host) or host
-        target = f"https://{host}:{tls_port}{request.url.path}"
+        if scheme == "https":
+            # Certified names only make sense on the HTTPS target — on plain
+            # HTTP there is no certificate to match.
+            host = _certified_host(host) or host
+        target = f"{scheme}://{host}:{target_port}{request.url.path}"
         if request.url.query:
             target += f"?{request.url.query}"
         status = 302 if request.method in ("GET", "HEAD") else 307
@@ -696,6 +703,54 @@ def _build_redirect_app(tls_port: int):
             methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
         ),
     ])
+
+
+def _make_aux_redirect_server(app, port: int):
+    """Build a best-effort auxiliary redirect listener.
+
+    Returns (server, None) ready to serve, or (None, err) when the port is
+    already taken — auxiliary listeners never block startup.
+
+    Only the main server installs signal handlers; otherwise the servers race
+    to register signal.signal handlers and the last one overrides the rest.
+    Auxiliary listeners cancel via the FIRST_COMPLETED logic in the runners
+    when the main server shuts down.
+    """
+    import contextlib as _contextlib
+
+    err = _preflight_port(port, retries=1)
+    if err is not None:
+        return None, err
+    aux_config = uvicorn.Config(
+        app,
+        host=config.BIND_ADDRESS,
+        port=port,
+        log_level="warning",  # quiet: every redirect logs an info line otherwise
+    )
+    server = uvicorn.Server(aux_config)
+
+    @_contextlib.contextmanager
+    def _no_signals():
+        yield
+
+    server.capture_signals = _no_signals
+    return server, None
+
+
+async def _serve_until_first_exit(tasks: list) -> None:
+    """Run listener tasks until one finishes, then cancel the rest.
+
+    When any task finishes (graceful shutdown, error, signal), the others are
+    cancelled so we don't hang in asyncio.gather; the completed task's
+    exception (if any) is re-raised.
+    """
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        task.result()
 
 
 def _harden_tls_context(context) -> None:
@@ -765,26 +820,10 @@ async def _run_tls() -> None:
     tasks: list[asyncio.Task] = [asyncio.create_task(main_server.serve())]
 
     if config.TLS_REDIRECT_HTTP:
-        redirect_err = _preflight_port(config.HTTP_PORT, retries=1)
-        if redirect_err is None:
-            redirect_config = uvicorn.Config(
-                _build_redirect_app(config.TLS_PORT),
-                host=config.BIND_ADDRESS,
-                port=config.HTTP_PORT,
-                log_level="warning",  # quiet: every redirect logs an info line otherwise
-            )
-            redirect_server = uvicorn.Server(redirect_config)
-            # Only the main server installs signal handlers; otherwise both
-            # servers race to register signal.signal handlers and the second
-            # one overrides the first. The redirect cancels via the
-            # FIRST_COMPLETED logic below when main shuts down.
-            import contextlib as _contextlib
-
-            @_contextlib.contextmanager
-            def _no_signals():
-                yield
-
-            redirect_server.capture_signals = _no_signals
+        redirect_server, redirect_err = _make_aux_redirect_server(
+            _build_redirect_app(config.TLS_PORT), config.HTTP_PORT
+        )
+        if redirect_server is not None:
             tasks.append(asyncio.create_task(redirect_server.serve()))
         else:
             log.warning(
@@ -794,16 +833,58 @@ async def _run_tls() -> None:
                 redirect_err,
             )
 
-    # When either task finishes (graceful shutdown, error, signal), cancel the
-    # other so we don't hang in asyncio.gather.
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    for task in done:
-        # Re-raise any exception the completed task ended with.
-        task.result()
+    # The port-80 listener lets typed URLs drop the port entirely. Skip when
+    # a listener above already owns 80.
+    if (
+        config.PORT80_REDIRECT
+        and config.TLS_PORT != 80
+        and not (config.TLS_REDIRECT_HTTP and config.HTTP_PORT == 80)
+    ):
+        server80, err80 = _make_aux_redirect_server(
+            _build_redirect_app(config.TLS_PORT), 80
+        )
+        if server80 is not None:
+            tasks.append(asyncio.create_task(server80.serve()))
+        else:
+            log.warning(
+                "Port-80 redirect listener could not bind (%s); "
+                "typed URLs still need the port.",
+                err80,
+            )
+
+    await _serve_until_first_exit(tasks)
+
+
+async def _run_http() -> None:
+    """Run the plain-HTTP listener plus the port-80 convenience redirect.
+
+    Only used when the port-80 redirect is enabled with HTTPS off — the
+    single-listener path in __main__ stays untouched otherwise.
+    """
+    main_config = uvicorn.Config(
+        "server.main:app",
+        host=config.BIND_ADDRESS,
+        port=config.HTTP_PORT,
+        reload=False,
+        log_level="info",
+    )
+    main_server = uvicorn.Server(main_config)
+    tasks: list[asyncio.Task] = [asyncio.create_task(main_server.serve())]
+
+    if config.HTTP_PORT != 80:
+        server80, err80 = _make_aux_redirect_server(
+            _build_redirect_app(config.HTTP_PORT, scheme="http"), 80
+        )
+        if server80 is not None:
+            tasks.append(asyncio.create_task(server80.serve()))
+        else:
+            log.warning(
+                "Port-80 redirect listener could not bind (%s); "
+                "typed URLs still need the port.",
+                err80,
+            )
+
+    await _serve_until_first_exit(tasks)
 
 
 if __name__ == "__main__":
@@ -834,6 +915,8 @@ if __name__ == "__main__":
 
     if config.TLS_ENABLED:
         asyncio.run(_run_tls())
+    elif config.PORT80_REDIRECT:
+        asyncio.run(_run_http())
     else:
         uvicorn.run(
             "server.main:app",

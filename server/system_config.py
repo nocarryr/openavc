@@ -182,6 +182,12 @@ DEFAULTS: dict[str, Any] = {
         # known reverse proxy. Off by default so a client can't spoof its
         # source IP to dodge rate limits / the localhost exemption.
         "trust_forwarded_for": False,
+        # Convenience redirect listener on port 80 so typed URLs can drop the
+        # port (http://<ip>/panel just works). Pure redirect to the real
+        # HTTP/HTTPS port — never serves content. Off by default: binding
+        # port 80 needs CAP_NET_BIND_SERVICE on Linux services, and the port
+        # is often owned by other software.
+        "port80_redirect": False,
         # Optional deployment-provided host-network backend: an importable
         # module exposing create_backend() -> NetworkBackend | None. Empty =
         # use built-in detection (nmcli). Appliance images set this to point
@@ -249,6 +255,7 @@ ENV_OVERRIDES: dict[tuple[str, str], tuple[str, type]] = {
     ("network", "bind_address"): ("OPENAVC_BIND", str),
     ("network", "control_interface"): ("OPENAVC_CONTROL_INTERFACE", str),
     ("network", "trust_forwarded_for"): ("OPENAVC_TRUST_FORWARDED_FOR", bool),
+    ("network", "port80_redirect"): ("OPENAVC_PORT80_REDIRECT", bool),
     ("auth", "programmer_username"): ("OPENAVC_PROGRAMMER_USERNAME", str),
     ("auth", "programmer_password"): ("OPENAVC_PROGRAMMER_PASSWORD", str),
     ("auth", "api_key"): ("OPENAVC_API_KEY", str),

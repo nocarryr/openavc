@@ -224,7 +224,7 @@ export async function importTheme(file: File): Promise<{ status: string; id: str
 // --- System Config ---
 
 export interface SystemConfig {
-  network: { http_port: number; bind_address: string; control_interface: string };
+  network: { http_port: number; bind_address: string; control_interface: string; port80_redirect: boolean };
   auth: { programmer_username: string; programmer_password: string; api_key: string; panel_lock_code: string };
   isc: { enabled: boolean; discovery_enabled: boolean; auth_key: string };
   logging: { level: string; file_enabled: boolean; max_size_mb: number; max_files: number };
