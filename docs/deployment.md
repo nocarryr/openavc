@@ -498,7 +498,7 @@ If the cert is missing, unreadable, malformed, or expired, OpenAVC refuses to st
 
 ### HTTP-to-HTTPS redirect
 
-When HTTPS is enabled, OpenAVC also runs a tiny HTTP listener on the original port (8080 by default) that 301/308-redirects every request to the HTTPS URL. This keeps old bookmarks, printed QR codes, and panel apps pointed at `http://` working without any user action. Disable it in Settings > Security if you want to take port 8080 down entirely.
+When HTTPS is enabled, OpenAVC also runs a tiny HTTP listener on the original port (8080 by default) that redirects every request to the HTTPS URL with a temporary redirect (302/307), so nothing caches a permanent redirect that would outlive a later decision to turn HTTPS back off. This keeps old bookmarks, printed QR codes, and panel apps pointed at `http://` working without any user action. Disable it in Settings > Security if you want to take port 8080 down entirely.
 
 ### Installing the CA on panel devices
 
@@ -511,6 +511,10 @@ Auto-generated certs are signed by an internal CA that no client trusts out of t
 5. **Windows / macOS / Linux:** add the cert to the system trust store (or browser trust store, depending on the browser).
 
 Once the CA is trusted, future cert regenerations (e.g., the server gets a new LAN IP) keep working without re-installing trust.
+
+### Trusted certificates without any client setup
+
+If the system is paired with OpenAVC Cloud, you can skip CA installs entirely: **Settings > Security** offers a one-click trusted certificate. The cloud obtains a publicly trusted certificate for the system (the private key never leaves the server), and the HTTP listener redirects clients to a certified URL that any browser accepts with a normal padlock. Nothing needs to be installed on client devices, which makes it the right choice for guest and BYOD scenarios. Network details, including the DNS rebind exception some routers need, are in the [network and security cut sheet](it-network-guide.md).
 
 ### Reverse-proxy deployments
 

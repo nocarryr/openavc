@@ -247,12 +247,33 @@ OpenAVC defaults to plain HTTP because most deployments live on an isolated AV V
 
 When enabled, the server runs the HTTPS listener on port 8443 with an enforced **TLS 1.2 floor** — only TLS 1.2 and 1.3 are negotiated, and TLS 1.0/1.1 are refused — using RSA-2048 server keys and a modern ECDHE (GCM / CHACHA20) cipher suite. It keeps a tiny HTTP listener on port 8080 that redirects to the HTTPS URL (temporary 302/307, so no browser caches a permanent redirect that would outlive a later decision to turn HTTPS back off) so existing clients keep working.
 
-Two cert modes are supported:
+Three cert modes are supported:
 
 - **Auto-generated self-signed cert.** Built-in CA and server cert under `{data_dir}/tls/`, 10-year validity, SANs covering the OS hostname and every local IPv4. The CA is downloadable at `GET /api/certificate` for install on panel devices.
 - **User-provided cert.** Point `tls.cert_file` / `tls.key_file` at PEM files signed by your internal CA. No browser warnings if the CA is already trusted by your fleet.
+- **Cloud-issued trusted cert.** Systems paired with OpenAVC Cloud can serve a publicly trusted certificate with no client-side setup at all. Details in the next section.
 
 A reverse proxy in front of OpenAVC (nginx, Caddy, Apache, HAProxy) is still fully supported — leave OpenAVC's TLS off and let the proxy terminate.
+
+### Trusted certificates (cloud-issued, optional)
+
+Systems paired with OpenAVC Cloud can serve a publicly trusted HTTPS certificate instead of the self-signed one. Browsers on the LAN then get a normal padlock, with no warnings to click through and no CA to roll out to guest or BYOD devices. It is a one-click opt-in under **Settings > Security**, and one click turns it back off.
+
+How it works:
+
+- The cloud assigns the system a random hostname label under the public zone `i.openavc.net` and obtains a wildcard certificate for it from Let's Encrypt, using a DNS challenge handled entirely by the cloud. The OpenAVC host needs no inbound connectivity and no new outbound rules; issuance and renewal ride the existing cloud connection (`cloud.openavc.com`, port 443).
+- The private key is generated on the OpenAVC host and never leaves it. The cloud receives a certificate signing request and returns the signed certificate.
+- Addresses encode the system's LAN IP in the hostname: `https://192-168-1-20.<label>.i.openavc.net:8443/` resolves to `192.168.1.20`. While the feature is active, the HTTP listener on port 8080 redirects clients to the certified URL automatically, so users still just type the plain IP address.
+- Renewal is automatic. The renewed certificate is served immediately, with no restart and no dropped connections.
+- Bare-IP HTTPS (`https://<ip>:8443/`) continues to serve the self-signed certificate, so devices that already trust the local CA keep working unchanged.
+
+Notes for network administrators:
+
+- Client devices resolve the certified hostname through normal public DNS, and the answer points at a private (RFC 1918) address. Only the name lookup leaves the network; the actual traffic to the OpenAVC host stays on the LAN.
+- **DNS rebind protection.** Some routers and firewalls refuse public DNS names that resolve to private addresses. The symptom: the certified URL fails to resolve on the LAN while everything else works, and the bare-IP URL still loads. Add an exception for the zone. On dnsmasq-based routers (including OpenWrt): `rebind-domain-ok=/i.openavc.net/`. On Unbound-based firewalls (OPNsense, pfSense): `private-domain: "i.openavc.net"`. On an AVM FRITZ!Box: add `i.openavc.net` to the DNS rebind protection exceptions. For other equipment, search its documentation for "DNS rebind" exceptions.
+- Like every publicly trusted certificate, issuance is recorded in public Certificate Transparency logs. The logged name contains only the random system label (for example `*.a3f9c2e81b4d0f37.i.openavc.net`). Your internal IP addresses, hostnames, and organization name do not appear in the certificate.
+- If the site loses internet access, devices that have already resolved the name keep working for the DNS TTL (24 hours). New devices can fall back to the bare-IP URL, which shows the standard self-signed warning.
+- Turning the feature off reverts the redirect immediately and revokes the hostname on the cloud side; clients with cached DNS answers lose resolution as their cache expires.
 
 ### Rate limiting
 
@@ -461,7 +482,7 @@ OpenAVC does not use UPnP port mapping, NAT traversal, or any technique that mod
 | Inbound ports | HTTP 8080 (+ UDP 5353 for panel auto-discovery) | Configurable. Adds 8443 when HTTPS is enabled. |
 | Bind address | Packaged installs: all interfaces (`0.0.0.0`); source run: localhost | Installers bind all interfaces so panels can reach the host. Force localhost with `OPENAVC_BIND=127.0.0.1`. |
 | Admin authentication | Secure by default | Shipped deployments refuse the Programmer and admin API until an admin password is set; the room panel stays open. A source checkout is open on localhost for development. |
-| TLS | Off, opt-in built-in | Enable via Settings > Security. TLS 1.2/1.3 only (1.0/1.1 refused). Auto-generated self-signed cert or supply your own. Reverse-proxy TLS also supported. |
+| TLS | Off, opt-in built-in | Enable via Settings > Security. TLS 1.2/1.3 only (1.0/1.1 refused). Auto-generated self-signed cert, supply your own, or a cloud-issued publicly trusted cert for paired systems. Reverse-proxy TLS also supported. |
 | Outbound internet | Not required | Only for optional updates and cloud |
 | Cloud connectivity | Disabled by default | Opt-in. When paired, it is an administrator-equivalent management plane (see Cloud Platform above). |
 | Privileged access | None required | Runs as standard user, no root/admin |
@@ -507,4 +528,4 @@ Yes. OpenAVC is MIT-licensed open source. The full source code, including the cl
 
 ---
 
-*Document version: 1.1. For the latest version, see [docs.openavc.com](https://docs.openavc.com).*
+*Document version: 1.2. For the latest version, see [docs.openavc.com](https://docs.openavc.com).*
