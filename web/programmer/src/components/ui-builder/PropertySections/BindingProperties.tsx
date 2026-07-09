@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 import type { UIElement, ProjectConfig } from "../../../api/types";
 import { BINDING_CAPABILITIES, type BindingCapability, slotActions, actionsCommandDevice, actionDanglingRef, actionIncompleteCheck } from "../uiBuilderHelpers";
@@ -10,6 +10,7 @@ import { ColorBindingEditor } from "../BindingEditor/ColorBindingEditor";
 import { SelectChangeEditor } from "../BindingEditor/SelectChangeEditor";
 import { SelectFeedbackEditor } from "../BindingEditor/SelectFeedbackEditor";
 import { VariableKeyPicker } from "../../shared/VariableKeyPicker";
+import { DeviceValuePicker } from "../BindingEditor/DeviceValuePicker";
 import { ConditionGroupEditor, type ConditionGroup } from "../../shared/ConditionGroupEditor";
 import { useConnectionStore } from "../../../store/connectionStore";
 
@@ -142,12 +143,16 @@ export function BindingProperties({ element, project, onChange }: BindingPropert
       showCards.push(
         <Card key="value" title={cap.value.label || "Value"} status={keyStatus(valueBinding ?? undefined)}>
           <ValueSourceEditor
+            key={element.id}
             binding={valueBinding}
+            project={project}
+            element={element}
             link={!!cap.value.link}
             hasDeviceCommand={hasDeviceCommand}
             valueMapDriven={valueMapDriven}
             onChange={(v) => setShowKey("value", v)}
             onAddCommand={addDeviceCommand}
+            onElementPatch={onChange}
           />
         </Card>,
       );
@@ -316,24 +321,42 @@ export function BindingProperties({ element, project, onChange }: BindingPropert
 
 function ValueSourceEditor({
   binding,
+  project,
+  element,
   link,
   hasDeviceCommand,
   valueMapDriven,
   onChange,
   onAddCommand,
+  onElementPatch,
 }: {
   binding: Record<string, unknown> | null;
+  project: ProjectConfig;
+  element: UIElement;
   link: boolean;
   hasDeviceCommand: boolean;
   valueMapDriven?: boolean;
   onChange: (value: Record<string, unknown> | null) => void;
   onAddCommand: () => void;
+  onElementPatch: (patch: Partial<UIElement>) => void;
 }) {
   const key = String(binding?.key || "");
   const liveValue = useConnectionStore((s) => (key ? s.liveState[key] : undefined));
   const isVar = key.startsWith("var.");
   const isDevice = key.startsWith("device.");
   const writeBack = !!binding?.write_back;
+  const hasDevices = project.devices.length > 0;
+
+  // Lead with the guided Device -> Property cascade when it can represent the
+  // binding (or nothing is bound yet). A key it can't — var./system./plugin./
+  // ui., or a device no longer in the project — opens in the all-keys picker
+  // so existing bindings never look broken. Both modes stay one click apart,
+  // and every state key remains pickable through the all-keys picker.
+  const boundDeviceInProject =
+    isDevice && project.devices.some((d) => d.id === key.split(".")[1]);
+  const [pickerMode, setPickerMode] = useState<"device" | "any">(() =>
+    key ? (boundDeviceInProject ? "device" : "any") : hasDevices ? "device" : "any",
+  );
 
   const setKey = (newKey: string) => {
     if (!newKey) {
@@ -356,7 +379,29 @@ function ValueSourceEditor({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
-      <VariableKeyPicker value={key} onChange={setKey} placeholder="Select state key..." />
+      {pickerMode === "device" && hasDevices ? (
+        <>
+          <DeviceValuePicker
+            keyValue={key}
+            project={project}
+            element={element}
+            onKeyChange={setKey}
+            onElementPatch={onElementPatch}
+          />
+          <button type="button" onClick={() => setPickerMode("any")} style={modeToggleStyle}>
+            Pick any state key instead (variables, system, advanced)…
+          </button>
+        </>
+      ) : (
+        <>
+          <VariableKeyPicker value={key} onChange={setKey} placeholder="Select state key..." />
+          {hasDevices && (
+            <button type="button" onClick={() => setPickerMode("device")} style={modeToggleStyle}>
+              Pick a device property instead…
+            </button>
+          )}
+        </>
+      )}
       {key && liveValue !== undefined && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", background: "var(--bg-surface)", borderRadius: 4, fontSize: 11 }}>
           <span style={{ color: "var(--text-muted)" }}>Current value:</span>
@@ -502,6 +547,17 @@ const clearBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "1px solid var(--border-color)",
   alignSelf: "flex-start",
+  cursor: "pointer",
+};
+
+const modeToggleStyle: React.CSSProperties = {
+  alignSelf: "flex-start",
+  padding: 0,
+  border: "none",
+  background: "transparent",
+  color: "var(--text-muted)",
+  fontSize: 11,
+  textDecoration: "underline",
   cursor: "pointer",
 };
 
