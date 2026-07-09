@@ -524,6 +524,8 @@ If you front OpenAVC with nginx, Caddy, or another reverse proxy that terminates
 
 By default, people have to include the port when typing an address: `http://192.168.1.20:8080/panel`. Turning on **Short URLs** in **Settings > Network** adds a small listener on port 80 that forwards every request to the real port, so `http://192.168.1.20/panel` just works. It composes with HTTPS and trusted certificates: with those on, typing the bare IP lands directly on the padlocked page. The listener serves no content, only redirects, and it is best-effort: if something else on the machine owns port 80, OpenAVC logs a warning and starts normally without it. Changing the toggle takes effect after a restart. Also set the environment variable `OPENAVC_PORT80_REDIRECT=true` for headless setups.
 
+While the listener is up, the addresses OpenAVC shows people — the Panel Access card, its QR code and printed poster, the device setup screen, and the startup log — drop the port automatically. If the listener could not bind, those surfaces keep showing the full address with the port, so a displayed URL always works as shown.
+
 Platform notes:
 
 - **Windows:** works as-is when port 80 is free (IIS or other web servers may own it).
