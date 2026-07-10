@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import * as ws from "../api/wsClient";
 import { useConnectionStore } from "../store/connectionStore";
 import { useLogStore } from "../store/logStore";
-import type { LogEntry } from "../store/logStore";
+import type { LogEntry, StepPathSegment } from "../store/logStore";
 import { useProjectStore } from "../store/projectStore";
 import { useUIBuilderStore } from "../store/uiBuilderStore";
 import { useDiscoveryStore } from "../store/discoveryStore";
@@ -78,6 +78,24 @@ export function useWebSocket() {
       pluginRefreshTimer = setTimeout(() => {
         usePluginStore.getState().load();
       }, 300);
+    };
+
+    // Track transient timers so an unmount / StrictMode double-mount / WS-auth
+    // bounce can't orphan them. An orphaned timer mutates global store state
+    // after this hook is gone — worst case a stale macro-reset or trigger-clear
+    // timer firing after re-login and stomping fresh state.
+    const macroResetTimers = new Set<ReturnType<typeof setTimeout>>();
+    // trigger.pending auto-clear timers, keyed by trigger_id: the server
+    // re-emits trigger.pending for the same id on every debounce reset, so we
+    // cancel the prior timer before arming a new one (otherwise an old timer
+    // clears a freshly re-armed pending entry mid-wait).
+    const triggerClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const cancelTriggerClear = (triggerId: string) => {
+      const existing = triggerClearTimers.get(triggerId);
+      if (existing) {
+        clearTimeout(existing);
+        triggerClearTimers.delete(triggerId);
+      }
     };
 
     const unsub = ws.onMessage((msg) => {
@@ -157,44 +175,20 @@ export function useWebSocket() {
         if (msg.status === "running") {
           const stepIndex = msg.step_index as number;
           const totalSteps = msg.total_steps as number;
-          // Build the active step path through conditional branches.
-          // The path stack tracks [parentStepIndex, branch, ...] segments.
-          // When total_steps changes from the parent level, we're entering a branch.
-          // When it changes back, we're leaving.
-          const prev = store.macroProgress;
-          let path = [...prev.activeStepPath];
-
-          if (prev.totalSteps != null && totalSteps !== prev.totalSteps) {
-            // total_steps changed — we entered or exited a branch level
-            if (totalSteps < prev.totalSteps) {
-              // Entering a deeper branch — the last conditional result tells us the branch
-              const lastCond = store.conditionalResults[store.conditionalResults.length - 1];
-              if (lastCond) {
-                path = [...path, lastCond.stepIndex, lastCond.branch, stepIndex];
-              }
-            } else {
-              // Returning to a higher level — pop path back to matching depth
-              // Find the depth where totalSteps matches by popping pairs
-              while (path.length >= 3) {
-                path = path.slice(0, -3);
-              }
-              path = [stepIndex];
-            }
-          } else {
-            // Same level — update the last index in the path
-            if (path.length === 0) {
-              path = [stepIndex];
-            } else {
-              path = [...path.slice(0, -1), stepIndex];
-            }
-          }
+          // The server sends the step's explicit tree location as step_path
+          // (e.g. [2, "then", 0]) — consume it verbatim rather than inferring
+          // branch depth from total_steps deltas (which is ambiguous when a
+          // branch's length equals its parent's). Fall back to the flat index.
+          const stepPath = Array.isArray(msg.step_path)
+            ? (msg.step_path as StepPathSegment[])
+            : [stepIndex];
 
           store.setMacroProgress({
             macroId: msg.macro_id as string,
             stepIndex,
             totalSteps,
             status: "running",
-            activeStepPath: path,
+            activeStepPath: stepPath,
           });
         }
         // Conditional evaluation result
@@ -240,11 +234,13 @@ export function useWebSocket() {
           status: "completed",
         });
         // Auto-reset after a brief moment, but only if still showing this macro
-        setTimeout(() => {
+        const resetTimer = setTimeout(() => {
+          macroResetTimers.delete(resetTimer);
           if (useLogStore.getState().macroProgress.macroId === completedId) {
             useLogStore.getState().resetMacroProgress();
           }
         }, 2000);
+        macroResetTimers.add(resetTimer);
       }
 
       if (msg.type === "macro.error") {
@@ -254,30 +250,43 @@ export function useWebSocket() {
           macroId: errorId,
           status: "error",
         });
-        setTimeout(() => {
+        const resetTimer = setTimeout(() => {
+          macroResetTimers.delete(resetTimer);
           if (useLogStore.getState().macroProgress.macroId === errorId) {
             useLogStore.getState().resetMacroProgress();
           }
         }, 3000);
+        macroResetTimers.add(resetTimer);
       }
 
       // Trigger pending / queued events
       if (msg.type === "trigger.pending") {
         const triggerId = msg.trigger_id as string;
+        const armedAt = Date.now();
         useLogStore.getState().setTriggerPending(triggerId, {
           reason: msg.reason as "debounce" | "delay",
           waitSeconds: msg.wait_seconds as number,
-          timestamp: Date.now(),
+          timestamp: armedAt,
         });
-        // Auto-clear after the wait period + buffer
+        // Cancel any prior auto-clear for this trigger before arming a new one,
+        // so a debounce re-arm can't have its old timer clear the fresh entry.
+        cancelTriggerClear(triggerId);
         const clearMs = ((msg.wait_seconds as number) ?? 5) * 1000 + 500;
-        setTimeout(() => {
-          useLogStore.getState().setTriggerPending(triggerId, null);
+        const clearTimer = setTimeout(() => {
+          triggerClearTimers.delete(triggerId);
+          // Only clear if the pending entry is still the one this timer armed
+          // (a newer pending/queued would carry a different timestamp).
+          if (useLogStore.getState().triggerPending[triggerId]?.timestamp === armedAt) {
+            useLogStore.getState().setTriggerPending(triggerId, null);
+          }
         }, clearMs);
+        triggerClearTimers.set(triggerId, clearTimer);
       }
 
       if (msg.type === "trigger.queued") {
         const triggerId = msg.trigger_id as string;
+        // A queued state supersedes any pending countdown — drop its clear timer.
+        cancelTriggerClear(triggerId);
         useLogStore.getState().setTriggerPending(triggerId, {
           reason: "queued",
           queuePosition: msg.queue_position as number,
@@ -288,6 +297,7 @@ export function useWebSocket() {
       // Clear trigger pending when it fires
       if (msg.type === "trigger.fired") {
         const triggerId = msg.trigger_id as string;
+        cancelTriggerClear(triggerId);
         useLogStore.getState().setTriggerPending(triggerId, null);
       }
 
@@ -338,6 +348,10 @@ export function useWebSocket() {
     return () => {
       if (reloadTimer) clearTimeout(reloadTimer);
       if (pluginRefreshTimer) clearTimeout(pluginRefreshTimer);
+      macroResetTimers.forEach(clearTimeout);
+      macroResetTimers.clear();
+      triggerClearTimers.forEach(clearTimeout);
+      triggerClearTimers.clear();
       unsub();
       unsubConnect();
       unsubDisconnect();

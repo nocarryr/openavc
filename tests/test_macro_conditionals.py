@@ -388,6 +388,128 @@ async def test_progress_auto_description(engine, state, events, devices):
     assert "projector" in progress_events[0]["description"]
 
 
+# ===== macro.progress step_path (explicit branch tracking) =====
+#
+# The progress event carries an explicit step_path — the step's tree location,
+# e.g. [1, "then", 0] — so the UI tracks the active step through conditional
+# branches directly instead of guessing tree depth from total_steps deltas
+# (which freezes when a branch's length equals its parent's).
+
+
+async def _running_paths(engine, events, macro):
+    """Run a macro and return the step_path of each 'running' progress event."""
+    paths: list[list] = []
+
+    async def capture(_event, data):
+        if data.get("status") == "running":
+            paths.append(data["step_path"])
+
+    events.on("macro.progress.*", capture)
+    engine.load_macros([macro])
+    await engine.execute(macro["id"])
+    return paths
+
+
+@pytest.mark.asyncio
+async def test_progress_step_path_equal_length_branch(engine, state, devices):
+    """The degenerate case: a branch whose length equals its parent's.
+
+    total_steps never changes across the parent->branch boundary here (both
+    lists have 3 steps), so the old delta-inference froze the highlight. The
+    explicit path must still descend into the branch and return to the parent.
+    """
+    state.set("var.go", True)
+    macro = {
+        "id": "m",
+        "name": "Equal-length branch",
+        "steps": [
+            {"action": "state.set", "key": "var.a", "value": 1},
+            {
+                "action": "conditional",
+                "condition": {"key": "var.go", "operator": "truthy"},
+                "then_steps": [
+                    {"action": "device.command", "device": "d", "command": "c0"},
+                    {"action": "device.command", "device": "d", "command": "c1"},
+                    {"action": "device.command", "device": "d", "command": "c2"},
+                ],
+            },
+            {"action": "state.set", "key": "var.b", "value": 2},
+        ],
+    }
+    paths = await _running_paths(engine, engine.events, macro)
+    assert paths == [
+        [0],
+        [1],
+        [1, "then", 0],
+        [1, "then", 1],
+        [1, "then", 2],
+        [2],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_progress_step_path_deeply_nested(engine, state, devices):
+    """Nested conditionals where every list has length 1 — the delta scheme
+    could never detect the branch entries (total_steps stays 1 throughout)."""
+    state.set("var.go", True)
+    macro = {
+        "id": "m",
+        "name": "Deep nest",
+        "steps": [
+            {
+                "action": "conditional",
+                "condition": {"key": "var.go", "operator": "truthy"},
+                "then_steps": [
+                    {
+                        "action": "conditional",
+                        "condition": {"key": "var.go", "operator": "truthy"},
+                        "then_steps": [
+                            {"action": "device.command", "device": "d", "command": "deep"},
+                        ],
+                    },
+                ],
+            },
+        ],
+    }
+    paths = await _running_paths(engine, engine.events, macro)
+    assert paths == [
+        [0],
+        [0, "then", 0],
+        [0, "then", 0, "then", 0],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_progress_step_path_else_branch_and_return(engine, state, devices):
+    """A false condition descends the else branch, then execution returns to
+    the next top-level step — the path must reflect the else segment and pop
+    back to the parent level."""
+    state.set("var.go", False)
+    macro = {
+        "id": "m",
+        "name": "Else + return",
+        "steps": [
+            {
+                "action": "conditional",
+                "condition": {"key": "var.go", "operator": "truthy"},
+                "then_steps": [
+                    {"action": "device.command", "device": "d", "command": "then0"},
+                ],
+                "else_steps": [
+                    {"action": "device.command", "device": "d", "command": "else0"},
+                ],
+            },
+            {"action": "state.set", "key": "var.after", "value": 1},
+        ],
+    }
+    paths = await _running_paths(engine, engine.events, macro)
+    assert paths == [
+        [0],
+        [0, "else", 0],
+        [1],
+    ]
+
+
 # ===== Project loader: StepCondition model =====
 
 

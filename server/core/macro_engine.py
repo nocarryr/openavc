@@ -348,18 +348,28 @@ class MacroEngine:
         stop_on_error: bool = False,
         _conditional_depth: int = 0,
         _call_chain: frozenset[str] | None = None,
+        _path_prefix: list[int | str] | None = None,
     ) -> None:
         """
         Execute a list of steps sequentially.
 
         Each step is wrapped in try/except — errors are logged but
         execution continues to the next step (unless stop_on_error is True).
+
+        ``_path_prefix`` is the tree location of this step list. Top-level runs
+        pass ``[]``; a conditional recursing into a branch passes
+        ``[*parent_path, "then"|"else"]``. Each step's full path is
+        ``[*_path_prefix, i]`` — emitted as ``step_path`` on the progress event
+        so the UI can track the active step through nested branches without
+        guessing tree depth from ``total_steps`` deltas.
         """
         context = context or {}
         total = len(steps)
+        prefix = _path_prefix or []
 
         for i, step in enumerate(steps):
             action = step.get("action", "")
+            step_path = [*prefix, i]
 
             # Emit progress
             if macro_id:
@@ -369,6 +379,7 @@ class MacroEngine:
                         "macro_id": macro_id,
                         "step_index": i,
                         "total_steps": total,
+                        "step_path": step_path,
                         "action": action,
                         "description": step.get("description") or self._auto_description(step),
                         "status": "running",
@@ -376,7 +387,10 @@ class MacroEngine:
                 )
 
             try:
-                await self._execute_step(step, context, _conditional_depth, macro_id, stop_on_error, _call_chain)
+                await self._execute_step(
+                    step, context, _conditional_depth, macro_id, stop_on_error,
+                    _call_chain, _step_path=step_path,
+                )
             except Exception as e:  # Catch-all: isolates individual step errors from halting the macro
                 step_detail = self._step_error_detail(step, i, total)
                 log.error(f"Macro step failed: {step_detail} — {e}")
@@ -516,8 +530,11 @@ class MacroEngine:
         _conditional_depth: int = 0, macro_id: str | None = None,
         stop_on_error: bool = False,
         _call_chain: frozenset[str] | None = None,
+        _step_path: list[int | str] | None = None,
     ) -> None:
-        """Execute a single macro step."""
+        """Execute a single macro step. ``_step_path`` is this step's tree
+        location (``[*parent_path, index]``); a conditional uses it to build the
+        branch prefix for its then/else sub-steps."""
         action = step.get("action", "")
 
         # Step-level skip_if guard
@@ -645,6 +662,7 @@ class MacroEngine:
                     },
                 )
 
+            step_path = _step_path or []
             if result:
                 then_steps = step.get("then_steps") or []
                 if then_steps:
@@ -654,6 +672,7 @@ class MacroEngine:
                         stop_on_error=stop_on_error,
                         _conditional_depth=_conditional_depth + 1,
                         _call_chain=_call_chain,
+                        _path_prefix=[*step_path, "then"],
                     )
             else:
                 else_steps = step.get("else_steps") or []
@@ -664,6 +683,7 @@ class MacroEngine:
                         stop_on_error=stop_on_error,
                         _conditional_depth=_conditional_depth + 1,
                         _call_chain=_call_chain,
+                        _path_prefix=[*step_path, "else"],
                     )
                 else:
                     log.debug("  Conditional: false, no else-steps")
