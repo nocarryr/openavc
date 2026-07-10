@@ -607,6 +607,18 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             errors.append(f"State variable '{var_name}': unknown type '{var_type}'")
         if not var_def.get("label"):
             errors.append(f"State variable '{var_name}': missing 'label'")
+        unit = var_def.get("unit")
+        if unit is not None and not isinstance(unit, str):
+            errors.append(
+                f"State variable '{var_name}': unit must be a string "
+                f"(got {unit!r})"
+            )
+        control = var_def.get("control")
+        if control is not None and not isinstance(control, bool):
+            errors.append(
+                f"State variable '{var_name}': control must be true or false "
+                f"(got {control!r})"
+            )
 
     # Validate the optional frame_parser block (binary protocols). The runtime
     # LengthPrefixFrameParser only accepts header_size in {1, 2, 4} and
@@ -785,6 +797,18 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                             f"{where}.state_variables.{var_name}: cloud_priority "
                             f"must be 'low' or 'high' (got {cp!r}); omit it for "
                             f"the default cadence"
+                        )
+                    cunit = var_def.get("unit")
+                    if cunit is not None and not isinstance(cunit, str):
+                        errors.append(
+                            f"{where}.state_variables.{var_name}: unit must be "
+                            f"a string (got {cunit!r})"
+                        )
+                    cctl = var_def.get("control")
+                    if cctl is not None and not isinstance(cctl, bool):
+                        errors.append(
+                            f"{where}.state_variables.{var_name}: control must "
+                            f"be true or false (got {cctl!r})"
                         )
 
             # Validate the optional `instances:` roster block (declarative

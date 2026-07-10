@@ -121,7 +121,7 @@ The other Connection sub-sections are optional:
 
 Order matters here. Build them in the order they appear:
 
-**State Variables** — the read-only properties the driver reports. Each entry has a type (string, integer, number, boolean, enum), a required label, optional help text, and for numerics optional min/max/step (used by the simulator and panel UI to auto-generate sliders).
+**State Variables** — the read-only properties the driver reports. Each entry has a type (string, integer, number, boolean, enum), a required label, optional help text, and for numerics optional min/max/step and a unit (used by the simulator and panel UI to auto-generate sliders, and by the UI Builder to match a bound control to the driver's range). Tick **Control** on the variables an integrator would bind a panel control to — the UI Builder's value picker lists those first.
 
 | Variable ID | Label | Type | Notes |
 |-------------|-------|------|-------|
@@ -554,9 +554,30 @@ async def set_device_setting(self, key: str, value: Any) -> Any:
 }
 ```
 
+```yaml
+output_1_fader_db:
+  type: number
+  label: Output 1 Gain (dB)
+  min: -80.0
+  max: 10.0
+  step: 0.5
+  unit: dB
+  control: true
+```
+
 Types: `string`, `integer`, `number`, `float`, `boolean`, `enum`.
 
 The `label` field is required — it's the human-readable name shown wherever the variable appears (device card, properties panel, simulator), and a state variable without one fails validation so the whole driver won't load. The optional `help` field provides a description shown in the Driver Builder UI and available to the AI assistant.
+
+Numeric variables can declare their real range and resolution:
+
+- `min` / `max` — the value range the device reports. The UI Builder offers to match a bound slider, fader, gauge, or meter to this range, and the simulator UI renders a matching slider.
+- `step` — the device's value resolution (e.g. `0.5` for a fader that moves in half-dB increments). Fills the matched control's Step.
+- `unit` — the unit as text (e.g. `dB`, `Hz`, `%`). Fills the matched control's Unit. Without it, the UI falls back to parsing a trailing "(dB)" from the label.
+
+Any variable can also declare:
+
+- `control: true` — marks a variable an integrator would bind a panel control to (a fader level, a mute, a source selection), as opposed to a read-out or metadata. The UI Builder's value picker lists flagged variables first. Ordering only — unflagged variables always remain pickable.
 
 #### `child_entity_types` entry
 
@@ -587,7 +608,7 @@ child_entity_types:
 - `id_format`: How the controller addresses this sub-unit.
   - `type: integer` (default): numbered sub-units. `min`/`max` bound the valid range; `pad_width` zero-pads the ID when it appears in state keys.
   - `type: string`: sub-units keyed by a device-native **name** instead of a number (a Q-SYS component Code Name, an MQTT topic leaf, a zone name). The name must be `[A-Za-z0-9_-]` only (so it's safe in a state key and in glob subscriptions) and at most `max_length` characters (default 128). Sanitize the device's native name to that charset and keep the original in the child's `label`.
-- `state_variables`: Same shape as device `state_variables` (types: `string`, `integer`, `number`, `float`, `boolean`, `enum`). The platform always adds a boolean `online` and a string `label` per child, so you don't declare those. Each variable may carry an optional `cloud_priority`:
+- `state_variables`: Same shape as device `state_variables` (types: `string`, `integer`, `number`, `float`, `boolean`, `enum`), including the optional `min`/`max`/`step`/`unit` numeric metadata and the `control: true` flag — a child variable flagged as a control is what the UI Builder's value picker and the `options_from: child_schema` command cascade list first. The platform always adds a boolean `online` and a string `label` per child, so you don't declare those. Each variable may carry an optional `cloud_priority`:
   - `high` — relayed to the cloud at the fast top-level cadence (for latency-sensitive fields like routing or mute).
   - `low` — relayed at the slow verbose cadence (for chatty per-IO state).
   - omitted — the default per-child cadence.

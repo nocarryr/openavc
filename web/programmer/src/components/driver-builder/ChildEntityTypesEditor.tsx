@@ -703,7 +703,7 @@ function StateVarsSection({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr auto auto",
+            gridTemplateColumns: "1fr 1fr 1fr auto auto auto",
             gap: "var(--space-sm)",
             marginBottom: "var(--space-xs)",
             alignItems: "center",
@@ -713,6 +713,7 @@ function StateVarsSection({
           <span style={{ ...labelStyle, fontSize: "11px" }}>Label</span>
           <span style={{ ...labelStyle, fontSize: "11px" }}>Help</span>
           <span style={{ ...labelStyle, fontSize: "11px" }}>Type</span>
+          <span style={{ ...labelStyle, fontSize: "11px" }} title="Mark fields a control would bind to — value and command pickers list them first. Unmarked fields stay available.">Control</span>
           <span />
         </div>
       )}
@@ -726,7 +727,7 @@ function StateVarsSection({
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "1fr 1fr 1fr auto auto",
+                gridTemplateColumns: "1fr 1fr 1fr auto auto auto",
                 gap: "var(--space-sm)",
                 alignItems: "center",
               }}
@@ -769,6 +770,15 @@ function StateVarsSection({
                 <option value="boolean">Boolean</option>
                 <option value="enum">Enum</option>
               </select>
+              <input
+                type="checkbox"
+                checked={v.control ?? false}
+                onChange={(e) =>
+                  updateVar(name, "control", e.target.checked || undefined)
+                }
+                title="Mark as a control field — value and command pickers list it first"
+                style={{ justifySelf: "center" }}
+              />
               <button
                 onClick={() => removeVar(name)}
                 style={{ padding: "2px", color: "var(--text-muted)" }}
@@ -790,7 +800,7 @@ function StateVarsSection({
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "100px 100px 100px 1fr",
+                      gridTemplateColumns: "100px 100px 100px 100px 1fr",
                       gap: "var(--space-sm)",
                       alignItems: "center",
                       marginBottom: "var(--space-xs)",
@@ -846,7 +856,15 @@ function StateVarsSection({
                       placeholder="step"
                       style={{ fontSize: "var(--font-size-sm)" }}
                     />
-                    <div style={helpStyle}>Numeric bounds.</div>
+                    <input
+                      value={v.unit ?? ""}
+                      onChange={(e) =>
+                        updateVar(name, "unit", e.target.value || undefined)
+                      }
+                      placeholder="unit (dB)"
+                      style={{ fontSize: "var(--font-size-sm)" }}
+                    />
+                    <div style={helpStyle}>Numeric bounds and unit.</div>
                   </div>
                 )}
                 {isEnum && (

@@ -80,7 +80,7 @@ export function StateVariableEditor({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr auto auto",
+            gridTemplateColumns: "1fr 1fr 1fr auto auto auto",
             gap: "var(--space-sm)",
             marginBottom: "var(--space-sm)",
             alignItems: "center",
@@ -90,6 +90,7 @@ export function StateVariableEditor({
           <span style={labelStyle}>Label</span>
           <span style={labelStyle}>Help Text</span>
           <span style={labelStyle}>Type</span>
+          <span style={labelStyle} title="Mark variables a control would bind to — the UI Builder's value picker lists them first. Unmarked variables stay available.">Control</span>
           <span />
         </div>
       )}
@@ -102,7 +103,7 @@ export function StateVariableEditor({
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "1fr 1fr 1fr auto auto",
+                gridTemplateColumns: "1fr 1fr 1fr auto auto auto",
                 gap: "var(--space-sm)",
                 alignItems: "center",
               }}
@@ -147,6 +148,15 @@ export function StateVariableEditor({
                 <option value="boolean">Boolean</option>
                 <option value="enum">Enum</option>
               </select>
+              <input
+                type="checkbox"
+                checked={v.control ?? false}
+                onChange={(e) =>
+                  updateVariable(name, "control", e.target.checked || undefined)
+                }
+                title="Mark as a control variable — the UI Builder's value picker lists it first"
+                style={{ justifySelf: "center" }}
+              />
               <button
                 onClick={() => removeVariable(name)}
                 style={{ padding: "2px", color: "var(--text-muted)" }}
@@ -163,7 +173,7 @@ export function StateVariableEditor({
                   paddingLeft: "var(--space-sm)",
                   borderLeft: "2px solid var(--border-color)",
                   display: "grid",
-                  gridTemplateColumns: "100px 100px 100px 1fr",
+                  gridTemplateColumns: "100px 100px 100px 100px 1fr",
                   gap: "var(--space-sm)",
                   alignItems: "center",
                 }}
@@ -218,9 +228,17 @@ export function StateVariableEditor({
                   placeholder="step"
                   style={{ fontSize: "var(--font-size-sm)" }}
                 />
+                <input
+                  value={v.unit ?? ""}
+                  onChange={(e) =>
+                    updateVariable(name, "unit", e.target.value || undefined)
+                  }
+                  placeholder="unit (dB)"
+                  style={{ fontSize: "var(--font-size-sm)" }}
+                />
                 <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-                  Numeric bounds — used by panel sliders and the simulator UI
-                  to render appropriate controls.
+                  Numeric bounds and unit — used by panel sliders, the UI
+                  Builder&apos;s range matching, and the simulator UI.
                 </div>
               </div>
             )}

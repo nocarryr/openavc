@@ -390,6 +390,77 @@ def test_validate_state_variables_as_list_does_not_raise():
     assert any("state_variables" in e for e in errors)
 
 
+def test_validate_state_variable_unit_and_control():
+    """`unit` (picker range prompt) and `control` (picker ordering) are
+    optional but typed: unit must be a string, control a boolean."""
+    good = {
+        **VALID_DEFINITION,
+        "state_variables": {
+            "gain_db": {
+                "type": "number", "label": "Gain (dB)",
+                "min": -80.0, "max": 10.0, "unit": "dB", "control": True,
+            },
+        },
+    }
+    assert validate_driver_definition(good) == []
+
+    bad_unit = {
+        **VALID_DEFINITION,
+        "state_variables": {
+            "gain_db": {"type": "number", "label": "Gain", "unit": 5},
+        },
+    }
+    errors = validate_driver_definition(bad_unit)
+    assert any("unit must be a string" in e for e in errors)
+
+    bad_control = {
+        **VALID_DEFINITION,
+        "state_variables": {
+            "gain_db": {"type": "number", "label": "Gain", "control": "yes"},
+        },
+    }
+    errors = validate_driver_definition(bad_control)
+    assert any("control must be true or false" in e for e in errors)
+
+
+def test_validate_child_state_variable_unit_and_control():
+    """Child-entity state variables carry the same typed unit/control."""
+    good = {
+        **VALID_DEFINITION,
+        "child_entity_types": {
+            "zone": {
+                "label": "Zone",
+                "state_variables": {
+                    "fader_db": {
+                        "type": "number", "label": "Fader (dB)",
+                        "min": -80.0, "max": 10.0,
+                        "unit": "dB", "control": True,
+                    },
+                },
+            },
+        },
+    }
+    assert validate_driver_definition(good) == []
+
+    bad = {
+        **VALID_DEFINITION,
+        "child_entity_types": {
+            "zone": {
+                "label": "Zone",
+                "state_variables": {
+                    "fader_db": {"type": "number", "unit": 1, "control": "on"},
+                },
+            },
+        },
+    }
+    errors = validate_driver_definition(bad)
+    assert any("zone.state_variables.fader_db: unit must be a string" in e for e in errors)
+    assert any(
+        "zone.state_variables.fader_db: control must be true or false" in e
+        for e in errors
+    )
+
+
 def test_validate_responses_as_dict_does_not_raise():
     defn = {**VALID_DEFINITION, "responses": {"not": "a list"}}
     errors = validate_driver_definition(defn)

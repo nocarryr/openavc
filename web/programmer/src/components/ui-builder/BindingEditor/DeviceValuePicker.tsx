@@ -12,12 +12,20 @@
  */
 import { useState, useRef, useEffect, useMemo } from "react";
 import { ChevronDown, Info } from "lucide-react";
-import type { ProjectConfig, DeviceInfo, UIElement } from "../../../api/types";
+import type {
+  ProjectConfig,
+  DeviceInfo,
+  UIElement,
+  ChildEntitiesListResponse,
+  ChildEntityEntry,
+} from "../../../api/types";
 import { useConnectionStore } from "../../../store/connectionStore";
 import * as api from "../../../api/restClient";
 
 /** Shape of one entry in DRIVER_INFO.state_variables (per-device, from
- *  getDevice — instance-building drivers only populate it there). */
+ *  getDevice — instance-building drivers only populate it there). Child
+ *  entity state vars share the shape (plus the same optional fields), so
+ *  the range prompt and grouping logic treat both alike. */
 export interface DeviceStateVarDef {
   type?: string;
   label?: string;
@@ -26,6 +34,12 @@ export interface DeviceStateVarDef {
   min?: number;
   max?: number;
   step?: number;
+  /** Declared unit for numeric values (e.g. "dB") — preferred over the
+   *  "(dB)" label parse when filling a matched control's Unit. */
+  unit?: string;
+  /** Driver marks vars meant to drive a control; the picker lists flagged
+   *  vars first. Ordering only — unflagged vars are never hidden. */
+  control?: boolean;
 }
 
 const NUMERIC_TYPES = new Set(["int", "integer", "float", "number"]);
@@ -95,7 +109,64 @@ interface PropEntry {
   suffix: string;
   label: string;
   def: DeviceStateVarDef | null;
-  group: "match" | "other" | "more";
+  /** "match" / "other" / "more", or "child:<type>" for child-entity vars. */
+  group: string;
+  /** Render de-emphasized (platform/metadata rows inside a child group). */
+  dim?: boolean;
+}
+
+/** Platform-injected child state keys — real and pickable, but never what a
+ *  control binds to, so they sort last (dimmed) inside their child group. */
+const PLATFORM_CHILD_PROPS = new Set(["online", "label"]);
+
+/** Effective var defs for one child: a dynamic child's own schema when
+ *  present, else the type-level schema. */
+function childSchemaFor(
+  resp: ChildEntitiesListResponse,
+  ctype: string,
+  entry: ChildEntityEntry,
+): Record<string, DeviceStateVarDef> {
+  return (entry.schema ??
+    resp.child_entity_types[ctype]?.state_variables ??
+    {}) as Record<string, DeviceStateVarDef>;
+}
+
+/** Resolve a bound suffix like "input.01.fader_db" against the device's
+ *  children payload (child type -> registered child -> var def). */
+export function childVarDefForSuffix(
+  resp: ChildEntitiesListResponse | null,
+  suffix: string,
+): DeviceStateVarDef | null {
+  if (!resp) return null;
+  const parts = suffix.split(".");
+  if (parts.length < 3) return null;
+  const [ctype, padded] = parts;
+  const prop = parts.slice(2).join(".");
+  const entry = (resp.children?.[ctype] ?? []).find(
+    (c) => c.local_id_padded === padded,
+  );
+  if (!entry) return null;
+  return childSchemaFor(resp, ctype, entry)[prop] ?? null;
+}
+
+/** Var def for a bound device suffix — device-level schema first, then the
+ *  child-entity schemas. Used by MatchDriverRangeRow, which doesn't hold the
+ *  picker's already-fetched data. */
+export async function fetchBoundVarDef(
+  deviceId: string,
+  suffix: string,
+): Promise<DeviceStateVarDef | null> {
+  const info = await api.getDevice(deviceId);
+  const vars = (
+    info.driver_info as
+      | { state_variables?: Record<string, DeviceStateVarDef> }
+      | undefined
+  )?.state_variables;
+  const direct = vars?.[suffix];
+  if (direct) return direct;
+  if (suffix.split(".").length < 3) return null;
+  const kids = await api.listChildEntities(deviceId).catch(() => null);
+  return childVarDefForSuffix(kids, suffix);
 }
 
 interface DeviceValuePickerProps {
@@ -132,6 +203,28 @@ export function DeviceValuePicker({
     api.getDevice(selectedDevice).then(setDeviceInfo).catch(() => setDeviceInfo(null));
   }, [selectedDevice]);
 
+  // Child entities (registered children + per-type schemas) — drivers whose
+  // controls live on children (mixer channels, zones) surface them as
+  // friendly grouped properties instead of raw live keys.
+  const [childData, setChildData] = useState<ChildEntitiesListResponse | null>(null);
+  useEffect(() => {
+    if (!selectedDevice) {
+      setChildData(null);
+      return;
+    }
+    let stale = false;
+    api.listChildEntities(selectedDevice)
+      .then((r) => {
+        if (!stale) setChildData(r);
+      })
+      .catch(() => {
+        if (!stale) setChildData(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [selectedDevice]);
+
   const schema = useMemo(() => {
     const info = deviceInfo?.driver_info as
       | { state_variables?: Record<string, DeviceStateVarDef> }
@@ -139,26 +232,80 @@ export function DeviceValuePicker({
     return info?.state_variables ?? {};
   }, [deviceInfo]);
 
-  // Schema vars in driver declaration order, then live-only keys (from the
-  // device state snapshot) so runtime-populated and metadata keys stay
-  // reachable without leaving the cascade.
-  const entries = useMemo((): PropEntry[] => {
+  // Schema vars in driver declaration order (control-flagged first inside
+  // the top group when the driver flags any), then child-entity vars in one
+  // group per child type, then live-only keys (from the device state
+  // snapshot) so runtime-populated and metadata keys stay reachable without
+  // leaving the cascade.
+  const { entries, childGroups } = useMemo(() => {
     const result: PropEntry[] = [];
     const hasSchema = Object.keys(schema).length > 0;
+
+    // Device-level vars. A driver that flags control vars is authoritative
+    // for ordering inside the match group; unflagged drivers keep the
+    // type+name heuristic order. Nothing is ever hidden either way.
+    const anyFlagged = Object.values(schema).some((d) => d.control === true);
+    const matchFlagged: PropEntry[] = [];
+    const matchRest: PropEntry[] = [];
+    const nonMatch: PropEntry[] = [];
     for (const [suffix, def] of Object.entries(schema)) {
-      result.push({
-        suffix,
-        label: def.label || suffix,
-        def,
-        group: METADATA_PATTERN.test(suffix)
-          ? "more"
-          : varMatchesElement(element.type, def)
-            ? "match"
-            : "other",
-      });
+      const group = METADATA_PATTERN.test(suffix)
+        ? "more"
+        : varMatchesElement(element.type, def)
+          ? "match"
+          : "other";
+      const entry: PropEntry = { suffix, label: def.label || suffix, def, group };
+      if (group === "match" && anyFlagged && def.control === true) {
+        matchFlagged.push(entry);
+      } else if (group === "match") {
+        matchRest.push(entry);
+      } else {
+        nonMatch.push(entry);
+      }
     }
+    result.push(...matchFlagged, ...matchRest, ...nonMatch);
+
+    // Child-entity vars: one group per child type ("Inputs", "Mixes", ...),
+    // children in registration order, each child's control vars first and
+    // its platform/metadata rows (online, label, name) last + dimmed.
+    const groups: { id: string; label: string }[] = [];
+    const childSuffixes = new Set<string>();
+    if (childData) {
+      for (const [ctype, tdef] of Object.entries(childData.child_entity_types ?? {})) {
+        const kids = childData.children?.[ctype] ?? [];
+        if (kids.length === 0) continue;
+        const gid = `child:${ctype}`;
+        groups.push({ id: gid, label: tdef.label_plural || tdef.label || ctype });
+        for (const kid of kids) {
+          const defs = childSchemaFor(childData, ctype, kid);
+          const kidFlagged = Object.values(defs).some((d) => d?.control === true);
+          const childLabel = kid.label || `${tdef.label || ctype} ${kid.local_id}`;
+          const preferred: PropEntry[] = [];
+          const plain: PropEntry[] = [];
+          const demotedRows: PropEntry[] = [];
+          for (const [prop, def] of Object.entries(defs)) {
+            const suffix = `${ctype}.${kid.local_id_padded}.${prop}`;
+            childSuffixes.add(suffix);
+            const demoted =
+              PLATFORM_CHILD_PROPS.has(prop) || METADATA_PATTERN.test(prop);
+            const entry: PropEntry = {
+              suffix,
+              label: `${childLabel} · ${def?.label || prop}`,
+              def: def ?? null,
+              group: gid,
+              dim: demoted,
+            };
+            if (demoted) demotedRows.push(entry);
+            else if (kidFlagged ? def?.control === true : true) preferred.push(entry);
+            else plain.push(entry);
+          }
+          result.push(...preferred, ...plain, ...demotedRows);
+        }
+      }
+    }
+
     const liveOnly = Object.keys(deviceInfo?.state ?? {})
-      .filter((s) => !(s in schema))
+      .filter((s) => !(s in schema) && !childSuffixes.has(s))
       .sort();
     for (const suffix of liveOnly) {
       const value = deviceInfo?.state[suffix];
@@ -178,15 +325,19 @@ export function DeviceValuePicker({
               : "other",
       });
     }
-    return result;
-  }, [schema, deviceInfo, element.type]);
+    return { entries: result, childGroups: groups };
+  }, [schema, deviceInfo, childData, element.type]);
 
   const selectedEntry = selectedDevice === boundDeviceId
     ? entries.find((e) => e.suffix === boundSuffix)
     : undefined;
 
   const boundDef =
-    keyValue && selectedDevice === boundDeviceId ? schema[boundSuffix] : undefined;
+    keyValue && selectedDevice === boundDeviceId
+      ? schema[boundSuffix] ??
+        childVarDefForSuffix(childData, boundSuffix) ??
+        undefined
+      : undefined;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
@@ -214,6 +365,7 @@ export function DeviceValuePicker({
           <label style={labelStyle}>Property</label>
           <PropertyDropdown
             entries={entries}
+            childGroups={childGroups}
             elementType={element.type}
             selectedSuffix={selectedEntry?.suffix ?? (selectedDevice === boundDeviceId ? boundSuffix : "")}
             selectedLabel={selectedEntry?.label}
@@ -245,6 +397,7 @@ export function DeviceValuePicker({
 
 function PropertyDropdown({
   entries,
+  childGroups,
   elementType,
   selectedSuffix,
   selectedLabel,
@@ -252,6 +405,7 @@ function PropertyDropdown({
   onPick,
 }: {
   entries: PropEntry[];
+  childGroups: { id: string; label: string }[];
   elementType: string;
   selectedSuffix: string;
   selectedLabel?: string;
@@ -298,12 +452,13 @@ function PropertyDropdown({
     );
   }, [entries, search]);
 
-  const groups: { id: PropEntry["group"]; label: string; desc: string; items: PropEntry[] }[] = [
+  const groups: { id: string; label: string; desc: string; items: PropEntry[] }[] = [
     { id: "match", label: matchGroupLabel(elementType), desc: "", items: [] },
+    ...childGroups.map((g) => ({ id: g.id, label: g.label, desc: "", items: [] as PropEntry[] })),
     { id: "other", label: "Other properties", desc: "", items: [] },
     { id: "more", label: "Status & metadata", desc: "Read-outs and device info", items: [] },
   ];
-  for (const e of filtered) groups.find((g) => g.id === e.group)!.items.push(e);
+  for (const e of filtered) groups.find((g) => g.id === e.group)?.items.push(e);
 
   const displayText = selectedSuffix
     ? selectedLabel || selectedSuffix
@@ -393,7 +548,7 @@ function PropertyDropdown({
                   </div>
                   {g.items.map((entry) => {
                     const live = liveState[`device.${deviceId}.${entry.suffix}`];
-                    const dimmed = entry.group === "more";
+                    const dimmed = entry.group === "more" || entry.dim === true;
                     return (
                       <div
                         key={entry.suffix}
@@ -462,9 +617,8 @@ const RANGE_ELEMENTS = new Set(["slider", "fader", "gauge", "level_meter"]);
 const STEP_ELEMENTS = new Set(["slider", "fader"]);
 const UNIT_ELEMENTS = new Set(["slider", "fader", "gauge"]);
 
-/** Pull a unit out of a label like "Input 1 Gain (dB)" — the state-var
- *  schema has no unit field, so a short parenthesized trailer is the best
- *  signal a driver gives today. */
+/** Pull a unit out of a label like "Input 1 Gain (dB)" — the fallback for
+ *  drivers that don't declare a `unit` field on the state variable. */
 function parseUnitFromLabel(label: string | undefined): string | undefined {
   const m = /\(([^()]+)\)\s*$/.exec(label ?? "");
   const candidate = m?.[1]?.trim() ?? "";
@@ -480,7 +634,9 @@ export function driverRangeTarget(
 ): { min: number; max: number; step?: number; unit?: string; differs: boolean } | null {
   if (!RANGE_ELEMENTS.has(element.type)) return null;
   if (typeof varDef.min !== "number" || typeof varDef.max !== "number") return null;
-  const unit = UNIT_ELEMENTS.has(element.type) ? parseUnitFromLabel(varDef.label) : undefined;
+  const unit = UNIT_ELEMENTS.has(element.type)
+    ? varDef.unit || parseUnitFromLabel(varDef.label)
+    : undefined;
   const step = STEP_ELEMENTS.has(element.type) ? varDef.step : undefined;
   const differs =
     element.min !== varDef.min ||
@@ -558,12 +714,9 @@ export function MatchDriverRangeRow({
       setVarDef(null);
       return;
     }
-    api.getDevice(deviceId)
-      .then((info) => {
-        if (stale) return;
-        const vars = (info.driver_info as { state_variables?: Record<string, DeviceStateVarDef> } | undefined)
-          ?.state_variables;
-        setVarDef(vars?.[suffix] ?? null);
+    fetchBoundVarDef(deviceId, suffix)
+      .then((def) => {
+        if (!stale) setVarDef(def);
       })
       .catch(() => {
         if (!stale) setVarDef(null);

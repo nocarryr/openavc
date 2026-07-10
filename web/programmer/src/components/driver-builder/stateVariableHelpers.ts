@@ -15,7 +15,7 @@ export function nextStateVariableName(existing: string[]): string {
   return name;
 }
 
-const NUMERIC_ONLY_FIELDS = ["min", "max", "step"] as const;
+const NUMERIC_ONLY_FIELDS = ["min", "max", "step", "unit"] as const;
 
 /**
  * Compute the updated state-var def when its `type` changes, as a SINGLE

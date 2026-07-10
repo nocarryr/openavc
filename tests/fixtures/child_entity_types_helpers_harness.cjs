@@ -66,13 +66,14 @@ const results = {};
   };
 }
 {
-  // Leaving integer/number drops numeric bounds.
+  // Leaving integer/number drops numeric bounds (unit rides with them, the
+  // control flag survives — it isn't type-specific).
   const r = H.applyChildVarTypeChange(
-    { type: "integer", label: "L", min: 1, max: 10, step: 2 },
+    { type: "integer", label: "L", min: 1, max: 10, step: 2, unit: "dB", control: true },
     "string",
   );
   results.h117_leaving_numeric_drops_bounds = {
-    pass: eq(r, { type: "string", label: "L" }),
+    pass: eq(r, { type: "string", label: "L", control: true }),
     detail: r,
   };
 }

@@ -1546,8 +1546,13 @@ class YAMLAutoSimulator(TCPSimulator):
                 v_min = var_def.get("min")
                 v_max = var_def.get("max")
                 if v_min is not None and v_max is not None:
-                    controls.append({"type": "slider", "key": key, "label": label,
-                                     "min": v_min, "max": v_max})
+                    ctl = {"type": "slider", "key": key, "label": label,
+                           "min": v_min, "max": v_max}
+                    if var_def.get("step") is not None:
+                        ctl["step"] = var_def["step"]
+                    if var_def.get("unit"):
+                        ctl["unit"] = var_def["unit"]
+                    controls.append(ctl)
                 else:
                     controls.append({"type": "indicator", "key": key, "label": label})
             elif var_type == "number":
@@ -1555,8 +1560,12 @@ class YAMLAutoSimulator(TCPSimulator):
                 v_min = var_def.get("min")
                 v_max = var_def.get("max")
                 if v_min is not None and v_max is not None:
-                    controls.append({"type": "slider", "key": key, "label": label,
-                                     "min": v_min, "max": v_max, "step": 0.1})
+                    ctl = {"type": "slider", "key": key, "label": label,
+                           "min": v_min, "max": v_max,
+                           "step": var_def.get("step", 0.1)}
+                    if var_def.get("unit"):
+                        ctl["unit"] = var_def["unit"]
+                    controls.append(ctl)
                 else:
                     controls.append({"type": "indicator", "key": key, "label": label})
             elif var_type == "boolean":

@@ -9,13 +9,15 @@ import { useProjectStore } from "../../store/projectStore";
 import { useConnectionStore } from "../../store/connectionStore";
 import { CopyButton } from "./CopyButton";
 import { showError } from "../../store/toastStore";
-import { getDevice } from "../../api/restClient";
+import { getDevice, listChildEntities } from "../../api/restClient";
 
 /** Session cache of device state-variable labels (deviceId -> suffix ->
  *  friendly label), filled lazily the first time a picker opens. Display-only:
  *  a missing or stale entry just means the row shows the raw suffix. Uses the
- *  per-device endpoint because instance-building drivers only populate
- *  state_variables on the live instance, not at class level. */
+ *  per-device endpoints because instance-building drivers only populate
+ *  state_variables on the live instance, not at class level. Child-entity
+ *  keys (input.01.fader_db) resolve to "<child> · <var>" labels from the
+ *  children payload's schemas. */
 const deviceVarLabelCache = new Map<string, Record<string, string>>();
 const labelFetchInflight = new Map<string, Promise<void>>();
 
@@ -23,14 +25,30 @@ function fetchDeviceVarLabels(deviceId: string): Promise<void> {
   if (deviceVarLabelCache.has(deviceId)) return Promise.resolve();
   let p = labelFetchInflight.get(deviceId);
   if (!p) {
-    p = getDevice(deviceId)
-      .then((info) => {
+    p = Promise.all([
+      getDevice(deviceId),
+      listChildEntities(deviceId).catch(() => null),
+    ])
+      .then(([info, kids]) => {
         const vars =
           (info.driver_info as { state_variables?: Record<string, { label?: string }> } | undefined)
             ?.state_variables ?? {};
         const labels: Record<string, string> = {};
         for (const [k, v] of Object.entries(vars)) {
           if (v?.label) labels[k] = v.label;
+        }
+        if (kids) {
+          for (const [ctype, tdef] of Object.entries(kids.child_entity_types ?? {})) {
+            for (const child of kids.children?.[ctype] ?? []) {
+              const schema = child.schema ?? tdef.state_variables ?? {};
+              const childLabel =
+                child.label || `${tdef.label || ctype} ${child.local_id}`;
+              for (const [prop, def] of Object.entries(schema)) {
+                labels[`${ctype}.${child.local_id_padded}.${prop}`] =
+                  `${childLabel} · ${def?.label || prop}`;
+              }
+            }
+          }
         }
         deviceVarLabelCache.set(deviceId, labels);
       })

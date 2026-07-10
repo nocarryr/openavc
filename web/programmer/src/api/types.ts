@@ -711,6 +711,13 @@ export interface DriverChildStateVarDef {
   min?: number;
   max?: number;
   step?: number;
+  /** Unit for numeric values (e.g. "dB"). The UI Builder's range-match
+   *  prompt fills a bound control's Unit from this. */
+  unit?: string;
+  /** Marks a var an integrator would bind a control to. Ordering hint for
+   *  the value picker and the `options_from: child_schema` cascade —
+   *  unflagged vars are never hidden. */
+  control?: boolean;
   /** "low" relays at the verbose-state cadence (30s default); "high"
    *  rides the snappy top-tier cadence (2s default). Unspecified =
    *  default child cadence (5s). */
@@ -773,7 +780,7 @@ export interface DriverDefinition {
   command_suffix?: string;
   default_config: Record<string, unknown>;
   config_schema: Record<string, unknown>;
-  state_variables: Record<string, { type: string; label: string; values?: string[]; help?: string; min?: number; max?: number; step?: number }>;
+  state_variables: Record<string, { type: string; label: string; values?: string[]; help?: string; min?: number; max?: number; step?: number; unit?: string; control?: boolean }>;
   /** Sub-units the driver manages (encoders, decoders, zones, presets, ...).
    *  Optional — drivers that don't declare children stay one flat device.
    *  See ``server/drivers/base.py`` ``BaseDriver`` child API. */
@@ -969,6 +976,9 @@ export interface ChildEntityStateVarDef {
   min?: number;
   max?: number;
   step?: number;
+  // Unit for numeric values (e.g. "dB") — fills a bound control's Unit in
+  // the UI Builder's range-match prompt.
+  unit?: string;
   cloud_priority?: string;
   // Marks this child state var as a settable control (not a read-only
   // mirror or metadata). A command param that cascades off this child type
