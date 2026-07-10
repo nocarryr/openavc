@@ -136,6 +136,20 @@ def test_generate_self_signed_unwritable_dir_raises(tmp_path, monkeypatch):
     assert "not writable" in excinfo.value.reason
 
 
+def test_generate_writes_fullchain(tmp_path):
+    """server.crt holds leaf + CA. The TLS listener serves exactly this file
+    as the handshake chain, and chain-pinning clients (the panel app pins the
+    CA it downloads from /api/certificate) need the CA present to match."""
+    paths = tls.generate_self_signed(
+        tmp_path, hostnames=["localhost"], ips=["127.0.0.1"]
+    )
+    chain = x509.load_pem_x509_certificates(paths.cert_path.read_bytes())
+    assert len(chain) == 2
+    leaf, ca = chain
+    assert ca == x509.load_pem_x509_certificate(paths.ca_cert_path.read_bytes())
+    leaf.verify_directly_issued_by(ca)
+
+
 # ---------------------------------------------------------------------------
 # load_or_generate (auto mode)
 # ---------------------------------------------------------------------------
@@ -176,6 +190,58 @@ def test_load_or_generate_regenerates_on_ip_change(tmp_path, monkeypatch):
     new_sans = tls.read_cert_info(cert2).sans
     assert "10.0.0.5" in new_sans
     assert "192.168.1.50" not in new_sans
+
+
+def test_load_upgrades_legacy_leaf_only_chain(tmp_path):
+    """A pre-fullchain install (leaf-only server.crt) gains the CA on the
+    next load — same leaf, same CA, no regeneration, so devices that already
+    pinned the CA stay trusted."""
+    cfg = _make_config()
+    cert_path, _ = tls.load_or_generate(cfg, tmp_path)
+    chain = x509.load_pem_x509_certificates(cert_path.read_bytes())
+    leaf_pem = chain[0].public_bytes(serialization.Encoding.PEM)
+    cert_path.write_bytes(leaf_pem)  # rewrite as the legacy leaf-only layout
+
+    cert2, _ = tls.load_or_generate(cfg, tmp_path)
+    upgraded = x509.load_pem_x509_certificates(cert2.read_bytes())
+    assert len(upgraded) == 2
+    assert upgraded[0].public_bytes(serialization.Encoding.PEM) == leaf_pem
+    assert upgraded[1] == x509.load_pem_x509_certificate(
+        (tmp_path / "tls" / "ca.crt").read_bytes()
+    )
+
+
+def test_load_does_not_rewrite_fullchain(tmp_path, monkeypatch):
+    """An already-complete chain is not rewritten on every startup."""
+    cfg = _make_config()
+    cert_path, _ = tls.load_or_generate(cfg, tmp_path)
+
+    replaces: list[tuple] = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        tls.os, "replace", lambda *a: (replaces.append(a), real_replace(*a))[1]
+    )
+    cert2, _ = tls.load_or_generate(cfg, tmp_path)
+    assert cert2 == cert_path
+    assert replaces == []
+
+
+def test_load_skips_append_when_ca_is_not_issuer(tmp_path):
+    """A ca.crt that did not sign the leaf is never appended — the bare leaf
+    is still a correct chain; a wrong CA in the handshake is not."""
+    cfg = _make_config()
+    cert_path, _ = tls.load_or_generate(cfg, tmp_path)
+    chain = x509.load_pem_x509_certificates(cert_path.read_bytes())
+    leaf_pem = chain[0].public_bytes(serialization.Encoding.PEM)
+    cert_path.write_bytes(leaf_pem)  # legacy layout
+
+    other = tls.generate_self_signed(
+        tmp_path / "other", hostnames=["localhost"], ips=["127.0.0.1"]
+    )
+    (tmp_path / "tls" / "ca.crt").write_bytes(other.ca_cert_path.read_bytes())
+
+    cert2, _ = tls.load_or_generate(cfg, tmp_path)
+    assert len(x509.load_pem_x509_certificates(cert2.read_bytes())) == 1
 
 
 def test_load_or_generate_regenerates_on_corrupt_cert(tmp_path):

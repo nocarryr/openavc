@@ -191,6 +191,17 @@ def _write_cert(cert: x509.Certificate, path: Path) -> None:
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
+def _write_fullchain(leaf: x509.Certificate, ca: x509.Certificate, path: Path) -> None:
+    # The TLS listener serves exactly this file's contents as the handshake
+    # chain. The CA must be in it: chain-pinning clients (the panel app pins
+    # the CA it downloads from /api/certificate) match pins against the
+    # presented chain, and a bare leaf gives them nothing to match.
+    path.write_bytes(
+        leaf.public_bytes(serialization.Encoding.PEM)
+        + ca.public_bytes(serialization.Encoding.PEM)
+    )
+
+
 def generate_self_signed(
     data_dir: Path,
     *,
@@ -201,7 +212,9 @@ def generate_self_signed(
 
     The CA is self-signed; the server cert is signed by the CA. Devices install
     the CA cert once; subsequent server cert regenerations (e.g. on IP change)
-    don't require re-installing trust on the device.
+    don't require re-installing trust on the device. ``server.crt`` holds the
+    full served chain (leaf then CA); ``ca.crt`` holds the CA alone for the
+    /api/certificate download.
     """
     tls_dir = data_dir / "tls"
     try:
@@ -304,7 +317,7 @@ def generate_self_signed(
     key_path = tls_dir / "server.key"
     ca_cert_path = tls_dir / "ca.crt"
 
-    _write_cert(server_cert, cert_path)
+    _write_fullchain(server_cert, ca_cert, cert_path)
     _write_key(server_key, key_path)
     _write_cert(ca_cert, ca_cert_path)
 
@@ -459,6 +472,34 @@ def _load_provided(cert_path: Path, key_path: Path) -> tuple[Path, Path]:
     return cert_path, key_path
 
 
+def _ensure_chain_includes_ca(cert_path: Path, ca_path: Path) -> None:
+    """Upgrade a legacy leaf-only ``server.crt`` to leaf+CA in place.
+
+    Installs that generated their cert before the served chain included the
+    CA keep a bare leaf on disk, which chain-pinning clients (the panel app)
+    cannot match. Appending the *existing* CA preserves continuity — devices
+    that already pinned it stay trusted, unlike a regeneration, which would
+    mint a new CA. Left untouched when the CA file is missing or is not the
+    leaf's issuer (serving the file as-is is still correct TLS).
+    """
+    try:
+        certs = x509.load_pem_x509_certificates(cert_path.read_bytes())
+        if len(certs) > 1 or not ca_path.exists():
+            return
+        ca = x509.load_pem_x509_certificate(ca_path.read_bytes())
+        certs[0].verify_directly_issued_by(ca)
+    except Exception as exc:
+        log.debug("Not appending CA to served chain at %s: %s", cert_path, exc)
+        return
+    tmp_path = cert_path.with_suffix(".crt.tmp")
+    tmp_path.write_bytes(
+        certs[0].public_bytes(serialization.Encoding.PEM)
+        + ca.public_bytes(serialization.Encoding.PEM)
+    )
+    os.replace(tmp_path, cert_path)
+    log.info("Added the CA to the served certificate chain at %s", cert_path)
+
+
 def _load_or_generate_auto(data_dir: Path, bind_address: str) -> tuple[Path, Path]:
     hostnames, ips = collect_local_identifiers(bind_address)
     tls_dir = data_dir / "tls"
@@ -477,6 +518,7 @@ def _load_or_generate_auto(data_dir: Path, bind_address: str) -> tuple[Path, Pat
             elif not _cert_covers_current_host(cert_path, ips):
                 log.info("Host IP changed, regenerating self-signed cert")
             else:
+                _ensure_chain_includes_ca(cert_path, tls_dir / "ca.crt")
                 return cert_path, key_path
 
     paths = generate_self_signed(data_dir, hostnames=hostnames, ips=ips)

@@ -310,6 +310,54 @@ async def _served_cert_der(port: int, server_hostname: str | None) -> bytes:
             await writer.wait_closed()
 
 
+async def _served_chain_der(port: int) -> list[bytes]:
+    """No-SNI handshake; return every cert the listener presented, as DER."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    _reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=ctx)
+    try:
+        chain = writer.get_extra_info("ssl_object").get_unverified_chain()
+        return [
+            c if isinstance(c, bytes) else c.public_bytes(ssl.Encoding.DER)
+            for c in chain
+        ]
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not hasattr(ssl.SSLObject, "get_unverified_chain"),
+    reason="ssl get_unverified_chain requires Python 3.13+",
+)
+async def test_no_sni_handshake_presents_leaf_plus_ca(cert_paths):
+    """The bare-IP handshake must present leaf + CA, not just the leaf.
+
+    The panel app pins the CA it downloads from /api/certificate and matches
+    the pin byte-for-byte against the presented chain — a leaf-only chain
+    gives it nothing to match, and HTTPS pairing fails."""
+    cert_path, key_path = cert_paths
+    tls_port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(
+        _make_test_app(),
+        host="127.0.0.1",
+        port=tls_port,
+        ssl_certfile=str(cert_path),
+        ssl_keyfile=str(key_path),
+        log_level="warning",
+    ))
+    leaf_der = _pem_to_der(cert_path.read_bytes())
+    ca_der = _pem_to_der((cert_path.parent / "ca.crt").read_bytes())
+
+    async with _running_server(server):
+        chain = await _served_chain_der(tls_port)
+
+    assert chain == [leaf_der, ca_der]
+
+
 @pytest.mark.asyncio
 async def test_sni_dual_serve_and_hot_swap(cert_paths, tmp_path):
     """One listener, two certs: SNI on the cloud names gets the cloud cert,
