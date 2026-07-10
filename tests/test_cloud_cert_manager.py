@@ -269,7 +269,10 @@ async def test_busy_error_retries_soon_not_daily(manager, agent):
                     "detail": "An issuance for this system is already in progress"})
     )
     remaining = manager._next_retry_at - time.monotonic()
-    assert 0 < remaining <= cm.BUSY_RETRY_INTERVAL
+    # +1 s tolerance: remaining is (t0 + delay) - t1, which floating-point
+    # rounding can nudge a hair past the exact interval. Point is it's a ~5 min
+    # retry, not the ~24 h daily backoff.
+    assert 0 < remaining <= cm.BUSY_RETRY_INTERVAL + 1
     await manager.stop()
 
 
