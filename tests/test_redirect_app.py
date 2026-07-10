@@ -293,3 +293,191 @@ def test_http_scheme_never_rewrites_to_certified_name(tmp_path):
         "/panel", headers={"host": "192.168.1.20"}, follow_redirects=False
     )
     assert resp.headers["location"] == "http://192.168.1.20:8080/panel"
+
+
+# ---------------------------------------------------------------------------
+# Smart-redirect probe page (browser navigations while a cloud cert is active)
+# ---------------------------------------------------------------------------
+
+# What a real browser sends on a navigation.
+BROWSER_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+)
+
+
+def test_browser_get_with_active_cert_serves_probe_page(tmp_path):
+    import json
+
+    _install_cloud_cert(tmp_path)
+    resp = _client().get(
+        "/present?room=3",
+        headers={"host": "192.168.1.20:8080", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert resp.headers.get("cache-control") == "no-store"
+    body = resp.text
+    cert_origin = f"https://192-168-1-20.{LABEL}.{ZONE}:8443"
+    bare_origin = "https://192.168.1.20:8443"
+    # Both candidate origins are embedded for the script (JSON-quoted).
+    assert json.dumps(cert_origin) in body
+    assert json.dumps(bare_origin) in body
+    # Probe mechanics: open health endpoint, opaque-response mode, no
+    # history entry for the probe page itself.
+    assert "/api/health" in body
+    assert "no-cors" in body
+    assert "location.replace" in body
+    # noscript fallback links preserve path + query on both targets.
+    assert "<noscript>" in body
+    assert f"{cert_origin}/present?room=3" in body
+    assert f"{bare_origin}/present?room=3" in body
+
+
+def test_probe_page_only_for_browser_accept(tmp_path):
+    """curl/API-style Accept keeps today's plain 302 to the certified name."""
+    _install_cloud_cert(tmp_path)
+    for accept in ("*/*", "application/json", ""):
+        resp = _client().get(
+            "/x?y=1",
+            headers={"host": "192.168.1.20", "accept": accept},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302, f"Accept={accept!r}"
+        assert resp.headers["location"] == (
+            f"https://192-168-1-20.{LABEL}.{ZONE}:8443/x?y=1"
+        )
+        assert resp.headers.get("cache-control") == "no-store"
+
+
+def test_probe_page_only_for_get(tmp_path):
+    """POST keeps the method-preserving 307 even with a browser Accept."""
+    _install_cloud_cert(tmp_path)
+    resp = _client().post(
+        "/api/x",
+        headers={"host": "192.168.1.20", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 307
+    assert resp.headers["location"] == (
+        f"https://192-168-1-20.{LABEL}.{ZONE}:8443/api/x"
+    )
+
+
+def test_head_with_browser_accept_still_redirects(tmp_path):
+    """Uptime monitors probe with HEAD — they must keep getting the 302."""
+    _install_cloud_cert(tmp_path)
+    resp = _client().head(
+        "/x",
+        headers={"host": "192.168.1.20", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == (
+        f"https://192-168-1-20.{LABEL}.{ZONE}:8443/x"
+    )
+
+
+def test_browser_get_without_cloud_cert_identical_to_current():
+    """No cloud cert: a browser navigation gets exactly the pre-probe
+    response — same status, target, and headers as any other client."""
+    resp = _client().get(
+        "/present?room=3",
+        headers={"host": "192.168.1.20:8080", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://192.168.1.20:8443/present?room=3"
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+def test_browser_get_with_expired_cert_no_probe_page(tmp_path):
+    """Expired cert reverts server-side: bare-IP 302, no probe page."""
+    cert_pem, key_pem = make_cloud_cert_pem(LABEL, ZONE)
+    state = tls.install_cloud_cert(tmp_path, cert_pem, key_pem)
+    expired = tls.CloudCertState(
+        context=state.context,
+        exact_names=state.exact_names,
+        wildcard_bases=state.wildcard_bases,
+        hostname_suffix=state.hostname_suffix,
+        expires_at=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1),
+    )
+    tls.cloud_cert_holder().set(expired)
+    resp = _client().get(
+        "/x",
+        headers={"host": "192.168.1.20", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://192.168.1.20:8443/x"
+
+
+def test_browser_get_hostname_host_no_probe_page(tmp_path):
+    """A non-IPv4 Host has no certified name — plain 302 even for browsers."""
+    _install_cloud_cert(tmp_path)
+    resp = _client().get(
+        "/x",
+        headers={"host": "openavc.local:8080", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://openavc.local:8443/x"
+
+
+def test_http_scheme_never_serves_probe_page(tmp_path):
+    """The plain-HTTP port-80 listener has no certified target to probe."""
+    _install_cloud_cert(tmp_path)
+    client = TestClient(_build_redirect_app(8080, scheme="http"))
+    resp = client.get(
+        "/panel",
+        headers={"host": "192.168.1.20", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://192.168.1.20:8080/panel"
+
+
+def test_probe_page_custom_tls_port(tmp_path):
+    _install_cloud_cert(tmp_path)
+    client = TestClient(_build_redirect_app(9443))
+    resp = client.get(
+        "/x",
+        headers={"host": "10.0.0.5", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert f"https://10-0-0-5.{LABEL}.{ZONE}:9443" in resp.text
+    assert "https://10.0.0.5:9443" in resp.text
+
+
+def test_probe_page_escapes_html_active_path(tmp_path):
+    """The path is request-controlled input embedded in the page — HTML-active
+    characters must never survive into the markup unescaped."""
+    _install_cloud_cert(tmp_path)
+    resp = _client().get(
+        '/x"><script>boom()</script>?q="><img src=x>',
+        headers={"host": "192.168.1.20", "accept": BROWSER_ACCEPT},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert "<script>boom" not in resp.text
+    assert "<img" not in resp.text
+
+
+def test_probe_page_flips_live_with_holder(tmp_path):
+    """Same holder-per-request behavior as the redirect target: enrolling
+    starts serving the probe page on the next navigation, disabling stops."""
+    client = _client()
+    headers = {"host": "192.168.1.20", "accept": BROWSER_ACCEPT}
+    before = client.get("/x", headers=headers, follow_redirects=False)
+    assert before.status_code == 302
+
+    _install_cloud_cert(tmp_path)
+    during = client.get("/x", headers=headers, follow_redirects=False)
+    assert during.status_code == 200
+    assert f"192-168-1-20.{LABEL}.{ZONE}" in during.text
+
+    tls.remove_cloud_cert(tmp_path)
+    after = client.get("/x", headers=headers, follow_redirects=False)
+    assert after.status_code == 302
+    assert after.headers["location"] == "https://192.168.1.20:8443/x"

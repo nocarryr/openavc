@@ -653,6 +653,103 @@ def _certified_host_for(host: str) -> str | None:
     return name if state.matches(name) else None
 
 
+# How long the probe page waits for the certified origin before falling back
+# to the bare-IP HTTPS URL. LAN round-trips answer in milliseconds; the
+# timeout only matters when the name is blackholed (rebind-protecting router)
+# rather than failing fast (NXDOMAIN, no internet).
+_PROBE_TIMEOUT_MS = 2500
+
+# Whether the certified hostname resolves is only observable from the
+# client's own device — its resolver, its router's rebind protection, its
+# venue's internet — so the server can never pick the right redirect target
+# on the client's behalf. This page probes the certified origin from the
+# browser and picks the first target that actually works. Fully inline (no
+# external assets: the client may be about to discover it has no working
+# DNS). The probe endpoint is GET /api/health: open (no auth) and on the
+# rate limiter's open tier. mode "no-cors" makes any completed response —
+# opaque, any status — count as reachable; only network-level failure
+# (resolution, TCP, TLS) or the timeout rejects. location.replace() keeps
+# this page out of browser history so Back never lands on it.
+_PROBE_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Connecting&hellip;</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 16px/1.5 system-ui, -apple-system, sans-serif; margin: 0;
+       min-height: 100vh; display: grid; place-items: center; }
+main { text-align: center; padding: 2rem; opacity: 0;
+       animation: reveal 0.3s ease 0.4s forwards; }
+@keyframes reveal { to { opacity: 1; } }
+a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+<p>Connecting&hellip;</p>
+<noscript>
+<p><a href="__CERT_URL__">Continue with a secure connection</a></p>
+<p><a href="__BARE_URL__">Use the direct address</a> (your browser may warn
+about the certificate)</p>
+</noscript>
+</main>
+<script>
+(function () {
+  "use strict";
+  var certOrigin = __CERT_ORIGIN_JS__;
+  var bareOrigin = __BARE_ORIGIN_JS__;
+  var suffix = location.pathname + location.search;
+  function go(url) { location.replace(url); }
+  if (!window.fetch || !window.AbortController) {
+    go(certOrigin + suffix);
+    return;
+  }
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, __TIMEOUT_MS__);
+  fetch(certOrigin + "/api/health",
+        { mode: "no-cors", cache: "no-store", signal: ctrl.signal })
+    .then(function () { clearTimeout(timer); go(certOrigin + suffix); })
+    .catch(function () { clearTimeout(timer); go(bareOrigin + suffix); });
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def _probe_page_response(
+    certified_host: str, bare_host: str, target_port: int, request: Request
+) -> HTMLResponse:
+    """The smart-redirect probe page for a browser navigation.
+
+    Embeds both candidate targets: the certified origin (probed first, green
+    lock) and the bare-IP HTTPS origin (fallback, self-signed interstitial —
+    a working page instead of a dead browser error). The script rebuilds
+    path + query from its own location; the noscript links carry them
+    HTML-escaped (the path is request-controlled input).
+    """
+    import html as _html
+    import json as _json
+
+    suffix = request.url.path
+    if request.url.query:
+        suffix += f"?{request.url.query}"
+    cert_origin = f"https://{certified_host}:{target_port}"
+    bare_origin = f"https://{bare_host}:{target_port}"
+    page = (
+        _PROBE_PAGE
+        .replace("__CERT_URL__", _html.escape(cert_origin + suffix, quote=True))
+        .replace("__BARE_URL__", _html.escape(bare_origin + suffix, quote=True))
+        .replace("__CERT_ORIGIN_JS__", _json.dumps(cert_origin))
+        .replace("__BARE_ORIGIN_JS__", _json.dumps(bare_origin))
+        .replace("__TIMEOUT_MS__", str(_PROBE_TIMEOUT_MS))
+    )
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
 def _build_redirect_app(target_port: int, scheme: str = "https"):
     """Tiny Starlette app: catch-all that 302/307 redirects to {scheme}://...:target_port.
 
@@ -681,14 +778,23 @@ def _build_redirect_app(target_port: int, scheme: str = "https"):
     resolves to an address known-good for this client. Everything else
     (real hostnames, IPv6, no/expired cloud cert) keeps the bare-host
     target and today's self-signed interstitial behavior.
+
+    Browser navigations (GET with text/html in Accept) don't get a blind
+    302 to the certified name: whether that name resolves is only knowable
+    on the client (its resolver, rebind-protecting router, venue internet),
+    and a browser that can't resolve it shows a dead error page with no way
+    back. They get the probe page instead, which tries the certified origin
+    and falls back to bare-IP HTTPS. Non-browser clients (no text/html) and
+    non-GET methods keep the plain 302/307; with no active cloud cert every
+    response is byte-identical to the pre-probe behavior.
     """
     from starlette.applications import Starlette
-    from starlette.responses import RedirectResponse
+    from starlette.responses import RedirectResponse, Response
     from starlette.routing import Route
 
     _BAD_HOST_CHARS = (" ", "/", "\\", "@", "<", ">", "\"", "'")
 
-    async def _handler(request: Request) -> RedirectResponse:
+    async def _handler(request: Request) -> Response:
         host_header = request.headers.get("host", "")
         if host_header.startswith("["):
             # Bracketed IPv6 ("[::1]:8080") — splitting on ":" would mangle
@@ -702,7 +808,15 @@ def _build_redirect_app(target_port: int, scheme: str = "https"):
         if scheme == "https":
             # Certified names only make sense on the HTTPS target — on plain
             # HTTP there is no certificate to match.
-            host = _certified_host_for(host) or host
+            certified = _certified_host_for(host)
+            if certified is not None:
+                if request.method == "GET" and "text/html" in request.headers.get(
+                    "accept", ""
+                ):
+                    return _probe_page_response(
+                        certified, host, target_port, request
+                    )
+                host = certified
         target = f"{scheme}://{host}:{target_port}{request.url.path}"
         if request.url.query:
             target += f"?{request.url.query}"

@@ -523,7 +523,7 @@ Once the CA is trusted, future cert regenerations (e.g., the server gets a new L
 
 ### Trusted certificates without any client setup
 
-If the system is paired with OpenAVC Cloud, you can skip CA installs entirely: **Settings > Security** offers a one-click trusted certificate. The cloud obtains a publicly trusted certificate for the system (the private key never leaves the server), and the HTTP listener redirects clients to a certified URL that any browser accepts with a normal padlock. Nothing needs to be installed on client devices, which makes it the right choice for guest and BYOD scenarios. Network details, including the DNS rebind exception some routers need, are in the [network and security cut sheet](it-network-guide.md).
+If the system is paired with OpenAVC Cloud, you can skip CA installs entirely: **Settings > Security** offers a one-click trusted certificate. The cloud obtains a publicly trusted certificate for the system (the private key never leaves the server), and the HTTP listener sends clients to a certified URL that any browser accepts with a normal padlock. Browsers first get a quick in-page reachability check, so a device that cannot resolve the certified name (blocked resolver, no internet at the venue) automatically lands on the bare-IP HTTPS URL with the standard warning instead of a dead page. Nothing needs to be installed on client devices, which makes it the right choice for guest and BYOD scenarios. Network details, including the DNS rebind exception some routers need, are in the [network and security cut sheet](it-network-guide.md).
 
 ### Reverse-proxy deployments
 

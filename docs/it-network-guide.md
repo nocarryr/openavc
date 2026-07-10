@@ -264,16 +264,17 @@ How it works:
 
 - The cloud assigns the system a random hostname label under the public zone `i.openavc.net` and obtains a wildcard certificate for it from Let's Encrypt, using a DNS challenge handled entirely by the cloud. The OpenAVC host needs no inbound connectivity and no new outbound rules; issuance and renewal ride the existing cloud connection (`cloud.openavc.com`, port 443).
 - The private key is generated on the OpenAVC host and never leaves it. The cloud receives a certificate signing request and returns the signed certificate.
-- Addresses encode the system's LAN IP in the hostname: `https://192-168-1-20.<label>.i.openavc.net:8443/` resolves to `192.168.1.20`. While the feature is active, the HTTP listener on port 8080 redirects clients to the certified URL automatically, so users still just type the plain IP address.
+- Addresses encode the system's LAN IP in the hostname: `https://192-168-1-20.<label>.i.openavc.net:8443/` resolves to `192.168.1.20`. While the feature is active, the HTTP listener on port 8080 sends clients to the certified URL automatically, so users still just type the plain IP address.
+- Whether the certified hostname resolves can only be determined on the client device, so browser navigations get a brief in-page reachability check before being forwarded: if the certified origin answers, the browser lands on the padlocked page; if the name cannot be resolved or reached (blocked resolver, no internet), the browser lands on the bare-IP HTTPS URL with the standard self-signed warning instead of a dead error page. The check adds no delay when the name resolves, and at most a few seconds when it does not. Non-browser clients (API integrations, scripts, monitoring) always receive a plain 302/307 redirect.
 - Renewal is automatic. The renewed certificate is served immediately, with no restart and no dropped connections.
 - Bare-IP HTTPS (`https://<ip>:8443/`) continues to serve the self-signed certificate, so devices that already trust the local CA keep working unchanged.
 
 Notes for network administrators:
 
 - Client devices resolve the certified hostname through normal public DNS, and the answer points at a private (RFC 1918) address. Only the name lookup leaves the network; the actual traffic to the OpenAVC host stays on the LAN.
-- **DNS rebind protection.** Some routers and firewalls refuse public DNS names that resolve to private addresses. The symptom: the certified URL fails to resolve on the LAN while everything else works, and the bare-IP URL still loads. Add an exception for the zone. On dnsmasq-based routers (including OpenWrt): `rebind-domain-ok=/i.openavc.net/`. On Unbound-based firewalls (OPNsense, pfSense): `private-domain: "i.openavc.net"`. On an AVM FRITZ!Box: add `i.openavc.net` to the DNS rebind protection exceptions. For other equipment, search its documentation for "DNS rebind" exceptions.
+- **DNS rebind protection.** Some routers and firewalls refuse public DNS names that resolve to private addresses. The symptom: browsers on the LAN land on the bare-IP HTTPS URL with the self-signed certificate warning instead of the padlocked certified page (the reachability check above falls back automatically, so nothing breaks — but the padlock is lost). To get the certified page, add an exception for the zone. On dnsmasq-based routers (including OpenWrt): `rebind-domain-ok=/i.openavc.net/`. On Unbound-based firewalls (OPNsense, pfSense): `private-domain: "i.openavc.net"`. On an AVM FRITZ!Box: add `i.openavc.net` to the DNS rebind protection exceptions. For other equipment, search its documentation for "DNS rebind" exceptions.
 - Like every publicly trusted certificate, issuance is recorded in public Certificate Transparency logs. The logged name contains only the random system label (for example `*.a3f9c2e81b4d0f37.i.openavc.net`). Your internal IP addresses, hostnames, and organization name do not appear in the certificate.
-- If the site loses internet access, devices that have already resolved the name keep working for the DNS TTL (24 hours). New devices can fall back to the bare-IP URL, which shows the standard self-signed warning.
+- If the site loses internet access, devices that have already resolved the name keep working for the DNS TTL (24 hours). Browsers on new devices fall back to the bare-IP URL automatically (standard self-signed warning); control of the AV equipment is never affected.
 - Turning the feature off reverts the redirect immediately and revokes the hostname on the cloud side; clients with cached DNS answers lose resolution as their cache expires.
 
 ### Rate limiting
@@ -530,4 +531,4 @@ Yes. OpenAVC is MIT-licensed open source. The full source code, including the cl
 
 ---
 
-*Document version: 1.2. For the latest version, see [docs.openavc.com](https://docs.openavc.com).*
+*Document version: 1.3. For the latest version, see [docs.openavc.com](https://docs.openavc.com).*
