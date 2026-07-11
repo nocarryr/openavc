@@ -20,24 +20,36 @@ _ESCAPE_MAP = {
 
 
 def encode_escape_sequences(s: str) -> bytes:
-    """Convert a string with escape sequences (\\r, \\n, \\t, \\xHH) to bytes.
+    r"""Convert a string with escape sequences (\r, \n, \t, \xHH) to bytes.
 
-    Only safe, known sequences are processed. Unknown backslash sequences
-    are passed through literally. Used by drivers and frame parsers.
+    Only safe, known sequences are processed; unknown backslash sequences are
+    passed through literally. ``\xHH`` yields the single raw byte 0xHH, so
+    binary delimiters and headers (e.g. ``\xFE`` / ``\xAA``) come out exact.
+    All other text is encoded as UTF-8, so an on-screen message, label, or
+    user string variable containing non-Latin-1 characters (an em dash, curly
+    quotes, accented or CJK text) is sent instead of raising
+    UnicodeEncodeError on a normal control path.
+
+    Used by drivers and frame parsers.
     """
-    def _replace(m: re.Match) -> str:
+    # Build the byte stream directly: an escaped ``\xHH`` must stay a single
+    # byte, but a plain-latin-1 ``.encode()`` of the whole string would raise
+    # on any character above U+00FF. So encode literal spans as UTF-8 and emit
+    # ``\xHH`` as its raw byte.
+    result = bytearray()
+    pos = 0
+    for m in re.finditer(r'\\(?:r|n|t|\\|x[0-9a-fA-F]{2})', s):
+        result += s[pos:m.start()].encode("utf-8")
         seq = m.group(0)
         if seq in _ESCAPE_MAP:
-            return _ESCAPE_MAP[seq]
-        if seq.startswith(r"\x") and len(seq) == 4:
-            try:
-                return chr(int(seq[2:], 16))
-            except ValueError:
-                pass
-        return seq
-
-    processed = re.sub(r'\\(?:r|n|t|\\|x[0-9a-fA-F]{2})', _replace, s)
-    return processed.encode("latin-1")
+            # \r \n \t \\ resolve to single ASCII control bytes.
+            result += _ESCAPE_MAP[seq].encode("utf-8")
+        else:
+            # \xHH — the regex guarantees exactly two hex digits (0x00-0xFF).
+            result.append(int(seq[2:], 16))
+        pos = m.end()
+    result += s[pos:].encode("utf-8")
+    return bytes(result)
 
 
 def pack_length_prefix(value: int, size: int, endian: str = "big") -> bytes:
@@ -106,6 +118,29 @@ def hex_dump(data: bytes, width: int = 16) -> str:
     return "\n".join(lines)
 
 
+def _require_escape_char_mapped(
+    escape_char: int,
+    special: dict[int, int] | None,
+) -> dict[int, int]:
+    """Resolve ``special``, enforcing that ``escape_char`` is one of its keys.
+
+    A framed binary protocol must escape its own escape byte, otherwise a raw
+    escape byte in the payload is indistinguishable from an escape prefix on
+    the way back out. ``None`` gets the self-escaping default; a caller-supplied
+    map missing ``escape_char`` is a corruption-prone mistake, so raise.
+    """
+    if special is None:
+        return {escape_char: escape_char}
+    if escape_char not in special:
+        raise ValueError(
+            f"escape_char 0x{escape_char:02X} must be a key in `special` "
+            f"(map it to itself, e.g. {{0x{escape_char:02X}: 0x{escape_char:02X}}}); "
+            f"without it a raw escape byte is left unescaped and corrupts the "
+            f"stream on the round-trip"
+        )
+    return special
+
+
 def escape_bytes(
     data: bytes,
     escape_char: int = 0xFE,
@@ -119,9 +154,13 @@ def escape_bytes(
         escape_char: The escape prefix byte.
         special: Map of byte_value -> escaped_value. If None, defaults to
                  escaping the escape_char itself (0xFE -> 0xFE 0xFE).
+
+    ``escape_char`` MUST be a key in ``special`` (map it to itself). If it is
+    not, a raw ``escape_char`` byte in ``data`` is emitted unescaped, and
+    ``unescape_bytes`` then reads it as an escape prefix and silently corrupts
+    the stream — so a missing key raises ValueError rather than corrupting.
     """
-    if special is None:
-        special = {escape_char: escape_char}
+    special = _require_escape_char_mapped(escape_char, special)
     result = bytearray()
     for b in data:
         if b in special:
@@ -145,9 +184,12 @@ def unescape_bytes(
         escape_char: The escape prefix byte.
         special: Map of escaped_value -> original_byte. If None, defaults to
                  unescaping the escape_char itself (0xFE 0xFE -> 0xFE).
+
+    ``escape_char`` MUST be a key in ``special`` (map it to itself) so it
+    mirrors ``escape_bytes`` exactly; a missing key raises ValueError rather
+    than silently mis-decoding an escaped escape byte.
     """
-    if special is None:
-        special = {escape_char: escape_char}
+    special = _require_escape_char_mapped(escape_char, special)
     result = bytearray()
     i = 0
     while i < len(data):
