@@ -11,6 +11,7 @@ Covers:
 7. get_all_extensions passes a panel_elements ext_auth flag through untouched.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -22,6 +23,9 @@ import server.api.auth as auth_mod
 from server.api.plugin_ext import (
     PLUGIN_TOKEN_HEADER,
     PLUGIN_TOKEN_QUERY,
+    _AccessLogRedactionFilter,
+    _redact_query_secrets,
+    install_access_log_redaction,
     mint_plugin_token,
     mount_plugin_router,
     unmount_plugin_router,
@@ -107,6 +111,88 @@ class TestPluginToken:
         assert verify_plugin_token("not-a-token", "video_panel") is False
         assert verify_plugin_token("", "video_panel") is False
         assert verify_plugin_token("a.b.c", "video_panel") is False
+
+
+class TestPluginTokenCredentialBinding:
+    """A token is bound to the admin credentials live at mint time, so changing
+    a credential invalidates every previously-minted token (no revocation on
+    disk needed)."""
+
+    def test_token_invalid_after_password_change(self, monkeypatch):
+        _set_auth(monkeypatch, password="old-pw")
+        token, _ = mint_plugin_token("vp")
+        assert verify_plugin_token(token, "vp") is True
+        # Password change rotates the signing key -> old token no longer verifies.
+        _set_auth(monkeypatch, password="new-pw")
+        assert verify_plugin_token(token, "vp") is False
+        # A freshly minted token under the new password verifies.
+        fresh, _ = mint_plugin_token("vp")
+        assert verify_plugin_token(fresh, "vp") is True
+
+    def test_token_invalid_after_api_key_change(self, monkeypatch):
+        _set_auth(monkeypatch, password="pw", api_key="key-1")
+        token, _ = mint_plugin_token("vp")
+        assert verify_plugin_token(token, "vp") is True
+        _set_auth(monkeypatch, password="pw", api_key="key-2")
+        assert verify_plugin_token(token, "vp") is False
+
+    def test_token_invalid_after_username_change(self, monkeypatch):
+        _set_auth(monkeypatch, password="pw", username="alice")
+        token, _ = mint_plugin_token("vp")
+        assert verify_plugin_token(token, "vp") is True
+        _set_auth(monkeypatch, password="pw", username="bob")
+        assert verify_plugin_token(token, "vp") is False
+
+
+class TestAccessLogRedaction:
+    """The plugin token, when it rides the _plugin_token query param, must be
+    stripped from uvicorn access-log records so it never lands on disk."""
+
+    def test_redacts_token_first_param(self):
+        out = _redact_query_secrets("/api/plugins/vp/ext/x?_plugin_token=SEKRET")
+        assert "SEKRET" not in out
+        assert "_plugin_token=REDACTED" in out
+
+    def test_redacts_token_among_other_params(self):
+        out = _redact_query_secrets("/x?a=1&_plugin_token=SEKRET&b=2")
+        assert out == "/x?a=1&_plugin_token=REDACTED&b=2"
+
+    def test_leaves_paths_without_token_untouched(self):
+        assert _redact_query_secrets("/api/status?foo=bar") == "/api/status?foo=bar"
+
+    def test_filter_rewrites_access_record(self):
+        filt = _AccessLogRedactionFilter()
+        record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 0,
+            '%s - "%s %s HTTP/%s" %d',
+            ("1.2.3.4", "GET", "/api/plugins/vp/ext/x?_plugin_token=SEKRET", "1.1", 200),
+            None,
+        )
+        assert filt.filter(record) is True
+        assert "SEKRET" not in record.getMessage()
+        assert "REDACTED" in record.getMessage()
+        # Non-path args are untouched.
+        assert record.args[0] == "1.2.3.4"
+        assert record.args[4] == 200
+
+    def test_filter_ignores_non_access_records(self):
+        filt = _AccessLogRedactionFilter()
+        record = logging.LogRecord(
+            "uvicorn.error", logging.INFO, __file__, 0, "plain message", None, None,
+        )
+        assert filt.filter(record) is True
+        assert record.getMessage() == "plain message"
+
+    def test_install_is_idempotent(self):
+        access_logger = logging.getLogger("uvicorn.access")
+        for f in [f for f in access_logger.filters if isinstance(f, _AccessLogRedactionFilter)]:
+            access_logger.removeFilter(f)
+        install_access_log_redaction()
+        install_access_log_redaction()
+        count = sum(
+            isinstance(f, _AccessLogRedactionFilter) for f in access_logger.filters
+        )
+        assert count == 1
 
 
 # ═══════════════════════════════════════════════════════════

@@ -15,10 +15,18 @@ of these hold:
    credentials to its own ``fetch`` but can attach a token the platform injects
    into ``openavc:init``.
 
-The token is a stateless HMAC over ``plugin_id`` + expiry, keyed by an
-in-memory per-process secret (so tokens naturally invalidate on restart and
-nothing sensitive lands on disk). It is scoped to one ``plugin_id`` so a token
-minted for plugin A can't reach plugin B's routes.
+The token is a stateless HMAC over ``plugin_id`` + expiry. The key is an
+in-memory per-process secret mixed with a digest of the current admin
+credentials (so tokens naturally invalidate on restart, and a programmer
+password / API-key change invalidates every previously-minted token). It is
+scoped to one ``plugin_id`` so a token minted for plugin A can't reach plugin
+B's routes.
+
+Nothing sensitive lands on disk: the secret is never persisted, and because
+the token can also ride the ``_plugin_token`` query param (for iframe contexts
+that can't set a request header), :func:`install_access_log_redaction` strips
+that value from uvicorn's access-log records so it never reaches the service
+log file or journald.
 """
 
 from __future__ import annotations
@@ -26,6 +34,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
+import re
 import secrets
 import time
 
@@ -53,6 +63,57 @@ _SECRET = secrets.token_bytes(32)
 _basic = HTTPBasic(auto_error=False)
 
 
+# ---------------------------------------------------------------------------
+# Access-log redaction
+# ---------------------------------------------------------------------------
+# The plugin token is accepted as a query param for iframe contexts that can't
+# set a request header (see the module docstring / plugin-dev-guide). uvicorn's
+# access logger records the full request path including the query string, which
+# persists to the service stdout log + journald — so the token would land on
+# disk verbatim. Redact its value in the access-log record while leaving the
+# query-param delivery path itself working.
+_REDACTED_QUERY_PARAMS = (PLUGIN_TOKEN_QUERY,)
+_REDACT_RE = re.compile(
+    r"([?&](?:" + "|".join(re.escape(p) for p in _REDACTED_QUERY_PARAMS) + r")=)[^&\s]*"
+)
+
+
+def _redact_query_secrets(path: str) -> str:
+    """Replace sensitive query-param values in a request path with ``REDACTED``."""
+    return _REDACT_RE.sub(r"\1REDACTED", path)
+
+
+class _AccessLogRedactionFilter(logging.Filter):
+    """Redact sensitive query-param values from uvicorn access-log records.
+
+    uvicorn emits each access line with ``record.args`` of
+    ``(client_addr, method, full_path, http_version, status_code)``, where
+    ``full_path`` carries the raw query string. Rewrite that arg in place so a
+    token presented via the ``_plugin_token`` query param never reaches the
+    service log file or journald.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            redacted = _redact_query_secrets(args[2])
+            if redacted != args[2]:
+                record.args = (*args[:2], redacted, *args[3:])
+        return True
+
+
+def install_access_log_redaction() -> None:
+    """Attach the query-secret redaction filter to uvicorn's access logger.
+
+    Idempotent — safe to call on every startup. Call it from the app lifespan
+    (after uvicorn has configured its logging) so the filter lands on the live
+    ``uvicorn.access`` logger and survives.
+    """
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessLogRedactionFilter) for f in access_logger.filters):
+        access_logger.addFilter(_AccessLogRedactionFilter())
+
+
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -66,11 +127,31 @@ def auth_required() -> bool:
     return bool(_auth._get_password() or _auth._get_api_key())
 
 
+def _plugin_signing_key() -> bytes:
+    """HMAC key for plugin tokens: the per-process secret bound to the current
+    admin credentials.
+
+    Deriving the key from the live credentials means a password / API-key /
+    username change invalidates every previously-minted plugin token — mint and
+    verify both key off whatever credentials are configured at call time, so no
+    explicit revocation bookkeeping is needed on the password-change path.
+
+    Guest tokens deliberately do NOT use this key (they stay on the bare
+    ``_SECRET``): they authenticate an external guest via a plugin-defined check
+    (a join code, a PIN), not the programmer credentials, so a programmer
+    password change must not evict live guest sessions.
+    """
+    cred = (
+        f"{_auth._get_username()}\x00{_auth._get_password()}\x00{_auth._get_api_key()}"
+    ).encode("utf-8")
+    return hmac.new(_SECRET, cred, hashlib.sha256).digest()
+
+
 def mint_plugin_token(plugin_id: str, ttl: int = _DEFAULT_TTL_SECONDS) -> tuple[str, int]:
     """Mint a plugin-scoped token. Returns (token, expires_at_unix)."""
     expires_at = int(time.time()) + ttl
     msg = f"{plugin_id}:{expires_at}".encode("utf-8")
-    sig = hmac.new(_SECRET, msg, hashlib.sha256).digest()
+    sig = hmac.new(_plugin_signing_key(), msg, hashlib.sha256).digest()
     return f"{_b64(msg)}.{_b64(sig)}", expires_at
 
 
@@ -82,7 +163,7 @@ def verify_plugin_token(token: str, plugin_id: str) -> bool:
         sig = _unb64(sig_b64)
     except (ValueError, TypeError):  # binascii.Error subclasses ValueError
         return False
-    expected = hmac.new(_SECRET, msg, hashlib.sha256).digest()
+    expected = hmac.new(_plugin_signing_key(), msg, hashlib.sha256).digest()
     if not hmac.compare_digest(sig, expected):
         return False
     try:

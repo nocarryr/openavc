@@ -224,6 +224,12 @@ async def lifespan(app: FastAPI):
     app.state.engine_ready = False
     app.state.engine_error = None
 
+    # Keep plugin tokens presented via the _plugin_token query param out of
+    # uvicorn's access log. Done here (not at import) so uvicorn has already
+    # configured its access logger and the filter lands on the live one.
+    from server.api.plugin_ext import install_access_log_redaction
+    install_access_log_redaction()
+
     log.info("=" * 60)
     log.info("  OpenAVC starting")
     log.info("=" * 60)
