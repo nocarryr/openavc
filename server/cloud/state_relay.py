@@ -104,8 +104,9 @@ class StateRelay:
         # Cache of key -> tier so we do not walk DRIVER_INFO on every state
         # change. Cleared on each start() — connection lifecycle is a
         # natural invalidation point and at-most-one-cache-miss-per-key
-        # amortizes the cost flatly. Stale entries are harmless (a deleted
-        # device's keys just sit unused in the cache).
+        # amortizes the cost flatly. A key's entry is evicted when the key is
+        # deleted (see _on_state_change) so the cache tracks only live keys
+        # and can't grow without bound under high child-entity churn.
         self._tier_cache: dict[str, str] = {}
 
         self._flush_tasks: dict[str, asyncio.Task] = {}
@@ -132,13 +133,23 @@ class StateRelay:
         # cloud_priority retagged in a driver update).
         self._tier_cache.clear()
 
+        # Subscribe BEFORE sending the snapshot. The snapshot send contains
+        # awaits and paced sleeps, so a state change that lands during that
+        # window (e.g. a driver poll loop setting device.*.connected) would be
+        # lost if it fell between a snapshot taken-before-subscribe and a
+        # subscription registered-after: not in the already-captured snapshot,
+        # and not yet caught by the subscription. Subscribing first buffers
+        # those changes into the batches; the flush loops (started below, after
+        # the snapshot ships) then deliver them. A change captured in both the
+        # snapshot and a batch is harmless — the cloud applies the same (or a
+        # newer) value idempotently.
+        self._sub_id = self._state.subscribe("*", self._on_state_change)
+
         # Send full state snapshot so the cloud has current values for keys
         # that were set before the relay started (e.g. device.*.connected).
         # The snapshot includes a flag so the cloud clears stale state from
         # a previous session before applying the fresh values.
         await self._send_initial_snapshot()
-
-        self._sub_id = self._state.subscribe("*", self._on_state_change)
 
         self._flush_tasks = {
             _TIER_TOP: asyncio.create_task(
@@ -253,6 +264,15 @@ class StateRelay:
         tier = self._key_tier(key)
         with self._batch_lock:
             self._batches[tier].append(entry)
+
+        # A deleted key will never be seen again, so drop its tier-cache entry
+        # (the classification above may have just re-added it). Without this,
+        # every key ever observed accumulates in _tier_cache for the life of
+        # the connection — under high child-entity churn (register/deregister
+        # of presets, routes, dynamic IO) that grows without bound until the
+        # next reconnect clears it.
+        if entry.get("deleted"):
+            self._tier_cache.pop(key, None)
 
     def _key_tier(self, key: str) -> str:
         """Return the relay tier (``"top"``, ``"child"``, or ``"low"``)

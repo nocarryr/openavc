@@ -592,3 +592,122 @@ class TestTierCadence:
             assert churns[0]["value"] == 4
         finally:
             await relay.stop()
+
+
+# ---------------------------------------------------------------------------
+# Initial-snapshot window — a change during the snapshot send must not be lost
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotWindowRace:
+    """The relay subscribes before sending the snapshot, so a state change that
+    lands while the snapshot is in flight (a driver poll-loop write) is buffered
+    into a batch instead of falling between an already-captured snapshot and a
+    not-yet-registered subscription."""
+
+    @pytest.mark.asyncio
+    async def test_change_during_snapshot_send_is_captured(self):
+        state = StateStore()
+        events = EventBus()
+        state.set_event_bus(events)
+        # A pre-existing key so the snapshot has content to send.
+        state.set("device.d1.connected", True, source="seed")
+
+        class _InjectingAgent(_RecordingAgent):
+            """Fires a state write on the first send_message, mimicking a poll
+            loop that sets a key after the snapshot was captured but before the
+            flush loops run."""
+
+            def __init__(self, relay_state):
+                super().__init__(config={
+                    # Long intervals: assert on the buffered batch, not a flush.
+                    "state_batch_interval": 60,
+                    "state_batch_interval_child": 60,
+                    "state_batch_interval_low": 60,
+                })
+                self._relay_state = relay_state
+                self._injected = False
+
+            async def send_message(self, msg_type, payload):
+                if not self._injected:
+                    self._injected = True
+                    self._relay_state.set("device.d1.volume", 42, source="poll")
+                await super().send_message(msg_type, payload)
+
+        agent = _InjectingAgent(state)
+        relay = StateRelay(agent, state)
+
+        await relay.start()
+        try:
+            pending = [
+                e["key"] for bucket in relay._batches.values() for e in bucket
+            ]
+            assert "device.d1.volume" in pending, (
+                "a change during the snapshot-send window was lost"
+            )
+        finally:
+            await relay.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tier cache eviction — deleted keys must not accumulate
+# ---------------------------------------------------------------------------
+
+
+class TestTierCacheEviction:
+    """A deleted key is evicted from the tier cache so it tracks only live keys
+    and can't grow without bound under high child-entity churn."""
+
+    @staticmethod
+    def _agent() -> _RecordingAgent:
+        return _RecordingAgent(config={
+            "state_batch_interval": 60,
+            "state_batch_interval_child": 60,
+            "state_batch_interval_low": 60,
+        })
+
+    @pytest.mark.asyncio
+    async def test_deleted_key_evicted_but_delete_still_relayed(self):
+        state = StateStore()
+        events = EventBus()
+        state.set_event_bus(events)
+        relay = StateRelay(self._agent(), state)
+
+        await relay.start()
+        try:
+            # Setting classifies + caches the key.
+            state.set("device.d1.route.1.dest", "hdmi1", source="drv")
+            assert "device.d1.route.1.dest" in relay._tier_cache
+
+            state.delete("device.d1.route.1.dest", source="drv")
+            # The deleted key must not linger in the cache...
+            assert "device.d1.route.1.dest" not in relay._tier_cache
+            # ...but its deletion is still routed into a batch for the cloud.
+            pending = [e for bucket in relay._batches.values() for e in bucket]
+            assert any(
+                e["key"] == "device.d1.route.1.dest" and e.get("deleted")
+                for e in pending
+            )
+        finally:
+            await relay.stop()
+
+    @pytest.mark.asyncio
+    async def test_cache_bounded_under_register_deregister_churn(self):
+        state = StateStore()
+        events = EventBus()
+        state.set_event_bus(events)
+        relay = StateRelay(self._agent(), state)
+
+        await relay.start()
+        try:
+            for i in range(500):
+                key = f"device.d1.preset.{i}.name"
+                state.set(key, f"p{i}", source="drv")
+                state.delete(key, source="drv")
+            leaked = [
+                k for k in relay._tier_cache
+                if k.startswith("device.d1.preset.")
+            ]
+            assert leaked == [], f"tier cache leaked {len(leaked)} deleted keys"
+        finally:
+            await relay.stop()
