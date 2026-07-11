@@ -220,7 +220,7 @@ Example: A "projector auto-off" trigger watches `device.projector_main.power` fo
 
 ## Scripts
 
-For logic that macros cannot express, write Python scripts using the **Code** view in the Programmer IDE. Scripts are stored in `projects/<name>/scripts/` as standard `.py` files.
+For logic that macros cannot express, write Python scripts using the **Code** view in the Programmer IDE. Scripts are stored in the active project's `scripts/` folder (`projects/default/scripts/`) as standard `.py` files.
 
 Use the search box at the top of the script list to filter by file name.
 

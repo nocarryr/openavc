@@ -65,7 +65,7 @@ The Dashboard is the landing page of the Programmer IDE, giving you a system sta
 
 ## Program
 
-A project is a single `.avc` file (JSON format) that defines everything about a room: devices, UI layout, macros, scripts, variables, schedules, and triggers. Projects are stored in `projects/<name>/project.avc`.
+A project is a single `.avc` file (JSON format) that defines everything about a room: devices, UI layout, macros, scripts, variables, and triggers. The active project is stored at `projects/default/project.avc`, and saved copies in your project library live under `saved_projects/<id>/project.avc`.
 
 The Program view shows:
 - Project name and description
