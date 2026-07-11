@@ -20,6 +20,8 @@ export const DOCS = {
   // Connection tab sub-sections
   transport: `${DOCS_BASE}/creating-drivers/#step-by-step-walkthrough`,
   auth: `${DOCS_BASE}/creating-drivers/#auth-section`,
+  push: `${DOCS_BASE}/creating-drivers/#push-section`,
+  liveness: `${DOCS_BASE}/creating-drivers/#liveness-section`,
   onConnect: `${DOCS_BASE}/creating-drivers/#on_connect-section`,
   frameParser: `${DOCS_BASE}/creating-drivers/#frame_parser-advanced`,
   configSchema: `${DOCS_BASE}/creating-drivers/#config_schema-entry`,

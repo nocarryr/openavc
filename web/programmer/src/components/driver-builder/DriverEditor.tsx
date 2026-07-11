@@ -16,6 +16,8 @@ import { SimulatorEditor } from "./SimulatorEditor";
 import { LiveTestPanel } from "./LiveTestPanel";
 import { LifecycleEditor } from "./LifecycleEditor";
 import { AuthEditor } from "./AuthEditor";
+import { PushEditor } from "./PushEditor";
+import { LivenessEditor } from "./LivenessEditor";
 import { FrameParserEditor } from "./FrameParserEditor";
 import { SendFrameEditor } from "./SendFrameEditor";
 import { ConfigSchemaEditor } from "./ConfigSchemaEditor";
@@ -156,6 +158,8 @@ export function DriverEditor({
   ).length;
   const onConnectCount = (draft.on_connect ?? []).length;
   const authEnabled = !!draft.auth;
+  const pushEnabled = !!draft.push;
+  const livenessEnabled = !!draft.liveness;
   const frameParserEnabled = !!draft.frame_parser;
   const sendFrameEnabled = !!draft.send_frame;
   // Command framing wraps byte-stream sends only — OSC uses an address, HTTP a
@@ -613,6 +617,26 @@ export function DriverEditor({
               helpHref={DOCS.auth}
             >
               <AuthEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Push Notifications"
+              subtitle="Optional — device-initiated updates on a separate multicast channel. Frames feed the same response rules as the control connection."
+              meta={pushEnabled ? "enabled" : "disabled"}
+              defaultOpen={pushEnabled}
+              helpHref={DOCS.push}
+            >
+              <PushEditor draft={draft} onUpdate={onUpdate} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Connection Watchdog"
+              subtitle="Optional — probes the device on an interval and reconnects after consecutive misses, for links that die without closing the connection."
+              meta={livenessEnabled ? "enabled" : "disabled"}
+              defaultOpen={livenessEnabled}
+              helpHref={DOCS.liveness}
+            >
+              <LivenessEditor draft={draft} onUpdate={onUpdate} />
             </CollapsibleSection>
 
             <CollapsibleSection

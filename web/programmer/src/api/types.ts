@@ -547,6 +547,11 @@ export interface DriverResponseDef {
   pattern?: string;
   match?: string;
   address?: string;
+  // Optional per-rule rate limit in seconds: after this rule matches and
+  // applies, re-matches within the window are dropped. Built for continuous
+  // push telemetry (10 Hz meter frames + throttle 0.5 = 2 state writes/sec).
+  // Must be a positive number; absent means every match applies.
+  throttle?: number;
   mappings?: DriverResponseMapping[];
   // Shorthand for capture-or-static mappings:
   //   set: { volume: "$1" }       — capture group reference
@@ -822,6 +827,16 @@ export interface DriverDefinition {
   // type='telnet_login' is implemented (prompt-driven Telnet/SSH banner
   // login). Username/password come from device config keys named here.
   auth?: DriverAuthDef;
+  // Device-initiated push notifications delivered on a separate channel the
+  // platform opens (today only type='multicast'). Frames arriving there feed
+  // the same `responses` rules as the control connection. `group`/`port`
+  // accept {config_field} templates resolved from device config.
+  push?: DriverPushDef;
+  // Declarative connection watchdog: send a cheap probe every `interval`
+  // seconds, await a reply within `timeout`, and reconnect after
+  // `max_failures` consecutive misses. tcp/serial/udp/osc transports only —
+  // for links that die without closing the connection.
+  liveness?: DriverLivenessDef;
   // Where the file lives on disk — set by the list endpoint, not authored.
   // "builtin": ships with the platform (read-only, can't delete or edit
   // in place; use Customize a Copy). "user": lives in driver_repo, freely
@@ -840,6 +855,35 @@ export interface DriverAuthDef {
   timeout_seconds?: number;
   line_ending?: string;
   skip_if_empty?: boolean;
+}
+
+export interface DriverPushDef {
+  /** Only "multicast" is supported (tcp_listener/http_listener/sse are
+   *  reserved for future channel types and rejected by the loader). */
+  type?: string;
+  /** IPv4 multicast group literal (224.0.0.0 - 239.255.255.255) or a
+   *  {config_field} template naming a declared config field. */
+  group?: string;
+  /** Integer 1-65535, or a {config_field} template string. */
+  port?: number | string;
+}
+
+export interface DriverLivenessDef {
+  /** The probe payload — a raw protocol string, or an OSC address on the
+   *  osc transport. Required. */
+  send?: string;
+  /** Optional regex a reply must match; when absent, any inbound frame
+   *  counts as a reply. */
+  expect?: string;
+  /** Seconds between probes (>= 1, runtime default 30). */
+  interval?: number;
+  /** Seconds to await a reply (>= 0.1, runtime default 5). */
+  timeout?: number;
+  /** Consecutive misses before the platform reconnects (>= 1, default 2). */
+  max_failures?: number;
+  /** OSC-only typed argument list for the probe message. No editor surface —
+   *  preserved as loaded so an authored probe round-trips intact. */
+  args?: unknown[];
 }
 
 // --- API response types ---

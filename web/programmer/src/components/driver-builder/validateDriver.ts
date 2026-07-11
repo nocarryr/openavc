@@ -691,6 +691,19 @@ export function validateDriver(
   (draft.responses ?? []).forEach((resp, i) => {
     const label = `Response ${i + 1}`;
     const tn = (draft.transport || "tcp").toUpperCase();
+    // Throttle (any response kind): the runtime rejects a zero/negative/
+    // non-numeric value, since it would silently disable either the rule or
+    // the throttle.
+    if (
+      resp.throttle !== undefined &&
+      (typeof resp.throttle !== "number" || !(resp.throttle > 0))
+    ) {
+      issues.push({
+        severity: "error",
+        section: "behavior",
+        message: `${label} throttle must be a positive number of seconds.`,
+      });
+    }
     if (resp.address !== undefined) {
       if (draft.transport && draft.transport !== "osc") {
         issues.push({
@@ -926,6 +939,14 @@ export function validateDriver(
     }
   }
 
+  // ── Push notifications + connection watchdog — mirror driver_loader.py's
+  //    push:/liveness: rules so a misdeclared block shows in the Connection
+  //    tab at author time. At runtime a bad push block silently never
+  //    delivers a frame, and a bad liveness block either never arms or tears
+  //    healthy devices down. ────────────────────────────────────────────────
+  validatePush(draft, issues);
+  validateLiveness(draft, issues);
+
   // ── Frame parser (binary protocols) — mirror driver_loader.py's
   //    validate_driver_definition so a bad header_size/length shows in the
   //    Connection tab at author time, not as a ValueError raised in connect()
@@ -938,6 +959,262 @@ export function validateDriver(
   validateDiscovery(draft, issues);
 
   return issues;
+}
+
+/** Mirror server/transport/multicast_listener.py's is_multicast_group: an
+ *  IPv4 literal in 224.0.0.0/4. */
+function isMulticastGroup(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  const octets = parts.map((p) =>
+    /^\d{1,3}$/.test(p) ? parseInt(p, 10) : NaN,
+  );
+  if (octets.some((o) => Number.isNaN(o) || o > 255)) return false;
+  return octets[0] >= 224 && octets[0] <= 239;
+}
+
+/** Push channel types the runtime knows about but hasn't implemented — kept
+ *  distinct from plain typos so the message says "not yet" rather than
+ *  "never". Mirror driver_loader.py. */
+const RESERVED_PUSH_TYPES: ReadonlySet<string> = new Set([
+  "tcp_listener",
+  "http_listener",
+  "sse",
+]);
+
+const PUSH_KEYS: ReadonlySet<string> = new Set(["type", "group", "port"]);
+
+/** Mirror server/drivers/driver_loader.py's push: load-time checks. The
+ *  group/port accept {config_field} templates, and a template may only name
+ *  a field declared in config_schema or default_config — an undeclared field
+ *  resolves to nothing at runtime and the channel never opens. */
+function validatePush(
+  draft: DriverDefinition,
+  issues: ValidationIssue[],
+): void {
+  const push = draft.push;
+  if (!push) return;
+
+  const declaredFields = new Set([
+    ...Object.keys(draft.config_schema ?? {}),
+    ...Object.keys(draft.default_config ?? {}),
+  ]);
+
+  if (push.type && RESERVED_PUSH_TYPES.has(push.type)) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push.type",
+      message: `Push type "${push.type}" isn't supported yet — only "multicast".`,
+    });
+  } else if (push.type !== "multicast") {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push.type",
+      message: `Push type must be "multicast" (the only supported channel type).`,
+    });
+  }
+
+  const unknownKeys = Object.keys(push).filter((k) => !PUSH_KEYS.has(k));
+  if (unknownKeys.length > 0) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push",
+      message: `Push has unknown key(s): ${unknownKeys.join(", ")} — only type, group, and port are allowed.`,
+    });
+  }
+
+  // A {config_field} template must name declared config fields; braces with
+  // no token would pass through to the wire verbatim.
+  const checkTemplate = (where: string, value: string) => {
+    const fields = [...value.matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+    if (fields.length === 0) {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: `push.${where}`,
+        message: `Push ${where} "${value}" has braces but no {config_field} token.`,
+      });
+    }
+    for (const f of fields) {
+      if (!declaredFields.has(f)) {
+        issues.push({
+          severity: "error",
+          section: "connection",
+          field: `push.${where}`,
+          message: `Push ${where} references config field "${f}", which isn't declared in the driver's config.`,
+        });
+      }
+    }
+  };
+
+  const group = push.group;
+  if (group === undefined || group === "") {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push.group",
+      message:
+        "Push needs a multicast group — a literal address like 239.0.0.100, or a {config_field} template.",
+    });
+  } else if (group.includes("{")) {
+    checkTemplate("group", group);
+  } else if (!isMulticastGroup(group)) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push.group",
+      message: `Push group "${group}" must be an IPv4 multicast address (224.0.0.0 – 239.255.255.255) or a {config_field} template.`,
+    });
+  }
+
+  const port = push.port;
+  if (port === undefined || port === "") {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push.port",
+      message:
+        "Push needs a port — a number 1-65535, or a {config_field} template.",
+    });
+  } else if (typeof port === "string" && port.includes("{")) {
+    checkTemplate("port", port);
+  } else if (
+    typeof port !== "number" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "push.port",
+      message:
+        "Push port must be a whole number between 1 and 65535, or a {config_field} template.",
+    });
+  }
+}
+
+/** Transports the connection watchdog supports. HTTP polling already awaits
+ *  every response and raises on failure, and bridge devices own no transport,
+ *  so the probe only makes sense on socket transports that can die silently.
+ *  Mirror driver_loader.py. */
+const LIVENESS_TRANSPORTS: ReadonlySet<string> = new Set([
+  "tcp",
+  "serial",
+  "udp",
+  "osc",
+]);
+
+/** Mirror server/drivers/driver_loader.py's liveness: load-time checks — a
+ *  misdeclared watchdog would silently never arm (the exact never-goes-
+ *  offline failure it exists to fix) or tear healthy devices down. */
+function validateLiveness(
+  draft: DriverDefinition,
+  issues: ValidationIssue[],
+): void {
+  const liveness = draft.liveness;
+  if (!liveness) return;
+
+  if (draft.transport && !LIVENESS_TRANSPORTS.has(draft.transport)) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "liveness",
+      message: `Connection watchdog only works on TCP, serial, UDP, or OSC transports, not ${draft.transport}. Disable it or change the transport.`,
+    });
+  }
+
+  if (!liveness.send) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "liveness.send",
+      message:
+        "Connection watchdog needs a probe command to send — without one the watchdog never arms.",
+    });
+  }
+
+  if (liveness.expect !== undefined) {
+    if (!liveness.expect) {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "liveness.expect",
+        message:
+          "Connection watchdog expect pattern can't be empty — remove it to count any inbound frame as a reply.",
+      });
+    } else {
+      try {
+        new RegExp(liveness.expect);
+      } catch {
+        issues.push({
+          severity: "error",
+          section: "connection",
+          field: "liveness.expect",
+          message: `Connection watchdog expect pattern "${liveness.expect}" isn't a valid regular expression.`,
+        });
+      }
+    }
+  }
+
+  if (
+    liveness.interval !== undefined &&
+    (typeof liveness.interval !== "number" || liveness.interval < 1)
+  ) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "liveness.interval",
+      message: "Connection watchdog interval must be at least 1 second.",
+    });
+  }
+  if (
+    liveness.timeout !== undefined &&
+    (typeof liveness.timeout !== "number" || liveness.timeout < 0.1)
+  ) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "liveness.timeout",
+      message: "Connection watchdog reply timeout must be at least 0.1 seconds.",
+    });
+  }
+  if (
+    liveness.max_failures !== undefined &&
+    (!Number.isInteger(liveness.max_failures) || liveness.max_failures < 1)
+  ) {
+    issues.push({
+      severity: "error",
+      section: "connection",
+      field: "liveness.max_failures",
+      message:
+        "Connection watchdog max failures must be a whole number of at least 1.",
+    });
+  }
+
+  // The OSC-only args list has no editor surface (it round-trips as loaded),
+  // but an imported file can still carry a bad one.
+  if (liveness.args !== undefined) {
+    if (draft.transport !== "osc") {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "liveness.args",
+        message:
+          "Connection watchdog args are only valid on the OSC transport.",
+      });
+    } else if (!Array.isArray(liveness.args)) {
+      issues.push({
+        severity: "error",
+        section: "connection",
+        field: "liveness.args",
+        message: "Connection watchdog args must be a list.",
+      });
+    }
+  }
 }
 
 /** Mirror server/drivers/driver_loader.py's frame_parser load-time checks.

@@ -148,7 +148,13 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
               <input
                 value={resp.address ?? pattern}
                 onChange={(e) =>
-                  updateResponse(i, { address: e.target.value, mappings })
+                  updateResponse(i, {
+                    ...(resp.throttle !== undefined
+                      ? { throttle: resp.throttle }
+                      : {}),
+                    address: e.target.value,
+                    mappings,
+                  })
                 }
                 placeholder='e.g., /ch/01/mix/fader'
                 style={{
@@ -279,10 +285,16 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 const nextArg = mappings.length > 0
                   ? Math.max(...mappings.map((m) => m.arg ?? m.group ?? 0)) + 1
                   : 0;
-                updateResponse(i, { address: resp.address ?? pattern, mappings: [
-                  ...mappings,
-                  { group: 0, arg: nextArg, state: "", type: "float" },
-                ] });
+                updateResponse(i, {
+                  ...(resp.throttle !== undefined
+                    ? { throttle: resp.throttle }
+                    : {}),
+                  address: resp.address ?? pattern,
+                  mappings: [
+                    ...mappings,
+                    { group: 0, arg: nextArg, state: "", type: "float" },
+                  ],
+                });
               } else {
                 const nextGroup =
                   mappings.length > 0
@@ -302,6 +314,47 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
           >
             + Add Mapping
           </button>
+          <div
+            style={{
+              display: "flex",
+              gap: "var(--space-sm)",
+              alignItems: "center",
+              marginTop: "var(--space-sm)",
+            }}
+          >
+            <label
+              style={{
+                fontSize: "var(--font-size-sm)",
+                color: "var(--text-muted)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Throttle (s)
+            </label>
+            <input
+              type="number"
+              value={resp.throttle ?? ""}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const n = parseFloat(raw);
+                const next = { ...resp };
+                if (raw === "" || Number.isNaN(n)) {
+                  delete next.throttle;
+                } else {
+                  next.throttle = n;
+                }
+                updateResponse(i, next);
+              }}
+              min={0}
+              step={0.1}
+              placeholder="off"
+              style={{ width: 80, fontSize: "var(--font-size-sm)" }}
+            />
+            <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+              Drop re-matches of this rule for N seconds — for high-rate
+              telemetry frames (meters). Leave blank for normal responses.
+            </span>
+          </div>
           {draft.transport !== "osc" &&
             Object.keys(draft.child_entity_types ?? {}).length > 0 && (
               <ChildSetEditor

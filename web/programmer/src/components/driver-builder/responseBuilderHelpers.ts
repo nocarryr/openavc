@@ -92,8 +92,9 @@ export function canUseSetShorthand(
 
 /** Build a response def, preserving the original form (set: shorthand or
  *  mappings:) of the loaded response when the new mappings still fit.
- *  `child_set` rides along untouched — rebuilding from a pattern/mapping
- *  edit must never drop the child routing. */
+ *  `child_set` and `throttle` ride along untouched — rebuilding from a
+ *  pattern/mapping edit must never drop the child routing or the rate
+ *  limit. */
 export function buildResponse(
   pattern: string,
   mappings: DriverResponseMapping[],
@@ -103,14 +104,16 @@ export function buildResponse(
   const childSet = original.child_set?.length
     ? { child_set: original.child_set }
     : {};
+  const throttle =
+    original.throttle !== undefined ? { throttle: original.throttle } : {};
   // OSC responses always use mappings + address (no child_set — the loader
-  // rejects it there).
+  // rejects it there; throttle is valid on any response kind).
   if (original.address !== undefined) {
-    return { address: pattern, mappings };
+    return { address: pattern, mappings, ...throttle };
   }
   // A child_set-only response keeps its YAML clean: no empty mappings key.
   if (mappings.length === 0 && original.mappings === undefined && original.set === undefined) {
-    return { match: pattern, ...childSet };
+    return { match: pattern, ...childSet, ...throttle };
   }
   // Choose set: shorthand when (a) the original used it AND (b) the
   // current mapping shape still fits the shorthand. Otherwise fall back
@@ -125,9 +128,9 @@ export function buildResponse(
         set[m.state] = `$${m.group}`;
       }
     }
-    return { match: pattern, set, ...childSet };
+    return { match: pattern, set, ...childSet, ...throttle };
   }
-  return { match: pattern, mappings, ...childSet };
+  return { match: pattern, mappings, ...childSet, ...throttle };
 }
 
 /** Validate renaming a value-map raw key against its sibling keys. Renaming

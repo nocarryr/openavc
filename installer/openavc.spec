@@ -107,6 +107,7 @@ hiddenimports = [
     'server.transport.tcp',
     'server.transport.serial_transport',
     'server.transport.udp',
+    'server.transport.multicast_listener',
     'server.transport.http_client',
     'server.transport.osc',
     'server.transport.osc_codec',
