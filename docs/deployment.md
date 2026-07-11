@@ -550,6 +550,7 @@ Platform notes:
     "status": "healthy",
     "version": "0.22.0",
     "uptime_seconds": 3600.5,
+    "update_available": "",
     "devices": {
         "total": 5,
         "connected": 4,
@@ -561,7 +562,7 @@ Platform notes:
 }
 ```
 
-The device counts add up to `total`: `connected` and `disconnected` cover enabled devices, `orphaned` counts devices whose driver is not installed, and `disabled` counts devices turned off in the project.
+`update_available` is the version of a newer release if the periodic update check has found one, or an empty string when the server is up to date. It reflects the last cached check result and never triggers a network check itself. The device counts add up to `total`: `connected` and `disconnected` cover enabled devices, `orphaned` counts devices whose driver is not installed, and `disabled` counts devices turned off in the project.
 
 ## Security Notes
 

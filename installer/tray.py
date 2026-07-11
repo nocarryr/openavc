@@ -233,9 +233,15 @@ class OpenAVCTray:
                     self._device_info = f'{connected}/{total} devices online'
                 else:
                     self._device_info = ''
+                # Passive update indicator: the server's periodic auto-check
+                # caches the available version and reports it here (empty when
+                # up to date), so the tooltip can surface it without the tray
+                # itself hitting the network.
+                self._update_available = health.get('update_available', '') or ''
             else:
                 self._server_status = 'stopped'
                 self._device_info = ''
+                self._update_available = ''
                 self._check_startup_error()
 
             time.sleep(POLL_INTERVAL)
@@ -250,8 +256,11 @@ class OpenAVCTray:
         """Trigger an update check, then open the Updates view in the browser."""
         # Fire-and-forget: tell the server to check now
         _api_get('/api/system/updates/check', self._server_cfg, timeout=15)
-        # Open the Programmer IDE Updates view so the user can see the result
-        webbrowser.open(f'{self._base_url}/programmer#/updates')
+        # Open the Programmer IDE Updates view so the user can see the result.
+        # The hash must be '#updates' (no slash): the IDE router strips the
+        # leading '#' and matches the bare view id, so '#/updates' falls back
+        # to the Dashboard and the update result never shows.
+        webbrowser.open(f'{self._base_url}/programmer#updates')
 
     def _run_service_command(self, command: str) -> None:
         """Run a service command and surface a dialog if it clearly fails.

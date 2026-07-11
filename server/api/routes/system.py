@@ -104,10 +104,15 @@ async def health_check() -> dict[str, Any]:
     connected = sum(1 for d in devices_list if d.get("connected"))
     orphaned = sum(1 for d in devices_list if d.get("orphaned"))
     disabled = sum(1 for d in devices_list if d.get("enabled") is False)
+    # Cached available-update version maintained by the periodic auto-check
+    # (empty when up to date). Read from state — never triggers a network
+    # check here, so monitoring callers and the tray can poll it cheaply.
+    update_available = engine.state.get("system.update_available", "") if engine.state else ""
     return {
         "status": "healthy",
         "version": status.get("version", "unknown"),
         "uptime_seconds": status.get("uptime_seconds", 0),
+        "update_available": update_available or "",
         "devices": {
             "total": total,
             "connected": connected,
