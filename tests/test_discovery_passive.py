@@ -686,6 +686,23 @@ class TestSSDPResult:
 
 
 class TestParseUpnpXml:
+    def test_device_type_extracted_from_description(self):
+        # The description's deviceType is the definitive URN — present
+        # even when the M-SEARCH response carrying it was lost or arrived
+        # under a generic ST.
+        xml = """<?xml version="1.0"?>
+        <root xmlns="urn:schemas-upnp-org:device-1-0">
+          <device>
+            <deviceType>urn:acme:device:WidgetFamily:1</deviceType>
+            <friendlyName>Widget 6a</friendlyName>
+            <modelName>Widget-6a</modelName>
+          </device>
+        </root>"""
+        result = SSDPResult(ip="192.168.1.50")
+        _parse_upnp_xml(result, xml)
+        assert result.device_types == ["urn:acme:device:WidgetFamily:1"]
+        assert result.model_name == "Widget-6a"
+
     def test_standard_xml(self):
         xml = """<?xml version="1.0"?>
         <root xmlns="urn:schemas-upnp-org:device-1-0">
@@ -853,6 +870,51 @@ class TestSSDPScanner:
         result = scanner._results["192.168.1.50"]
         assert result.st == "urn:schemas-upnp-org:device:MediaRenderer:1"
         assert result.server == "Samsung UPnP SDK"
+
+    def test_process_response_accumulates_all_observed_types(self):
+        """An ssdp:all responder answers once per advertised type; a later
+        generic response (upnp:rootdevice) must not clobber the family
+        device-type URN a driver fingerprints."""
+        scanner = SSDPScanner()
+
+        resp1 = (
+            "HTTP/1.1 200 OK\r\n"
+            "ST: urn:acme:device:WidgetFamily:1\r\n"
+            "USN: uuid:abc::urn:acme:device:WidgetFamily:1\r\n"
+            "\r\n"
+        )
+        scanner._process_response(resp1.encode("utf-8"), "192.168.1.50")
+
+        resp2 = (
+            "HTTP/1.1 200 OK\r\n"
+            "ST: upnp:rootdevice\r\n"
+            "USN: uuid:abc::upnp:rootdevice\r\n"
+            "\r\n"
+        )
+        scanner._process_response(resp2.encode("utf-8"), "192.168.1.50")
+
+        result = scanner._results["192.168.1.50"]
+        # Most-recent ST is the generic one...
+        assert result.st == "upnp:rootdevice"
+        # ...but the URN stays observed, so the fingerprint can still match.
+        assert result.device_types == [
+            "urn:acme:device:WidgetFamily:1",
+            "upnp:rootdevice",
+        ]
+
+    def test_process_response_mines_usn_suffix(self):
+        """A response whose ST is a bare uuid still names its type in the
+        USN suffix (uuid:X::<type>)."""
+        scanner = SSDPScanner()
+        resp = (
+            "HTTP/1.1 200 OK\r\n"
+            "ST: uuid:abc123\r\n"
+            "USN: uuid:abc123::urn:acme:device:WidgetFamily:1\r\n"
+            "\r\n"
+        )
+        scanner._process_response(resp.encode("utf-8"), "192.168.1.50")
+        result = scanner._results["192.168.1.50"]
+        assert result.device_types == ["urn:acme:device:WidgetFamily:1"]
 
 
 # ============================================================

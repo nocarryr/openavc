@@ -311,7 +311,8 @@ class TestTierMatcherIdentified:
 
     def test_ssdp_model_filter_end_to_end(self):
         # Two drivers share one family URN; the scanner's device-description
-        # fields (SSDPResult.to_evidence -> data["txt"]) pick the right one.
+        # fields (SSDPResult.to_evidence_records -> data["txt"]) pick the
+        # right one.
         from server.discovery.ssdp_scanner import SSDPResult
 
         idx = SignalIndex()
@@ -323,22 +324,50 @@ class TestTierMatcherIdentified:
         ))
         m = TierMatcher(idx)
 
-        ev = SSDPResult(
+        (ev,) = SSDPResult(
             ip="10.0.0.60",
             st="urn:foo:device:AcmeFamily:1",
             manufacturer="AcmeCorp",
             model_name="Widget-6a",
-        ).to_evidence()
+        ).to_evidence_records()
         result = m.match([ev])
         assert result.state == DeviceState.IDENTIFIED
         assert result.driver_id == "widget_b"
 
         # Same URN with no description fields -> filtered rules stay silent.
-        bare = SSDPResult(
+        (bare,) = SSDPResult(
             ip="10.0.0.61", st="urn:foo:device:AcmeFamily:1",
-        ).to_evidence()
+        ).to_evidence_records()
         result = m.match([bare])
         assert result.state != DeviceState.IDENTIFIED
+
+    def test_ssdp_generic_st_arriving_last_still_identifies(self):
+        # The real-device shape: the ssdp:all responder's LAST response is
+        # a generic upnp:rootdevice, and the family URN reached the record
+        # only via an earlier response / the devdesc deviceType. Matching
+        # must consider every observed type, not just the most recent ST.
+        from server.discovery.ssdp_scanner import SSDPResult, _parse_upnp_xml
+
+        idx = SignalIndex()
+        idx.add_rule(SignalRule.for_ssdp(
+            "widget_b", "urn:foo:device:AcmeFamily:1", txt_match={"model": "Widget-6a"},
+        ))
+        m = TierMatcher(idx)
+
+        r = SSDPResult(ip="10.0.0.62", st="upnp:rootdevice")
+        r.note_device_type("upnp:rootdevice")
+        _parse_upnp_xml(r, """<?xml version="1.0"?>
+        <root xmlns="urn:schemas-upnp-org:device-1-0">
+          <device>
+            <deviceType>urn:foo:device:AcmeFamily:1</deviceType>
+            <friendlyName>Widget 6a</friendlyName>
+            <modelName>Widget-6a</modelName>
+          </device>
+        </root>""")
+
+        result = m.match(r.to_evidence_records())
+        assert result.state == DeviceState.IDENTIFIED
+        assert result.driver_id == "widget_b"
 
     def test_active_probe_match_identified(self):
         idx = SignalIndex()

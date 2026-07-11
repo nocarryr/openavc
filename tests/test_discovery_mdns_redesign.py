@@ -121,18 +121,17 @@ class TestSSDPResultEvidence:
             manufacturer="Sonos Inc.",
             model_name="ZP100",
         )
-        ev = r.to_evidence()
-        assert ev is not None
+        (ev,) = r.to_evidence_records()
         assert ev.tier == SignalTier.PASSIVE_LISTENER
         assert ev.data["kind"] == KIND_SSDP
         assert ev.data["source_id"] == "urn:schemas-upnp-org:device:MediaRenderer:1"
         assert ev.data["manufacturer"] == "Sonos Inc."
         assert ev.data["model"] == "ZP100"
 
-    def test_no_st_returns_none(self):
-        # No ST means we can't deterministically match.
+    def test_no_observed_type_emits_nothing(self):
+        # No ST and no accumulated types — nothing to match on.
         r = SSDPResult(ip="10.0.0.50", usn="uuid:abc", friendly_name="thing")
-        assert r.to_evidence() is None
+        assert r.to_evidence_records() == []
 
     def test_description_fields_emitted_as_observed_field_map(self):
         # model/manufacturer/friendly_name double as the matcher's
@@ -144,8 +143,7 @@ class TestSSDPResultEvidence:
             manufacturer="AcmeCorp",
             model_name="Widget-6a",
         )
-        ev = r.to_evidence()
-        assert ev is not None
+        (ev,) = r.to_evidence_records()
         assert ev.data["txt"] == {
             "model": "Widget-6a",
             "manufacturer": "AcmeCorp",
@@ -154,9 +152,41 @@ class TestSSDPResultEvidence:
 
     def test_no_description_fields_omits_field_map(self):
         r = SSDPResult(ip="10.0.0.50", st="urn:foo:device:AcmeFamily:1")
-        ev = r.to_evidence()
-        assert ev is not None
+        (ev,) = r.to_evidence_records()
         assert "txt" not in ev.data
+
+    def test_one_record_per_observed_type(self):
+        # An ssdp:all responder answers once per advertised type; the
+        # family device-type URN a driver claims is rarely the last one
+        # to arrive, so every distinct type gets its own record.
+        r = SSDPResult(ip="10.0.0.50", model_name="Widget-6a")
+        r.note_device_type("upnp:rootdevice")
+        r.note_device_type("urn:foo:device:AcmeFamily:1")
+        r.note_device_type("urn:foo:service:AcmeControl:1")
+        records = r.to_evidence_records()
+        assert [ev.data["source_id"] for ev in records] == [
+            "upnp:rootdevice",
+            "urn:foo:device:AcmeFamily:1",
+            "urn:foo:service:AcmeControl:1",
+        ]
+        # Description fields ride on every record.
+        assert all(ev.data["txt"] == {"model": "Widget-6a"} for ev in records)
+
+    def test_note_device_type_dedups_and_skips_uuids(self):
+        r = SSDPResult(ip="10.0.0.50")
+        r.note_device_type("urn:foo:device:AcmeFamily:1")
+        r.note_device_type("urn:foo:device:AcmeFamily:1")   # dup
+        r.note_device_type("uuid:1234-abcd")                 # per-unit id
+        r.note_device_type("")                               # empty
+        r.note_device_type(None)                             # missing
+        assert r.device_types == ["urn:foo:device:AcmeFamily:1"]
+
+    def test_note_device_type_bounded(self):
+        from server.discovery.ssdp_scanner import MAX_DEVICE_TYPES_PER_IP
+        r = SSDPResult(ip="10.0.0.50")
+        for i in range(MAX_DEVICE_TYPES_PER_IP + 10):
+            r.note_device_type(f"urn:foo:device:Type{i}:1")
+        assert len(r.device_types) == MAX_DEVICE_TYPES_PER_IP
 
 
 class TestDriverDeclaredServiceTypes:

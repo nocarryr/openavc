@@ -198,7 +198,7 @@ class TestSSDPManufacturerVendorString:
     def _ssdp_evidence(self):
         from server.discovery.ssdp_scanner import SSDPResult
 
-        return SSDPResult(
+        (ev,) = SSDPResult(
             ip="192.0.2.10",
             # Generic UPnP device type — every gateway advertises it, so it is
             # not (and must not be) a strong fingerprint on its own.
@@ -206,7 +206,8 @@ class TestSSDPManufacturerVendorString:
             server="Acme_Switch UPnP/1.1 AW9000/1.0",
             manufacturer="AcmeAV",
             model_name="AW-9000",
-        ).to_evidence()
+        ).to_evidence_records()
+        return ev
 
     def test_extract_mines_top_level_manufacturer(self):
         from server.discovery.tier_matcher import (

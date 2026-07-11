@@ -16,7 +16,7 @@ import logging
 import re
 import socket
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from typing import Any
 from defusedxml.ElementTree import fromstring as _safe_xml_fromstring, ParseError as _XMLParseError
 from xml.etree import ElementTree
@@ -52,15 +52,29 @@ SEARCH_TARGETS = [
 UPNP_NS = {"upnp": "urn:schemas-upnp-org:device-1-0"}
 
 
+# A device answering ``ssdp:all`` sends one response per advertised type
+# (rootdevice, embedded devices, services) — bound how many distinct types
+# one IP may accumulate so a chatty or hostile stack can't grow the record
+# without limit.
+MAX_DEVICE_TYPES_PER_IP = 32
+
+
 @dataclass
 class SSDPResult:
     """A device discovered via SSDP/UPnP."""
     ip: str
     port: int | None = None
     usn: str | None = None         # Unique Service Name
-    st: str | None = None          # Search Target (device type)
+    st: str | None = None          # Search Target (most recent response)
     location: str | None = None    # URL to UPnP device description XML
     server: str | None = None      # Server header (often has manufacturer info)
+    # Every distinct UPnP type observed for this IP, in arrival order:
+    # response ST headers, USN suffixes (uuid:X::<type>), and the
+    # devdesc.xml <deviceType>. A device answering ssdp:all responds once
+    # per advertised type, and drivers fingerprint the family device-type
+    # URN — which is NOT necessarily the last response to arrive, so a
+    # single last-writer-wins ``st`` cannot carry the match.
+    device_types: list[str] = dataclass_field(default_factory=list)
     # Fields populated from UPnP XML description
     friendly_name: str | None = None
     manufacturer: str | None = None
@@ -68,6 +82,25 @@ class SSDPResult:
     model_number: str | None = None
     serial_number: str | None = None
     udn: str | None = None         # Unique Device Name
+
+    def note_device_type(self, value: str | None) -> None:
+        """Record one observed UPnP type identifier, deduplicated.
+
+        Per-unit ``uuid:*`` identifiers are skipped — no driver rule can
+        meaningfully claim one. ``upnp:rootdevice`` is kept: paired with a
+        description filter it is a legitimate fingerprint for devices that
+        advertise nothing more specific.
+        """
+        if not value:
+            return
+        v = value.strip()
+        if not v or v.lower().startswith("uuid:"):
+            return
+        if v in self.device_types:
+            return
+        if len(self.device_types) >= MAX_DEVICE_TYPES_PER_IP:
+            return
+        self.device_types.append(v)
 
     def to_device_info(self) -> dict[str, Any]:
         """Convert to a dict suitable for merge_device_info()."""
@@ -112,29 +145,21 @@ class SSDPResult:
 
         return info
 
-    def to_evidence(self):
-        """Emit a passive_listener Evidence record for the deterministic matcher.
+    def to_evidence_records(self) -> list:
+        """Emit one passive_listener Evidence record per observed UPnP type.
 
-        Returns ``None`` if no UPnP device-type ST was observed (e.g.
-        the response was an ssdp:all hit with only USN/Location).
+        A driver's ``ssdp:`` fingerprint names the family device-type URN,
+        which is just one of the several types a device advertises — every
+        distinct observed type gets a record so the matcher can find the
+        claimed one regardless of response arrival order. Empty when no
+        type was observed at all (e.g. a response with only USN/Location).
         """
-        if not self.st:
-            return None
         from server.discovery.result import Evidence, SignalTier
         from server.discovery.tier_matcher import KIND_SSDP
 
-        data = {
-            "kind": KIND_SSDP,
-            "source_id": self.st,
-        }
-        if self.manufacturer:
-            data["manufacturer"] = self.manufacturer
-        if self.model_name:
-            data["model"] = self.model_name
-        if self.friendly_name:
-            data["friendly_name"] = self.friendly_name
-        if self.server:
-            data["server"] = self.server
+        # Direct constructions (tests, companions) may set ``st`` without
+        # going through note_device_type — fall back to it.
+        types = self.device_types or ([self.st] if self.st else [])
 
         # Device-description fields double as the matcher's observed-field
         # map, so ssdp rules can filter on model/manufacturer the way mdns
@@ -148,14 +173,29 @@ class SSDPResult:
             )
             if value
         }
-        if txt:
-            data["txt"] = txt
 
-        return Evidence(
-            tier=SignalTier.PASSIVE_LISTENER,
-            source=f"ssdp:{self.st}",
-            data=data,
-        )
+        records = []
+        for device_type in types:
+            data = {
+                "kind": KIND_SSDP,
+                "source_id": device_type,
+            }
+            if self.manufacturer:
+                data["manufacturer"] = self.manufacturer
+            if self.model_name:
+                data["model"] = self.model_name
+            if self.friendly_name:
+                data["friendly_name"] = self.friendly_name
+            if self.server:
+                data["server"] = self.server
+            if txt:
+                data["txt"] = dict(txt)
+            records.append(Evidence(
+                tier=SignalTier.PASSIVE_LISTENER,
+                source=f"ssdp:{device_type}",
+                data=data,
+            ))
+        return records
 
 
 def _st_to_category(st: str | None) -> str | None:
@@ -334,6 +374,14 @@ class SSDPScanner:
         result.st = headers.get("st", result.st)
         result.server = headers.get("server", result.server)
 
+        # Accumulate every advertised type — an ssdp:all responder sends
+        # one response per type, and the family device-type URN a driver
+        # fingerprints is rarely the last to arrive.
+        result.note_device_type(headers.get("st"))
+        usn = headers.get("usn") or ""
+        if "::" in usn:
+            result.note_device_type(usn.split("::", 1)[1])
+
         location = headers.get("location")
         if location:
             result.location = location
@@ -469,6 +517,10 @@ def _parse_upnp_xml(result: SSDPResult, xml_text: str) -> None:
     result.model_number = _get_xml_text(device, "modelNumber")
     result.serial_number = _get_xml_text(device, "serialNumber")
     result.udn = _get_xml_text(device, "UDN")
+    # The description's deviceType is the definitive device-type URN —
+    # present even when the matching M-SEARCH response was lost or
+    # arrived under a generic ST like upnp:rootdevice.
+    result.note_device_type(_get_xml_text(device, "deviceType"))
 
 
 def _get_xml_text(parent: ElementTree.Element, tag: str) -> str | None:

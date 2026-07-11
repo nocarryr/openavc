@@ -1048,9 +1048,9 @@ class DiscoveryEngine:
         for ip, ssdp_result in ssdp_results.items():
             device = self._get_or_create(ip)
             device.alive = True
-            ev = ssdp_result.to_evidence()
-            if ev is not None:
-                device.evidence_log.append(ev)
+            # One record per observed UPnP type — the driver-claimed
+            # family URN is only one of the types a device advertises.
+            device.evidence_log.extend(ssdp_result.to_evidence_records())
             merge_device_info(device, ssdp_result.to_device_info(), "ssdp")
             await self._emit_device_update(device, "ssdp")
 
