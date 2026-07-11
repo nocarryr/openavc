@@ -58,6 +58,13 @@ def eval_operator(op: str, actual: Any, target: Any) -> bool:
     op = _OPERATOR_ALIASES.get(op, op)
 
     if op in ("eq", "ne"):
+        # None means "no decision" — a device that hasn't reported yet, an
+        # absent or mistyped key. Never equal, never not-equal, matching the
+        # gt/lt guard below, so a rule like `power != "on"` doesn't fire a
+        # shutdown/alert macro against a device that simply hasn't polled.
+        # (To test for an unset value, use the falsy operator.)
+        if actual is None or target is None:
+            return False
         # Try boolean coercion if either side is a bool
         if isinstance(actual, bool) or isinstance(target, bool):
             a_bool = _coerce_bool(actual)
@@ -70,7 +77,15 @@ def eval_operator(op: str, actual: Any, target: Any) -> bool:
             t_num = _coerce_numeric(target)
             if a_num is not None and t_num is not None:
                 return (a_num == t_num) if op == "eq" else (a_num != t_num)
-        return (actual == target) if op == "eq" else (actual != target)
+        # Strings compare case-insensitively so `power == "On"` matches a
+        # device reporting "on" (device state casing varies by vendor; the
+        # docs promise "just enter the value you expect"). Distinct tokens
+        # stay distinct — "on" and "true" are not made equivalent here.
+        if isinstance(actual, str) and isinstance(target, str):
+            is_equal = actual.casefold() == target.casefold()
+        else:
+            is_equal = actual == target
+        return is_equal if op == "eq" else not is_equal
 
     if op in ("gt", "lt", "gte", "lte"):
         if actual is None or target is None:

@@ -82,7 +82,9 @@ A conditional step checks a state value and runs one set of steps if the conditi
 
 The value field adapts to the key you chose: pick a boolean variable and you get a **true / false** dropdown instead of a text box, so there is no guessing at how to spell the value. This same condition editor is used by **Skip If** guards, **Wait Until** steps, and trigger guard conditions, so the true/false dropdown appears in all of them.
 
-Comparisons automatically handle type differences between device state and your condition value. A device that reports volume as `"-12.5"` (text) will correctly compare against a numeric threshold like `-20`. Similarly, `"true"` (text) matches `true` (boolean). You don't need to worry about the internal type — just enter the value you expect.
+Comparisons automatically handle type differences between device state and your condition value. A device that reports volume as `"-12.5"` (text) will correctly compare against a numeric threshold like `-20`. Similarly, `"true"` (text) matches `true` (boolean). Text equality also ignores case, so a condition value of `On` matches a device that reports `on`. You don't need to worry about the internal type or exact casing — just enter the value you expect.
+
+`eq`/`ne` against a value that has not been reported yet (a device that has not polled, or a key that does not exist) never match: `power != "on"` will not fire while `power` is still unknown, so an automation cannot act on state a device has not sent. To branch on a missing or empty value, use `falsy`.
 
 Conditionals can be nested (a conditional inside a conditional) up to 5 levels deep. Macros that call other macros via "Run Macro" steps can nest up to 10 levels deep. For most rooms, one level of each is enough.
 

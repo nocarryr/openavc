@@ -26,7 +26,8 @@ class TestEq:
         assert eval_operator("eq", True, True) is True
 
     def test_none_eq_none(self):
-        assert eval_operator("eq", None, None) is True
+        # None is "no decision" (matches gt/lt): never equal, never not-equal.
+        assert eval_operator("eq", None, None) is False
 
     def test_none_eq_value(self):
         assert eval_operator("eq", None, "on") is False
@@ -60,7 +61,9 @@ class TestNe:
         assert eval_operator("ne", "on", "on") is False
 
     def test_none_ne_value(self):
-        assert eval_operator("ne", None, "x") is True
+        # None is "no decision": `!=` must NOT fire against an unreported
+        # device (previously returned True, firing shutdown/alert macros).
+        assert eval_operator("ne", None, "x") is False
 
     def test_alias_not_equals(self):
         assert eval_operator("not_equals", 1, 2) is True
@@ -278,3 +281,68 @@ class TestTypeMismatch:
         assert eval_operator("eq", "false", True) is False
         assert eval_operator("eq", "TRUE", True) is True
         assert eval_operator("ne", "false", False) is False
+
+
+# ---------------------------------------------------------------------------
+# None is "no decision" for eq/ne (consistent with gt/lt)
+# ---------------------------------------------------------------------------
+
+class TestNoneNoDecision:
+    """A None operand (unreported device, absent/mistyped key) makes eq and ne
+    return False, so automations don't fire against state that hasn't been
+    reported yet. Use the ``falsy`` operator to test for an unset value."""
+
+    def test_ne_none_actual_does_not_fire(self):
+        # The reported bug: `power != "on"` firing shutdown when power is None.
+        assert eval_operator("ne", None, "on") is False
+
+    def test_eq_none_actual(self):
+        assert eval_operator("eq", None, "on") is False
+
+    def test_ne_none_target(self):
+        assert eval_operator("ne", "on", None) is False
+
+    def test_eq_none_target(self):
+        assert eval_operator("eq", "on", None) is False
+
+    def test_both_none(self):
+        assert eval_operator("eq", None, None) is False
+        assert eval_operator("ne", None, None) is False
+
+    def test_ne_none_actual_with_bool_target(self):
+        # Bool-typed condition value against an unreported (None) device state.
+        assert eval_operator("ne", None, True) is False
+        assert eval_operator("eq", None, True) is False
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive string comparison for eq/ne
+# ---------------------------------------------------------------------------
+
+class TestCaseInsensitiveStrings:
+    """String eq/ne ignores case so a guard like `power == "On"` matches a
+    device reporting "on". Distinct tokens are NOT made equivalent."""
+
+    def test_eq_differing_case(self):
+        assert eval_operator("eq", "on", "On") is True
+        assert eval_operator("eq", "Standby", "standby") is True
+        assert eval_operator("eq", "HDMI1", "hdmi1") is True
+
+    def test_ne_differing_case(self):
+        assert eval_operator("ne", "on", "On") is False
+        assert eval_operator("ne", "Standby", "standby") is False
+
+    def test_distinct_tokens_stay_distinct(self):
+        assert eval_operator("eq", "on", "off") is False
+        # Case-insensitive does not conflate different words: "on" != "true".
+        assert eval_operator("eq", "on", "true") is False
+        assert eval_operator("ne", "on", "off") is True
+
+    def test_empty_string_still_matches_empty(self):
+        assert eval_operator("eq", "", "") is True
+        assert eval_operator("eq", "", "x") is False
+
+    def test_bool_coercion_still_wins_over_string_path(self):
+        # A real bool on one side still coerces (unchanged by the case rule).
+        assert eval_operator("eq", "on", True) is True
+        assert eval_operator("eq", "On", True) is True
