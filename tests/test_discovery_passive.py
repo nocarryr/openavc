@@ -27,10 +27,15 @@ from server.discovery.ssdp_scanner import (
     SSDPResult,
     parse_ssdp_response,
     _extract_port_from_url,
+    _location_host_is_sender,
     _parse_upnp_xml,
     _st_to_category,
     M_SEARCH_TEMPLATE,
+    MAX_DESCRIPTION_FETCHES,
+    MAX_SSDP_SOURCES,
     SEARCH_TARGETS,
+    SSDP_ADDR,
+    SSDP_PORT,
 )
 from server.discovery.result import (
     DiscoveredDevice,
@@ -1081,6 +1086,276 @@ class TestSSDPHttpGet:
         result = SSDPResult(ip="192.168.1.50", location=None)
         await scanner._fetch_single_description(result)
         assert result.friendly_name is None
+
+
+# ============================================================
+# SSDP Hardening: source cap, SSRF-guarded fetch, NOTIFY, multicast join
+# ============================================================
+
+
+class TestSSDPSourceCap:
+    """A spoofed responder must not be able to grow ``_results`` without limit."""
+
+    def _response(self, n: int) -> bytes:
+        return (
+            "HTTP/1.1 200 OK\r\n"
+            f"ST: urn:schemas-upnp-org:device:Widget-{n}:1\r\n"
+            f"USN: uuid:dev-{n}\r\n"
+            "\r\n"
+        ).encode("utf-8")
+
+    def test_distinct_sources_capped(self):
+        scanner = SSDPScanner()
+        for n in range(MAX_SSDP_SOURCES + 50):
+            scanner._process_response(
+                self._response(n),
+                f"10.{(n >> 16) & 255}.{(n >> 8) & 255}.{n & 255}",
+            )
+        assert len(scanner._results) == MAX_SSDP_SOURCES
+
+    def test_known_source_still_updates_past_cap(self):
+        scanner = SSDPScanner()
+        for n in range(MAX_SSDP_SOURCES + 50):
+            scanner._process_response(
+                self._response(n),
+                f"10.{(n >> 16) & 255}.{(n >> 8) & 255}.{n & 255}",
+            )
+        # 10.0.0.0 was the first source in; a fresh response from it must still
+        # be recorded even after the cap trips.
+        scanner._process_response(
+            (
+                "HTTP/1.1 200 OK\r\n"
+                "SERVER: Updated UPnP SDK\r\n"
+                "\r\n"
+            ).encode("utf-8"),
+            "10.0.0.0",
+        )
+        assert scanner._results["10.0.0.0"].server == "Updated UPnP SDK"
+
+    def test_cap_logs_once_per_window(self, caplog):
+        scanner = SSDPScanner()
+        with caplog.at_level("WARNING"):
+            for n in range(MAX_SSDP_SOURCES + 10):
+                scanner._process_response(
+                    self._response(n),
+                    f"10.{(n >> 16) & 255}.{(n >> 8) & 255}.{n & 255}",
+                )
+        hits = [r for r in caplog.records if "distinct-source cap" in r.message]
+        assert len(hits) == 1
+
+
+class TestSSDPLocationSSRFGuard:
+    """The description fetch must only ever hit the responder's own LOCATION."""
+
+    def test_location_host_is_sender_matches_ip(self):
+        assert _location_host_is_sender(
+            "http://192.168.1.50:49152/desc.xml", "192.168.1.50"
+        )
+
+    def test_location_host_is_sender_rejects_foreign_ip(self):
+        # LOCATION points at an internal service on a different host.
+        assert not _location_host_is_sender(
+            "http://10.0.0.5:6379/desc.xml", "192.168.1.50"
+        )
+
+    def test_location_host_is_sender_rejects_hostname(self):
+        # A hostname would require resolution — a DNS-rebinding vector.
+        assert not _location_host_is_sender(
+            "http://internal.corp.example/desc.xml", "192.168.1.50"
+        )
+
+    def test_location_host_is_sender_rejects_metadata_endpoint(self):
+        assert not _location_host_is_sender(
+            "http://169.254.169.254/latest/meta-data/", "192.168.1.50"
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_skips_foreign_location(self):
+        """A LOCATION that isn't the sender's own IP must not be fetched."""
+        scanner = SSDPScanner()
+        result = SSDPResult(
+            ip="192.168.1.50",
+            location="http://10.0.0.5:6379/desc.xml",
+        )
+        with patch(
+            "server.discovery.ssdp_scanner._http_get",
+            new_callable=AsyncMock,
+        ) as mock_get:
+            await scanner._fetch_single_description(result)
+        mock_get.assert_not_called()
+        assert result.friendly_name is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_allows_own_location(self):
+        """A LOCATION on the responder's own IP is still fetched."""
+        scanner = SSDPScanner()
+        result = SSDPResult(
+            ip="192.168.1.50",
+            location="http://192.168.1.50:49152/desc.xml",
+        )
+        xml_body = (
+            '<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+            "<friendlyName>Own Device</friendlyName></device></root>"
+        )
+        with patch(
+            "server.discovery.ssdp_scanner._http_get",
+            new_callable=AsyncMock,
+            return_value=xml_body,
+        ) as mock_get:
+            await scanner._fetch_single_description(result)
+        mock_get.assert_called_once()
+        assert result.friendly_name == "Own Device"
+
+    @pytest.mark.asyncio
+    async def test_fetch_descriptions_concurrency_capped(self):
+        """Concurrent description fetches must not exceed MAX_DESCRIPTION_FETCHES."""
+        scanner = SSDPScanner()
+        # Many responders, each with a valid same-IP LOCATION.
+        for n in range(MAX_DESCRIPTION_FETCHES * 4):
+            ip = f"192.168.5.{n}"
+            scanner._results[ip] = SSDPResult(
+                ip=ip, location=f"http://{ip}:49152/desc.xml"
+            )
+
+        in_flight = 0
+        peak = 0
+
+        async def fake_get(url, timeout=3.0):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return None
+
+        with patch(
+            "server.discovery.ssdp_scanner._http_get",
+            side_effect=fake_get,
+        ):
+            await scanner._fetch_descriptions()
+
+        assert peak <= MAX_DESCRIPTION_FETCHES
+
+
+class TestSSDPNotify:
+    """NOTIFY beacons carry the type in NT and announce departures via NTS."""
+
+    def test_notify_alive_uses_nt(self):
+        scanner = SSDPScanner()
+        notify = (
+            "NOTIFY * HTTP/1.1\r\n"
+            "HOST: 239.255.255.250:1900\r\n"
+            "NT: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+            "NTS: ssdp:alive\r\n"
+            "USN: uuid:beacon-1::urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+            "SERVER: Acme UPnP/1.0\r\n"
+            "\r\n"
+        )
+        scanner._process_response(notify.encode("utf-8"), "192.168.1.77")
+        assert "192.168.1.77" in scanner._results
+        result = scanner._results["192.168.1.77"]
+        # NT populates the type even though there is no ST header.
+        assert result.st == "urn:schemas-upnp-org:device:MediaRenderer:1"
+        assert "urn:schemas-upnp-org:device:MediaRenderer:1" in result.device_types
+
+    def test_notify_byebye_removes_existing(self):
+        scanner = SSDPScanner()
+        # First an M-SEARCH reply records the device...
+        reply = (
+            "HTTP/1.1 200 OK\r\n"
+            "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+            "USN: uuid:beacon-1\r\n"
+            "\r\n"
+        )
+        scanner._process_response(reply.encode("utf-8"), "192.168.1.77")
+        assert "192.168.1.77" in scanner._results
+
+        # ...then a byebye departure drops it.
+        byebye = (
+            "NOTIFY * HTTP/1.1\r\n"
+            "HOST: 239.255.255.250:1900\r\n"
+            "NT: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+            "NTS: ssdp:byebye\r\n"
+            "USN: uuid:beacon-1\r\n"
+            "\r\n"
+        )
+        scanner._process_response(byebye.encode("utf-8"), "192.168.1.77")
+        assert "192.168.1.77" not in scanner._results
+
+    def test_notify_byebye_no_record_is_noop(self):
+        scanner = SSDPScanner()
+        byebye = (
+            "NOTIFY * HTTP/1.1\r\n"
+            "NTS: ssdp:byebye\r\n"
+            "USN: uuid:ghost\r\n"
+            "\r\n"
+        )
+        scanner._process_response(byebye.encode("utf-8"), "192.168.1.99")
+        assert scanner._results == {}
+
+
+class TestSSDPSocketJoinsGroup:
+    """The listening socket must join the SSDP group, not just bind ephemeral."""
+
+    def test_socket_binds_port_and_joins_group(self):
+        from server.discovery import ssdp_scanner as mod
+
+        created = {}
+
+        class FakeSocket:
+            def __init__(self, *a, **k):
+                created["sock"] = self
+                self.bound = None
+                self.closed = False
+
+            def setsockopt(self, *a):
+                pass
+
+            def bind(self, addr):
+                self.bound = addr
+
+            def setblocking(self, flag):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        with patch.object(mod.socket, "socket", FakeSocket), \
+             patch.object(mod, "set_shared_port_reuse"), \
+             patch.object(
+                 mod, "join_group_on_interfaces", return_value=["192.168.1.10"]
+             ) as mock_join:
+            sock = mod._create_ssdp_socket()
+
+        assert sock.bound == ("", SSDP_PORT)
+        mock_join.assert_called_once()
+        # Joined the SSDP multicast group.
+        assert mock_join.call_args.args[1] == SSDP_ADDR
+
+    def test_socket_raises_when_no_interface_joins(self):
+        from server.discovery import ssdp_scanner as mod
+
+        class FakeSocket:
+            def __init__(self, *a, **k):
+                self.closed = False
+
+            def setsockopt(self, *a):
+                pass
+
+            def bind(self, addr):
+                pass
+
+            def setblocking(self, flag):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        with patch.object(mod.socket, "socket", FakeSocket), \
+             patch.object(mod, "set_shared_port_reuse"), \
+             patch.object(mod, "join_group_on_interfaces", return_value=[]):
+            with pytest.raises(OSError):
+                mod._create_ssdp_socket()
 
 
 # ============================================================

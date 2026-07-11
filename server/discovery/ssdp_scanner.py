@@ -12,6 +12,7 @@ References:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 import socket
@@ -21,7 +22,12 @@ from typing import Any
 from defusedxml.ElementTree import fromstring as _safe_xml_fromstring, ParseError as _XMLParseError
 from xml.etree import ElementTree
 
-from server.discovery.multicast import ANY_INTERFACE, send_per_interface
+from server.discovery.multicast import (
+    ANY_INTERFACE,
+    join_group_on_interfaces,
+    send_per_interface,
+    set_shared_port_reuse,
+)
 from server.discovery.network_scanner import get_interface_ips
 
 log = logging.getLogger("discovery.ssdp")
@@ -57,6 +63,18 @@ UPNP_NS = {"upnp": "urn:schemas-upnp-org:device-1-0"}
 # one IP may accumulate so a chatty or hostile stack can't grow the record
 # without limit.
 MAX_DEVICE_TYPES_PER_IP = 32
+
+# Cap on distinct sender IPs recorded per scan window — mirrors
+# amx_ddp_scanner.MAX_BEACON_SOURCES. A spoofed responder can emit an
+# endless stream of distinct source IPs; without this the ``_results`` dict
+# (and the description fan-out below) would grow without limit.
+MAX_SSDP_SOURCES = 512
+
+# UPnP description fetches run concurrently but capped. A scan window can
+# accumulate hundreds of responders and — unlike a bounded ping/port sweep —
+# each fetch opens an outbound TCP connection, so an uncapped gather would be
+# a connection-flood / internal-port-scan amplifier.
+MAX_DESCRIPTION_FETCHES = 10
 
 
 @dataclass
@@ -227,6 +245,7 @@ class SSDPScanner:
         self._sock: socket.socket | None = None
         self._running = False
         self._results: dict[str, SSDPResult] = {}  # keyed by IP
+        self._cap_warned = False
         self._control_ip = control_ip
         # Interface IPs M-SEARCH goes out on (one send per entry; responses
         # come back unicast to the bound port regardless of interface).
@@ -254,6 +273,7 @@ class SSDPScanner:
             Dict of IP -> SSDPResult for discovered devices.
         """
         self._results.clear()
+        self._cap_warned = False
         self._running = True
         self.env_error = None
 
@@ -365,19 +385,39 @@ class SSDPScanner:
         if text.startswith("M-SEARCH"):
             return
 
-        # Create or update result for this IP
+        # Unsolicited NOTIFY beacons carry the advertised type in NT (not ST,
+        # which only M-SEARCH replies use) and announce departures via NTS.
+        # An ssdp:byebye means the device is leaving — drop any record for it.
+        if headers.get("nts") == "ssdp:byebye":
+            self._results.pop(sender_ip, None)
+            return
+
+        # Create or update result for this IP, subject to the distinct-source
+        # cap so a spoofed responder can't grow the dict without limit.
         if sender_ip not in self._results:
+            if len(self._results) >= MAX_SSDP_SOURCES:
+                if not self._cap_warned:
+                    self._cap_warned = True
+                    log.warning(
+                        "SSDP scanner hit the %d distinct-source cap; "
+                        "ignoring new sources for the rest of the scan window",
+                        MAX_SSDP_SOURCES,
+                    )
+                return
             self._results[sender_ip] = SSDPResult(ip=sender_ip)
 
         result = self._results[sender_ip]
         result.usn = headers.get("usn", result.usn)
-        result.st = headers.get("st", result.st)
+        # ST is present on M-SEARCH replies; NT carries the type on NOTIFY.
+        type_urn = headers.get("st") or headers.get("nt")
+        if type_urn:
+            result.st = type_urn
         result.server = headers.get("server", result.server)
 
         # Accumulate every advertised type — an ssdp:all responder sends
         # one response per type, and the family device-type URN a driver
         # fingerprints is rarely the last to arrive.
-        result.note_device_type(headers.get("st"))
+        result.note_device_type(type_urn)
         usn = headers.get("usn") or ""
         if "::" in usn:
             result.note_device_type(usn.split("::", 1)[1])
@@ -391,18 +431,47 @@ class SSDPScanner:
                 result.port = port
 
     async def _fetch_descriptions(self) -> None:
-        """Fetch UPnP device description XML for each discovered device."""
-        tasks = []
-        for ip, result in self._results.items():
-            if result.location:
-                tasks.append(self._fetch_single_description(result))
+        """Fetch UPnP device description XML for each discovered device.
 
+        Concurrency-capped: a scan window can accumulate many responders and
+        each fetch opens an outbound TCP connection, so an uncapped gather
+        would be a connection-flood amplifier. The per-fetch SSRF guard (only
+        the responder's own LOCATION is honored) lives in
+        ``_fetch_single_description``.
+        """
+        sem = asyncio.Semaphore(MAX_DESCRIPTION_FETCHES)
+
+        async def fetch_guarded(result: SSDPResult) -> None:
+            async with sem:
+                await self._fetch_single_description(result)
+
+        tasks = [
+            fetch_guarded(result)
+            for result in self._results.values()
+            if result.location
+        ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _fetch_single_description(self, result: SSDPResult) -> None:
-        """Fetch and parse a single UPnP device description."""
+        """Fetch and parse a single UPnP device description.
+
+        A UPnP device serves its own description, so a legitimate LOCATION
+        host is the responder's own IP. A spoofed SSDP responder can put any
+        host:port in LOCATION — honoring an arbitrary host would turn
+        discovery into a request-forgery / internal-port-scan primitive — so
+        the fetch only proceeds when the LOCATION host is an IP literal equal
+        to the sender IP.
+        """
         if not result.location:
+            return
+
+        if not _location_host_is_sender(result.location, result.ip):
+            log.debug(
+                "Skipping UPnP description fetch for %s: LOCATION host in %s "
+                "is not the responder's own IP (possible SSRF attempt)",
+                result.ip, result.location,
+            )
             return
 
         try:
@@ -470,6 +539,24 @@ def _extract_port_from_url(url: str) -> int | None:
     if match:
         return int(match.group(1))
     return None
+
+
+def _location_host_is_sender(location: str, sender_ip: str) -> bool:
+    """True only when the LOCATION URL host is an IP literal equal to sender_ip.
+
+    UPnP devices serve their own description, so a legitimate LOCATION host is
+    the responder's own address. Rejecting anything else — a different IP, or
+    a hostname that would have to be resolved (a DNS-rebinding vector) — keeps
+    the description fetch from being pointed at arbitrary internal hosts by a
+    spoofed responder.
+    """
+    match = re.match(r"https?://([^/:]+)", location)
+    if not match:
+        return False
+    try:
+        return ipaddress.ip_address(match.group(1)) == ipaddress.ip_address(sender_ip)
+    except ValueError:
+        return False
 
 
 # --- UPnP XML Parsing ---
@@ -602,28 +689,40 @@ async def _http_get(url: str, timeout: float = 3.0) -> str | None:
 
 
 def _create_ssdp_socket(control_ip: str = "") -> socket.socket:
-    """Create a UDP socket for SSDP M-SEARCH.
+    """Create a UDP socket that both M-SEARCHes and listens for NOTIFY beacons.
 
-    Cross-platform: works on both Windows and Linux. The outbound
-    multicast interface is pinned per send (see ``_send_searches``);
-    binding to ``control_ip`` here additionally pins the source address
-    so responses come back to the right interface on multi-homed hosts.
+    Binding to the well-known SSDP port and joining 239.255.255.250 lets the
+    socket receive unsolicited NOTIFY (ssdp:alive / ssdp:byebye) announcements
+    in addition to unicast M-SEARCH replies — matching the mDNS and AMX DDP
+    listeners (without the group join, devices that only beacon and never
+    answer M-SEARCH for the queried STs are missed). When ``control_ip`` is
+    set the group is joined via that interface only; otherwise once per
+    interface with INADDR_ANY as the fallback (see ``discovery.multicast``).
+    The outbound multicast interface is pinned per send (see
+    ``_send_searches``). Raises OSError when the group could not be joined on
+    any interface.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    set_shared_port_reuse(sock)
 
-    # Allow address reuse
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        # Bind to the well-known port so multicast NOTIFY beacons are heard;
+        # unicast M-SEARCH replies arrive here too.
+        sock.bind(("", SSDP_PORT))
 
-    # Bind to specific source IP if requested, otherwise INADDR_ANY.
-    sock.bind((control_ip or "", 0))
+        joined = join_group_on_interfaces(sock, SSDP_ADDR, control_ip=control_ip)
+        if not joined:
+            raise OSError(f"could not join {SSDP_ADDR} on any interface")
 
-    # Set TTL for multicast
-    sock.setsockopt(
-        socket.IPPROTO_IP, socket.IP_MULTICAST_TTL,
-        struct.pack("b", 4),
-    )
+        # TTL for outbound M-SEARCH multicast.
+        sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_TTL,
+            struct.pack("b", 4),
+        )
 
-    # Non-blocking
-    sock.setblocking(False)
+        sock.setblocking(False)
+    except OSError:
+        sock.close()
+        raise
 
     return sock
