@@ -18,9 +18,11 @@ machinery as TCP.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import math
 import re
+import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -242,6 +244,15 @@ class YAMLAutoSimulator(TCPSimulator):
         # the simulator UI emits the matching string to the panel.
         self._push_state = sim_section.get("push_state", False) or self._inline_protocol
 
+        # Multicast push emission: when the driver declares
+        # `push: {type: multicast}`, notification templates (the simulator
+        # `notifications:` map) are emitted to the resolved group:port as UDP
+        # multicast — and NOT to connected control clients, matching real
+        # devices whose notice channel is multicast-only. Sender socket is
+        # opened in start() / closed in stop().
+        self._push_multicast = self._resolve_push_multicast(driver_def, config)
+        self._mcast_sock: socket.socket | None = None
+
         logger.info(
             "Auto-gen simulator for %s: %d command handlers, %d query handlers, %d state responses",
             self.driver_id,
@@ -396,8 +407,68 @@ class YAMLAutoSimulator(TCPSimulator):
 
     # ── UDP / OSC / HTTP transport overrides ──
 
+    @staticmethod
+    def _resolve_push_multicast(
+        driver_def: dict, config: dict | None
+    ) -> tuple[str, int] | None:
+        """Resolve the driver's `push: {type: multicast}` block to a concrete
+        (group, port) emission target, or None. `{config_field}` templates
+        resolve against default_config overlaid with the instance config —
+        the same fields the real driver resolves them from."""
+        push = driver_def.get("push")
+        if not isinstance(push, dict) or push.get("type") != "multicast":
+            return None
+        merged = dict(driver_def.get("default_config") or {})
+        merged.update(config or {})
+
+        def resolve(value: Any) -> Any:
+            if isinstance(value, str) and "{" in value:
+                return re.sub(
+                    r"\{(\w+)\}",
+                    lambda m: str(merged.get(m.group(1), m.group(0))),
+                    value,
+                )
+            return value
+
+        group = str(resolve(push.get("group", "")) or "").strip()
+        try:
+            port = int(str(resolve(push.get("port"))).strip())
+        except (TypeError, ValueError):
+            port = 0
+        try:
+            is_mcast = ipaddress.IPv4Address(group).is_multicast
+        except (ipaddress.AddressValueError, ValueError):
+            is_mcast = False
+        if not is_mcast or not (0 < port < 65536):
+            logger.warning(
+                "push block did not resolve to a multicast group/port "
+                "(group=%r port=%r) — simulator will not emit notifications",
+                group, push.get("port"),
+            )
+            return None
+        return (group, port)
+
+    def _open_multicast_sender(self) -> None:
+        """Open the multicast emission socket (TTL 1, loopback enabled so a
+        same-host platform listener receives the frames)."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+            sock.setblocking(False)
+            self._mcast_sock = sock
+            logger.info(
+                "%s multicast notifications to %s:%d",
+                self.name, self._push_multicast[0], self._push_multicast[1],
+            )
+        except OSError as e:
+            self._mcast_sock = None
+            logger.warning("Could not open multicast sender: %s", e)
+
     async def start(self, port: int) -> None:
         """Start the simulator server (TCP, UDP, OSC, or HTTP based on driver transport)."""
+        if self._push_multicast:
+            self._open_multicast_sender()
         if self._is_http:
             await self._start_http(port)
             return
@@ -422,6 +493,12 @@ class YAMLAutoSimulator(TCPSimulator):
     async def stop(self) -> None:
         """Stop the simulator server."""
         self._cancel_state_machine_timers()
+        if self._mcast_sock is not None:
+            try:
+                self._mcast_sock.close()
+            except OSError:
+                pass
+            self._mcast_sock = None
         if self._is_http:
             await self._stop_http()
             return
@@ -1419,12 +1496,52 @@ class YAMLAutoSimulator(TCPSimulator):
         if not template:
             return
 
-        msg = template.replace("{value}", str(value)).replace("{key}", key)
+        msg = self._render_notification(template, key, value)
         delimiter = self._get_delimiter()
         data = (msg + delimiter).encode()
 
-        if self._clients:
+        # A driver with a multicast push channel gets its notifications on
+        # that channel ONLY — real devices with a multicast notice feed never
+        # send those frames on the control connection.
+        if self._push_multicast:
+            if self._mcast_sock is not None:
+                try:
+                    self._mcast_sock.sendto(data, self._push_multicast)
+                    self.log_protocol("out", data)
+                except OSError:
+                    logger.debug(
+                        "Multicast notification send failed", exc_info=True
+                    )
+        elif self._clients:
             asyncio.ensure_future(self.push(data))
+
+    @staticmethod
+    def _render_notification(template: str, key: str, value: Any) -> str:
+        """Render a notification template. `{value}` / `{key}` substitute as
+        before; an optional format spec (`{value:d}`, `{value:04X}`) formats
+        the value — booleans coerce to int first so `{value:d}` renders a
+        protocol's 0/1 instead of 'True'/'False'."""
+
+        def repl(m: re.Match) -> str:
+            val: Any = value if m.group(1) == "value" else key
+            spec = m.group(2)
+            if not spec:
+                return str(val)
+            if isinstance(val, bool):
+                val = int(val)
+            try:
+                return format(val, spec)
+            except (ValueError, TypeError):
+                # A numeric spec on a numeric string: coerce, then format.
+                if isinstance(val, str):
+                    for conv in (int, float):
+                        try:
+                            return format(conv(val), spec)
+                        except (ValueError, TypeError):
+                            continue
+                return str(val)
+
+        return re.sub(r"\{(value|key)(?::([^{}]*))?\}", repl, template)
 
     def _push_osc_state(self, key: str, value: Any) -> None:
         """Send an OSC message to the connected driver for a state change."""

@@ -415,6 +415,12 @@ class BaseDriver(ABC):
         # probe; stopped on disconnect / transport drop.
         self._health_task: asyncio.Task | None = None
         self._health_failures = 0
+        # Push-notification subscription (DRIVER_INFO["push"], e.g. a device
+        # that multicasts state-change frames). Started by connect() once the
+        # session is up — before any on_connect arming commands run — and
+        # stopped on both disconnect paths. None when the driver declares no
+        # push block or the subscription failed (polling still covers it).
+        self._push_subscription: Any = None
         # Registered child entities: {child_type: {local_id: register_epoch}}.
         # The inner mapping is a dict (not a set) so it preserves insertion
         # order, which makes list_children() output stable for tests and IDE
@@ -573,6 +579,9 @@ class BaseDriver(ABC):
         # can't be misattributed to this one by the fault classifier.
         self._last_transport_error = ""
         self._last_fault = None
+        # A reconnect attempt may arrive with a stale push subscription if the
+        # async cleanup hasn't run yet; drop it so we never hold two.
+        await self._stop_push()
         if self.transport:
             try:
                 await self.transport.close()
@@ -871,6 +880,13 @@ class BaseDriver(ABC):
             self._connected = False
             raise
 
+        # Push notifications (DRIVER_INFO["push"]): subscribe as soon as the
+        # session is up — BEFORE any subclass connect() stage runs on_connect
+        # arming commands, so the listener never misses the first frame a
+        # freshly-armed device sends. Failure is non-fatal (logged inside);
+        # polling still covers the device.
+        await self._start_push()
+
         # Start polling if configured
         poll_interval = self.config.get("poll_interval", 0)
         if poll_interval > 0:
@@ -893,6 +909,7 @@ class BaseDriver(ABC):
         Override for custom disconnect logic.
         """
         self._stop_health_loop()
+        await self._stop_push()
         await self.stop_polling()
         if self.transport:
             await self.transport.close()
@@ -1245,6 +1262,103 @@ class BaseDriver(ABC):
         except asyncio.CancelledError:
             return
 
+    # --- Push notifications (DRIVER_INFO["push"]) ---
+
+    def _resolve_push_value(self, value: Any) -> Any:
+        """Resolve a push-block value: ``{config_field}`` tokens substitute
+        from the device config; unknown fields are left verbatim so the
+        warning in _start_push names exactly what didn't resolve."""
+        if isinstance(value, str) and "{" in value:
+            return re.sub(
+                r"\{(\w+)\}",
+                lambda m: str(self.config.get(m.group(1), m.group(0))),
+                value,
+            )
+        return value
+
+    async def _start_push(self) -> None:
+        """Subscribe to the driver's declared push channel, if any.
+
+        Only ``type: multicast`` exists today. Never raises: a device whose
+        push channel can't be joined still connects and polls — the gap is
+        logged so the user can see why changes aren't instant.
+        """
+        push_def = self.DRIVER_INFO.get("push")
+        if not isinstance(push_def, dict):
+            return
+        if push_def.get("type") != "multicast":
+            # The loader rejects unknown/unsupported types for catalog
+            # drivers; this is the runtime backstop for hand-installed files.
+            log.warning(
+                f"[{self.device_id}] push: type "
+                f"{push_def.get('type')!r} is not supported at runtime"
+            )
+            return
+
+        from server.transport.multicast_listener import (
+            is_multicast_group,
+            subscribe,
+        )
+
+        group = str(self._resolve_push_value(push_def.get("group", "")) or "")
+        raw_port = self._resolve_push_value(push_def.get("port"))
+        try:
+            port = int(str(raw_port).strip())
+        except (TypeError, ValueError):
+            port = 0
+        if not is_multicast_group(group) or not (0 < port < 65536):
+            log.warning(
+                f"[{self.device_id}] push: cannot subscribe — group "
+                f"{group!r} / port {raw_port!r} did not resolve to a "
+                f"multicast address and port (check the device's "
+                f"notification settings fields)"
+            )
+            return
+        try:
+            self._push_subscription = await subscribe(
+                group=group,
+                port=port,
+                source_ip=str(self.config.get("host", "") or ""),
+                callback=self._handle_push_datagram,
+                name=self.device_id,
+            )
+        except OSError as e:
+            log.warning(
+                f"[{self.device_id}] push: could not open multicast "
+                f"listener on {group}:{port}: {e}"
+            )
+
+    async def _stop_push(self) -> None:
+        """Drop the push subscription (no-op when none is active)."""
+        sub = self._push_subscription
+        self._push_subscription = None
+        if sub is not None:
+            try:
+                await sub.close()
+            except Exception:
+                log.debug(
+                    f"[{self.device_id}] Error closing push subscription",
+                    exc_info=True,
+                )
+
+    async def _handle_push_datagram(
+        self, data: bytes, source: tuple[str, int]
+    ) -> None:
+        """Feed a push datagram through the normal response path.
+
+        One datagram may carry several protocol frames; when the driver
+        declares a delimiter, split on it and dispatch each frame separately
+        (first-match-wins response matching would otherwise apply only one
+        rule to the whole datagram).
+        """
+        delimiter = self._resolve_delimiter()
+        if delimiter:
+            for part in data.split(delimiter):
+                if part.strip():
+                    await self.on_data_received(part)
+        elif data:
+            await self.on_data_received(data)
+
     def _force_disconnect(self, code: str = NO_RESPONSE, message: str = "") -> None:
         """Tear down a dead transport and fire the disconnect path so the
         DeviceManager auto-reconnects / classifies the device offline.
@@ -1479,6 +1593,7 @@ class BaseDriver(ABC):
         so it never re-enters this handler.
         """
         self._stop_health_loop()
+        await self._stop_push()
         await self.stop_polling()
         # Capture the transport's last error before nulling it, so the
         # DeviceManager can classify the offline reason from the event handler

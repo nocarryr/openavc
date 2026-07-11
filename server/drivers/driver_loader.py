@@ -279,6 +279,18 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
         if not isinstance(resp, dict):
             errors.append(f"Response {i}: must be a mapping")
             continue
+        # Optional per-rule throttle (any response kind): positive seconds.
+        # A zero/negative/non-numeric value would silently disable the rule
+        # or the throttle depending on the runtime's mood — reject it here.
+        throttle = resp.get("throttle")
+        if throttle is not None and (
+            isinstance(throttle, bool)
+            or not isinstance(throttle, (int, float))
+            or throttle <= 0
+        ):
+            errors.append(
+                f"Response {i}: throttle must be a positive number of seconds"
+            )
         # OSC responses use "address" key — validate it starts with /
         if "address" in resp:
             addr = resp["address"]
@@ -475,6 +487,88 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
             parse_driver_discovery(driver_def)
         except DiscoveryHintError as exc:
             errors.append(f"discovery: {exc}")
+
+    # Validate the optional `push:` block (device-initiated notifications —
+    # frames arriving on a channel the platform must open, not the established
+    # control connection). A misdeclared block would silently never deliver a
+    # frame (the exact still-polling failure it exists to fix); enforce shape
+    # and addressing at load time. `group`/`port` accept `{config_field}`
+    # templates so a device whose notification target is user-configurable
+    # can resolve them per instance.
+    push_def = driver_def.get("push")
+    if push_def is not None:
+        if not isinstance(push_def, dict):
+            errors.append("push: must be a mapping")
+        else:
+            _push_config_fields: set[str] = set()
+            for src_key in ("config_schema", "default_config"):
+                src = driver_def.get(src_key)
+                if isinstance(src, dict):
+                    _push_config_fields.update(src)
+
+            ptype = push_def.get("type")
+            if ptype in ("tcp_listener", "http_listener", "sse"):
+                errors.append(
+                    f"push: type '{ptype}' is not supported yet "
+                    f"(only 'multicast')"
+                )
+            elif ptype != "multicast":
+                errors.append(
+                    "push: missing or unknown 'type' (supported: multicast)"
+                )
+            unknown_push = set(push_def) - {"type", "group", "port"}
+            if unknown_push:
+                errors.append(
+                    f"push: unknown key(s): {', '.join(sorted(unknown_push))} "
+                    f"(known keys: type, group, port)"
+                )
+
+            def _push_template_ok(where: str, value: str) -> None:
+                fields = re.findall(r"\{(\w+)\}", value)
+                if not fields:
+                    errors.append(
+                        f"push: {where} {value!r} has braces but no "
+                        f"{{config_field}} token"
+                    )
+                for field in fields:
+                    if field not in _push_config_fields:
+                        errors.append(
+                            f"push: {where} references config field "
+                            f"'{field}' that is not declared in "
+                            f"config_schema or default_config"
+                        )
+
+            group = push_def.get("group")
+            if group is None:
+                errors.append("push: missing 'group'")
+            elif isinstance(group, str) and "{" in group:
+                _push_template_ok("group", group)
+            else:
+                from server.transport.multicast_listener import (
+                    is_multicast_group,
+                )
+
+                if not isinstance(group, str) or not is_multicast_group(group):
+                    errors.append(
+                        f"push: group {group!r} must be an IPv4 multicast "
+                        f"address (224.0.0.0 - 239.255.255.255) or a "
+                        f"{{config_field}} template"
+                    )
+
+            pport = push_def.get("port")
+            if pport is None:
+                errors.append("push: missing 'port'")
+            elif isinstance(pport, str) and "{" in pport:
+                _push_template_ok("port", pport)
+            elif (
+                isinstance(pport, bool)
+                or not isinstance(pport, int)
+                or not (0 < pport < 65536)
+            ):
+                errors.append(
+                    "push: port must be an integer 1-65535 or a "
+                    "{config_field} template"
+                )
 
     # Validate the optional `auth:` login handshake block. The runtime swaps to
     # raw byte buffering and types credentials before any other traffic — so a

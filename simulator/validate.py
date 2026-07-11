@@ -873,11 +873,18 @@ def _check_notifications(
     if not notifications:
         return
 
-    if transport not in ("tcp", "serial"):
+    # A driver with a multicast push channel emits its notifications to the
+    # group instead of the control connection — valid on any transport.
+    push_def = driver_def.get("push")
+    has_push_multicast = (
+        isinstance(push_def, dict) and push_def.get("type") == "multicast"
+    )
+    if transport not in ("tcp", "serial") and not has_push_multicast:
         result.warning(
             "notifications",
             f"notifications: has no effect for transport '{transport}' — only "
-            f"line-based TCP/serial simulators push notification messages"
+            f"line-based TCP/serial simulators push notification messages "
+            f"(unless the driver declares a multicast push: block)"
         )
 
     response_patterns = _compile_response_patterns(responses, driver_def)
@@ -942,7 +949,19 @@ def _check_notifications(
                     sample_value = _default_for_type(state_vars.get(key, {}))
             else:
                 sample_value = trigger
-            message = template.replace("{value}", str(sample_value)).replace("{key}", key)
+            # Render with the runtime's own template renderer so format specs
+            # ({value:d} on a boolean) validate the way they will emit. A
+            # boolean var's per-value trigger key is the runtime bool, not the
+            # 'true'/'false' lookup string.
+            if var_type == "boolean" and isinstance(sample_value, str) and (
+                sample_value in ("true", "false")
+            ):
+                sample_value = sample_value == "true"
+            from simulator.yaml_auto import YAMLAutoSimulator
+
+            message = YAMLAutoSimulator._render_notification(
+                str(template), key, sample_value
+            )
             if "{" in message and "}" in message:
                 continue  # unresolved placeholders — can't validate statically
             if not any(p.search(message) for p in response_patterns):

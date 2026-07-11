@@ -68,6 +68,8 @@ The simulator runs real protocol servers -- a simulated PJLink projector runs a 
 
 When you change state from the Simulator UI (adjusting a slider, toggling a button, etc.), simulators with `push_state: true` in their driver definition push the update to connected drivers immediately. This matches real devices that send unsolicited updates (verbose mode, subscriptions, notifications). Your driver picks up the change through its existing response matchers, the same way it would from real hardware. Drivers without `push_state` are poll-only, matching devices where the driver must query for state. HTTP simulators are always poll-based.
 
+Drivers that declare a multicast `push:` block (devices that send notifications to a multicast group rather than on the control connection) are simulated faithfully too: the simulator emits the driver's notification templates to the same group and port, so push updates flow end to end exactly as they would from the real device.
+
 When you add or remove devices while simulation is active, the simulator automatically syncs -- new devices get simulated, removed devices are cleaned up. No restart needed.
 
 ## Which Drivers Support Simulation

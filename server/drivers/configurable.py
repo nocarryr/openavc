@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any
 
 from server.drivers.base import (
@@ -164,13 +165,26 @@ class ConfigurableDriver(BaseDriver):
         # 1. Regex patterns for TCP/serial/UDP/HTTP responses
         #    (each with flat state mappings + compiled child_set entries)
         # 2. OSC address patterns for OSC responses
+        # Every entry carries an optional throttle state ({window, last} or
+        # None) — a rule with `throttle: <seconds>` skips re-fires inside its
+        # window (drop-style; built for continuous push telemetry like audio
+        # level meters, where every skipped frame is superseded by the next).
         self._compiled_responses: list[
-            tuple[re.Pattern[str], list[dict[str, Any]], list[dict[str, Any]]]
+            tuple[
+                re.Pattern[str],
+                list[dict[str, Any]],
+                list[dict[str, Any]],
+                dict[str, float] | None,
+            ]
         ] = []
-        self._osc_responses: list[tuple[str, list[dict[str, Any]]]] = []
+        self._osc_responses: list[
+            tuple[str, list[dict[str, Any]], dict[str, float] | None]
+        ] = []
         # JSON-body responses: each entry is a list of {state, key, type, map}
         # mappings applied together from one parsed JSON object (multi-field).
-        self._json_responses: list[list[dict[str, Any]]] = []
+        self._json_responses: list[
+            tuple[list[dict[str, Any]], dict[str, float] | None]
+        ] = []
 
         # Telnet/serial login handshake state. Active only during
         # _perform_auth_handshake() — outside that window on_data_received
@@ -225,13 +239,17 @@ class ConfigurableDriver(BaseDriver):
                 # _definition; aliasing it would let one instance's edits leak
                 # into every instance of this driver type.
                 mappings = list(resp.get("mappings", []))
-                self._osc_responses.append((addr, mappings))
+                self._osc_responses.append(
+                    (addr, mappings, self._build_throttle(resp))
+                )
                 continue
 
             # JSON-body response: parse the whole body once and map many keys
             # at a time. Additive — does not change the regex first-match path.
             if resp.get("json"):
-                self._json_responses.append(self._build_json_mappings(resp))
+                self._json_responses.append(
+                    (self._build_json_mappings(resp), self._build_throttle(resp))
+                )
                 continue
 
             try:
@@ -284,12 +302,45 @@ class ConfigurableDriver(BaseDriver):
                             })
 
                 child_mappings = self._compile_child_set(resp)
-                self._compiled_responses.append((pattern, mappings, child_mappings))
+                self._compiled_responses.append(
+                    (pattern, mappings, child_mappings, self._build_throttle(resp))
+                )
             except re.error as e:
                 log.warning(
                     f"[{self.device_id}] Invalid response pattern "
                     f"'{resp.get('match', resp.get('pattern', ''))}': {e}"
                 )
+
+    @staticmethod
+    def _build_throttle(resp: dict[str, Any]) -> dict[str, float] | None:
+        """Compile a response entry's optional ``throttle: <seconds>`` into a
+        per-instance {window, last} state dict (None when absent/invalid).
+        The loader validates the value up-front; runtime parsing stays
+        defensive so a hand-installed file can't crash the driver."""
+        raw = resp.get("throttle")
+        if raw is None:
+            return None
+        try:
+            window = float(raw)
+        except (TypeError, ValueError):
+            log.warning("Invalid response throttle %r ignored", raw)
+            return None
+        if window <= 0:
+            return None
+        return {"window": window, "last": float("-inf")}
+
+    @staticmethod
+    def _throttle_skip(tstate: dict[str, float] | None) -> bool:
+        """Check-and-stamp: True when the rule fired inside its throttle
+        window (the caller skips this application); otherwise records now as
+        the last-fire time and returns False."""
+        if not tstate:
+            return False
+        now = time.monotonic()
+        if now - tstate["last"] < tstate["window"]:
+            return True
+        tstate["last"] = now
+        return False
 
     def _compile_child_set(self, resp: dict[str, Any]) -> list[dict[str, Any]]:
         """Compile a response entry's ``child_set:`` list — route regex
@@ -635,7 +686,7 @@ class ConfigurableDriver(BaseDriver):
                 # OSC convention: sending an address with no args returns the
                 # current value. This populates state immediately on connect.
                 query_delay = max(delay, 0.005)
-                for addr_pattern, _mappings in self._osc_responses:
+                for addr_pattern, _mappings, _tstate in self._osc_responses:
                     # A response address with fnmatch wildcards (e.g. QLab's
                     # push-only "/update/workspace/*/...") is a match pattern,
                     # not a queryable address — sending it literally is
@@ -1542,9 +1593,17 @@ class ConfigurableDriver(BaseDriver):
         if self._json_responses and self._apply_json_responses(text):
             return
 
-        for pattern, mappings, child_mappings in self._compiled_responses:
+        for pattern, mappings, child_mappings, tstate in self._compiled_responses:
             match = pattern.search(text)
             if match:
+                # A throttled rule consumes its frame without applying it —
+                # falling through would let a later rule match the same frame.
+                if self._throttle_skip(tstate):
+                    log.debug(
+                        f"[{self.device_id}] Response throttled: "
+                        f"{pattern.pattern}"
+                    )
+                    return
                 for mapping in mappings:
                     state_key = mapping.get("state")
                     if not state_key:
@@ -1671,10 +1730,16 @@ class ConfigurableDriver(BaseDriver):
 
         for address, args in messages:
             matched = False
-            for addr_pattern, mappings in self._osc_responses:
+            for addr_pattern, mappings, tstate in self._osc_responses:
                 if not fnmatch.fnmatch(address, addr_pattern):
                     continue
                 matched = True
+                if self._throttle_skip(tstate):
+                    log.debug(
+                        f"[{self.device_id}] OSC response throttled: "
+                        f"{addr_pattern}"
+                    )
+                    break
                 for mapping in mappings:
                     state_key = mapping.get("state")
                     if not state_key:
@@ -1817,7 +1882,11 @@ class ConfigurableDriver(BaseDriver):
         if not isinstance(obj, dict):
             return False
         applied = False
-        for mappings in self._json_responses:
+        throttled = False
+        for mappings, tstate in self._json_responses:
+            # Resolve first so a body without this rule's keys neither applies
+            # nor stamps the rule's throttle window.
+            resolved: list[tuple[dict[str, Any], Any]] = []
             for mapping in mappings:
                 state_key = mapping.get("state")
                 key = mapping.get("key")
@@ -1826,6 +1895,15 @@ class ConfigurableDriver(BaseDriver):
                 value = self._extract_json_path(obj, key)
                 if value is _JSON_PATH_MISSING:
                     continue
+                resolved.append((mapping, value))
+            if not resolved:
+                continue
+            if self._throttle_skip(tstate):
+                # Matched but inside the throttle window: consume the body
+                # (return True below) without writing state.
+                throttled = True
+                continue
+            for mapping, value in resolved:
                 value_map = mapping.get("map")
                 if value_map and str(value) in value_map:
                     coerced = self._coerce_value(
@@ -1833,14 +1911,14 @@ class ConfigurableDriver(BaseDriver):
                     )
                 else:
                     coerced = self._coerce_json_value(value, mapping.get("type", "string"))
-                self.set_state(state_key, coerced)
+                self.set_state(mapping["state"], coerced)
                 applied = True
         if applied:
             log.debug(
                 f"[{self.device_id}] JSON response applied "
                 f"({len(self._json_responses)} rule(s))"
             )
-        return applied
+        return applied or throttled
 
     @staticmethod
     def _coerce_json_value(value: Any, value_type: str) -> Any:
@@ -2212,6 +2290,12 @@ def create_configurable_driver_class(
     # bridge resolver (engine.resolved_device_config).
     if "bridge" in driver_def:
         driver_info["bridge"] = driver_def["bridge"]
+
+    # Copy the push-notification declaration (e.g. a device that multicasts
+    # state-change frames). BaseDriver reads this on connect to subscribe the
+    # shared listener; frames feed the normal response dispatch.
+    if "push" in driver_def:
+        driver_info["push"] = driver_def["push"]
 
     # Copy the multi-transport declaration (e.g. ["tcp", "serial"]). The
     # driver's command/response strings run identically over either medium;

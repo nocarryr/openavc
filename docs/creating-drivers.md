@@ -44,7 +44,7 @@ The editor has six tabs across the top, each grouping a single concern:
 | Tab | What lives here |
 |-----|-----------------|
 | **General** | Identity (id, name, manufacturer, category, version, author, description), Help & Setup text, Publishing metadata (min platform version, protocols, tags, source URL) |
-| **Connection** | Transport (TCP/serial/UDP/OSC/HTTP), Authentication, Connect Sequence (`on_connect`), Frame Parser, Configuration Fields (`config_schema`) |
+| **Connection** | Transport (TCP/serial/UDP/OSC/HTTP), Authentication, Push Notifications (`push`), Connection Watchdog (`liveness`), Connect Sequence (`on_connect`), Frame Parser, Configuration Fields (`config_schema`) |
 | **Behavior** | State Variables, Commands, Responses, Polling, Device Settings |
 | **Discovery** | Discovery fingerprints (mDNS, SSDP, AMX DDP beacon, TCP/UDP probes, Python file) and hints (OUI, hostname, open port, manufacturer alias, SNMP PEN) |
 | **Simulation** | Simulator definition (initial state, controls, command handlers, error modes) |
@@ -445,6 +445,8 @@ The tables below document each field in detail.
 | `auth` | No | Login handshake performed between TCP connect and `on_connect`. See `auth` section below. |
 | `on_connect` | No | List of raw commands sent immediately after connecting. Use for enabling verbose/feedback mode or requesting initial state. |
 | `polling` | No | Periodic status query configuration. |
+| `liveness` | No | Connection watchdog — send a probe on an interval, reconnect after consecutive misses. See `liveness` section below. |
+| `push` | No | Device-initiated push notifications (e.g. a device that multicasts state-change frames). Frames feed the same `responses` rules. See `push` section below. |
 | `frame_parser` | No | Advanced: custom receive framing (see below). |
 | `send_frame` | No | Advanced: send-side packet framing — wraps every command in a binary header with a computed data length (e.g. eISCP). The send twin of `frame_parser` (see below). Byte-stream transports only. |
 | `protocols` | No | Protocol names this driver speaks (e.g., `["pjlink"]`, `["extron_sis"]`). Helps discovery match devices to drivers. |
@@ -855,6 +857,16 @@ The shorthand `set` format is recommended (cleaner, matches community driver con
 
 Responses are checked in order. The first matching pattern wins.
 
+**Throttling high-rate telemetry.** A response entry may declare `throttle: <seconds>`: after the rule matches and applies, further matches of the same rule are dropped until the window elapses. Use it on continuous telemetry streams — audio level meters, position feedback — where a device sends many frames per second and every dropped frame is superseded by the next one anyway:
+
+```yaml
+- match: 'METER (\d+),(\d+)'
+  throttle: 0.5            # apply at most every 0.5 s (~2 updates/sec)
+  set: { meter_in: "$1", meter_out: "$2" }
+```
+
+Don't throttle ordinary command replies or state-change notices — a dropped frame there means stale state until the next poll. Works on regex, `json: true`, and OSC address rules alike.
+
 **Reading many fields from one JSON reply.** A regex response stops at the first match, so it can't fill several state variables from a single JSON body. When a reply is a JSON object (common with HTTP/REST devices), use a `json: true` response instead — it parses the body once and applies every mapping:
 
 ```yaml
@@ -1007,6 +1019,34 @@ frame_parser:
 ```
 
 `command_prefix` / `command_suffix` still handle the inner ISCP framing (`!1` and `\r`); `send_frame` adds the outer packet header on top. For a serial protocol that uses the same `!1…\r` command bodies but no packet header, drop `send_frame` and keep just `command_prefix` / `command_suffix`.
+
+#### `push` section
+
+Most devices report state only when polled, and some push updates on the connection the driver already holds — both of those need nothing special. A `push` block is for devices that deliver notifications on a **separate channel the platform must open**. The supported type is `multicast`: the device sends state-change frames to a multicast group that OpenAVC joins.
+
+```yaml
+push:
+  type: multicast
+  group: "{notify_group}"   # literal address, or a {config_field} the user can change
+  port: "{notify_port}"
+```
+
+- `type` — `multicast` (required).
+- `group` — the IPv4 multicast group (224.0.0.0 – 239.255.255.255), as a literal or a `{config_field}` template. Use a template with a matching `config_schema` field when the device's notification target is user-configurable, so an installer who changed it on the device can match it in OpenAVC.
+- `port` — the UDP port, literal or `{config_field}` template.
+
+How it behaves:
+
+- The subscription starts as soon as the device connects — **before** `on_connect` runs, so a device whose notifications must be armed by an `on_connect` command never sends a frame the platform misses. It stops when the device disconnects and re-arms automatically on reconnect.
+- Each incoming datagram goes through the driver's normal `responses` rules — same `match`/`set` semantics as a polled reply, nothing new to learn. If the driver declares a `delimiter`, a datagram carrying several frames is split on it first.
+- Frames are accepted **only from the device's own address**, so two identical devices multicasting to the same group each update their own OpenAVC device.
+- Push supplements polling; it doesn't replace it. Keep your `polling` block as the baseline resync — if the network filters multicast (see below), the device still works, just at poll speed.
+
+Many devices ship with notifications disabled and a runtime command to enable them — send it from `on_connect`. If a device offers a continuous meter stream on the same channel, gate it behind a config field (substituted into the arming command) and put a `throttle:` on the meter response rule so panels get smooth readings without flooding the system.
+
+Network requirements (worth repeating in your driver's `help.setup` text): the device and OpenAVC must be on the same VLAN (multicast doesn't cross VLANs without a router configured for it), and switches with IGMP snooping need an IGMP querier or the group may never reach the server. When the join fails or frames are filtered, nothing breaks — the driver logs the gap and polling carries on.
+
+The simulator understands `push` too: a driver with a multicast push block emits its `simulator.notifications` templates to the group instead of the control connection, so you can watch push updates end-to-end against a simulated device. See the [notifications section](https://github.com/open-avc/openavc-drivers/blob/main/docs/writing-simulators.md) of the simulator guide.
 
 ### Discovery
 
