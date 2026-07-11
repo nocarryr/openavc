@@ -99,6 +99,33 @@ def test_tcp_driver_redirect_leaves_transport_untouched():
     assert mgr._original_configs["dev2"]["transport"] is None
 
 
+def test_https_device_redirect_flips_ssl_off_and_restores():
+    # Simulated HTTP devices serve plain HTTP; an HTTPS device's ssl flag is
+    # flipped off for the duration and restored exactly afterwards.
+    mgr = _manager(_FakeDeviceManager({}))
+    driver = _FakeDriver("http", host="10.0.0.7", port=4003)
+    driver.config["ssl"] = True
+
+    mgr._apply_sim_redirect(driver, "dev4", 19011)
+    assert driver.config["ssl"] is False
+    assert mgr._original_configs["dev4"]["ssl"] is True
+
+    mgr._restore_original_config(driver, mgr._original_configs["dev4"])
+    assert driver.config["ssl"] is True
+    assert driver.config["host"] == "10.0.0.7"
+
+
+def test_plain_http_device_redirect_leaves_ssl_absent():
+    mgr = _manager(_FakeDeviceManager({}))
+    driver = _FakeDriver("http", host="10.0.0.8", port=80)
+
+    mgr._apply_sim_redirect(driver, "dev5", 19013)
+    assert "ssl" not in driver.config
+
+    mgr._restore_original_config(driver, mgr._original_configs["dev5"])
+    assert "ssl" not in driver.config
+
+
 def test_explicit_transport_override_is_preserved_on_restore():
     # A serial driver whose device config explicitly pins transport keeps that
     # exact value on restore (not deleted).

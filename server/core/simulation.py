@@ -484,9 +484,12 @@ class SimulationManager:
         record its original connection so _restore_original_config can undo it.
 
         A serial driver is flipped to TCP for the duration: the simulator
-        serves TCP, so the driver must speak TCP to reach it. Every other
-        transport (tcp/udp/osc/http/mqtt) is served by the sim directly and
-        keeps its declared transport.
+        serves TCP, so the driver must speak TCP to reach it. An HTTPS device
+        (``ssl: true``) is flipped to plain HTTP the same way — simulated
+        HTTP devices serve plain HTTP, so leaving TLS on would make every
+        HTTPS-only device (ClickShare, Hue v2) fail its own simulator. Every
+        other transport (tcp/udp/osc/mqtt) is served by the sim directly and
+        keeps its declared settings.
         """
         self._original_configs[device_id] = {
             "host": driver.config.get("host", ""),
@@ -495,15 +498,18 @@ class SimulationManager:
             # let the DRIVER_INFO transport apply again (a serial driver has no
             # explicit transport in config until we add one here).
             "transport": driver.config.get("transport"),
+            "ssl": driver.config.get("ssl"),
         }
         driver.config["host"] = "127.0.0.1"
         driver.config["port"] = sim_port
         if self._driver_transport_is_serial(driver):
             driver.config["transport"] = "tcp"
+        if driver.config.get("ssl"):
+            driver.config["ssl"] = False
 
     @staticmethod
     def _restore_original_config(driver: Any, orig: dict) -> None:
-        """Restore a driver's saved connection (host, port, and transport)."""
+        """Restore a driver's saved connection (host, port, transport, ssl)."""
         driver.config["host"] = orig.get("host", "")
         driver.config["port"] = orig.get("port", 0)
         # Only touch transport when we actually recorded it. A None value means
@@ -514,6 +520,11 @@ class SimulationManager:
                 driver.config.pop("transport", None)
             else:
                 driver.config["transport"] = orig["transport"]
+        if "ssl" in orig:
+            if orig["ssl"] is None:
+                driver.config.pop("ssl", None)
+            else:
+                driver.config["ssl"] = orig["ssl"]
 
     async def _redirect_connections(self) -> None:
         """Swap device host/port (and serial→tcp) to point at the simulator."""
