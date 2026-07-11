@@ -13,6 +13,27 @@ from __future__ import annotations
 import struct
 from typing import Any
 
+# OSC bundles may nest bundles. Untrusted device bytes could nest them
+# thousands deep and overflow Python's recursion limit — a RecursionError is
+# neither ValueError nor struct.error, so it escapes the "malformed decode is
+# non-fatal" catch decoders' callers use, dropping the frame with an unhandled
+# traceback. Cap nesting well below the interpreter limit instead.
+_MAX_BUNDLE_DEPTH = 16
+
+
+def _require(buf: bytes, offset: int, n: int) -> None:
+    """Raise ValueError if fewer than ``n`` bytes remain at ``offset``.
+
+    OSC arg readers use this so a truncated or hostile message is a clean
+    reject as the documented ValueError, not a ``struct.error`` from
+    ``unpack_from`` that a caller catching only ValueError would miss.
+    """
+    if offset < 0 or offset + n > len(buf):
+        raise ValueError(
+            f"OSC arg truncated: need {n} bytes at offset {offset}, "
+            f"buffer is {len(buf)}"
+        )
+
 
 def osc_encode_message(address: str, args: list[tuple[str, Any]] | None = None) -> bytes:
     """
@@ -78,14 +99,23 @@ def osc_decode_message(data: bytes) -> tuple[str, list[tuple[str, Any]]]:
     return _decode_single_message(data, 0, len(data))
 
 
-def osc_decode_bundle(data: bytes) -> list[tuple[str, list[tuple[str, Any]]]]:
+def osc_decode_bundle(
+    data: bytes, _depth: int = 0
+) -> list[tuple[str, list[tuple[str, Any]]]]:
     """
     Decode an OSC bundle into a list of (address, args) tuples.
 
-    Handles nested bundles by flattening all messages.
+    Handles nested bundles by flattening all messages. Nesting is capped at
+    ``_MAX_BUNDLE_DEPTH``: a hostile deeply-nested bundle is rejected with a
+    ValueError (caught and skipped like any other malformed element) rather
+    than recursing until RecursionError, which would escape the decode-failure
+    catch and drop the whole frame.
     """
     if data[:8] != b"#bundle\x00":
         return [_decode_single_message(data, 0, len(data))]
+
+    if _depth >= _MAX_BUNDLE_DEPTH:
+        raise ValueError(f"OSC bundle nesting exceeds max depth {_MAX_BUNDLE_DEPTH}")
 
     messages: list[tuple[str, list[tuple[str, Any]]]] = []
     # Skip "#bundle\0" (8 bytes) + timetag (8 bytes)
@@ -98,13 +128,13 @@ def osc_decode_bundle(data: bytes) -> list[tuple[str, list[tuple[str, Any]]]]:
             break
 
         elem_data = data[offset : offset + elem_size]
-        if elem_data[:8] == b"#bundle\x00":
-            messages.extend(osc_decode_bundle(elem_data))
-        else:
-            try:
+        try:
+            if elem_data[:8] == b"#bundle\x00":
+                messages.extend(osc_decode_bundle(elem_data, _depth + 1))
+            else:
                 messages.append(_decode_single_message(elem_data, 0, len(elem_data)))
-            except (ValueError, struct.error):
-                pass  # Skip malformed elements
+        except (ValueError, struct.error):
+            pass  # Skip malformed / too-deeply-nested elements
         offset += elem_size
 
     return messages
@@ -133,10 +163,12 @@ def _decode_single_message(
 
     for tag in tags:
         if tag == "f":
+            _require(buf, offset, 4)
             value = struct.unpack_from(">f", buf, offset)[0]
             offset += 4
             args.append(("f", round(value, 6)))
         elif tag == "i":
+            _require(buf, offset, 4)
             value = struct.unpack_from(">i", buf, offset)[0]
             offset += 4
             args.append(("i", value))
@@ -144,16 +176,24 @@ def _decode_single_message(
             value, offset = _read_string(buf, offset)
             args.append(("s", value))
         elif tag == "h":
+            _require(buf, offset, 8)
             value = struct.unpack_from(">q", buf, offset)[0]
             offset += 8
             args.append(("h", value))
         elif tag == "d":
+            _require(buf, offset, 8)
             value = struct.unpack_from(">d", buf, offset)[0]
             offset += 8
             args.append(("d", value))
         elif tag == "b":
+            _require(buf, offset, 4)
             blob_len = struct.unpack_from(">i", buf, offset)[0]
             offset += 4
+            # Length is a signed int32 on the wire; a negative value would run
+            # the offset backward and silently mis-decode every following arg.
+            if blob_len < 0:
+                raise ValueError(f"OSC blob length is negative: {blob_len}")
+            _require(buf, offset, blob_len)
             value = buf[offset : offset + blob_len]
             offset += blob_len
             remainder = blob_len % 4
