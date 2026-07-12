@@ -31,6 +31,7 @@ HOST_KEY_REJECTED = "host_key_rejected"
 TLS_CERT_UNTRUSTED = "tls_cert_untrusted"  # HTTPS/TLS cert couldn't be verified
 NO_RESPONSE = "no_response"
 CLIENT_MISSING = "client_missing"
+INVALID_CONFIG = "invalid_config"  # bad connection settings (baud/parity/port/...)
 TRANSPORT_DISCONNECTED = "transport_disconnected"  # generic fallback
 BRIDGE_OFFLINE = "bridge_offline"  # a bridge-routed device whose bridge is down
 
@@ -57,6 +58,7 @@ _DRIVER_FAULT_CODES = frozenset({
     HOST_KEY_REJECTED,
     NO_RESPONSE,
     CLIENT_MISSING,
+    INVALID_CONFIG,
     TRANSPORT_DISCONNECTED,
 })
 
@@ -84,6 +86,10 @@ _DEFAULT_MESSAGES = {
     CLIENT_MISSING: (
         "Required client not found. Install it and make sure it's on the "
         "system PATH."
+    ),
+    INVALID_CONFIG: (
+        "The device's connection settings are invalid. Check the "
+        "configuration (e.g. baud rate, parity, data bits, or port)."
     ),
     TRANSPORT_DISCONNECTED: (
         "The connection to the device dropped. OpenAVC is retrying "

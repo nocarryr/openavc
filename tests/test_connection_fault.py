@@ -19,6 +19,7 @@ from server.core.connection_fault import (
     CLIENT_MISSING,
     CONNECTION_REFUSED,
     HOST_KEY_REJECTED,
+    INVALID_CONFIG,
     NO_RESPONSE,
     TLS_CERT_UNTRUSTED,
     TRANSPORT_DISCONNECTED,
@@ -386,6 +387,34 @@ def test_typed_fault_empty_message_uses_taxonomy_default():
     )
     assert fault.code == AUTH_FAILED
     assert "Authentication failed" in fault.message
+
+
+def test_invalid_config_typed_fault_surfaces_verbatim():
+    """A bad-serial-setting ValueError, typed as invalid_config, keeps its
+    actionable message instead of being classified as a transient disconnect."""
+    exc = _wrap(
+        "reconnect wrapper",
+        ConnectionFaultError(
+            "Invalid serial settings for /dev/ttyUSB0: Not a valid parity: 'X'. "
+            "Check the baud rate, parity, data bits, and stop bits.",
+            code=INVALID_CONFIG,
+        ),
+    )
+    fault = classify_connection_fault(
+        last_error="not a valid parity", exc=exc,
+        host="", port="/dev/ttyUSB0", transport="serial",
+    )
+    assert fault.code == INVALID_CONFIG
+    assert "parity" in fault.message.lower()
+
+
+def test_invalid_config_default_message():
+    exc = ConnectionFaultError(code=INVALID_CONFIG)
+    fault = classify_connection_fault(
+        last_error="", exc=exc, host="", port="COM7", transport="serial",
+    )
+    assert fault.code == INVALID_CONFIG
+    assert "connection settings are invalid" in fault.message.lower()
 
 
 def test_typed_fault_unknown_code_fails_at_construction():

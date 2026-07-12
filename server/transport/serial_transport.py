@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from server.core.connection_fault import INVALID_CONFIG, ConnectionFaultError
 from server.transport.frame_parsers import DelimiterFrameParser, FrameParser
 from server.utils.logger import get_logger
 from .types import Callback
@@ -310,6 +311,19 @@ class SerialTransport:
                 self._frame_parser.reset()
             self._reader_task = asyncio.create_task(self._reader_loop())
             log.info(f"Serial connected to {self.port} @ {self.baudrate}")
+        except ValueError as e:
+            # pyserial raises ValueError for an out-of-range setting (bad
+            # parity/baudrate/data bits) — a PERMANENT config error, never valid
+            # on retry. Without catching it here it escapes the ConnectionError
+            # wrapping and is handled as a transient disconnect, leaving the
+            # device offline with a generic "reconnecting" message that hides the
+            # real cause. Type it as invalid_config so the card names the fix.
+            self._last_error = str(e) or type(e).__name__
+            raise ConnectionFaultError(
+                f"Invalid serial settings for {self.port}: {e}. Check the baud "
+                f"rate, parity, data bits, and stop bits.",
+                code=INVALID_CONFIG,
+            ) from e
         except (OSError, asyncio.TimeoutError) as e:
             self._last_error = str(e) or type(e).__name__
             raise ConnectionError(

@@ -4,8 +4,35 @@ import asyncio
 
 import pytest
 
+import server.transport.serial_transport as st
+from server.core.connection_fault import INVALID_CONFIG, ConnectionFaultError
 from server.transport.frame_parsers import FixedLengthFrameParser
 from server.transport.serial_transport import SerialTransport
+
+
+async def test_invalid_serial_settings_raise_invalid_config_fault(monkeypatch):
+    """A pyserial ValueError (e.g. bad parity) is a permanent config error, not
+    a transient disconnect: _connect must raise a typed invalid_config fault so
+    the device card names the real cause instead of showing a generic
+    'reconnecting' message and burning an hour of retries."""
+    def _raise(**kwargs):
+        raise ValueError("Not a valid parity: 'X'")
+
+    monkeypatch.setattr(st, "HAS_SERIAL", True)
+    monkeypatch.setattr(
+        st, "serial_asyncio",
+        type("_M", (), {"open_serial_connection": staticmethod(_raise)}),
+        raising=False,
+    )
+
+    with pytest.raises(ConnectionFaultError) as ei:
+        await SerialTransport.create(
+            "/dev/ttyUSB0", baudrate=9600,
+            on_data=lambda d: None, on_disconnect=lambda: None,
+            parity="X",
+        )
+    assert ei.value.fault_code == INVALID_CONFIG
+    assert "parity" in str(ei.value).lower()
 
 
 async def test_sim_connect():
