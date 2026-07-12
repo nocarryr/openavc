@@ -6,8 +6,10 @@ Three tiers based on request path:
 - Standard: moderate limit for general API routes   (default 60/min)
 - Strict:   low limit for expensive/sensitive ops    (default 10/min)
 
-Auth failures (401 responses) are retroactively counted against the strict
-tier, providing brute-force protection even when auth is opt-in.
+Auth failures (401 responses) feed a dedicated brute-force counter that is
+checked on every request at the strict rate, regardless of the endpoint's tier
+— so credential probing is throttled even against a standard-tier protected
+endpoint, and even when auth is opt-in.
 
 Disabled entirely with OPENAVC_RATE_LIMIT_ENABLED=false.
 """
@@ -132,12 +134,17 @@ class _SlidingWindow:
 
 
 class _IPBuckets:
-    __slots__ = ("open", "standard", "strict", "last_seen")
+    __slots__ = ("open", "standard", "strict", "auth_fail", "last_seen")
 
     def __init__(self) -> None:
         self.open = _SlidingWindow(config.RATE_LIMIT_OPEN_PER_MINUTE)
         self.standard = _SlidingWindow(config.RATE_LIMIT_STANDARD_PER_MINUTE)
         self.strict = _SlidingWindow(config.RATE_LIMIT_STRICT_PER_MINUTE)
+        # 401 brute-force counter: the strict rate, but checked on EVERY request
+        # regardless of tier. Kept separate from the strict-tier endpoint window
+        # so legitimate sensitive-op traffic (which fills ``strict``) doesn't
+        # feed the brute-force limit and vice versa.
+        self.auth_fail = _SlidingWindow(config.RATE_LIMIT_STRICT_PER_MINUTE)
         self.last_seen = time.monotonic()
 
     def get_window(self, tier: str) -> _SlidingWindow:
@@ -209,8 +216,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             _ip_buckets[client_ip] = buckets
         buckets.last_seen = now
 
-        # Check only the tier this request belongs to
         window = buckets.get_window(tier)
+
+        # Brute-force gate: an IP that has piled up 401s is throttled at the
+        # strict rate on EVERY tier. Credential probing usually targets a
+        # standard-tier protected endpoint, whose own (higher) window is far too
+        # loose to slow guessing — this dedicated counter closes that gap.
+        if buckets.auth_fail.is_exceeded(now):
+            retry = buckets.auth_fail.time_until_open(now)
+            _log_limited(client_ip, "auth_fail", request.url.path, now)
+            return _make_429(retry)
+
+        # Then the request's own tier window.
         if window.is_exceeded(now):
             retry = window.time_until_open(now)
             _log_limited(client_ip, tier, request.url.path, now)
@@ -222,8 +239,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Record in the appropriate bucket
         now_after = time.monotonic()
         if response.status_code == 401:
-            # Auth failure counts toward strict tier
-            buckets.strict.record(now_after)
+            # Auth failure feeds the brute-force counter, not the tier window.
+            buckets.auth_fail.record(now_after)
         else:
             window.record(now_after)
 

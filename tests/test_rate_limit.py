@@ -237,23 +237,59 @@ def test_strict_exceeded_blocks_only_strict():
         assert r.status_code == 200
 
 
-def test_auth_failure_counts_strict():
-    """401 responses should count toward the strict tier."""
+def test_auth_failure_throttles_every_tier_at_strict_rate():
+    """401 responses feed a brute-force counter that throttles EVERY tier at
+    the strict rate — not just strict-tier traffic. Credential probing against
+    a standard-tier endpoint must be stopped too."""
     app = _make_app(auth_status=401, strict_limit=2)
     client = TestClient(app)
 
     with patch("server.config.RATE_LIMIT_STRICT_PER_MINUTE", 2):
         _reset_state()
-        # Two auth failures
+        # Two auth failures (the strict/brute-force limit).
         for _ in range(2):
             r = client.get("/api/protected")
             assert r.status_code == 401
-        # Strict-tier endpoints should be blocked
-        r = client.post("/api/devices/d1/command")
-        assert r.status_code == 429
-        # Standard tier should still work (auth failures only block strict)
-        r = client.get("/api/devices")
-        assert r.status_code == 200
+        # Strict-tier endpoint is blocked...
+        assert client.post("/api/devices/d1/command").status_code == 429
+        # ...and so is the standard tier (the M-293 fix — brute-force protection
+        # is no longer confined to strict-tier endpoints).
+        assert client.get("/api/devices").status_code == 429
+
+
+def test_brute_force_probing_throttled_at_strict_rate_not_standard():
+    """Probing a STANDARD-tier protected endpoint is capped at the strict
+    (brute-force) rate, far below the standard rate — the standard window alone
+    would let ~60/min through."""
+    app = _make_app(auth_status=401, standard_limit=60, strict_limit=3)
+    client = TestClient(app)
+
+    with patch("server.config.RATE_LIMIT_STANDARD_PER_MINUTE", 60), \
+         patch("server.config.RATE_LIMIT_STRICT_PER_MINUTE", 3):
+        _reset_state()
+        # /api/protected classifies as standard, but only 3 probes get through.
+        for _ in range(3):
+            assert client.get("/api/protected").status_code == 401
+        # 4th probe is throttled — at the strict rate (3), not the standard 60.
+        assert client.get("/api/protected").status_code == 429
+
+
+def test_legit_strict_usage_does_not_trip_brute_force_counter():
+    """A separate window: hammering a strict-tier endpoint with SUCCESSFUL
+    calls fills the strict window but not the auth-failure counter, so it never
+    leaks into the standard tier (guards against conflating the two limits)."""
+    app = _make_app(strict_limit=2)
+    client = TestClient(app)
+
+    with patch("server.config.RATE_LIMIT_STRICT_PER_MINUTE", 2):
+        _reset_state()
+        for _ in range(2):
+            assert client.post("/api/devices/d1/command").status_code == 200
+        # Strict endpoint now blocked, but standard/open still work — the 200s
+        # went to the strict window, not the brute-force counter.
+        assert client.post("/api/devices/d1/command").status_code == 429
+        assert client.get("/api/devices").status_code == 200
+        assert client.get("/api/status").status_code == 200
 
 
 def test_429_response_format():

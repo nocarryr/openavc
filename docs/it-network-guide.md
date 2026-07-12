@@ -292,7 +292,7 @@ Rate limiting is enabled by default on the HTTP REST API for remote clients. Req
 | Standard | 60 requests/min per IP | General API operations (including library/catalog reads) |
 | Strict | 10 requests/min per IP | Device commands, discovery, cloud operations, driver/plugin install, backup restore, and project save |
 
-Failed authentication attempts count against the strict tier, providing brute-force protection. Volume ramps, rapid command sequences, and multi-room control from the touch panel are unaffected by these limits.
+Failed authentication attempts are throttled at the strict (10/min) rate on every endpoint, not just strict-tier ones, so credential probing is capped wherever it is aimed. Successful control traffic is tracked separately: volume ramps, rapid command sequences, and multi-room control from the touch panel are unaffected by the brute-force limit.
 
 ---
 
