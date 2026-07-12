@@ -59,7 +59,9 @@ export function StyleProperties({ element, onChange, themeDefaults }: StylePrope
   };
 
   const gradient = (style.background_gradient as Record<string, unknown>) || null;
-  const gradientEnabled = !!gradient?.from;
+  // A gradient needs both stops — the preview and runtime fall back to the flat
+  // bg_color unless from AND to are set (matches the page-background sibling).
+  const gradientEnabled = !!(gradient?.from && gradient?.to);
 
   return (
     <div
@@ -166,7 +168,7 @@ export function StyleProperties({ element, onChange, themeDefaults }: StylePrope
       <StyleRow label="Font Size" tooltip="Text size in pixels">
         <input
           type="number"
-          value={Number(style.font_size) || ""}
+          value={style.font_size != null ? Number(style.font_size) : ""}
           onChange={(e) =>
             handleStyleChange(
               "font_size",
@@ -405,7 +407,7 @@ export function StyleProperties({ element, onChange, themeDefaults }: StylePrope
       >
         <input
           type="number"
-          value={Number(style.border_radius) || ""}
+          value={style.border_radius != null ? Number(style.border_radius) : ""}
           onChange={(e) =>
             handleStyleChange(
               "border_radius",
@@ -580,9 +582,15 @@ export function StyleProperties({ element, onChange, themeDefaults }: StylePrope
             checked={gradientEnabled}
             onChange={(e) => {
               if (e.target.checked) {
-                // Enable with a sensible default start color
+                // Seed BOTH stops — enabling with only a start color leaves the
+                // preview and runtime showing nothing (they need from AND to).
                 const startColor = String(style.bg_color || themeDefaults?.bg_color || "#333333");
-                handleGradientChange("from", startColor);
+                onChange({
+                  style: {
+                    ...style,
+                    background_gradient: { type: "linear", angle: 180, from: startColor, to: "#000000" },
+                  },
+                });
               } else {
                 onChange({ style: { ...style, background_gradient: undefined } });
               }
