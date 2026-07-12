@@ -114,6 +114,23 @@ def _assets_dir_for(project_id: str) -> Path:
     return _lib_dir() / sanitize_id(project_id) / "assets"
 
 
+def _require_active_project(project_id: str) -> None:
+    """Guard the write endpoints (upload/delete) to the active project.
+
+    ``default`` (or empty) addresses the active project — the one being
+    edited — and is the only id these mutating routes accept. Any other id
+    names a saved library project, which this surface deliberately does not
+    mutate (there's no editing UI for a library project's assets). Reject it
+    explicitly with a 404 rather than silently writing to the active project:
+    a mis-addressed write must fail loudly, not land on the wrong project.
+    """
+    if project_id not in ("", "default"):
+        raise HTTPException(
+            status_code=404,
+            detail="Assets can only be modified on the active project.",
+        )
+
+
 def _list_assets_metadata(assets_dir: Path) -> list[dict[str, Any]]:
     """Build the asset metadata list shared between the API and state publishing."""
     out: list[dict[str, Any]] = []
@@ -198,9 +215,10 @@ async def serve_asset(project_id: str, filename: str):
     """Serve an asset file (with caching headers). No auth required for panel access.
 
     Honors ``project_id``: ``default`` serves the active project, any other id
-    serves that saved library project's assets. (The authenticated list/upload/
-    delete endpoints below always act on the active project — the one being
-    edited — so library templates aren't mutated through this surface.)
+    serves that saved library project's assets. (The authenticated ``list``
+    endpoint below honors the id the same way; the mutating ``upload``/
+    ``delete`` endpoints act only on the active project and reject any other id,
+    so library templates aren't mutated through this surface.)
     """
     assets_dir = _assets_dir_for(project_id)
     # Prevent directory traversal
@@ -220,8 +238,15 @@ async def serve_asset(project_id: str, filename: str):
 
 @router.get("/projects/{project_id}/assets")
 async def list_assets(project_id: str) -> dict[str, Any]:
-    """List all assets in the project."""
-    assets_dir = _assets_dir()
+    """List all assets for the addressed project.
+
+    ``default`` lists the active project; any other id lists that saved
+    library project's assets. A project with no assets directory yields an
+    empty list rather than an error.
+    """
+    assets_dir = _assets_dir_for(project_id)
+    if not assets_dir.is_dir():
+        return {"assets": [], "total_size": 0}
     assets = _list_assets_metadata(assets_dir)
     return {"assets": assets, "total_size": _get_total_size(assets_dir)}
 
@@ -229,6 +254,7 @@ async def list_assets(project_id: str) -> dict[str, Any]:
 @router.post("/projects/{project_id}/assets")
 async def upload_asset(project_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
     """Upload an asset file. Returns the asset reference."""
+    _require_active_project(project_id)
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -280,6 +306,7 @@ async def upload_asset(project_id: str, file: UploadFile = File(...)) -> dict[st
 @router.delete("/projects/{project_id}/assets/{filename}")
 async def delete_asset(project_id: str, filename: str) -> dict[str, str]:
     """Delete an asset file."""
+    _require_active_project(project_id)
     safe_name = _sanitize_filename(filename)
     assets_dir = _assets_dir()
     path = assets_dir / safe_name

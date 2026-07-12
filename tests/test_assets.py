@@ -276,3 +276,77 @@ async def test_delete_audio(client):
     assert resp.status_code == 200
     resp = client.get("/api/projects/default/assets/delme.mp3")
     assert resp.status_code == 404
+
+
+# --- Per-project scoping of the {project_id} path param ---
+#
+# Reads (serve, list) honor {project_id}: `default` = active project, any other
+# id = that saved library project. Writes (upload, delete) act only on the
+# active project and reject any other id, so a mis-addressed request can never
+# silently hit — or mutate — the wrong project.
+
+
+def _seed_library_project(monkeypatch, tmp_path, project_id, files):
+    """Create a saved library project with the given assets under a temp lib dir."""
+    from server import config
+    from server.core.project_library import sanitize_id
+
+    lib_root = tmp_path / "saved_projects"
+    monkeypatch.setattr(config, "SAVED_PROJECTS_DIR", lib_root)
+    proj_assets = lib_root / sanitize_id(project_id) / "assets"
+    proj_assets.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        (proj_assets / name).write_bytes(data)
+
+
+async def test_list_scoped_to_library_project(client, monkeypatch, tmp_path):
+    """Listing a library project id returns ITS assets, not the active project's."""
+    client.post(
+        "/api/projects/default/assets",
+        files={"file": ("active-only.png", io.BytesIO(_make_png()), "image/png")},
+    )
+    _seed_library_project(monkeypatch, tmp_path, "roomB", {"lib-only.png": _make_png()})
+
+    active = {a["name"] for a in client.get("/api/projects/default/assets").json()["assets"]}
+    assert "active-only.png" in active
+    assert "lib-only.png" not in active
+
+    lib = {a["name"] for a in client.get("/api/projects/roomB/assets").json()["assets"]}
+    assert lib == {"lib-only.png"}
+
+
+async def test_list_unknown_project_is_empty(client, monkeypatch, tmp_path):
+    from server import config
+    monkeypatch.setattr(config, "SAVED_PROJECTS_DIR", tmp_path / "saved_projects")
+    resp = client.get("/api/projects/does-not-exist/assets")
+    assert resp.status_code == 200
+    assert resp.json() == {"assets": [], "total_size": 0}
+
+
+async def test_serve_scoped_to_library_project(client, monkeypatch, tmp_path):
+    _seed_library_project(monkeypatch, tmp_path, "roomB", {"pic.png": _make_png(256)})
+    resp = client.get("/api/projects/roomB/assets/pic.png")
+    assert resp.status_code == 200
+    assert len(resp.content) == 256
+
+
+async def test_upload_rejects_non_active_project(client):
+    """A write addressed to a non-active project 404s instead of hitting active."""
+    resp = client.post(
+        "/api/projects/roomB/assets",
+        files={"file": ("stray.png", io.BytesIO(_make_png()), "image/png")},
+    )
+    assert resp.status_code == 404
+    active = {a["name"] for a in client.get("/api/projects/default/assets").json()["assets"]}
+    assert "stray.png" not in active
+
+
+async def test_delete_rejects_non_active_project(client):
+    """A delete addressed to a non-active project 404s and leaves the active asset intact."""
+    client.post(
+        "/api/projects/default/assets",
+        files={"file": ("keep.png", io.BytesIO(_make_png()), "image/png")},
+    )
+    resp = client.delete("/api/projects/roomB/assets/keep.png")
+    assert resp.status_code == 404
+    assert client.get("/api/projects/default/assets/keep.png").status_code == 200
