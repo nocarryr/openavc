@@ -23,6 +23,7 @@ from server.cloud.crypto import derive_auth_key, compute_auth_proof, derive_sign
 from server.cloud.protocol import (
     CHALLENGE, SESSION_START,
     AUTH_FAILED, VERSION_MISMATCH, RESUME_FROM,
+    PROTOCOL_VERSION,
     build_hello, build_authenticate, build_resume,
     parse_message, extract_payload, _now_iso,
 )
@@ -200,6 +201,21 @@ class Handshake:
             )
 
         payload = extract_payload(msg)
+
+        # Validate the cloud's protocol version — symmetric to the cloud
+        # rejecting our hello.protocol_version. A cloud advertising a version we
+        # don't speak may reshape downstream payloads, so fail closed rather
+        # than silently mis-parse them. A cloud that omits the field is the
+        # pre-negotiation v1 baseline (older cloud, or one that predates this
+        # check), so treat missing as compatible — this keeps the rollout safe
+        # whichever side deploys first.
+        cloud_version = payload.get("protocol_version")
+        if cloud_version is not None and cloud_version != PROTOCOL_VERSION:
+            raise HandshakeError(
+                f"Cloud protocol version {cloud_version} is not supported "
+                f"(agent speaks {PROTOCOL_VERSION})",
+                reason="version_mismatch",
+            )
 
         # Extract session info
         session_id = payload.get("session_id")

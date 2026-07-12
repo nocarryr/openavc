@@ -436,6 +436,48 @@ class TestHandshake:
         assert result.config["heartbeat_interval"] == 60
         assert len(result.signing_key) == 32
 
+    async def _run_to_session_start(self, hs, session_payload):
+        """Drive perform() through challenge -> session_start with the given payload."""
+        recv_queue = asyncio.Queue()
+
+        async def send(msg):
+            pass
+
+        await recv_queue.put(json.dumps({
+            "type": CHALLENGE, "ts": "t", "payload": {"nonce": generate_nonce()},
+        }))
+        await recv_queue.put(json.dumps({
+            "type": SESSION_START, "ts": "t", "payload": session_payload,
+        }))
+        return await hs.perform(send, recv_queue.get)
+
+    @pytest.mark.asyncio
+    async def test_handshake_rejects_incompatible_cloud_version(self):
+        """A session_start advertising an unsupported cloud version fails closed."""
+        hs, system_key, system_id = self._make_handshake()
+        salt_hex = generate_nonce(32).encode("utf-8").hex()
+        with pytest.raises(HandshakeError) as exc_info:
+            await self._run_to_session_start(hs, {
+                "protocol_version": PROTOCOL_VERSION + 1,
+                "session_id": "s", "session_token": "tok",
+                "signing_key_salt": salt_hex,
+                "enabled_capabilities": [], "config": {},
+            })
+        assert exc_info.value.reason == "version_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_handshake_accepts_matching_cloud_version(self):
+        """A session_start advertising our version completes the handshake."""
+        hs, system_key, system_id = self._make_handshake()
+        salt_hex = generate_nonce(32).encode("utf-8").hex()
+        result = await self._run_to_session_start(hs, {
+            "protocol_version": PROTOCOL_VERSION,
+            "session_id": "s", "session_token": "tok",
+            "signing_key_salt": salt_hex,
+            "enabled_capabilities": [], "config": {},
+        })
+        assert result.session_id == "s"
+
     @pytest.mark.asyncio
     async def test_handshake_auth_failed(self):
         """Handshake raises HandshakeError on auth_failed."""
