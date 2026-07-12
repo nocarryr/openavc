@@ -431,7 +431,8 @@ function IdFormatSection({
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Instances (declarative roster — count / count_from / ids_from + label)
+// Instances (declarative roster — count / count_from / ids_from / literal
+// ids + label)
 // ──────────────────────────────────────────────────────────────────────────
 function InstancesSection({
   name,
@@ -445,7 +446,7 @@ function InstancesSection({
   onUpdate: (partial: Partial<DriverChildEntityType>) => void;
 }) {
   const inst = type.instances;
-  const source: "none" | "count" | "count_from" | "ids_from" =
+  const source: "none" | "count" | "count_from" | "ids_from" | "ids" =
     inst == null
       ? "none"
       : inst.count !== undefined
@@ -454,7 +455,9 @@ function InstancesSection({
           ? "count_from"
           : inst.ids_from !== undefined
             ? "ids_from"
-            : "none";
+            : inst.ids !== undefined
+              ? "ids"
+              : "none";
 
   const keepLabel = inst?.label ? { label: inst.label } : {};
 
@@ -465,6 +468,8 @@ function InstancesSection({
       onUpdate({ instances: { count: 2, ...keepLabel } });
     } else if (next === "count_from") {
       onUpdate({ instances: { count_from: configFields[0] ?? "", ...keepLabel } });
+    } else if (next === "ids") {
+      onUpdate({ instances: { ids: [], ...keepLabel } });
     } else {
       onUpdate({ instances: { ids_from: configFields[0] ?? "", ...keepLabel } });
     }
@@ -529,6 +534,7 @@ function InstancesSection({
             <option value="count">Fixed count</option>
             <option value="count_from">Config field (how many)</option>
             <option value="ids_from">Config field (list of IDs)</option>
+            <option value="ids">Fixed list of IDs</option>
           </select>
         </div>
         {source === "count" && (
@@ -564,6 +570,28 @@ function InstancesSection({
             {fieldSelect("ids_from", inst?.ids_from ?? "")}
           </div>
         )}
+        {source === "ids" && (
+          <div>
+            <span style={{ ...labelStyle, fontSize: "11px" }}>IDs</span>
+            {/* Commit on blur: a live-controlled comma list would swallow
+                the ", " the user just typed on every re-render join. */}
+            <input
+              data-testid={`child-instances-ids-${name}`}
+              defaultValue={(inst?.ids ?? []).join(", ")}
+              onBlur={(e) => {
+                const isInt = (type.id_format?.type ?? "integer") !== "string";
+                const ids = e.target.value
+                  .split(",")
+                  .map((t) => t.trim())
+                  .filter((t) => t !== "")
+                  .map((t) => (isInt && /^\d+$/.test(t) ? parseInt(t, 10) : t));
+                onUpdate({ instances: { ids, ...keepLabel } });
+              }}
+              placeholder="st, m"
+              style={{ width: "100%", fontSize: "var(--font-size-sm)" }}
+            />
+          </div>
+        )}
         {source !== "none" && (
           <div>
             <span style={{ ...labelStyle, fontSize: "11px" }}>
@@ -597,6 +625,12 @@ function InstancesSection({
           <>
             Reads an integer from the named config field and registers IDs
             1..N — lets one driver cover different frame sizes.
+          </>
+        ) : source === "ids" ? (
+          <>
+            Registers exactly these IDs — for rosters the protocol fixes
+            (e.g. main buses <code>st, m</code>) that no config field should
+            have to carry.
           </>
         ) : (
           <>

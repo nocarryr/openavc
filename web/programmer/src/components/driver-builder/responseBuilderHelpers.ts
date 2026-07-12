@@ -109,10 +109,15 @@ export function buildResponse(
     ...(original.json !== undefined ? { json: original.json } : {}),
     ...(original.require !== undefined ? { require: original.require } : {}),
   };
-  // OSC responses always use mappings + address (no child_set — the loader
-  // rejects it there; throttle is valid on any response kind).
+  // OSC responses use mappings + address; child_set rides along (the id is
+  // an address segment / literal there — no capture groups). A child_set-only
+  // rule keeps its YAML clean: no empty mappings key.
   if (original.address !== undefined) {
-    return { address: pattern, mappings, ...carry };
+    const oscMappings =
+      mappings.length === 0 && original.mappings === undefined
+        ? {}
+        : { mappings };
+    return { address: pattern, ...oscMappings, ...childSet, ...carry };
   }
   // A child_set-only response keeps its YAML clean: no empty mappings key.
   if (mappings.length === 0 && original.mappings === undefined && original.set === undefined) {
@@ -222,4 +227,66 @@ export function childIdFromParts(
   }
   if (refMatch) return text.trim();
   return /^\d+$/.test(text.trim()) ? parseInt(text.trim(), 10) : text;
+}
+
+/** The text shown in an OSC child_set ID input: the long form
+ *  {segment, map} renders as "seg:N" (a 0-based index into the /-split
+ *  address); plain literals render verbatim. */
+export function oscChildIdToText(id: unknown): string {
+  if (id !== null && typeof id === "object") {
+    const segment = (id as { segment?: unknown }).segment;
+    return `seg:${String(segment ?? "")}`;
+  }
+  return String(id ?? "");
+}
+
+/** Rebuild an OSC child_set id from the ID input's text + the map rows.
+ *  "seg:N" becomes {segment: N} (carrying the map when rows exist);
+ *  anything else is a literal (numeric text becomes a number) and the map —
+ *  meaningless for a literal — is dropped. */
+export function oscChildIdFromParts(
+  text: string,
+  map: Record<string, string | number> | undefined,
+):
+  | string
+  | number
+  | { segment: number; map?: Record<string, string | number> } {
+  const segMatch = /^seg:(\d+)$/.exec(text.trim());
+  if (segMatch) {
+    const segment = parseInt(segMatch[1], 10);
+    return map && Object.keys(map).length > 0 ? { segment, map } : { segment };
+  }
+  return /^\d+$/.test(text.trim()) ? parseInt(text.trim(), 10) : text;
+}
+
+/** The text shown in an OSC child_set property input: {arg: N} renders as
+ *  "arg:N" (a 0-based positional OSC arg); {value: X} and plain literals
+ *  render as the value text. */
+export function oscChildPropToText(expr: unknown): string {
+  if (expr !== null && typeof expr === "object") {
+    const arg = (expr as { arg?: unknown }).arg;
+    if (arg !== undefined) return `arg:${String(arg)}`;
+    const value = (expr as { value?: unknown }).value;
+    return String(value ?? "");
+  }
+  return String(expr ?? "");
+}
+
+/** Rebuild an OSC child_set property from its input text: "arg:N" becomes
+ *  {arg: N}, preserving a value map the original expression carried (the
+ *  editor has no map rows for props; edits must not drop them); anything
+ *  else is a static literal. */
+export function oscChildPropFromText(text: string, original: unknown): unknown {
+  const argMatch = /^arg:(\d+)$/.exec(text.trim());
+  if (argMatch) {
+    const arg = parseInt(argMatch[1], 10);
+    if (original !== null && typeof original === "object") {
+      const map = (original as { map?: unknown }).map;
+      if (map !== null && typeof map === "object") {
+        return { arg, map };
+      }
+    }
+    return { arg };
+  }
+  return text;
 }

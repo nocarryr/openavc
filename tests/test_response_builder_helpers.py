@@ -92,6 +92,9 @@ SCENARIOS = [
     "child_set_rides_along",
     "child_id_long_form_renders_ref",
     "child_id_rebuild_shapes",
+    "osc_child_id_shapes",
+    "osc_child_prop_shapes",
+    "osc_rebuild_carries_child_set",
 ]
 
 

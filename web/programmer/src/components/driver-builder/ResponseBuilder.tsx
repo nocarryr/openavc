@@ -17,6 +17,10 @@ import {
   childIdToText,
   getMappings,
   getPattern,
+  oscChildIdFromParts,
+  oscChildIdToText,
+  oscChildPropFromText,
+  oscChildPropToText,
   renameValueMapKey,
 } from "./responseBuilderHelpers";
 
@@ -151,13 +155,10 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
               <input
                 value={resp.address ?? pattern}
                 onChange={(e) =>
-                  updateResponse(i, {
-                    ...(resp.throttle !== undefined
-                      ? { throttle: resp.throttle }
-                      : {}),
-                    address: e.target.value,
-                    mappings,
-                  })
+                  updateResponse(
+                    i,
+                    buildResponse(e.target.value, mappings, resp, stateVars),
+                  )
                 }
                 placeholder='e.g., /ch/01/mix/fader'
                 style={{
@@ -288,16 +289,15 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
                 const nextArg = mappings.length > 0
                   ? Math.max(...mappings.map((m) => m.arg ?? m.group ?? 0)) + 1
                   : 0;
-                updateResponse(i, {
-                  ...(resp.throttle !== undefined
-                    ? { throttle: resp.throttle }
-                    : {}),
-                  address: resp.address ?? pattern,
-                  mappings: [
+                updateResponse(i, buildResponse(
+                  resp.address ?? pattern,
+                  [
                     ...mappings,
                     { group: 0, arg: nextArg, state: "", type: "float" },
                   ],
-                });
+                  resp,
+                  stateVars,
+                ));
               } else {
                 const nextGroup =
                   mappings.length > 0
@@ -358,22 +358,22 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
               telemetry frames (meters). Leave blank for normal responses.
             </span>
           </div>
-          {draft.transport !== "osc" &&
-            Object.keys(draft.child_entity_types ?? {}).length > 0 && (
-              <ChildSetEditor
-                entries={resp.child_set ?? []}
-                childTypes={draft.child_entity_types ?? {}}
-                onChange={(entries) => {
-                  const rebuilt = buildResponse(pattern, mappings, resp, stateVars);
-                  if (entries.length) {
-                    rebuilt.child_set = entries;
-                  } else {
-                    delete rebuilt.child_set;
-                  }
-                  updateResponse(i, rebuilt);
-                }}
-              />
-            )}
+          {Object.keys(draft.child_entity_types ?? {}).length > 0 && (
+            <ChildSetEditor
+              mode={draft.transport === "osc" ? "osc" : "regex"}
+              entries={resp.child_set ?? []}
+              childTypes={draft.child_entity_types ?? {}}
+              onChange={(entries) => {
+                const rebuilt = buildResponse(pattern, mappings, resp, stateVars);
+                if (entries.length) {
+                  rebuilt.child_set = entries;
+                } else {
+                  delete rebuilt.child_set;
+                }
+                updateResponse(i, rebuilt);
+              }}
+            />
+          )}
         </div>
         );
       })}
@@ -400,18 +400,24 @@ export function ResponseBuilder({ draft, onUpdate }: ResponseBuilderProps) {
 /** Route captures into child-entity state: one row per child_set entry —
  *  pick the child type, say which capture (or literal) is the child ID, and
  *  map child properties to captures or literals. Only offered when the
- *  driver declares child_entity_types. */
+ *  driver declares child_entity_types. In "osc" mode (address-matched rules
+ *  — no capture groups) the ID comes from an address segment ("seg:1") and
+ *  property values from positional args ("arg:0"). */
 function ChildSetEditor({
+  mode,
   entries,
   childTypes,
   onChange,
 }: {
+  mode: "regex" | "osc";
   entries: DriverChildSetEntry[];
   childTypes: Record<string, DriverChildEntityType>;
   onChange: (entries: DriverChildSetEntry[]) => void;
 }) {
   const [open, setOpen] = useState(entries.length > 0);
   const typeNames = Object.keys(childTypes);
+  const isOsc = mode === "osc";
+  const idToText = isOsc ? oscChildIdToText : childIdToText;
 
   const updateEntry = (idx: number, updated: DriverChildSetEntry) => {
     const next = [...entries];
@@ -422,7 +428,7 @@ function ChildSetEditor({
   const addEntry = () => {
     onChange([
       ...entries,
-      { type: typeNames[0] ?? "", id: "$1", state: {} },
+      { type: typeNames[0] ?? "", id: isOsc ? { segment: 1 } : "$1", state: {} },
     ]);
     setOpen(true);
   };
@@ -505,17 +511,23 @@ function ChildSetEditor({
                 ID from
               </span>
               <input
-                value={childIdToText(entry.id)}
+                value={idToText(entry.id)}
                 onChange={(e) => {
                   updateEntry(idx, {
                     ...entry,
-                    id: childIdFromParts(e.target.value, childIdMap(entry.id)),
+                    id: isOsc
+                      ? oscChildIdFromParts(e.target.value, childIdMap(entry.id))
+                      : childIdFromParts(e.target.value, childIdMap(entry.id)),
                   });
                 }}
-                placeholder="$1 or a number"
-                title="Which capture group holds the child ID ($1, $2, ...) — or a literal ID when the pattern is specific to one child"
+                placeholder={isOsc ? "seg:1 or literal" : "$1 or a number"}
+                title={
+                  isOsc
+                    ? "Which address segment holds the child ID (seg:1 = the second /-separated part, 0-based) — or a literal ID when the address is specific to one child"
+                    : "Which capture group holds the child ID ($1, $2, ...) — or a literal ID when the pattern is specific to one child"
+                }
                 style={{
-                  width: 90,
+                  width: 110,
                   fontFamily: "var(--font-mono)",
                   fontSize: "var(--font-size-sm)",
                 }}
@@ -528,13 +540,17 @@ function ChildSetEditor({
                 <Trash2 size={12} />
               </button>
             </div>
-            {/^\$\d+$/.test(childIdToText(entry.id)) && (
+            {(isOsc
+              ? /^seg:\d+$/.test(idToText(entry.id))
+              : /^\$\d+$/.test(idToText(entry.id))) && (
               <WireIdMapRows
                 idMap={childIdMap(entry.id)}
                 onChange={(map) =>
                   updateEntry(idx, {
                     ...entry,
-                    id: childIdFromParts(childIdToText(entry.id), map),
+                    id: isOsc
+                      ? oscChildIdFromParts(idToText(entry.id), map)
+                      : childIdFromParts(idToText(entry.id), map),
                   })
                 }
               />
@@ -571,13 +587,20 @@ function ChildSetEditor({
                   =
                 </span>
                 <input
-                  value={String(expr ?? "")}
+                  value={isOsc ? oscChildPropToText(expr) : String(expr ?? "")}
                   onChange={(e) => {
-                    const nextState = { ...entry.state, [prop]: e.target.value };
+                    const nextValue = isOsc
+                      ? oscChildPropFromText(e.target.value, expr)
+                      : e.target.value;
+                    const nextState = { ...entry.state, [prop]: nextValue };
                     updateEntry(idx, { ...entry, state: nextState });
                   }}
-                  placeholder="$2 or literal"
-                  title="A capture group ($2) or a literal value; coerced by the property's declared type"
+                  placeholder={isOsc ? "arg:0 or literal" : "$2 or literal"}
+                  title={
+                    isOsc
+                      ? "A positional OSC argument (arg:0 is the first) or a literal value; coerced by the property's declared type"
+                      : "A capture group ($2) or a literal value; coerced by the property's declared type"
+                  }
                   style={{
                     width: 110,
                     fontFamily: "var(--font-mono)",
@@ -601,7 +624,10 @@ function ChildSetEditor({
                 const unused = props.find((p) => !(p in (entry.state ?? {})));
                 updateEntry(idx, {
                   ...entry,
-                  state: { ...entry.state, [unused ?? ""]: "$2" },
+                  state: {
+                    ...entry.state,
+                    [unused ?? ""]: isOsc ? { arg: 0 } : "$2",
+                  },
                 });
               }}
               style={{ fontSize: "11px", color: "var(--accent)", padding: "2px 0" }}

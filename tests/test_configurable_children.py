@@ -1,8 +1,10 @@
 """Tests for declarative child entities in YAML drivers.
 
 Covers the three runtime pieces — `instances:` rosters (count / count_from /
-ids_from), `child_set:` response routing, and `each_child:` query expansion —
-plus the loader validation for each, using an invented matrix switcher.
+ids_from / literal ids), `child_set:` response routing (regex-captured and
+OSC address-segment ids, wire-id maps), and `each_child:` query expansion
+(incl. {child_id:02d} format specs) — plus the loader validation for each,
+using an invented matrix switcher and an invented OSC mixer.
 """
 
 import pytest
@@ -549,4 +551,330 @@ def test_loader_rejects_bad_param_map_shape():
 
     assert any(
         "map must be a non-empty mapping" in e for e in _errors_for(mutate)
+    )
+
+# ---------------------------------------------------------------------------
+# OSC child routing: child_set on address-matched rules (id from an address
+# segment or a literal, values from positional args), {child_id:02d} format
+# specs in each_child templates, and the instances `ids:` literal roster.
+# ---------------------------------------------------------------------------
+
+
+ACME_OSC_MIXER = {
+    "id": "acme_osc_mixer",
+    "name": "Acme OSC Mixer",
+    "manufacturer": "Acme",
+    "category": "audio",
+    "version": "1.0.0",
+    "transport": "osc",
+    "default_config": {"host": "", "port": 10023},
+    "config_schema": {
+        "host": {"type": "string", "required": True, "label": "IP Address"},
+        "port": {"type": "integer", "default": 10023, "label": "Port"},
+    },
+    "state_variables": {
+        "last_fader": {"type": "number", "label": "Last Fader Seen"},
+    },
+    "child_entity_types": {
+        "channel": {
+            "label": "Channel",
+            "id_format": {"type": "integer", "min": 1, "max": 32, "pad_width": 2},
+            "state_variables": {
+                "fader": {"type": "number", "label": "Fader", "min": 0, "max": 1},
+                "mute": {"type": "boolean", "label": "Mute"},
+                "name": {"type": "string", "label": "Name"},
+            },
+            "instances": {"count": 2, "label": "Ch {id}"},
+        },
+        "main": {
+            "label": "Main",
+            "id_format": {"type": "string"},
+            "state_variables": {
+                "fader": {"type": "number", "label": "Fader"},
+            },
+            "instances": {"ids": ["st", "m"], "label": "Main {id}"},
+        },
+    },
+    "commands": {
+        "set_channel_fader": {
+            "label": "Set Channel Fader",
+            "address": "/ch/{channel:02d}/mix/fader",
+            "args": [{"type": "f", "value": "{level}"}],
+            "params": {
+                "channel": {
+                    "type": "child_id",
+                    "child_type": "channel",
+                    "required": True,
+                },
+                "level": {"type": "number", "min": 0, "max": 1, "required": True},
+            },
+        },
+    },
+    "responses": [
+        {
+            # Flat mapping and child_set coexist on one rule.
+            "address": "/ch/*/mix/fader",
+            "mappings": [{"arg": 0, "state": "last_fader", "type": "float"}],
+            "child_set": [
+                {
+                    "type": "channel",
+                    "id": {"segment": 1},
+                    "state": {"fader": {"arg": 0}},
+                },
+            ],
+        },
+        {
+            # x32 semantics: on=1 means unmuted — value map + bool coercion.
+            "address": "/ch/*/mix/on",
+            "child_set": [
+                {
+                    "type": "channel",
+                    "id": {"segment": 1},
+                    "state": {"mute": {"arg": 0, "map": {"0": "true", "1": "false"}}},
+                },
+            ],
+        },
+        {
+            "address": "/ch/*/config/name",
+            "child_set": [
+                {
+                    "type": "channel",
+                    "id": {"segment": 1},
+                    "state": {"name": {"arg": 0}},
+                },
+            ],
+        },
+        {
+            # Literal string id: a fixed address routes to one child.
+            "address": "/main/st/mix/fader",
+            "child_set": [
+                {"type": "main", "id": "st", "state": {"fader": {"arg": 0}}},
+            ],
+        },
+        {
+            # 0-based wire ids translated by the id map; unmapped ids skip.
+            "address": "/wire/*/lvl",
+            "child_set": [
+                {
+                    "type": "channel",
+                    "id": {"segment": 1, "map": {"0": 1, "1": 2}},
+                    "state": {"fader": {"arg": 0}},
+                },
+            ],
+        },
+    ],
+    "polling": {
+        "interval": 9,
+        "queries": [
+            {"each_child": "channel", "send": "/ch/{child_id:02d}/mix/fader"},
+            {"each_child": "main", "send": "/main/{child_id}/mix/fader"},
+        ],
+    },
+}
+
+
+def _make_osc_driver(definition=ACME_OSC_MIXER):
+    state = StateStore()
+    events = EventBus()
+    state.set_event_bus(events)
+    cls = create_configurable_driver_class(definition)
+    driver = cls("dev1", {"host": "127.0.0.1", "port": 10023}, state, events)
+    driver._register_declared_children()
+    return driver
+
+
+def _osc(address, *args):
+    from server.transport.osc_codec import osc_encode_message
+
+    return osc_encode_message(address, list(args))
+
+
+def test_ids_literal_roster_registers_string_children():
+    driver = _make_osc_driver()
+    assert driver.list_children("channel") == [1, 2]
+    assert driver.list_children("main") == ["st", "m"]
+
+
+async def test_osc_child_set_routes_by_address_segment():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/ch/02/mix/fader", ("f", 0.5)))
+    assert driver.state.get("device.dev1.channel.02.fader") == 0.5
+    assert driver.state.get("device.dev1.channel.01.fader") == 0.0
+
+
+async def test_osc_flat_mapping_coexists_with_child_set():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/ch/01/mix/fader", ("f", 0.75)))
+    assert driver.get_state("last_fader") == 0.75
+    assert driver.state.get("device.dev1.channel.01.fader") == 0.75
+
+
+async def test_osc_child_set_value_map_coerces_bool():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/ch/01/mix/on", ("i", 0)))
+    assert driver.state.get("device.dev1.channel.01.mute") is True
+    await driver.on_data_received(_osc("/ch/01/mix/on", ("i", 1)))
+    assert driver.state.get("device.dev1.channel.01.mute") is False
+
+
+async def test_osc_child_set_string_arg_routes_name():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/ch/02/config/name", ("s", "Vocals")))
+    assert driver.state.get("device.dev1.channel.02.name") == "Vocals"
+
+
+async def test_osc_child_set_literal_string_id():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/main/st/mix/fader", ("f", 0.9)))
+    assert driver.state.get("device.dev1.main.st.fader") == 0.9
+
+
+async def test_osc_child_set_id_map_routes_wire_id():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/wire/0/lvl", ("f", 0.25)))
+    assert driver.state.get("device.dev1.channel.01.fader") == 0.25
+
+
+async def test_osc_child_set_id_map_unmapped_wire_id_skips():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/wire/9/lvl", ("f", 0.25)))
+    assert driver.state.get("device.dev1.channel.01.fader") == 0.0
+    assert driver.state.get("device.dev1.channel.02.fader") == 0.0
+
+
+async def test_osc_child_set_unregistered_id_skipped():
+    driver = _make_osc_driver()
+    await driver.on_data_received(_osc("/ch/09/mix/fader", ("f", 0.5)))
+    assert driver.state.get("device.dev1.channel.09.fader") is None
+
+
+async def test_osc_child_set_out_of_range_segment_skips():
+    import copy
+
+    definition = copy.deepcopy(ACME_OSC_MIXER)
+    # Segment index past the end of real addresses: entry skips, no crash.
+    definition["responses"][0]["child_set"][0]["id"] = {"segment": 9}
+    driver = _make_osc_driver(definition)
+    await driver.on_data_received(_osc("/ch/01/mix/fader", ("f", 0.5)))
+    assert driver.state.get("device.dev1.channel.01.fader") == 0.0
+
+
+async def test_osc_poll_expands_each_child_with_format_spec():
+    driver = _make_osc_driver()
+    driver.transport = FakeTransport()
+    await driver.poll()
+    sent = driver.transport.sent
+    assert sent[0].startswith(b"/ch/01/mix/fader\x00")
+    assert sent[1].startswith(b"/ch/02/mix/fader\x00")
+    assert sent[2].startswith(b"/main/st/mix/fader\x00")
+    assert sent[3].startswith(b"/main/m/mix/fader\x00")
+
+
+async def test_osc_child_id_param_pads_via_format_spec():
+    driver = _make_osc_driver()
+    driver.transport = FakeTransport()
+
+    # OSC commands require the OSCTransport type; substitute the encoder
+    # check by calling the substitution path directly.
+    from server.core.device_manager import DeviceManager
+
+    params = DeviceManager._coerce_child_id_params(
+        driver, "set_channel_fader", {"channel": "02", "level": 0.5}
+    )
+    assert params["channel"] == 2
+    address = driver._safe_substitute(
+        "/ch/{channel:02d}/mix/fader", {**driver.config, **params}
+    )
+    assert address == "/ch/02/mix/fader"
+
+
+# ---------------------------------------------------------------------------
+# Loader validation — OSC child_set + ids roster + format-spec each_child
+# ---------------------------------------------------------------------------
+
+
+def _osc_errors_for(mutate):
+    import copy
+
+    definition = copy.deepcopy(ACME_OSC_MIXER)
+    mutate(definition)
+    return validate_driver_definition(definition)
+
+
+def test_loader_accepts_osc_child_set_definition():
+    assert validate_driver_definition(ACME_OSC_MIXER) == []
+
+
+def test_loader_rejects_osc_capture_ref_id():
+    def mutate(d):
+        d["responses"][1]["child_set"][0]["id"] = "$1"
+
+    assert any("no capture groups" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_osc_capture_ref_prop():
+    def mutate(d):
+        d["responses"][1]["child_set"][0]["state"] = {"mute": "$1"}
+
+    assert any("no capture groups" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_osc_segment_past_pattern_end():
+    def mutate(d):
+        d["responses"][0]["child_set"][0]["id"] = {"segment": 4}
+
+    assert any("past the end" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_osc_prop_without_arg_or_value():
+    def mutate(d):
+        d["responses"][0]["child_set"][0]["state"] = {"fader": {"map": {"0": 1}}}
+
+    assert any("needs {arg: N} or {value:" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_osc_unknown_child_type():
+    def mutate(d):
+        d["responses"][0]["child_set"][0]["type"] = "widget"
+
+    assert any(
+        "not a declared child_entity_type" in e for e in _osc_errors_for(mutate)
+    )
+
+
+def test_loader_rejects_osc_unknown_prop():
+    def mutate(d):
+        d["responses"][0]["child_set"][0]["state"] = {"bogus": {"arg": 0}}
+
+    assert any("not declared in" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_ids_roster_non_list():
+    def mutate(d):
+        d["child_entity_types"]["main"]["instances"] = {"ids": "st,m"}
+
+    assert any("non-empty list" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_ids_roster_non_integer_for_integer_type():
+    def mutate(d):
+        d["child_entity_types"]["channel"]["instances"] = {"ids": [1, "left"]}
+
+    assert any("is not an integer" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_rejects_two_roster_sources_with_ids():
+    def mutate(d):
+        d["child_entity_types"]["main"]["instances"] = {
+            "ids": ["st"],
+            "count": 2,
+        }
+
+    assert any("exactly one of" in e for e in _osc_errors_for(mutate))
+
+
+def test_loader_accepts_format_spec_child_id_placeholder():
+    # {child_id:02d} satisfies the each_child placeholder requirement.
+    assert not any(
+        "must contain" in e for e in validate_driver_definition(ACME_OSC_MIXER)
     )

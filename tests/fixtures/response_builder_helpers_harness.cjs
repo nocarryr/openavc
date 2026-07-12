@@ -253,4 +253,63 @@ const results = {};
   };
 }
 
+// --- OSC child_set helpers: segment ids, arg props, address-rule rebuild ----
+{
+  // The OSC long form renders as seg:N, keeps its map, and rebuilds
+  // correctly from text + rows (a literal drops the meaningless map).
+  const rows = { "0": 1, "10": "st" };
+  results.osc_child_id_shapes = {
+    pass: H.oscChildIdToText({ segment: 1, map: rows }) === "seg:1" &&
+      H.oscChildIdToText("st") === "st" &&
+      eq(H.childIdMap({ segment: 1, map: rows }), rows) &&
+      eq(H.oscChildIdFromParts("seg:1", rows), { segment: 1, map: rows }) &&
+      eq(H.oscChildIdFromParts("seg:2", undefined), { segment: 2 }) &&
+      eq(H.oscChildIdFromParts("seg:2", {}), { segment: 2 }) &&
+      H.oscChildIdFromParts("st", rows) === "st" &&
+      H.oscChildIdFromParts("3", rows) === 3,
+    detail: H.oscChildIdFromParts("seg:1", rows),
+  };
+}
+{
+  // OSC props render {arg: N} as arg:N and rebuild from text, preserving a
+  // value map the original expression carried (the editor has no map rows
+  // for props — an edit must not drop them).
+  const withMap = { arg: 0, map: { "0": "true", "1": "false" } };
+  results.osc_child_prop_shapes = {
+    pass: H.oscChildPropToText({ arg: 0 }) === "arg:0" &&
+      H.oscChildPropToText(withMap) === "arg:0" &&
+      H.oscChildPropToText({ value: "x" }) === "x" &&
+      H.oscChildPropToText("lit") === "lit" &&
+      eq(H.oscChildPropFromText("arg:1", withMap), { arg: 1, map: withMap.map }) &&
+      eq(H.oscChildPropFromText("arg:1", "old"), { arg: 1 }) &&
+      H.oscChildPropFromText("lit", withMap) === "lit",
+    detail: H.oscChildPropFromText("arg:1", withMap),
+  };
+}
+{
+  // An OSC (address) rule's rebuild carries child_set and throttle, and a
+  // child_set-only rule doesn't grow an empty mappings key.
+  const vars = {};
+  const original = {
+    address: "/ch/*/mix/fader",
+    throttle: 0.5,
+    child_set: [
+      { type: "channel", id: { segment: 1 }, state: { fader: { arg: 0 } } },
+    ],
+  };
+  const rebuilt = H.buildResponse(
+    "/ch/*/mix/fader",
+    H.getMappings(original, vars),
+    original,
+    vars,
+  );
+  results.osc_rebuild_carries_child_set = {
+    pass: rebuilt.address === original.address &&
+      rebuilt.throttle === original.throttle &&
+      eq(rebuilt.child_set, original.child_set) &&
+      !("mappings" in rebuilt), // child_set-only rule grows no empty mappings
+    detail: rebuilt,
+  };
+}
+
 process.stdout.write(JSON.stringify(results));

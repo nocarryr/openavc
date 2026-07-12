@@ -585,18 +585,24 @@ export interface DriverChildSetEntry {
   // wire id through a translation map: { group: 1, map: { "0": 1 } } — for
   // protocols whose wire channel numbers differ from the local child ids
   // (0-based wire, ST-channel codes). A wire id the map doesn't cover skips
-  // the entry.
+  // the entry. On OSC rules (address-matched — no capture groups) the long
+  // form is { segment: 1, map?: ... }: a 0-based index into the /-split
+  // address, so in /ch/07/mix/fader segment 1 is "07"; state values use
+  // { arg: N } (positional OSC arg) instead of $N.
   id: string | number | DriverChildSetIdSpec;
   state: Record<string, unknown>;
 }
 
 export interface DriverChildSetIdSpec {
-  group: number | string;
+  group?: number | string;
+  // OSC form: 0-based address-segment index (mutually exclusive with group).
+  segment?: number;
   map?: Record<string, string | number>;
 }
 
 /** Per-child query template for polling.queries / on_connect: expands to one
- *  query per registered child with `{child_id}` substituted. */
+ *  query per registered child with `{child_id}` substituted (format specs
+ *  work: `{child_id:02d}` zero-pads for padded-address protocols). */
 export interface DriverEachChildQuery {
   each_child: string;
   send: string;
@@ -759,23 +765,28 @@ export interface DriverChildStateVarDef {
 }
 
 export interface DriverChildIdFormat {
-  /** v1 only supports "integer". The platform validates at register_child
-   *  time; the editor surfaces a fixed dropdown. */
-  type: "integer";
+  /** The editor's ID Format section authors "integer" only, but the runtime
+   *  (and hand-written YAML — e.g. string main-bus ids like "st"/"m" with an
+   *  `instances: {ids: [...]}` roster) also speaks "string"; the Builder must
+   *  validate and round-trip those without mangling them. */
+  type: "integer" | "string";
   min?: number;
   max?: number;
   pad_width?: number;
 }
 
 /** Declarative child roster (YAML drivers). Exactly one of count /
- *  count_from / ids_from. `count` = fixed ids 1..N; `count_from` names an
- *  integer config field; `ids_from` names a comma-separated config field
- *  (sparse ids). `label` is an initial-label template — `{id}` substitutes
- *  the local id; a user-set project label always wins. */
+ *  count_from / ids_from / ids. `count` = fixed ids 1..N; `count_from` names
+ *  an integer config field; `ids_from` names a comma-separated config field
+ *  (sparse ids); `ids` is a literal fixed list (protocol-fixed rosters —
+ *  string ids or sparse ints — that no config field should have to fake).
+ *  `label` is an initial-label template — `{id}` substitutes the local id;
+ *  a user-set project label always wins. */
 export interface DriverChildInstances {
   count?: number;
   count_from?: string;
   ids_from?: string;
+  ids?: (string | number)[];
   label?: string;
 }
 

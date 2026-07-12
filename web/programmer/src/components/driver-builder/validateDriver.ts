@@ -418,7 +418,7 @@ export function validateDriver(
         ...Object.keys(draft.config_schema ?? {}),
         ...Object.keys(draft.default_config ?? {}),
       ]);
-      const sources = (["count", "count_from", "ids_from"] as const).filter(
+      const sources = (["count", "count_from", "ids_from", "ids"] as const).filter(
         (k) => inst[k] !== undefined,
       );
       if (sources.length !== 1) {
@@ -426,8 +426,28 @@ export function validateDriver(
           severity: "error",
           section: "behavior",
           field: `child_entity_types.${typeName}.instances`,
-          message: `Child type "${typeName}" instances must declare exactly one of a fixed count, a count config field, or an ID-list config field.`,
+          message: `Child type "${typeName}" instances must declare exactly one of a fixed count, a count config field, an ID-list config field, or a fixed ID list.`,
         });
+      } else if (sources[0] === "ids") {
+        const ids = inst.ids;
+        if (!Array.isArray(ids) || ids.length === 0) {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            field: `child_entity_types.${typeName}.instances`,
+            message: `Child type "${typeName}" instances ids must be a non-empty list of literal child IDs.`,
+          });
+        } else if (
+          idf.type !== "string" &&
+          ids.some((v) => !/^\d+$/.test(String(v).trim()))
+        ) {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            field: `child_entity_types.${typeName}.instances`,
+            message: `Child type "${typeName}" declares integer ids, but the instances ids list has a non-integer entry.`,
+          });
+        }
       } else if (sources[0] === "count") {
         const count = inst.count as number;
         if (!Number.isInteger(count) || count < 1) {
@@ -766,14 +786,145 @@ export function validateDriver(
     }
 
     // child_set routing (mirror driver_loader.py): declared type, declared
-    // props, in-range capture refs, not on OSC/json responses.
+    // props, in-range capture refs (regex) or address segments + positional
+    // args (OSC); not on json responses.
     const childSet = resp.child_set;
     if (childSet !== undefined) {
       if (resp.address !== undefined) {
-        issues.push({
-          severity: "error",
-          section: "behavior",
-          message: `${label}: child entity routing isn't supported on OSC responses.`,
+        // OSC form: id from {segment: N} or a literal; values from {arg: N}
+        // or literals. No capture groups exist on an address match.
+        if (!Array.isArray(childSet) || childSet.length === 0) {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            message: `${label}: child_set must contain at least one routing entry.`,
+          });
+          return;
+        }
+        const addrText = (resp.address ?? "").trim();
+        const stripped = addrText.replace(/^\/+|\/+$/g, "");
+        const nsegs = stripped ? stripped.split("/").length : null;
+        childSet.forEach((entry, j) => {
+          const eLabel = `routing entry ${j + 1}`;
+          if (!entry.type || !childTypeNames.has(entry.type)) {
+            issues.push({
+              severity: "error",
+              section: "behavior",
+              message: `${label}: ${eLabel} routes to child type "${entry.type || "(none)"}", which isn't declared.`,
+            });
+            return;
+          }
+          if (entry.id === undefined || entry.id === null || entry.id === "") {
+            issues.push({
+              severity: "error",
+              section: "behavior",
+              message: `${label}: ${eLabel} needs an ID — an address segment like seg:1, or a literal child ID.`,
+            });
+          } else if (typeof entry.id === "object") {
+            const spec = entry.id as { segment?: unknown; map?: unknown };
+            const seg = spec.segment;
+            if (typeof seg !== "number" || !Number.isInteger(seg) || seg < 0) {
+              issues.push({
+                severity: "error",
+                section: "behavior",
+                message: `${label}: ${eLabel} ID needs an address segment index (seg:1 = the second /-separated part; OSC rules have no capture groups).`,
+              });
+            } else if (nsegs !== null && seg >= nsegs) {
+              issues.push({
+                severity: "error",
+                section: "behavior",
+                message: `${label}: ${eLabel} ID segment ${seg} is past the end of the address (${nsegs} segment${nsegs === 1 ? "" : "s"}).`,
+              });
+            }
+            if (spec.map !== undefined) {
+              const entriesOk =
+                typeof spec.map === "object" &&
+                spec.map !== null &&
+                Object.keys(spec.map as object).length > 0 &&
+                Object.entries(spec.map as Record<string, unknown>).every(
+                  ([k, v]) =>
+                    k !== "" &&
+                    (typeof v === "string" || typeof v === "number") &&
+                    String(v) !== "",
+                );
+              if (!entriesOk) {
+                issues.push({
+                  severity: "error",
+                  section: "behavior",
+                  message: `${label}: ${eLabel} wire-ID map rows must each have a wire ID and a child ID.`,
+                });
+              } else if (
+                (childTypes[entry.type]?.id_format?.type ?? "integer") ===
+                "integer"
+              ) {
+                for (const v of Object.values(
+                  spec.map as Record<string, string | number>,
+                )) {
+                  if (!/^\d+$/.test(String(v).trim())) {
+                    issues.push({
+                      severity: "error",
+                      section: "behavior",
+                      message: `${label}: ${eLabel} wire-ID map value "${v}" isn't an integer, but child type "${entry.type}" uses integer IDs.`,
+                    });
+                    break;
+                  }
+                }
+              }
+            }
+          } else if (typeof entry.id === "string" && entry.id.startsWith("$")) {
+            issues.push({
+              severity: "error",
+              section: "behavior",
+              message: `${label}: ${eLabel} ID "${entry.id}" — OSC rules have no capture groups; use an address segment (seg:1) or a literal.`,
+            });
+          }
+          const props = new Set(
+            Object.keys(childTypes[entry.type]?.state_variables ?? {}),
+          );
+          const stateMap = entry.state ?? {};
+          if (Object.keys(stateMap).length === 0) {
+            issues.push({
+              severity: "error",
+              section: "behavior",
+              message: `${label}: ${eLabel} maps no properties — add at least one.`,
+            });
+          }
+          for (const [prop, expr] of Object.entries(stateMap)) {
+            if (!props.has(prop)) {
+              issues.push({
+                severity: "error",
+                section: "behavior",
+                message: `${label}: ${eLabel} maps "${prop}", which isn't a declared field of child type "${entry.type}".`,
+              });
+            }
+            if (typeof expr === "string" && expr.startsWith("$")) {
+              issues.push({
+                severity: "error",
+                section: "behavior",
+                message: `${label}: ${eLabel} value for "${prop}" — OSC rules have no capture groups; use a positional argument (arg:0) or a literal.`,
+              });
+            } else if (typeof expr === "object" && expr !== null) {
+              const pe = expr as { arg?: unknown; value?: unknown };
+              if (pe.arg === undefined && pe.value === undefined) {
+                issues.push({
+                  severity: "error",
+                  section: "behavior",
+                  message: `${label}: ${eLabel} value for "${prop}" needs a positional argument (arg:0) or a literal value.`,
+                });
+              } else if (
+                pe.arg !== undefined &&
+                (typeof pe.arg !== "number" ||
+                  !Number.isInteger(pe.arg) ||
+                  pe.arg < 0)
+              ) {
+                issues.push({
+                  severity: "error",
+                  section: "behavior",
+                  message: `${label}: ${eLabel} value for "${prop}" arg must be a whole number of 0 or more.`,
+                });
+              }
+            }
+          }
         });
         return;
       }
@@ -954,11 +1105,11 @@ export function validateDriver(
           section: "behavior",
           message: `${fieldName} entry ${i + 1}: per-child query needs a send template.`,
         });
-      } else if (!send.includes("{child_id}")) {
+      } else if (!/\{child_id(?::[^{}]*)?\}/.test(send)) {
         issues.push({
           severity: "error",
           section: "behavior",
-          message: `${fieldName} entry ${i + 1}: the send template must contain {child_id} so each child gets its own query.`,
+          message: `${fieldName} entry ${i + 1}: the send template must contain {child_id} so each child gets its own query (a format spec like {child_id:02d} works too).`,
         });
       }
     });

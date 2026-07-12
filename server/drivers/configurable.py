@@ -178,7 +178,12 @@ class ConfigurableDriver(BaseDriver):
             ]
         ] = []
         self._osc_responses: list[
-            tuple[str, list[dict[str, Any]], dict[str, float] | None]
+            tuple[
+                str,
+                list[dict[str, Any]],
+                list[dict[str, Any]],
+                dict[str, float] | None,
+            ]
         ] = []
         # JSON-body responses: each entry is a list of {state, key, type, map}
         # mappings applied together from one parsed JSON object (multi-field).
@@ -240,7 +245,12 @@ class ConfigurableDriver(BaseDriver):
                 # into every instance of this driver type.
                 mappings = list(resp.get("mappings", []))
                 self._osc_responses.append(
-                    (addr, mappings, self._build_throttle(resp))
+                    (
+                        addr,
+                        mappings,
+                        self._compile_osc_child_set(resp),
+                        self._build_throttle(resp),
+                    )
                 )
                 continue
 
@@ -458,6 +468,108 @@ class ConfigurableDriver(BaseDriver):
                         )
                         continue
                     props.append({"prop": prop, "group": group, "type": var_type})
+                else:
+                    # Static value — coerce by declared type like flat set:.
+                    props.append({"prop": prop, "value": expr, "type": var_type})
+            if props:
+                compiled.append(
+                    {
+                        "type": ctype,
+                        "id": idspec,
+                        "id_map": id_map,
+                        "props": props,
+                    }
+                )
+        return compiled
+
+    def _compile_osc_child_set(self, resp: dict[str, Any]) -> list[dict[str, Any]]:
+        """Compile an OSC response entry's ``child_set:`` list — route an
+        address-matched message into child-entity state. OSC has no capture
+        groups, so the child id comes from an **address segment**
+        (``id: {segment: N}``, 0-based over the /-split address — in
+        ``/ch/07/mix/fader`` segment 1 is ``"07"``) or a literal, and prop
+        values come from **positional args** (``{arg: N}``) or literals.
+        ``map:`` semantics (id translation with unmapped-skip, per-prop value
+        maps) mirror the regex path. Malformed entries are skipped with a
+        warning; the loader validates the same shape up-front.
+        """
+        raw = resp.get("child_set")
+        if not isinstance(raw, list):
+            return []
+        child_types = self._definition.get("child_entity_types") or {}
+        compiled: list[dict[str, Any]] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            ctype = entry.get("type")
+            tdef = child_types.get(ctype)
+            if not isinstance(tdef, dict):
+                log.warning(
+                    f"[{self.device_id}] child_set: unknown child type "
+                    f"{ctype!r}; skipping entry"
+                )
+                continue
+            cvars = tdef.get("state_variables") or {}
+            cid = entry.get("id")
+            idspec: tuple[str, Any]
+            id_map: dict[str, Any] | None = None
+            if isinstance(cid, dict):
+                try:
+                    idspec = ("segment", int(cid.get("segment")))
+                except (TypeError, ValueError):
+                    log.warning(
+                        f"[{self.device_id}] child_set: OSC id needs a "
+                        f"'segment' index (got {cid!r}); skipping entry"
+                    )
+                    continue
+                raw_map = cid.get("map")
+                if isinstance(raw_map, dict) and raw_map:
+                    id_map = {str(k): v for k, v in raw_map.items()}
+            elif cid is not None and not (
+                isinstance(cid, str) and cid.startswith("$")
+            ):
+                idspec = ("literal", cid)
+            else:
+                log.warning(
+                    f"[{self.device_id}] child_set: OSC rules have no capture "
+                    f"groups — id must be {{segment: N}} or a literal "
+                    f"(got {cid!r}); skipping entry"
+                )
+                continue
+            state_map = entry.get("state")
+            if not isinstance(state_map, dict):
+                continue
+            props: list[dict[str, Any]] = []
+            for prop, expr in state_map.items():
+                var_def = cvars.get(prop, {})
+                var_type = (
+                    var_def.get("type", "string")
+                    if isinstance(var_def, dict)
+                    else "string"
+                )
+                if isinstance(expr, dict):
+                    pm: dict[str, Any] = {
+                        "prop": prop,
+                        "type": expr.get("type", var_type),
+                    }
+                    if "arg" in expr:
+                        try:
+                            pm["arg"] = int(expr["arg"])
+                        except (TypeError, ValueError):
+                            continue
+                    elif "value" in expr:
+                        pm["value"] = expr["value"]
+                    else:
+                        continue
+                    if isinstance(expr.get("map"), dict):
+                        pm["map"] = expr["map"]
+                    props.append(pm)
+                elif isinstance(expr, str) and expr.startswith("$"):
+                    log.warning(
+                        f"[{self.device_id}] child_set: state '{prop}' — OSC "
+                        f"rules have no capture groups; use {{arg: N}}. Skipping"
+                    )
+                    continue
                 else:
                     # Static value — coerce by declared type like flat set:.
                     props.append({"prop": prop, "value": expr, "type": var_type})
@@ -730,7 +842,7 @@ class ConfigurableDriver(BaseDriver):
                 # OSC convention: sending an address with no args returns the
                 # current value. This populates state immediately on connect.
                 query_delay = max(delay, 0.005)
-                for addr_pattern, _mappings, _tstate in self._osc_responses:
+                for addr_pattern, _mappings, _cmaps, _tstate in self._osc_responses:
                     # A response address with fnmatch wildcards (e.g. QLab's
                     # push-only "/update/workspace/*/...") is a match pattern,
                     # not a queryable address — sending it literally is
@@ -804,8 +916,10 @@ class ConfigurableDriver(BaseDriver):
         """Expand one polling/on_connect entry. Strings pass through
         unchanged; an ``{each_child: <type>, send: <template>}`` dict yields
         one query per registered child of that type with ``{child_id}``
-        substituted (the unpadded local id). Anything else is skipped with a
-        warning.
+        substituted (the unpadded local id). ``{child_id:spec}`` format specs
+        work too (``{child_id:02d}`` zero-pads for padded-address protocols);
+        other ``{placeholders}`` pass through untouched for the downstream
+        config substitution. Anything else is skipped with a warning.
         """
         if isinstance(query, str):
             return [query]
@@ -819,7 +933,7 @@ class ConfigurableDriver(BaseDriver):
                 )
                 return []
             return [
-                template.replace("{child_id}", str(local_id))
+                self._safe_substitute(template, {"child_id": local_id})
                 for local_id in self.list_children(ctype)
             ]
         log.warning(
@@ -851,10 +965,40 @@ class ConfigurableDriver(BaseDriver):
     ) -> list[int | str] | None:
         """Resolve an ``instances:`` block to the wanted local-id list.
         ``count`` = fixed ids 1..N; ``count_from`` = an integer config field;
-        ``ids_from`` = a comma-separated config field (sparse / string ids).
+        ``ids_from`` = a comma-separated config field (sparse / string ids);
+        ``ids`` = a literal fixed list (protocol-fixed rosters — string ids
+        or sparse ints — that no config field should have to fake).
         Returns None when the declaration can't be resolved (warned)."""
         id_format = tdef.get("id_format") or {}
         id_type = id_format.get("type", "integer")
+        if "ids" in inst:
+            raw_ids = inst["ids"]
+            if not isinstance(raw_ids, list):
+                log.warning(
+                    f"[{self.device_id}] instances: {ctype} ids must be a list"
+                )
+                return None
+            ids: list[int | str] = []
+            for item in raw_ids:
+                if isinstance(item, bool) or not isinstance(item, (str, int)):
+                    log.warning(
+                        f"[{self.device_id}] instances: {ctype} id {item!r} "
+                        f"is not a scalar; skipping"
+                    )
+                    continue
+                if id_type == "integer":
+                    try:
+                        ids.append(int(str(item).strip()))
+                    except ValueError:
+                        log.warning(
+                            f"[{self.device_id}] instances: {ctype} id "
+                            f"{item!r} is not an integer; skipping"
+                        )
+                else:
+                    text = str(item).strip()
+                    if text:
+                        ids.append(text)
+            return ids
         if "count" in inst or "count_from" in inst:
             if id_type != "integer":
                 log.warning(
@@ -1821,7 +1965,7 @@ class ConfigurableDriver(BaseDriver):
 
         for address, args in messages:
             matched = False
-            for addr_pattern, mappings, tstate in self._osc_responses:
+            for addr_pattern, mappings, child_mappings, tstate in self._osc_responses:
                 if not fnmatch.fnmatch(address, addr_pattern):
                     continue
                 matched = True
@@ -1868,11 +2012,78 @@ class ConfigurableDriver(BaseDriver):
 
                     self.set_state(state_key, coerced)
 
+                if child_mappings:
+                    self._apply_osc_child_mappings(address, args, child_mappings)
+
                 log.debug(f"[{self.device_id}] OSC matched: {addr_pattern}")
                 break
 
             if not matched:
                 log.debug(f"[{self.device_id}] Unmatched OSC: {address}")
+
+    def _apply_osc_child_mappings(
+        self,
+        address: str,
+        args: list[tuple[str, Any]],
+        child_mappings: list[dict[str, Any]],
+    ) -> None:
+        """Route an address-matched OSC message into child-entity state
+        (``child_set:``). The child id comes from an address segment or a
+        literal; prop values from positional args or literals. Coercion,
+        id-map unmapped-skip, and the unregistered-id guard mirror
+        ``_apply_child_mappings`` exactly."""
+        segments = address.strip("/").split("/")
+        for cm in child_mappings:
+            ctype = cm["type"]
+            id_kind, id_val = cm["id"]
+            if id_kind == "segment":
+                if not 0 <= id_val < len(segments):
+                    continue
+                raw_id: Any = segments[id_val]
+            else:
+                raw_id = id_val
+            id_map = cm.get("id_map")
+            if id_map is not None:
+                mapped_id = id_map.get(str(raw_id).strip())
+                if mapped_id is None:
+                    log.debug(
+                        f"[{self.device_id}] child_set: {ctype} wire id "
+                        f"{raw_id!r} not in the id map — skipping"
+                    )
+                    continue
+                raw_id = mapped_id
+            local_id = self._coerce_child_local_id(ctype, raw_id)
+            if local_id is None:
+                continue
+            if not self.is_child_registered(ctype, local_id):
+                log.debug(
+                    f"[{self.device_id}] child_set: {ctype} {local_id!r} not "
+                    f"registered — skipping"
+                )
+                continue
+            updates: dict[str, Any] = {}
+            for pm in cm["props"]:
+                value_type = pm.get("type", "string")
+                if "value" in pm:
+                    updates[pm["prop"]] = self._coerce_value(
+                        str(pm["value"]), value_type
+                    )
+                    continue
+                arg_index = pm.get("arg", 0)
+                if not 0 <= arg_index < len(args):
+                    continue
+                _, raw_value = args[arg_index]
+                value_map = pm.get("map")
+                if value_map is not None and str(raw_value) in value_map:
+                    updates[pm["prop"]] = self._coerce_value(
+                        str(value_map[str(raw_value)]), value_type
+                    )
+                else:
+                    updates[pm["prop"]] = self._coerce_osc_value(
+                        raw_value, value_type
+                    )
+            if updates:
+                self.set_child_state_batch(ctype, local_id, updates)
 
     @staticmethod
     def _extract_json_path(raw_value: Any, path: Any) -> Any:

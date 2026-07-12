@@ -635,6 +635,7 @@ child_entity_types:
       count: 6                 # fixed: registers IDs 1..6
       # count_from: output_count   # or: an integer config field (frame size varies by model)
       # ids_from: zone_ids         # or: a comma-separated config field ("1,2,4" — sparse IDs)
+      # ids: [st, m]               # or: a literal fixed list (protocol-fixed rosters like main buses)
       label: "Output {id}"     # optional initial label; a user's project label always wins
 ```
 
@@ -654,7 +655,7 @@ responses:
       - { type: output, id: 2, state: { input: $2 } }
 ```
 
-A response entry can carry `set:` (flat state) and `child_set:` together; first-match-wins dispatch is unchanged. A routed ID that isn't registered is skipped quietly — devices legitimately answer for ports beyond a configured roster. `child_set` works on regex responses (TCP, serial, UDP, HTTP text); it is not supported on OSC or `json:` responses.
+A response entry can carry `set:` (flat state) and `child_set:` together; first-match-wins dispatch is unchanged. A routed ID that isn't registered is skipped quietly — devices legitimately answer for ports beyond a configured roster. `child_set` works on regex responses (TCP, serial, UDP, HTTP text) and on OSC address rules (see below); it is not supported on `json:` responses.
 
 When the protocol's channel numbers differ from your child IDs — a 0-based wire where children are 1-based, or a special code for a stereo channel — use the long ID form to translate the captured wire ID:
 
@@ -669,7 +670,29 @@ responses:
         state: { level: $2 }
 ```
 
-Poll each child with an `each_child:` entry in `polling.queries` (also allowed in `on_connect`). It expands to one query per registered child, substituting `{child_id}` with the unpadded local ID:
+**OSC drivers** route with `child_set:` too, but an address match has no capture groups — the child ID comes from an **address segment** (`{segment: N}`, a 0-based index into the `/`-split address) or a literal, and each state value from a **positional argument** (`{arg: N}`) or a literal. The `map:` forms (wire-ID translation with unmapped-skip, per-value maps) work the same as on regex rules:
+
+```yaml
+responses:
+  # One rule covers every channel: in /ch/07/mix/fader, segment 1 is "07".
+  - address: "/ch/*/mix/fader"
+    child_set:
+      - type: channel
+        id: { segment: 1 }
+        state: { fader: { arg: 0 } }
+  # The console reports on/off; the child models mute — map + coerce:
+  - address: "/ch/*/mix/on"
+    child_set:
+      - type: channel
+        id: { segment: 1 }
+        state: { mute: { arg: 0, map: { "0": "true", "1": "false" } } }
+  # A fixed address routes to one child (string-ID main buses):
+  - address: "/main/st/mix/fader"
+    child_set:
+      - { type: main, id: st, state: { fader: { arg: 0 } } }
+```
+
+Poll each child with an `each_child:` entry in `polling.queries` (also allowed in `on_connect`). It expands to one query per registered child, substituting `{child_id}` with the unpadded local ID — format specs work, so `{child_id:02d}` zero-pads for padded-address protocols:
 
 ```yaml
 polling:
@@ -677,9 +700,10 @@ polling:
   queries:
     - "PWR?\r"                                  # sent once
     - { each_child: output, send: "?VOUT{child_id}\r" }   # sent once per output
+    - { each_child: channel, send: "/ch/{child_id:02d}/mix/fader" }  # OSC, zero-padded
 ```
 
-Per-child **writes** need nothing new — declare a command with a `child_id` parameter (see `commands`) and the platform validates and substitutes the ID. Per-child values that the device persists (a zone volume, an output mute) are modeled as child state variables plus a `child_id` command, not as `device_settings` — a device setting's `state_key` is flat and can't address a child. The IDE's per-child "Refresh from Device" re-derives the roster from config automatically.
+Per-child **writes** need nothing new — declare a command with a `child_id` parameter (see `commands`) and the platform validates and substitutes the ID (as the unpadded local ID; use a format spec like `{channel:02d}` in the send string / OSC address when the wire wants zero-padding). Per-child values that the device persists (a zone volume, an output mute) are modeled as child state variables plus a `child_id` command, not as `device_settings` — a device setting's `state_key` is flat and can't address a child. The IDE's per-child "Refresh from Device" re-derives the roster from config automatically.
 
 Python drivers declare the same block in `DRIVER_INFO` and register instances at runtime with `self.register_child(type, local_id, initial_state=...)`, update them with `set_child_state` / `set_children_state_batch`, and remove them with `deregister_child`. For a **dynamic** type, pass the discovered control schema when registering:
 
