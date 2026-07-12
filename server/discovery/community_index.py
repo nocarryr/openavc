@@ -58,7 +58,17 @@ class CommunityIndexCache:
                 log.info("Using stale community index cache (%d drivers)", len(self._drivers))
             return self._drivers
 
-        drivers = data.get("drivers", []) if isinstance(data, dict) else data
+        raw = data.get("drivers", []) if isinstance(data, dict) else data
+        if not isinstance(raw, list):
+            log.warning("index.json had unexpected shape; ignoring")
+            return self._drivers
+        # Drop non-object entries so a single malformed element in the remote
+        # catalog can't crash a downstream consumer's `.get(...)` (which would
+        # abort the whole scan) — skip the bad entry, keep the rest.
+        drivers = [d for d in raw if isinstance(d, dict)]
+        skipped = len(raw) - len(drivers)
+        if skipped:
+            log.warning("index.json: skipped %d malformed (non-object) driver entr(ies)", skipped)
         self._drivers = drivers
         self._fetched_at = now
         log.info("Community index fetched: %d drivers", len(drivers))
@@ -116,10 +126,18 @@ class CommunityDevicesCache:
                 log.info("Using stale community devices cache (%d devices)", len(self._devices))
             return
 
-        devices = data.get("devices", []) if isinstance(data, dict) else data
-        if not isinstance(devices, list):
+        raw = data.get("devices", []) if isinstance(data, dict) else data
+        if not isinstance(raw, list):
             log.warning("devices.json had unexpected shape; ignoring")
             return
+
+        # Drop non-object entries so one malformed element can't crash the
+        # per-element `.get(...)` below (and, via the engine catch-all, abort
+        # the whole scan) — skip the bad entry, keep the rest.
+        devices = [d for d in raw if isinstance(d, dict)]
+        skipped = len(raw) - len(devices)
+        if skipped:
+            log.warning("devices.json: skipped %d malformed (non-object) entr(ies)", skipped)
 
         self._devices = devices
         self._lookup = {}

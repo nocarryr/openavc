@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+from server.discovery import community_index as ci
 from server.discovery.engine import DiscoveryEngine
 from server.discovery.tier_matcher import KIND_ACTIVE_PROBE, KIND_SSDP
 
@@ -107,3 +108,64 @@ def test_requires_gated_catalog_entry_skips_without_side_effects(monkeypatch, ca
     probe = engine.signal_index.find_strong(KIND_ACTIVE_PROBE, "custom_acme_widget_tcp")
     assert probe is not None and probe.driver_id == "acme_widget"
     assert "falling back to installed-only" not in caplog.text
+
+
+# --- A malformed (non-object) catalog element must be skipped, not fatal ---
+
+
+def _fetch_returning(data):
+    async def _fetch(_path):
+        return data
+    return _fetch
+
+
+async def test_index_cache_skips_non_object_driver_entries(monkeypatch, caplog):
+    """A non-dict element in index.json is dropped; the rest survive."""
+    payload = {"drivers": [
+        {"id": "acme_widget", "version": "1.0.0"},
+        "not-a-dict",
+        None,
+        {"id": "acme_gadget", "version": "1.0.0"},
+    ]}
+    monkeypatch.setattr(ci, "_fetch_json_with_retry", _fetch_returning(payload))
+    cache = ci.CommunityIndexCache()
+    with caplog.at_level(logging.WARNING):
+        drivers = await cache.get_drivers()
+    assert [d["id"] for d in drivers] == ["acme_widget", "acme_gadget"]
+    assert all(isinstance(d, dict) for d in drivers)
+    assert "skipped 2 malformed" in caplog.text
+
+
+async def test_index_cache_unexpected_shape_ignored(monkeypatch):
+    """A non-list `drivers` value is ignored rather than cached blindly."""
+    monkeypatch.setattr(ci, "_fetch_json_with_retry", _fetch_returning({"drivers": "oops"}))
+    cache = ci.CommunityIndexCache()
+    assert await cache.get_drivers() == []
+
+
+async def test_devices_cache_skips_non_object_entries(monkeypatch):
+    """A non-dict element in devices.json is dropped; lookups still resolve."""
+    payload = {"devices": [
+        {"manufacturer": "Acme", "model": "X1", "drivers": [{"id": "acme_widget"}]},
+        "not-a-dict",
+        {"manufacturer": "Acme", "model": "X2", "drivers": [{"id": "acme_gadget"}]},
+    ]}
+    monkeypatch.setattr(ci, "_fetch_json_with_retry", _fetch_returning(payload))
+    cache = ci.CommunityDevicesCache()
+    assert await cache.find_drivers("Acme", "X2") == [{"id": "acme_gadget"}]
+    assert all(isinstance(d, dict) for d in await cache.get_devices())
+
+
+def test_rebuild_signal_index_skips_non_dict_catalog_entry(caplog):
+    """Defense in depth: a non-dict catalog element folds to nothing, not a crash."""
+    engine = DiscoveryEngine()
+    engine._installed_registry = []
+    catalog = [
+        "not-a-dict",
+        None,
+        _catalog_entry("acme_widget", {"tcp_probe": {"port": 4999, "expect_regex": "ACME"}}),
+    ]
+    with caplog.at_level(logging.ERROR):
+        engine._rebuild_signal_index(catalog)  # must not raise
+    probe = engine.signal_index.find_strong(KIND_ACTIVE_PROBE, "custom_acme_widget_tcp")
+    assert probe is not None and probe.driver_id == "acme_widget"

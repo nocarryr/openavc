@@ -332,6 +332,11 @@ class DiscoveryEngine:
         catalog_only: list[dict[str, Any]] = []
         superseded_installed_ids: set[str] = set()
         for d in community_drivers:
+            # The cache filters non-object entries at the fetch boundary; guard
+            # here too so a malformed element from any caller degrades this one
+            # rule rather than aborting the whole scan.
+            if not isinstance(d, dict):
+                continue
             cid = str(d.get("id") or "")
             if not cid:
                 continue
