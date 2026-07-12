@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from server.utils.paths import is_safe_script_filename
+
 
 class CommandRequest(BaseModel):
     command: str
@@ -113,6 +115,20 @@ class ScriptCreateRequest(BaseModel):
     def validate_id(cls, v: str) -> str:
         if not v or not _SCRIPT_ID_RE.match(v):
             raise ValueError("Script ID must be lowercase alphanumeric with underscores")
+        return v
+
+    @field_validator("file")
+    @classmethod
+    def validate_file(cls, v: str) -> str:
+        # A script file is a flat .py basename under scripts/ — reject path
+        # separators, `..`, and non-.py extensions so a request can't write
+        # into a nested subdir or drop a non-Python file. (safe_path_within at
+        # the write site blocks escaping scripts/, but not these shapes.)
+        if not is_safe_script_filename(v):
+            raise ValueError(
+                "Script file must be a plain .py filename "
+                "(letters, numbers, hyphens, underscores), no path separators"
+            )
         return v
 
 

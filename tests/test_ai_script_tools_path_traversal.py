@@ -83,6 +83,28 @@ async def test_create_script_allows_normal_filename(script_handler):
     assert [s.id for s in engine.project.scripts] == ["good"]
 
 
+async def test_create_script_rejects_nested_subpath(script_handler):
+    handler, engine, tmp_path = script_handler
+    result = await handler._create_script(
+        {"id": "nested", "file": "sub/evil.py", "source": "x = 1\n"}
+    )
+    assert "error" in result
+    assert "Invalid script filename" in result["error"]
+    assert not (tmp_path / "scripts" / "sub").exists()
+    assert engine.project.scripts == []
+
+
+async def test_create_script_rejects_non_py_extension(script_handler):
+    handler, engine, tmp_path = script_handler
+    result = await handler._create_script(
+        {"id": "shellish", "file": "evil.sh", "source": "x = 1\n"}
+    )
+    assert "error" in result
+    assert "Invalid script filename" in result["error"]
+    assert not (tmp_path / "scripts" / "evil.sh").exists()
+    assert engine.project.scripts == []
+
+
 async def test_read_update_delete_reject_poisoned_stored_path(tmp_path):
     """Defense in depth: even a project entry whose ``file`` escapes (e.g. a
     hand-crafted .avc) must not become a read/write/delete primitive."""

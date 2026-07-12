@@ -135,6 +135,39 @@ def test_create_script_duplicate(client):
     assert resp.status_code == 409
 
 
+def test_create_script_rejects_nested_subpath(client, mock_engine):
+    """`file` may not carry a subdir — no writing into scripts/<nested>/."""
+    resp = client.post(
+        "/api/scripts",
+        json={"id": "nested", "file": "sub/evil.py", "source": "x = 1\n"},
+    )
+    assert resp.status_code == 422
+    scripts_dir = mock_engine.project_path.parent / "scripts"
+    assert not (scripts_dir / "sub").exists()
+    assert [s.id for s in mock_engine.project.scripts] == ["test_script"]
+
+
+def test_create_script_rejects_non_py_extension(client, mock_engine):
+    """`file` must end in .py — no dropping a .sh (or any non-Python) file."""
+    resp = client.post(
+        "/api/scripts",
+        json={"id": "shellish", "file": "evil.sh", "source": "x = 1\n"},
+    )
+    assert resp.status_code == 422
+    scripts_dir = mock_engine.project_path.parent / "scripts"
+    assert not (scripts_dir / "evil.sh").exists()
+    assert [s.id for s in mock_engine.project.scripts] == ["test_script"]
+
+
+def test_references_skips_invalid_stored_file(client, mock_engine):
+    """A poisoned stored `file` must not fail the whole reference scan."""
+    mock_engine.project.scripts.append(
+        ScriptConfig(id="bad", file="../../etc/passwd.py")
+    )
+    resp = client.get("/api/scripts/references")
+    assert resp.status_code == 200
+
+
 def test_delete_script(client, mock_engine):
     resp = client.delete("/api/scripts/test_script")
     assert resp.status_code == 200

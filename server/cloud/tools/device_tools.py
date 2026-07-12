@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from server.utils.paths import safe_path_within
+from server.utils.paths import is_safe_script_filename, safe_path_within
 
 
 class DeviceToolsMixin:
@@ -857,6 +857,8 @@ class DeviceToolsMixin:
                 return {"error": f"Script '{script_id}': {err}"}
 
         scripts_dir = engine.project_path.parent / "scripts"
+        if not is_safe_script_filename(filename):
+            return {"error": f"Invalid script filename '{filename}': must be a plain .py name with no path separators"}
         path = safe_path_within(scripts_dir, filename)
         if path is None:
             return {"error": "Invalid script filename"}

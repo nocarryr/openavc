@@ -10,7 +10,7 @@ from server.api._engine import _get_engine
 from server.api.auth import require_claimed_auth
 from server.api.models import ScriptCreateRequest
 from server.core.project_loader import save_project_async
-from server.utils.paths import safe_path_within
+from server.utils.paths import is_safe_script_filename, safe_path_within
 
 router = APIRouter()
 
@@ -33,7 +33,15 @@ def _find_script_config(script_id: str) -> dict[str, Any] | None:
 
 
 def _safe_script_path(scripts_dir: Path, filename: str) -> Path:
-    """Resolve a script filename safely within the scripts directory."""
+    """Resolve a script filename safely within the scripts directory.
+
+    Scripts are flat ``.py`` files directly under ``scripts/``. Reject anything
+    that isn't a bare ``.py`` basename (nested subpath, ``..``, non-.py
+    extension) before the containment check, so neither a crafted request nor a
+    poisoned stored ``file`` can read or write outside that expected shape.
+    """
+    if not is_safe_script_filename(filename):
+        raise HTTPException(status_code=400, detail="Invalid script filename")
     resolved = safe_path_within(scripts_dir, filename)
     if resolved is None:
         raise HTTPException(status_code=400, detail="Invalid script filename")
@@ -104,7 +112,8 @@ async def get_script_references() -> dict[str, Any]:
             if not path.exists():
                 continue
             source = path.read_text(encoding="utf-8")
-        except (OSError, ValueError):
+        except (OSError, ValueError, HTTPException):
+            # A malformed/hostile stored `file` shouldn't fail the whole scan.
             continue
 
         for line_num, line in enumerate(source.splitlines(), 1):
