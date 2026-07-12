@@ -333,15 +333,15 @@ export function validateDriver(
       });
     }
 
-    // id_format sanity. v1 only supports integer IDs; the runtime raises
-    // on anything else, so flag a non-integer type as an error.
+    // id_format sanity (mirror driver_loader.py): integer or string local
+    // ids. The runtime raises on anything else.
     const idf = typeDef.id_format ?? { type: "integer" };
-    if (idf.type !== "integer") {
+    if (idf.type !== "integer" && idf.type !== "string") {
       issues.push({
         severity: "error",
         section: "behavior",
         field: `child_entity_types.${typeName}.id_format`,
-        message: `Child type "${typeName}" id_format.type must be "integer" (only integer IDs are supported).`,
+        message: `Child type "${typeName}" id_format.type must be "integer" or "string".`,
       });
     }
     if (
@@ -465,6 +465,14 @@ export function validateDriver(
             message: `Child type "${typeName}" instances count (${count}) exceeds id_format.max (${idf.max}).`,
           });
         }
+        if (idf.type === "string") {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            field: `child_entity_types.${typeName}.instances`,
+            message: `Child type "${typeName}" instances count requires integer ids (id_format.type is "string" — use an ID-list config field).`,
+          });
+        }
       } else {
         const fieldName = inst[sources[0]] as string;
         if (!fieldName || !configFields.has(fieldName)) {
@@ -473,6 +481,14 @@ export function validateDriver(
             section: "behavior",
             field: `child_entity_types.${typeName}.instances`,
             message: `Child type "${typeName}" instances reads config field "${fieldName || "(none)"}", which isn't declared in the driver's config.`,
+          });
+        }
+        if (sources[0] === "count_from" && idf.type === "string") {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            field: `child_entity_types.${typeName}.instances`,
+            message: `Child type "${typeName}" instances count field requires integer ids (id_format.type is "string" — use an ID-list config field).`,
           });
         }
       }

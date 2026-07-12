@@ -765,14 +765,17 @@ export interface DriverChildStateVarDef {
 }
 
 export interface DriverChildIdFormat {
-  /** The editor's ID Format section authors "integer" only, but the runtime
-   *  (and hand-written YAML — e.g. string main-bus ids like "st"/"m" with an
-   *  `instances: {ids: [...]}` roster) also speaks "string"; the Builder must
-   *  validate and round-trip those without mangling them. */
+  /** Integer ids pair with count / count_from rosters; string ids (a
+   *  device-native name restricted to [A-Za-z0-9_-] — letter-addressed
+   *  matrix outputs, main-bus ids like "st"/"m") take their roster from
+   *  ids_from or a literal ids list. The platform validates at
+   *  register_child time. */
   type: "integer" | "string";
   min?: number;
   max?: number;
   pad_width?: number;
+  /** String ids only: maximum id length (default 128). */
+  max_length?: number;
 }
 
 /** Declarative child roster (YAML drivers). Exactly one of count /
