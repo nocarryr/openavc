@@ -20,6 +20,7 @@ from server.core.connection_fault import (
     CONNECTION_REFUSED,
     HOST_KEY_REJECTED,
     NO_RESPONSE,
+    TLS_CERT_UNTRUSTED,
     TRANSPORT_DISCONNECTED,
     UNREACHABLE,
     ConnectionFaultError,
@@ -198,6 +199,48 @@ def test_host_key_rejected_beats_auth():
         exc=None, host="h", port=22, transport="ssh",
     )
     assert fault.code == HOST_KEY_REJECTED
+
+
+# --- tls_cert_untrusted ----------------------------------------------------
+
+def test_tls_cert_untrusted_self_signed_httpx_string():
+    # The exact string httpx surfaces for a self-signed cert (captured live
+    # from httpx 0.28 + OpenSSL 3), which HTTPClientTransport stashes as
+    # last_error and the device manager feeds here.
+    fault = classify_connection_fault(
+        last_error=(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "self-signed certificate (_ssl.c:1010)"
+        ),
+        exc=None, host="10.0.0.9", port=443, transport="http",
+    )
+    assert fault.code == TLS_CERT_UNTRUSTED
+    assert "Verify SSL Certificate" in fault.message
+    assert "10.0.0.9:443" in fault.message
+
+
+@pytest.mark.parametrize("err", [
+    "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+    "unable to get local issuer certificate (_ssl.c:1010)",
+    "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+    "certificate has expired (_ssl.c:1010)",
+])
+def test_tls_cert_untrusted_other_verification_failures(err):
+    fault = classify_connection_fault(
+        last_error=err, exc=None, host="h", port=443, transport="http",
+    )
+    assert fault.code == TLS_CERT_UNTRUSTED
+
+
+def test_tls_cert_untrusted_beats_generic_timeout_noise():
+    # A cert-verify failure is a specific identity problem — it must not be
+    # swallowed by the weak timeout/unreachable bucket if the blob also
+    # mentions a timeout.
+    fault = classify_connection_fault(
+        last_error="certificate verify failed: self-signed certificate; connection timeout",
+        exc=None, host="h", port=443, transport="http",
+    )
+    assert fault.code == TLS_CERT_UNTRUSTED
 
 
 # --- no_response -----------------------------------------------------------

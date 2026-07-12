@@ -32,7 +32,7 @@ default_config:
   host: ""
   port: 80
   ssl: false
-  verify_ssl: false            # AV devices almost always use self-signed certs
+  verify_ssl: true             # secure by default; turn off for self-signed certs
   auth_type: "none"            # none, basic, digest, bearer, api_key
   username: ""
   password: ""
@@ -60,9 +60,9 @@ config_schema:
     description: "Enable HTTPS (TLS/SSL)"
   verify_ssl:
     type: boolean
-    default: false
+    default: true
     label: Verify SSL Certificate
-    description: "Set to false for self-signed certificates (common on AV devices)"
+    description: "On by default. Turn off for self-signed certificates (common on AV devices)"
   auth_type:
     type: enum
     values: ["none", "basic", "digest", "bearer", "api_key"]

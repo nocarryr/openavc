@@ -28,6 +28,7 @@ AUTH_FAILED = "auth_failed"
 CONNECTION_REFUSED = "connection_refused"
 UNREACHABLE = "unreachable"
 HOST_KEY_REJECTED = "host_key_rejected"
+TLS_CERT_UNTRUSTED = "tls_cert_untrusted"  # HTTPS/TLS cert couldn't be verified
 NO_RESPONSE = "no_response"
 CLIENT_MISSING = "client_missing"
 TRANSPORT_DISCONNECTED = "transport_disconnected"  # generic fallback
@@ -152,6 +153,22 @@ _HOST_KEY_SIGS = (
     "remote host identification has changed",
     "host key for",  # "Host key for <host> has changed"
     "key verification failed",
+)
+
+# TLS certificate verification failed — the HTTPS analog of a rejected SSH host
+# key: the peer's identity couldn't be verified (self-signed, expired, wrong
+# hostname, or an unknown issuer). Every OpenSSL verification failure carries
+# "certificate verify failed"; the others are extra specificity. Checked right
+# after host-key so it wins over the generic buckets and can point the user at
+# the "Verify SSL Certificate" toggle (self-signed certs are common on AV gear).
+_TLS_CERT_SIGS = (
+    "certificate verify failed",
+    "certificate_verify_failed",
+    "self-signed certificate",
+    "self signed certificate",
+    "unable to get local issuer certificate",
+    "certificate has expired",
+    "sslcertverificationerror",
 )
 
 # Authentication failures. Gated to non-serial transports by the caller order
@@ -398,7 +415,18 @@ def classify_connection_fault(
             "device, then re-accept it.",
         )
 
-    # 3. Authentication failed.
+    # 3. TLS certificate couldn't be verified (self-signed / expired / wrong
+    #    host / unknown issuer). Point the integrator straight at the toggle —
+    #    self-signed certs are the norm on AV gear.
+    if _has_any(hay, _TLS_CERT_SIGS):
+        return ConnectionFault(
+            TLS_CERT_UNTRUSTED,
+            f"Couldn't verify the TLS certificate for {where}. If the device "
+            f"uses a self-signed certificate, turn off 'Verify SSL Certificate' "
+            f"for it.",
+        )
+
+    # 4. Authentication failed.
     if _has_any(hay, _AUTH_SIGS):
         return ConnectionFault(
             AUTH_FAILED,
@@ -406,7 +434,7 @@ def classify_connection_fault(
             "install the OpenAVC key on the device.",
         )
 
-    # 4. Port closed / service off.
+    # 5. Port closed / service off.
     if _has_refused(chain) or err_no == errno.ECONNREFUSED or _has_any(hay, _REFUSED_SIGS):
         return ConnectionFault(
             CONNECTION_REFUSED,
@@ -414,7 +442,7 @@ def classify_connection_fault(
             f"port correct?",
         )
 
-    # 5. Unreachable — strong signals (route, DNS, host down, connect-phase
+    # 6. Unreachable — strong signals (route, DNS, host down, connect-phase
     #    timeout). A connect-level timeout shows up as a TimeoutError in the
     #    exception chain paired with a transport connect wrapper, distinct from
     #    a protocol read-timeout (handled as no_response below).
@@ -428,7 +456,7 @@ def classify_connection_fault(
             f"Can't reach {where}. Check the IP address and network.",
         )
 
-    # 6. Authed/opened but no usable response (wrong transport or protocol).
+    # 7. Authed/opened but no usable response (wrong transport or protocol).
     if _has_any(hay, _NO_RESPONSE_SIGS):
         return ConnectionFault(
             NO_RESPONSE,
@@ -436,14 +464,14 @@ def classify_connection_fault(
             "transport or protocol for this device?",
         )
 
-    # 7. Weak timeout / unreachable signals with nothing more specific.
+    # 8. Weak timeout / unreachable signals with nothing more specific.
     if _has_any(hay, _UNREACHABLE_WEAK_SIGS):
         return ConnectionFault(
             UNREACHABLE,
             f"Can't reach {where}. Check the IP address and network.",
         )
 
-    # 8. Fallback — an unexplained drop. Keep the existing generic wording.
+    # 9. Fallback — an unexplained drop. Keep the existing generic wording.
     return ConnectionFault(
         TRANSPORT_DISCONNECTED,
         "The connection to the device dropped. OpenAVC is retrying "
