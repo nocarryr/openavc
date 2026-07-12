@@ -210,13 +210,21 @@ class Sequencer:
         """
         Reset sequence counters for a new session.
 
-        Called after a fresh handshake. The send buffer is preserved
-        so messages can be replayed with new sequence numbers.
+        Called after a fresh handshake. The send buffer is preserved so
+        messages can be replayed with new sequence numbers.
+
+        The caller must read ``last_ack_seq`` for resume negotiation *before*
+        calling this: the new session numbers its upstream from seq 1 (replayed
+        messages are re-assigned via ``assign_seq``), and the cloud acks from 1,
+        so the ack accounting has to restart too. Left un-reset, ``handle_ack``
+        would early-return on every new-session ack (``acked_seq`` <= the stale
+        prior-session ``last_ack_seq``), the buffer would never drain, and
+        priority eviction would start dropping real messages.
         """
         with self._lock:
             self._next_seq = 1
             self._last_downstream_seq = 0
-            # Don't reset last_ack_seq — used for resume negotiation
+            self._last_ack_seq = 0
 
     def clear_buffer(self) -> None:
         """Clear the send buffer (e.g., after successful replay)."""

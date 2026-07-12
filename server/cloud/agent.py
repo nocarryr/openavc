@@ -499,6 +499,13 @@ class CloudAgent:
             # down any auto loop), not "keep whatever loop was running before".
             await self._sync_update_policy(result.config)
 
+            # Capture the prior session's last-acked seq for resume negotiation
+            # before the reset clears it: reset_for_new_session zeroes it so the
+            # new session's acks (which restart from seq 1) are accounted for,
+            # but the cloud still needs the prior value to compute the replay
+            # point.
+            prior_last_ack = self._sequencer.last_ack_seq
+
             # Reset sequencer for new session
             self._sequencer.reset_for_new_session()
 
@@ -514,7 +521,7 @@ class CloudAgent:
                     replay_from = await handshake.send_resume(
                         send=self._send_raw,
                         recv=self._recv_raw,
-                        last_ack_seq=self._sequencer.last_ack_seq,
+                        last_ack_seq=prior_last_ack,
                         buffered_count=buffered,
                         disconnected_at=self._disconnect_time or "",
                     )

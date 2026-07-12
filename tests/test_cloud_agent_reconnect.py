@@ -631,20 +631,50 @@ class TestSequencerReconnect:
         assert msgs == []
 
     def test_reset_for_new_session(self):
-        """Reset clears counters but preserves buffer for replay."""
+        """Reset clears counters (incl. last_ack_seq) but preserves the buffer."""
         seq = Sequencer()
         seq.assign_seq({"type": "heartbeat"})
         seq.assign_seq({"type": "heartbeat"})
         seq.validate_downstream_seq(1)
-        old_ack = seq.last_ack_seq
+        seq.handle_ack({"payload": {"last_seq": 2}})
+        assert seq.last_ack_seq == 2
+
+        # Buffer a fresh message so there's something to preserve across reset.
+        seq.assign_seq({"type": "state_batch"})
 
         seq.reset_for_new_session()
         assert seq.next_seq == 1
         assert seq.last_downstream_seq == 0
-        # Buffer is preserved for message replay after reconnection
+        # Buffer is preserved for message replay after reconnection.
+        assert seq.buffer_count == 1
+        # last_ack_seq resets to 0 — the new session's acks restart from seq 1.
+        assert seq.last_ack_seq == 0
+
+    def test_new_session_acks_drain_buffer_after_reconnect(self):
+        """Regression: a stale last_ack_seq must not block new-session acks.
+
+        Before the fix, reset_for_new_session preserved last_ack_seq, so after
+        a reconnect (new session numbering from seq 1) every ack early-returned
+        (acked_seq <= stale last_ack_seq) and the buffer never drained.
+        """
+        seq = Sequencer()
+        # Prior session: send + ack up to a high seq.
+        for _ in range(500):
+            seq.assign_seq({"type": "heartbeat"})
+        seq.handle_ack({"payload": {"last_seq": 500}})
+        assert seq.last_ack_seq == 500
+        assert seq.buffer_count == 0
+
+        # Reconnect: new session, sequence numbers restart from 1.
+        seq.reset_for_new_session()
+        seq.assign_seq({"type": "heartbeat"})   # seq 1
+        seq.assign_seq({"type": "state_batch"})  # seq 2
         assert seq.buffer_count == 2
-        # last_ack_seq is preserved for resume negotiation
-        assert seq.last_ack_seq == old_ack
+
+        # The cloud acks the new session's seq 1 — it must actually free it.
+        seq.handle_ack({"payload": {"last_seq": 1}})
+        assert seq.buffer_count == 1
+        assert seq.last_ack_seq == 1
 
     def test_clear_buffer(self):
         """clear_buffer removes all buffered messages."""
