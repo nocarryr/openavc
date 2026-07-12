@@ -45,6 +45,12 @@ export function FeedbackBindingEditor({
 
   const stateKey = String(current.key || "");
   const liveValue = useConnectionStore((s) => stateKey ? s.liveState[stateKey] : undefined);
+  // Subscribe to stateVersion so the category/key pickers re-render when device
+  // state arrives after the editor is opened (integrators routinely open this
+  // right after adding a device). liveState is a getState() snapshot read fresh
+  // each render and re-derived in the useMemos below keyed on stateVersion —
+  // matches the PluginExtensions/DeviceView pattern.
+  const stateVersion = useConnectionStore((s) => s.stateVersion);
   const liveState = useConnectionStore.getState().liveState;
   const condition = (current.condition as Record<string, unknown>) || { equals: "" };
   const styleActive = (current.style_active as Record<string, string>) || {};
@@ -116,7 +122,10 @@ export function FeedbackBindingEditor({
     }
 
     return cats;
-  }, [variables, devices, liveState]);
+    // stateVersion drives recomputation when a new state batch arrives (liveState
+    // is re-read from getState() on the triggered re-render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variables, devices, liveState, stateVersion]);
 
   // Determine selected category from current key
   const derivedCategory = useMemo(() => {
@@ -479,6 +488,12 @@ export function FeedbackBindingEditor({
                     value={String(appearance.icon || "")}
                     onChange={(v) => handleUpdateStateAppearance(sk, { icon: v || undefined })}
                   />
+                  {!!appearance.icon && (
+                    <InlineColorPicker clearable
+                      value={String(appearance.icon_color || "")}
+                      onChange={(c) => handleUpdateStateAppearance(sk, { icon_color: c || undefined })}
+                    />
+                  )}
                 </div>
                 {showImageField && (
                   <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
@@ -641,6 +656,12 @@ export function FeedbackBindingEditor({
                 value={styleActive.icon || ""}
                 onChange={(v) => handleChange({ style_active: { ...styleActive, icon: v || undefined } })}
               />
+              {styleActive.icon && (
+                <InlineColorPicker clearable
+                  value={styleActive.icon_color || ""}
+                  onChange={(c) => handleChange({ style_active: { ...styleActive, icon_color: c || undefined } })}
+                />
+              )}
             </div>
             {showImageField && (
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
@@ -702,6 +723,12 @@ export function FeedbackBindingEditor({
                 value={styleInactive.icon || ""}
                 onChange={(v) => handleChange({ style_inactive: { ...styleInactive, icon: v || undefined } })}
               />
+              {styleInactive.icon && (
+                <InlineColorPicker clearable
+                  value={styleInactive.icon_color || ""}
+                  onChange={(c) => handleChange({ style_inactive: { ...styleInactive, icon_color: c || undefined } })}
+                />
+              )}
             </div>
             {showImageField && (
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
