@@ -267,7 +267,7 @@ class _Registry:
             control_ip = get_system_config().get("network", "control_interface")
             listener.join_group(group, control_ip or "", name)
 
-            source_ips = await _resolve_source_ips(source_ip, name)
+            source_ips = await resolve_source_ips(source_ip, name)
             sub = MulticastSubscription(listener, group, source_ips, callback, name)
             listener.subscriptions.append(sub)
             return sub
@@ -294,7 +294,7 @@ class _Registry:
             self._listeners.clear()
 
 
-async def _resolve_source_ips(source_ip: str, name: str) -> set[str] | None:
+async def resolve_source_ips(source_ip: str, name: str) -> set[str] | None:
     """Compute the accepted source-address set for a subscription.
 
     A loopback host means the device is redirected to the local simulator, so
@@ -302,6 +302,7 @@ async def _resolve_source_ips(source_ip: str, name: str) -> set[str] | None:
     sender socket used — accept loopback plus every local interface address.
     A hostname is resolved once at subscribe time; resolution failure falls
     back to the literal (never matches, but the warning tells the user why).
+    Shared by the multicast and inbound-TCP push listener registries.
     """
     host = (source_ip or "").strip()
     if not host:

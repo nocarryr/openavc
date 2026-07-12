@@ -446,7 +446,7 @@ The tables below document each field in detail.
 | `on_connect` | No | List of raw commands sent immediately after connecting. Use for enabling verbose/feedback mode or requesting initial state. |
 | `polling` | No | Periodic status query configuration. |
 | `liveness` | No | Connection watchdog — send a probe on an interval, reconnect after consecutive misses. See `liveness` section below. |
-| `push` | No | Device-initiated push notifications — a multicast group the device sends frames to, or an SSE event stream on its HTTP API. Everything feeds the same `responses` rules. See `push` section below. |
+| `push` | No | Device-initiated push notifications — a multicast group the device sends frames to, an SSE event stream on its HTTP API, or a TCP port the device dials back to. Everything feeds the same `responses` rules. See `push` section below. |
 | `frame_parser` | No | Advanced: custom receive framing (see below). |
 | `send_frame` | No | Advanced: send-side packet framing — wraps every command in a binary header with a computed data length (e.g. eISCP). The send twin of `frame_parser` (see below). Byte-stream transports only. |
 | `protocols` | No | Protocol names this driver speaks (e.g., `["pjlink"]`, `["extron_sis"]`). Helps discovery match devices to drivers. |
@@ -1047,7 +1047,7 @@ For protocols that don't use a simple delimiter, you can specify a frame parser:
 }
 ```
 
-Types: `length_prefix` (reads a length header then N bytes), `fixed_length` (messages are always N bytes). For anything more complex, use a Python driver.
+Types: `length_prefix` (reads a length header then N bytes), `fixed_length` (messages are always N bytes), `struct_frame` (fixed reserved regions around a length field and payload — common in device dial-back notification containers; fields documented in the `push` section below, but usable here too). For anything more complex, use a Python driver.
 
 For `length_prefix`:
 
@@ -1089,7 +1089,7 @@ frame_parser:
 
 #### `push` section
 
-Most devices report state only when polled, and some push updates on the connection the driver already holds — both of those need nothing special. A `push` block is for devices that deliver notifications on a **separate channel the platform must open**. Two types are supported: `multicast` (the device sends state-change frames to a multicast group that OpenAVC joins) and `sse` (the device streams updates over a Server-Sent-Events endpoint on its HTTP API).
+Most devices report state only when polled, and some push updates on the connection the driver already holds — both of those need nothing special. A `push` block is for devices that deliver notifications on a **separate channel the platform must open**. Three types are supported: `multicast` (the device sends state-change frames to a multicast group that OpenAVC joins), `sse` (the device streams updates over a Server-Sent-Events endpoint on its HTTP API), and `tcp_listener` (the device dials back to a TCP port on the OpenAVC server after a registration command tells it where).
 
 ```yaml
 # UDP multicast — the device sends frames to a group OpenAVC joins:
@@ -1116,19 +1116,43 @@ push:
 - `path` — the event-stream URL path on the device, or a **list** of paths for devices that stream each resource separately (Barco ClickShare lets you subscribe to every endpoint you can GET). Literal paths start with `/`; `{config_field}` templates are allowed.
 - `idle_timeout` — optional. If the stream is silent (keepalives included) for this many seconds, the connection is presumed dead and reopened. Set it above the device's keepalive interval (ClickShare sends one every 90 s); omit it to wait indefinitely.
 
+```yaml
+# TCP listener — the device dials back to a port on the OpenAVC server and
+# pushes framed notifications (Panasonic PTZ cameras work this way):
+push:
+  type: tcp_listener
+  port: "{notify_port}"          # local inbound port; 0 = OS-assigned
+  register: start_notifications  # command that tells the device where to dial
+  unregister: stop_notifications # optional; frees the device's subscriber slot
+  frame_parser:                  # how the pushed frames are parsed
+    type: struct_frame
+    header_reserve: 22           # reserved bytes before the length field
+    length_size: 2               # 1 | 2 | 4
+    length_endian: big           # big (default) | little
+    length_adjust: -8            # added to the length value to get the payload size
+    mid_reserve: 4               # reserved bytes between length and payload
+    trailer_reserve: 24          # reserved bytes after the payload
+```
+
+- `type` — `tcp_listener`.
+- `port` — the local TCP port OpenAVC listens on, as a literal (0–65535), or a `{config_field}` template so the installer can change it per device. `0` lets the operating system pick a free port — convenient, but a fixed port is easier to allow through a host firewall. Devices pointed at the same port share one listener; each device's frames are matched to it by source address.
+- `register` — the name of a command that tells the device where to dial back. Reference the reserved `{listener_port}` token in the command's `path`/`send` string — it resolves to the actual bound port. The command runs right after the listener opens, and again on every reconnect, so devices whose registrations don't survive a reboot or a link cut re-arm automatically.
+- `unregister` — optional; the command that cancels the registration. It runs best-effort when the device is disconnected on purpose (project reload, device removed), freeing the device's subscriber slot — dial-back devices typically allow only a handful of registered controllers.
+- `frame_parser` — how the dial-back byte stream is split into notifications (it's a separate stream, so the control transport's framing doesn't apply). `struct_frame` fits the common shape above — reserved header + length field + reserved bytes + payload + reserved trailer; `length_prefix` and `fixed_length` are also accepted. Omit it to dispatch raw reads (fine for devices that send one plain-text line per connection).
+
 How it behaves:
 
-- The subscription starts as soon as the device connects — **before** `on_connect` runs, so a device whose notifications must be armed by an `on_connect` command never sends a frame the platform misses. It stops when the device disconnects and re-arms automatically on reconnect.
-- Everything that arrives goes through the driver's normal `responses` rules — same `match`/`set` semantics as a polled reply, nothing new to learn. A multicast datagram carrying several frames is split on the driver's `delimiter` first; an SSE event dispatches whole, exactly like an HTTP response body (SSE payloads are typically JSON — pair them with `json: true` response rules).
-- Multicast frames are accepted **only from the device's own address**, so two identical devices multicasting to the same group each update their own OpenAVC device. SSE needs no filtering — the stream rides the driver's own HTTP session, with its authentication and TLS settings.
-- A dropped SSE stream reconnects on its own with exponential backoff (1 s doubling to 30 s); a device reboot re-establishes the subscription without any user action.
+- The subscription starts as soon as the device connects — **before** `on_connect` (and any `register` command) runs, so a device whose notifications must be armed never sends a frame the platform misses. It stops when the device disconnects and re-arms automatically on reconnect.
+- Everything that arrives goes through the driver's normal `responses` rules — same `match`/`set` semantics as a polled reply, nothing new to learn. A multicast datagram or dial-back frame carrying several messages is split on the driver's `delimiter` first; an SSE event dispatches whole, exactly like an HTTP response body (SSE payloads are typically JSON — pair them with `json: true` response rules).
+- Multicast frames and dial-back connections are accepted **only from the device's own address**, so two identical devices pointed at the same group or listener port each update their own OpenAVC device. SSE needs no filtering — the stream rides the driver's own HTTP session, with its authentication and TLS settings.
+- A dropped SSE stream reconnects on its own with exponential backoff (1 s doubling to 30 s); a device reboot re-establishes the subscription without any user action. Dial-back devices open connections toward OpenAVC, so there is nothing to reconnect on this side — re-registration on reconnect (plus polling) covers a device that rebooted.
 - Push supplements polling; it doesn't replace it. Keep your `polling` block as the baseline resync — if the network filters multicast or an event stream drops (see below), the device still works, just at poll speed.
 
-Many devices ship with notifications disabled and a runtime command to enable them — send it from `on_connect`. If a device offers a continuous meter stream on the same channel, gate it behind a config field (substituted into the arming command) and put a `throttle:` on the meter response rule so panels get smooth readings without flooding the system.
+Many devices ship with notifications disabled and a runtime command to enable them — send it from `on_connect` (or, for dial-back devices, name it in `push.register`). If a device offers a continuous meter stream on the same channel, gate it behind a config field (substituted into the arming command) and put a `throttle:` on the meter response rule so panels get smooth readings without flooding the system.
 
-Network requirements (worth repeating in your driver's `help.setup` text): for multicast, the device and OpenAVC must be on the same VLAN (multicast doesn't cross VLANs without a router configured for it), and switches with IGMP snooping need an IGMP querier or the group may never reach the server. SSE has no special requirements — it's an ordinary outbound HTTPS/HTTP connection to the device's existing API port, just held open. When a join fails or a stream can't connect, nothing breaks — the driver logs the gap and polling carries on.
+Network requirements (worth repeating in your driver's `help.setup` text): for multicast, the device and OpenAVC must be on the same VLAN (multicast doesn't cross VLANs without a router configured for it), and switches with IGMP snooping need an IGMP querier or the group may never reach the server. For a TCP listener, the device opens connections **to** the OpenAVC server on the listener port — a host firewall on the server must allow that inbound port, and the device must be able to reach the server's address (same VLAN, or routed). SSE has no special requirements — it's an ordinary outbound HTTPS/HTTP connection to the device's existing API port, just held open. When a join fails, a port can't be bound, or a stream can't connect, nothing breaks — the driver logs the gap and polling carries on.
 
-The simulator understands `push` too: a driver with a multicast push block emits its `simulator.notifications` templates to the group instead of the control connection, and a driver with an SSE push block serves its declared event-stream paths and delivers the templates there — so you can watch push updates end-to-end against a simulated device either way. See the [notifications section](https://github.com/open-avc/openavc-drivers/blob/main/docs/writing-simulators.md) of the simulator guide.
+The simulator understands `push` too: a driver with a multicast push block emits its `simulator.notifications` templates to the group instead of the control connection; a driver with an SSE push block serves its declared event-stream paths and delivers the templates there; and a driver with a TCP-listener push block gets a real dial-back loop — the simulator recognizes the `register`/`unregister` commands (via their `{listener_port}` token), tracks subscribers, and dials each one with the templates wrapped in the declared frame container. So you can watch push updates end-to-end against a simulated device in all three shapes. See the [notifications section](https://github.com/open-avc/openavc-drivers/blob/main/docs/writing-simulators.md) of the simulator guide.
 
 ### Discovery
 

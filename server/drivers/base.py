@@ -416,11 +416,11 @@ class BaseDriver(ABC):
         self._health_task: asyncio.Task | None = None
         self._health_failures = 0
         # Push-notification subscription (DRIVER_INFO["push"] — a multicast
-        # group membership, or a list of SSE event-stream handles). Started
-        # by connect() once the session is up — before any on_connect arming
-        # commands run — and stopped on both disconnect paths. None when the
-        # driver declares no push block or the subscription failed (polling
-        # still covers it).
+        # group membership, an inbound TCP listener subscription, or a list
+        # of SSE event-stream handles). Started by connect() once the session
+        # is up — before any on_connect arming commands run — and stopped on
+        # both disconnect paths. None when the driver declares no push block
+        # or the subscription failed (polling still covers it).
         self._push_subscription: Any = None
         # Registered child entities: {child_type: {local_id: register_epoch}}.
         # The inner mapping is a dict (not a set) so it preserves insertion
@@ -1280,9 +1280,10 @@ class BaseDriver(ABC):
     async def _start_push(self) -> None:
         """Subscribe to the driver's declared push channel, if any.
 
-        ``type: multicast`` and ``type: sse`` exist today. Never raises: a
-        device whose push channel can't be opened still connects and polls —
-        the gap is logged so the user can see why changes aren't instant.
+        ``type: multicast``, ``type: sse``, and ``type: tcp_listener`` exist
+        today. Never raises: a device whose push channel can't be opened
+        still connects and polls — the gap is logged so the user can see why
+        changes aren't instant.
         """
         push_def = self.DRIVER_INFO.get("push")
         if not isinstance(push_def, dict):
@@ -1292,6 +1293,8 @@ class BaseDriver(ABC):
             await self._start_push_multicast(push_def)
         elif ptype == "sse":
             self._start_push_sse(push_def)
+        elif ptype == "tcp_listener":
+            await self._start_push_tcp_listener(push_def)
         else:
             # The loader rejects unknown/unsupported types for catalog
             # drivers; this is the runtime backstop for hand-installed files.
@@ -1334,6 +1337,72 @@ class BaseDriver(ABC):
                 f"[{self.device_id}] push: could not open multicast "
                 f"listener on {group}:{port}: {e}"
             )
+
+    async def _start_push_tcp_listener(self, push_def: dict[str, Any]) -> None:
+        """Open the shared inbound listener the device dials back to.
+
+        The subscription starts before on_connect / registration commands run,
+        so the first frame a freshly-registered device pushes is never missed.
+        The actual bound port is injected into the device config as
+        ``listener_port`` — the reserved substitution token registration
+        commands use (``my_port={listener_port}``). When the push block names
+        a ``register`` command it runs here, which also re-arms the device on
+        every reconnect (device-side registrations don't survive a reboot or
+        a link cut).
+        """
+        from server.transport import tcp_listener
+        from server.transport.frame_parsers import build_frame_parser
+
+        raw_port = self._resolve_push_value(push_def.get("port"))
+        try:
+            port = int(str(raw_port).strip())
+        except (TypeError, ValueError):
+            port = -1
+        if not (0 <= port < 65536):
+            log.warning(
+                f"[{self.device_id}] push: cannot listen — port {raw_port!r} "
+                f"did not resolve to a TCP port (check the device's "
+                f"notification settings fields)"
+            )
+            return
+
+        frame_cfg = push_def.get("frame_parser")
+        if isinstance(frame_cfg, dict):
+            def factory() -> Any:
+                return build_frame_parser(frame_cfg)
+        else:
+            factory = None
+
+        try:
+            sub = await tcp_listener.subscribe(
+                port=port,
+                source_ip=str(self.config.get("host", "") or ""),
+                callback=self._handle_push_datagram,
+                name=self.device_id,
+                frame_parser_factory=factory,
+            )
+        except OSError as e:
+            log.warning(
+                f"[{self.device_id}] push: could not open TCP listener on "
+                f"port {port}: {e} (is another program using it?)"
+            )
+            return
+        self._push_subscription = sub
+        # Reserved substitution token: commands, on_connect entries, and poll
+        # queries can reference {listener_port} to tell the device where to
+        # dial back (resolves an ephemeral port-0 bind to the real port).
+        self.config["listener_port"] = sub.port
+
+        register = push_def.get("register")
+        if register:
+            try:
+                await self.send_command(str(register))
+            except Exception as e:
+                log.warning(
+                    f"[{self.device_id}] push: registration command "
+                    f"{register!r} failed: {e} — the device will not push "
+                    f"until it reconnects (polling still covers it)"
+                )
 
     def _start_push_sse(self, push_def: dict[str, Any]) -> None:
         """Open the driver's declared SSE event stream(s).
@@ -1383,6 +1452,7 @@ class BaseDriver(ABC):
         self._push_subscription = None
         if sub is None:
             return
+        await self._push_unregister()
         for handle in sub if isinstance(sub, list) else [sub]:
             try:
                 await handle.close()
@@ -1391,6 +1461,37 @@ class BaseDriver(ABC):
                     f"[{self.device_id}] Error closing push subscription",
                     exc_info=True,
                 )
+
+    async def _push_unregister(self) -> None:
+        """Best-effort de-registration on a graceful disconnect.
+
+        Devices in the dial-back shape hold a limited subscriber list (the
+        Panasonic cameras allow 5) and keep a slot busy as long as deliveries
+        succeed — so a device that is being removed while its shared listener
+        port stays open for others would hold its slot indefinitely. Only
+        attempted while the session is still up: on transport loss (and on
+        the stale-subscription drop at reconnect) there is nobody to talk to.
+        """
+        push_def = self.DRIVER_INFO.get("push")
+        if not isinstance(push_def, dict):
+            return
+        unregister = push_def.get("unregister")
+        if (
+            not unregister
+            or not self._connected
+            or self.transport is None
+            or not self.transport.connected
+        ):
+            return
+        try:
+            await asyncio.wait_for(
+                self.send_command(str(unregister)), timeout=5.0
+            )
+        except Exception as e:
+            log.debug(
+                f"[{self.device_id}] push: de-registration command "
+                f"{unregister!r} failed: {e}"
+            )
 
     async def _handle_push_datagram(
         self, data: bytes, source: tuple[str, int]

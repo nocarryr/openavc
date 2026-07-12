@@ -896,13 +896,15 @@ export interface DriverAuthDef {
 }
 
 export interface DriverPushDef {
-  /** "multicast" or "sse" (tcp_listener/http_listener are reserved for
-   *  future channel types and rejected by the loader). */
+  /** "multicast", "sse", or "tcp_listener" (http_listener is reserved for a
+   *  future channel type and rejected by the loader). */
   type?: string;
   /** Multicast only: IPv4 group literal (224.0.0.0 - 239.255.255.255) or a
    *  {config_field} template naming a declared config field. */
   group?: string;
-  /** Multicast only: integer 1-65535, or a {config_field} template string. */
+  /** Multicast: integer 1-65535, or a {config_field} template string.
+   *  TCP listener: the local inbound port the device dials back to —
+   *  0-65535 (0 = OS-assigned) or a {config_field} template. */
   port?: number | string;
   /** SSE only: event-stream URL path(s) on the device (e.g.
    *  "/v2/configuration/system/status"), each a literal starting with "/"
@@ -912,6 +914,17 @@ export interface DriverPushDef {
    *  before the connection is considered dead and reopened. Omit to wait
    *  indefinitely. */
   idle_timeout?: number;
+  /** TCP listener only: framing for the pushed frames (struct_frame,
+   *  length_prefix, or fixed_length) — the dial-back channel is its own
+   *  byte stream, independent of the control transport's framing. */
+  frame_parser?: { type: string; [key: string]: unknown } | null;
+  /** TCP listener only: name of the command that registers the dial-back
+   *  target with the device (reference {listener_port} in its path/send
+   *  string). Runs after the listener opens, and again on every reconnect. */
+  register?: string;
+  /** TCP listener only: name of the command that cancels the registration.
+   *  Runs best-effort on graceful disconnect. */
+  unregister?: string;
 }
 
 export interface DriverLivenessDef {

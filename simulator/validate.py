@@ -883,11 +883,12 @@ def _check_notifications(
         return
 
     # A driver with a push channel emits its notifications there instead of
-    # the control connection — multicast is valid on any transport, SSE on
-    # HTTP (subscriptions ride the control session).
+    # the control connection — multicast and tcp_listener (dial-back) are
+    # valid on any transport, SSE on HTTP (subscriptions ride the control
+    # session).
     push_def = driver_def.get("push")
     has_push_channel = isinstance(push_def, dict) and (
-        push_def.get("type") == "multicast"
+        push_def.get("type") in ("multicast", "tcp_listener")
         or (push_def.get("type") == "sse" and transport == "http")
     )
     if transport not in ("tcp", "serial") and not has_push_channel:
@@ -895,7 +896,8 @@ def _check_notifications(
             "notifications",
             f"notifications: has no effect for transport '{transport}' — only "
             f"line-based TCP/serial simulators push notification messages "
-            f"(unless the driver declares a multicast or SSE push: block)"
+            f"(unless the driver declares a multicast, SSE, or TCP dial-back "
+            f"push: block)"
         )
 
     response_patterns = _compile_response_patterns(responses, driver_def)
@@ -979,8 +981,17 @@ def _check_notifications(
             # rendered JSON notification must still round-trip below.
             if re.search(r"\{[a-zA-Z_]\w*(:[^}]*)?\}", message):
                 continue
+            # Mirror runtime dispatch: pushed data is split on line endings
+            # (driver delimiter) and stripped before matching, so a template
+            # wrapped in CR/LF (dial-back containers embed the payload as
+            # "\r\n<response>\r\n") still round-trips.
+            candidates = [message.strip()] + [
+                part.strip()
+                for part in re.split(r"[\r\n]+", message)
+                if part.strip()
+            ]
             if not any(
-                p.search(message) for p in response_patterns
+                p.search(c) for c in candidates for p in response_patterns
             ) and not _matches_json_rules(message, json_keys):
                 result.warning(
                     "notifications",

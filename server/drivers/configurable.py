@@ -2498,31 +2498,18 @@ class ConfigurableDriver(BaseDriver):
         return sf["header"] + length + sf["after_length"] + data
 
     def _create_frame_parser(self) -> FrameParser | None:
-        """Check definition for frame parser config."""
+        """Check definition for frame parser config.
+
+        Delegates to the shared declarative builder (length_prefix,
+        fixed_length, struct_frame) — the same interpreter the push
+        channel's per-subscription framing uses.
+        """
+        from server.transport.frame_parsers import build_frame_parser
+
         parser_config = self._definition.get("frame_parser")
         if not parser_config:
             return None
-
-        parser_type = parser_config.get("type", "")
-        if parser_type == "length_prefix":
-            from server.transport.frame_parsers import LengthPrefixFrameParser
-
-            return LengthPrefixFrameParser(
-                header_size=parser_config.get("header_size", 2),
-                header_offset=parser_config.get("header_offset", 0),
-                include_header=parser_config.get("include_header", False),
-                length_offset=parser_config.get("length_offset", 0),
-                header_extra=parser_config.get("header_extra", 0),
-                length_endian=parser_config.get("length_endian", "big"),
-            )
-        elif parser_type == "fixed_length":
-            from server.transport.frame_parsers import FixedLengthFrameParser
-
-            return FixedLengthFrameParser(
-                length=parser_config.get("length", 1),
-            )
-
-        return None
+        return build_frame_parser(parser_config)
 
     @staticmethod
     def _coerce_value(raw: str, value_type: str) -> Any:

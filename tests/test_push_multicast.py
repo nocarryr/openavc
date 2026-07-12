@@ -102,7 +102,9 @@ def test_loader_accepts_literal_group_and_port():
 @pytest.mark.parametrize(
     "push, expect",
     [
-        ({"type": "tcp_listener", "group": "239.0.0.1", "port": 1}, "not supported yet"),
+        # tcp_listener is a real type now — group doesn't apply to it (its
+        # own accept/reject matrix lives in test_push_tcp_listener.py).
+        ({"type": "tcp_listener", "group": "239.0.0.1", "port": 1}, "unknown key"),
         ({"type": "http_listener", "group": "239.0.0.1", "port": 1}, "not supported yet"),
         # sse is a real type now, but group/port don't apply to it (and it
         # requires the http transport — this invented mixer is tcp).
