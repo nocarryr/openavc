@@ -420,12 +420,19 @@ class TestBackup:
     def test_list_backups(self, tmp_path):
         backup_dir = tmp_path / "backups"
         backup_dir.mkdir()
-        (backup_dir / "pre-update-v0.1.0-20260101T000000Z.zip").write_bytes(b"fake")
-        (backup_dir / "pre-update-v0.2.0-20260201T000000Z.zip").write_bytes(b"fake")
+        older = backup_dir / "pre-update-v0.1.0-20260101T000000Z.zip"
+        newer = backup_dir / "pre-update-v0.2.0-20260201T000000Z.zip"
+        older.write_bytes(b"fake")
+        newer.write_bytes(b"fake")
+        # Set explicit mtimes so the newest-first assertion is deterministic:
+        # list_backups orders by mtime, and Windows' coarse mtime resolution can
+        # otherwise tie two writes made in the same tick (flaky order).
+        os.utime(older, (1_600_000_000, 1_600_000_000))
+        os.utime(newer, (1_700_000_000, 1_700_000_000))
 
         backups = list_backups(tmp_path)
         assert len(backups) == 2
-        # Newest first
+        # Newest first (by mtime)
         assert "v0.2.0" in backups[0]["name"]
 
     def test_cleanup_old_backups(self, tmp_path):
