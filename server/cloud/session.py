@@ -77,8 +77,11 @@ class Session:
                 )
                 if datetime.now(timezone.utc) >= expires_dt:
                     return False
-            except ValueError:
-                pass  # Can't parse expiry — assume still valid
+            except (ValueError, TypeError):
+                # Unparseable expiry (ValueError) or a timezone-naive one that
+                # can't be compared to an aware now (TypeError) — fail closed:
+                # a session whose expiry we can't verify is treated as invalid.
+                return False
         return True
 
     def sign_outgoing(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -132,11 +135,22 @@ class Session:
         new_expires = payload.get("new_session_expires", "")
         switch_at_seq = payload.get("switch_at_seq")
 
-        if not all([new_token, new_salt_hex]):
+        # switch_at_seq is required: without it check_rotation can never fire
+        # (it gates on `_rotate_at_downstream_seq is not None`), so the agent
+        # would silently stay on the old key while the cloud switches to the new
+        # one — breaking signature verification on later messages.
+        if not all([new_token, new_salt_hex]) or not isinstance(switch_at_seq, int):
             log.warning("session_rotate missing required fields, ignoring")
             return
 
-        new_salt = bytes.fromhex(new_salt_hex)
+        try:
+            new_salt = bytes.fromhex(new_salt_hex)
+        except ValueError:
+            # A malformed (cloud-controlled) salt must warn-and-ignore, not abort
+            # rotation with an uncaught exception (which would leave the agent on
+            # the old key after the cloud believes rotation occurred).
+            log.warning("session_rotate has a malformed signing-key salt, ignoring")
+            return
         # Use new session_id for key derivation if provided, otherwise keep current
         new_session_id = payload.get("new_session_id", self.session_id)
         new_signing_key = derive_signing_key(

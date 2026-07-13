@@ -279,10 +279,12 @@ class TestSessionManagement:
         session, _, _ = self._make_session(session_expires="2099-12-31T23:59:59+00:00")
         assert session.is_valid
 
-    def test_session_malformed_expiry_still_valid(self):
-        """Unparseable expiry string does not cause crash, session stays valid."""
+    def test_session_malformed_expiry_fails_closed(self):
+        """An unparseable expiry string doesn't crash — and fails closed (the
+        session is treated as invalid rather than kept valid, since its expiry
+        can't be verified). See bug-fix L-164."""
         session, _, _ = self._make_session(session_expires="not-a-date")
-        assert session.is_valid
+        assert session.is_valid is False
 
     # --- Signing and Verification ---
 

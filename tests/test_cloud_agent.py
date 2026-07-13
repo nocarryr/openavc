@@ -646,6 +646,57 @@ class TestSession:
         assert session.session_token == "new-token-xyz"
         assert session.signing_key != old_key
 
+    def test_session_rotate_ignores_malformed_salt(self):
+        """A malformed (non-hex) rotation salt is ignored — no uncaught
+        exception, and no rotation is armed, so the agent stays on the working
+        current key instead of diverging from the cloud."""
+        session, _ = self._make_session()
+        rotate_msg = {
+            "type": SESSION_ROTATE,
+            "payload": {
+                "new_session_token": "new-token",
+                "new_signing_key_salt": "not-hex-zz",
+                "switch_at_seq": 5,
+            },
+        }
+        session.handle_session_rotate(rotate_msg)  # must not raise
+        assert session._pending_token is None  # nothing armed
+        session.check_rotation(999)
+        assert session.session_token == "token-abc"  # unchanged
+
+    def test_session_rotate_ignores_missing_switch_at_seq(self):
+        """A rotate without switch_at_seq is ignored, not silently armed as a
+        rotation check_rotation can never apply (which would leave the agent on
+        the old signing key while the cloud switches)."""
+        session, _ = self._make_session()
+        rotate_msg = {
+            "type": SESSION_ROTATE,
+            "payload": {
+                "new_session_token": "new-token",
+                "new_signing_key_salt": generate_nonce(32),
+                # switch_at_seq intentionally omitted
+            },
+        }
+        session.handle_session_rotate(rotate_msg)
+        assert session._pending_token is None  # rotation not armed
+        session.check_rotation(999)
+        assert session.session_token == "token-abc"
+
+    def test_is_valid_naive_expiry_fails_closed(self):
+        """A timezone-naive expiry can't be compared to an aware now; treat the
+        session as invalid rather than crashing the caller with a TypeError."""
+        system_key = generate_system_key()
+        signing_key = derive_signing_key(system_key, b"salt", "s1")
+        session = Session("s1", "tok", signing_key, "2099-01-01T00:00:00", system_key)
+        assert session.is_valid is False
+
+    def test_is_valid_unparseable_expiry_fails_closed(self):
+        """An unparseable expiry fails closed (was swallowed and treated valid)."""
+        system_key = generate_system_key()
+        signing_key = derive_signing_key(system_key, b"salt", "s1")
+        session = Session("s1", "tok", signing_key, "not-a-timestamp", system_key)
+        assert session.is_valid is False
+
     def test_handle_session_invalid(self):
         """session_invalid raises SessionInvalid."""
         session, _ = self._make_session()
