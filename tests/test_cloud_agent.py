@@ -951,6 +951,58 @@ class TestCommandHandler:
         assert len(emitted) == 1
         assert emitted[0]["mode"] == "graceful"
 
+    @pytest.mark.asyncio
+    async def test_config_push_migrates_old_schema(self, tmp_path):
+        """A config_push carrying an older-schema project is migrated to the
+        current format before it's validated and saved — not persisted with
+        stale field placement to be re-migrated only on the next disk reload."""
+        import json
+        from server.core.state_store import StateStore
+        from server.core.event_bus import EventBus
+        from server.core.device_manager import DeviceManager
+        from server.cloud.command_handler import CommandHandler
+
+        state = StateStore()
+        events = EventBus()
+        devices = DeviceManager(state, events)
+
+        sent = []
+
+        class MockAgent:
+            async def send_message(self, msg_type, payload):
+                sent.append((msg_type, payload))
+
+        # Pre-existing on-disk project uses a distinct id, so we can tell the
+        # pushed project actually replaced it (i.e. the save happened).
+        project_path = tmp_path / "project.avc"
+        project_path.write_text(
+            json.dumps({"openavc_version": "0.7.0", "project": {"id": "old", "name": "Old"}}),
+            encoding="utf-8",
+        )
+
+        reloaded = []
+
+        async def reload_fn():
+            reloaded.append(True)
+
+        handler = CommandHandler(
+            MockAgent(), devices, events, reload_fn=reload_fn, project_path=str(project_path),
+        )
+
+        # Push a 0.6.0-schema project; the current schema is 0.7.0.
+        old_schema = {"openavc_version": "0.6.0", "project": {"id": "pushed", "name": "Room"}}
+        await handler._handle_config_push(
+            {"project_json": old_schema, "mode": "full_replace"}, "req-cfg", "tech@x.com",
+        )
+
+        saved = json.loads(project_path.read_text(encoding="utf-8"))
+        # Migration ran before the save: the persisted version is the current one.
+        assert saved["openavc_version"] == "0.7.0", saved.get("openavc_version")
+        # And the pushed project is what got saved (not the pre-existing one).
+        assert saved["project"]["id"] == "pushed"
+        assert reloaded == [True]
+        assert sent and sent[-1][1]["success"] is True
+
 
 # ===========================================================================
 # State Relay Tests
@@ -1412,6 +1464,81 @@ class TestDiagnosticActions:
         finally:
             server.close()
             await server.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_tcp_check_rejects_port_zero(self):
+        """A literal port 0 is an invalid request — clear error, not a probe of
+        port 1 (which the old clamp produced)."""
+        from server.cloud.command_handler import _diagnostic_tcp_check
+        result = await _diagnostic_tcp_check("127.0.0.1", {"port": 0})
+        assert result["open"] is False
+        assert "invalid port" in result["error"]
+        assert "host" not in result  # never reached the probe
+
+    @pytest.mark.asyncio
+    async def test_tcp_check_rejects_out_of_range_port(self):
+        """A port above 65535 is rejected with a clear error, not clamped."""
+        from server.cloud.command_handler import _diagnostic_tcp_check
+        result = await _diagnostic_tcp_check("127.0.0.1", {"port": 70000})
+        assert result["open"] is False
+        assert "invalid port" in result["error"]
+
+    def test_validate_exec_target_accepts_hostnames_and_ips(self):
+        """Hostnames and IPs (v4/v6) are valid diagnostic targets."""
+        from server.cloud.command_handler import _validate_exec_target
+        for good in ("example.com", "device-1.local", "192.168.1.10", "2001:db8::1"):
+            assert _validate_exec_target(good) is None, good
+
+    def test_validate_exec_target_rejects_dash_and_junk(self):
+        """A leading dash (option injection) and non-host characters are rejected."""
+        from server.cloud.command_handler import _validate_exec_target
+        assert _validate_exec_target("") is not None
+        assert _validate_exec_target("-oProxyCommand=x") is not None
+        assert _validate_exec_target("--flood") is not None
+        assert _validate_exec_target("a b") is not None  # whitespace
+        assert _validate_exec_target("$(rm -rf)") is not None
+
+    @pytest.mark.asyncio
+    async def test_ping_rejects_dash_target(self):
+        """ping never spawns a subprocess for a dash-prefixed target."""
+        from server.cloud.command_handler import _diagnostic_ping
+        result = await _diagnostic_ping("-c1000", {})
+        assert result["reachable"] is False
+        assert "must not start with '-'" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_traceroute_rejects_dash_target(self):
+        """traceroute never spawns a subprocess for a dash-prefixed target."""
+        from server.cloud.command_handler import _diagnostic_traceroute
+        result = await _diagnostic_traceroute("-x", {})
+        assert "must not start with '-'" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_communicate_bounded_kills_hung_process(self):
+        """A subprocess that never returns is killed and reaped, and the overall
+        bound raises TimeoutError instead of hanging the diagnostic task."""
+        import asyncio
+        from server.cloud.command_handler import _communicate_bounded
+
+        class _HungProc:
+            def __init__(self):
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self):
+                await asyncio.sleep(3600)  # never within the test bound
+
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                self.waited = True
+
+        proc = _HungProc()
+        with pytest.raises(asyncio.TimeoutError):
+            await _communicate_bounded(proc, 0.05)
+        assert proc.killed is True
+        assert proc.waited is True
 
     @pytest.mark.asyncio
     async def test_port_scan_finds_open_port(self):

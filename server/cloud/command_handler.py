@@ -8,6 +8,7 @@ engine subsystem and sends command_result responses.
 
 from __future__ import annotations
 
+import re
 from typing import Any, TYPE_CHECKING
 
 from server.cloud.protocol import (
@@ -146,6 +147,7 @@ class CommandHandler:
             try:
                 from pathlib import Path
                 from server.core.project_loader import ProjectConfig, save_project_async
+                from server.core.project_migration import migrate_project
                 from server.core.backup_manager import create_backup
 
                 project_path = Path(self._project_path)
@@ -161,9 +163,13 @@ class CommandHandler:
 
                 # Write new project_json to disk if provided
                 if project_json:
-                    # Validate against schema before writing to disk
+                    # Migrate an old-schema push to the current format BEFORE
+                    # validating/saving, matching load_project — otherwise a
+                    # pre-current-schema cloud project is persisted with stale
+                    # field placement and misread until the next disk reload.
                     try:
-                        project = ProjectConfig.model_validate(project_json)
+                        migrated_json, _ = migrate_project(project_json)
+                        project = ProjectConfig.model_validate(migrated_json)
                     except (ValueError, TypeError) as ve:
                         await self._send_result(request_id, False, error=f"Invalid project schema: {ve}")
                         return
@@ -490,10 +496,49 @@ def _clamp(value: Any, lo: int, hi: int, default: int) -> int:
     return max(lo, min(hi, v))
 
 
+# Hostname / IP characters only. ping/traceroute receive the cloud-supplied
+# target as a bare argv element, so a value starting with '-' would be read as
+# an option flag (option injection). exec() avoids the shell, so the leading-dash
+# case is the real risk; the character whitelist is cheap defence in depth.
+_EXEC_TARGET_RE = re.compile(r"[A-Za-z0-9._:%-]+")
+
+
+def _validate_exec_target(target: str) -> str | None:
+    """Return an error message if `target` is unsafe to pass as a bare argv
+    element to ping/traceroute, else None."""
+    if not target:
+        return "target required"
+    if target.startswith("-"):
+        return "invalid target: must not start with '-'"
+    if not _EXEC_TARGET_RE.fullmatch(target):
+        return "invalid target: only hostname/IP characters are allowed"
+    return None
+
+
+async def _communicate_bounded(proc, timeout_s: float) -> tuple[bytes, bytes]:
+    """Run ``proc.communicate()`` under an overall wall-clock bound, killing and
+    reaping the subprocess if it overruns. Without this a ping/traceroute whose
+    binary stalls on an unresponsive target hangs the task far past any per-hop
+    timeout (tcp_check already bounds itself with asyncio.wait_for). Raises
+    ``asyncio.TimeoutError`` on overrun."""
+    import asyncio
+    import contextlib
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()  # best-effort reap so the child isn't left as a zombie
+        raise
+
+
 async def _diagnostic_ping(target: str, params: dict) -> dict:
     """ICMP-ish ping using the OS `ping` binary (cross-platform)."""
     import asyncio
     import sys
+    err = _validate_exec_target(target)
+    if err:
+        return {"reachable": False, "error": err}
     count = _clamp(params.get("count"), 1, 20, 4)
     timeout_s = _clamp(params.get("timeout"), 1, 30, 2)
 
@@ -505,7 +550,18 @@ async def _diagnostic_ping(target: str, params: dict) -> dict:
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    # Overall bound: each of `count` pings can wait up to timeout_s, plus slack.
+    overall_timeout = count * timeout_s + 5
+    try:
+        stdout, stderr = await _communicate_bounded(proc, overall_timeout)
+    except asyncio.TimeoutError:
+        return {
+            "exit_code": None,
+            "reachable": False,
+            "output": "",
+            "error": f"ping exceeded {overall_timeout}s and was terminated",
+            "count": count,
+        }
     output = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
     return {
         "exit_code": proc.returncode,
@@ -518,9 +574,18 @@ async def _diagnostic_ping(target: str, params: dict) -> dict:
 async def _diagnostic_tcp_check(target: str, params: dict) -> dict:
     """Probe a TCP port. Target is the host; port comes from params."""
     import asyncio
-    port = _clamp(params.get("port"), 1, 65535, 0)
-    if port == 0:
+    raw_port = params.get("port")
+    if raw_port is None:
         return {"open": False, "error": "port required for tcp_check"}
+    # Validate rather than clamp: a literal port 0 (or out-of-range) is an
+    # invalid request and must yield a clear error, not a misleading probe of
+    # port 1 (which clamping produced).
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        return {"open": False, "error": f"invalid port {raw_port!r} (must be an integer 1-65535)"}
+    if not 1 <= port <= 65535:
+        return {"open": False, "error": f"invalid port {port} (must be 1-65535)"}
     timeout_s = _clamp(params.get("timeout"), 1, 30, 3)
 
     try:
@@ -569,6 +634,9 @@ async def _diagnostic_traceroute(target: str, params: dict) -> dict:
     """Trace the route to a host. Uses the OS `traceroute`/`tracert` binary."""
     import asyncio
     import sys
+    err = _validate_exec_target(target)
+    if err:
+        return {"error": err}
     max_hops = _clamp(params.get("max_hops"), 1, 64, 30)
     timeout_s = _clamp(params.get("timeout"), 1, 30, 2)
 
@@ -583,7 +651,15 @@ async def _diagnostic_traceroute(target: str, params: dict) -> dict:
         )
     except FileNotFoundError:
         return {"error": f"{cmd[0]} not installed on this system"}
-    stdout, stderr = await proc.communicate()
+    # Overall bound: up to max_hops probes each waiting timeout_s, plus slack.
+    overall_timeout = max_hops * timeout_s + 10
+    try:
+        stdout, stderr = await _communicate_bounded(proc, overall_timeout)
+    except asyncio.TimeoutError:
+        return {
+            "error": f"traceroute exceeded {overall_timeout}s and was terminated",
+            "max_hops": max_hops,
+        }
     output = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
     return {
         "exit_code": proc.returncode,
