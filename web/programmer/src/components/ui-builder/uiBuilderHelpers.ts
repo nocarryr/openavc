@@ -908,20 +908,26 @@ export function reorderElement(
   });
 }
 
-export function moveElementInOrder(
+// Swap two elements' positions in a page's element array (the array order IS
+// the z-order). Callers pass the moving element and the neighbour it should
+// trade places with — the OutlinePanel passes the *visible* neighbour from its
+// (possibly search-filtered) list, so reordering swaps the element the user
+// actually sees adjacent to it, not a hidden full-list neighbour. With no
+// filter the visible neighbour is the full-list adjacent, so this reduces to a
+// plain adjacent move.
+export function swapElementsInOrder(
   pages: UIPage[],
   pageId: string,
   elementId: string,
-  direction: "up" | "down",
+  neighborId: string,
 ): UIPage[] {
   return pages.map((p) => {
     if (p.id !== pageId) return p;
-    const idx = p.elements.findIndex((e) => e.id === elementId);
-    if (idx === -1) return p;
-    const newIdx = direction === "up" ? idx - 1 : idx + 1;
-    if (newIdx < 0 || newIdx >= p.elements.length) return p;
+    const a = p.elements.findIndex((e) => e.id === elementId);
+    const b = p.elements.findIndex((e) => e.id === neighborId);
+    if (a === -1 || b === -1 || a === b) return p;
     const els = [...p.elements];
-    [els[idx], els[newIdx]] = [els[newIdx], els[idx]];
+    [els[a], els[b]] = [els[b], els[a]];
     return { ...p, elements: els };
   });
 }

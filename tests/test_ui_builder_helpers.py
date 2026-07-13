@@ -109,6 +109,10 @@ SCENARIOS = [
     "l147_page_alias_incomplete",
     "l147_value_map_branch_incomplete",
     "l147_valid_actions_clean",
+    "m306_swap_adjacent",
+    "m306_swap_visible_neighbor_skips_hidden",
+    "m306_swap_noop_unknown_or_same",
+    "m306_swap_scoped_to_page",
 ]
 
 

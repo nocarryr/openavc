@@ -564,4 +564,51 @@ statusScenario("l147_valid_actions_clean", () => {
   return { pass: checks.every(Boolean), detail: checks };
 });
 
+// --- M-306: swapElementsInOrder swaps by id (visible-neighbour z-order move) ---
+// The OutlinePanel z-order buttons pass the moving element's VISIBLE (filtered)
+// neighbour, so a reorder swaps what the user sees adjacent — not a hidden
+// full-list neighbour, which the old direction-based adjacent move did.
+const pageWith = (ids) => [{ id: "pg", elements: ids.map((id) => ({ id })) }];
+const idsOf = (pages) => pages[0].elements.map((e) => e.id);
+{
+  // Adjacent (unfiltered) case: B up past A -> [B, A, C].
+  const r = H.swapElementsInOrder(pageWith(["A", "B", "C"]), "pg", "B", "A");
+  results.m306_swap_adjacent = { pass: eq(idsOf(r), ["B", "A", "C"]), detail: idsOf(r) };
+}
+{
+  // THE fix: x is hidden by a search filter between A and B in the full list.
+  // Moving A against its VISIBLE neighbour B swaps A<->B, so x keeps its slot.
+  // The OLD adjacent move ("down") would have swapped A<->x instead.
+  const full = ["A", "x", "B"];
+  const oldAdjacent = (() => { const e = [...full]; [e[0], e[1]] = [e[1], e[0]]; return e; })();
+  const r = H.swapElementsInOrder(pageWith(full), "pg", "A", "B");
+  results.m306_swap_visible_neighbor_skips_hidden = {
+    pass: eq(oldAdjacent, ["x", "A", "B"]) && eq(idsOf(r), ["B", "x", "A"]),
+    detail: { oldAdjacent, now: idsOf(r) },
+  };
+}
+{
+  // No-op guards: unknown neighbour or same id leaves order untouched.
+  const same = H.swapElementsInOrder(pageWith(["A", "B"]), "pg", "A", "A");
+  const missing = H.swapElementsInOrder(pageWith(["A", "B"]), "pg", "A", "ghost");
+  results.m306_swap_noop_unknown_or_same = {
+    pass: eq(idsOf(same), ["A", "B"]) && eq(idsOf(missing), ["A", "B"]),
+    detail: { same: idsOf(same), missing: idsOf(missing) },
+  };
+}
+{
+  // Only the named page is touched.
+  const pages = [
+    { id: "pg", elements: [{ id: "A" }, { id: "B" }] },
+    { id: "other", elements: [{ id: "A" }, { id: "B" }] },
+  ];
+  const r = H.swapElementsInOrder(pages, "pg", "A", "B");
+  results.m306_swap_scoped_to_page = {
+    pass:
+      eq(r[0].elements.map((e) => e.id), ["B", "A"]) &&
+      eq(r[1].elements.map((e) => e.id), ["A", "B"]),
+    detail: { pg: r[0].elements.map((e) => e.id), other: r[1].elements.map((e) => e.id) },
+  };
+}
+
 process.stdout.write(JSON.stringify(results));

@@ -39,7 +39,7 @@ import {
   moveElementInPage,
   duplicateElementInPage,
   reorderElement,
-  moveElementInOrder,
+  swapElementsInOrder,
   promoteToMaster,
   demoteFromMaster,
   updateMasterElement,
@@ -1230,11 +1230,11 @@ export function UIBuilderView() {
                           }
                         }}
                         onSelectMasterElement={selectMasterElement}
-                        onMoveOrder={(elementId, direction) => {
+                        onMoveOrder={(elementId, neighborId) => {
                           if (!currentPage) return;
                           applyMutation(
-                            (p) => moveElementInOrder(p, currentPage.id, elementId, direction),
-                            `Move ${direction}`,
+                            (p) => swapElementsInOrder(p, currentPage.id, elementId, neighborId),
+                            "Reorder element",
                           );
                         }}
                         onToggleLock={(id) => useUIBuilderStore.getState().toggleLock(id)}

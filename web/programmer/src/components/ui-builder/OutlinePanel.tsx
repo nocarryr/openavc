@@ -37,7 +37,7 @@ interface OutlinePanelProps {
   lockedElementIds: Set<string>;
   onSelectElement: (id: string, shift?: boolean) => void;
   onSelectMasterElement: (id: string) => void;
-  onMoveOrder: (elementId: string, direction: "up" | "down") => void;
+  onMoveOrder: (elementId: string, neighborId: string) => void;
   onToggleLock: (elementId: string) => void;
 }
 
@@ -84,7 +84,16 @@ export function OutlinePanel({
     cursor: "pointer", borderRadius: 2, flexShrink: 0,
   };
 
-  const renderRow = (el: UIElement, isMaster: boolean, idx: number, total: number) => {
+  // prevId / nextId are the moving element's neighbours in the *visible*
+  // (search-filtered) list — the z-order buttons swap against those so a move
+  // reorders what the user actually sees adjacent, never a hidden full-list
+  // neighbour. Undefined at the visible top/bottom, which disables the button.
+  const renderRow = (
+    el: UIElement,
+    isMaster: boolean,
+    prevId?: string,
+    nextId?: string,
+  ) => {
     const isSelected = isMaster
       ? selectedMasterElementId === el.id
       : selectedElementIds.includes(el.id);
@@ -133,17 +142,17 @@ export function OutlinePanel({
         {!isMaster && isSelected && (
           <>
             <button
-              onClick={(e) => { e.stopPropagation(); onMoveOrder(el.id, "up"); }}
-              disabled={idx === 0}
-              style={{ ...iconBtnStyle, color: idx === 0 ? "var(--border-color)" : "var(--text-muted)" }}
+              onClick={(e) => { e.stopPropagation(); if (prevId) onMoveOrder(el.id, prevId); }}
+              disabled={!prevId}
+              style={{ ...iconBtnStyle, color: !prevId ? "var(--border-color)" : "var(--text-muted)" }}
               title="Move backward (lower z-order)"
             >
               <ChevronUp size={10} />
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); onMoveOrder(el.id, "down"); }}
-              disabled={idx === total - 1}
-              style={{ ...iconBtnStyle, color: idx === total - 1 ? "var(--border-color)" : "var(--text-muted)" }}
+              onClick={(e) => { e.stopPropagation(); if (nextId) onMoveOrder(el.id, nextId); }}
+              disabled={!nextId}
+              style={{ ...iconBtnStyle, color: !nextId ? "var(--border-color)" : "var(--text-muted)" }}
               title="Move forward (higher z-order)"
             >
               <ChDown size={10} />
@@ -189,7 +198,7 @@ export function OutlinePanel({
             <div style={{ padding: "4px 8px", fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
               Master Elements
             </div>
-            {filteredMasters.map((el, i) => renderRow(el, true, i, filteredMasters.length))}
+            {filteredMasters.map((el) => renderRow(el, true))}
             <div style={{ height: 1, margin: "4px 8px", background: "var(--border-color)" }} />
           </>
         )}
@@ -202,7 +211,9 @@ export function OutlinePanel({
             {search ? "No matching elements" : "No elements on this page"}
           </div>
         ) : (
-          filteredElements.map((el, i) => renderRow(el, false, i, filteredElements.length))
+          filteredElements.map((el, i) =>
+            renderRow(el, false, filteredElements[i - 1]?.id, filteredElements[i + 1]?.id),
+          )
         )}
       </div>
     </div>
