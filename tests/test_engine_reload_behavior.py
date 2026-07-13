@@ -1,6 +1,6 @@
 """Behavioral pins for the engine's hot-reload reconciliation.
 
-Covers the observable contract of reload_project / save_project_checked:
+Covers the observable contract of reload_project / apply_project:
 
 - reload broadcasts ``ui.definition`` and ``project.reloaded`` (with the new
   revision) to WebSocket clients, and emits ``system.project.reloaded`` on the
@@ -337,6 +337,7 @@ def _mock_plugin_loader(known=(), running=(), configs=None) -> MagicMock:
     loader.get_running_config.side_effect = lambda pid: configs.get(pid, {})
     loader.start_plugin = AsyncMock()
     loader.stop_plugin = AsyncMock()
+    loader.restart_or_apply = AsyncMock(return_value="restarted")
     loader.remove_plugin_tracking = MagicMock()
     return loader
 
@@ -416,7 +417,8 @@ async def test_sync_plugins_starts_enabled_stopped_plugin(tmp_path):
 @pytest.mark.asyncio
 async def test_sync_plugins_restarts_plugin_on_config_change(tmp_path):
     """A running plugin whose config changed must end up running with the new
-    config — today that is a stop followed by a start."""
+    config — via the same hot-apply-or-restart path every other config-write
+    path uses (the plugin's on_config_changed hook first, else stop/start)."""
     eng = _engine(tmp_path, plugins={
         "p1": {"enabled": True, "config": {"level": 2}},
     })
@@ -426,8 +428,9 @@ async def test_sync_plugins_restarts_plugin_on_config_change(tmp_path):
 
     await eng._sync_plugins()
 
-    eng.plugin_loader.stop_plugin.assert_awaited_once_with("p1")
-    eng.plugin_loader.start_plugin.assert_awaited_once_with("p1", {"level": 2})
+    eng.plugin_loader.restart_or_apply.assert_awaited_once_with("p1", {"level": 2})
+    eng.plugin_loader.stop_plugin.assert_not_awaited()
+    eng.plugin_loader.start_plugin.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -443,6 +446,7 @@ async def test_sync_plugins_leaves_unchanged_running_plugin_alone(tmp_path):
 
     eng.plugin_loader.stop_plugin.assert_not_awaited()
     eng.plugin_loader.start_plugin.assert_not_awaited()
+    eng.plugin_loader.restart_or_apply.assert_not_awaited()
 
 
 # ── PUT /api/project end to end ──

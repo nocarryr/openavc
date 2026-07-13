@@ -88,7 +88,9 @@ async def save_project_config(request: Request) -> dict[str, Any]:
     # increments the revision — checked here, two concurrent saves could
     # both pass and one edit would be silently lost.
     try:
-        await engine.save_project_checked(project, expected_rev)
+        new_revision = await engine.apply_project(
+            project, expected_revision=expected_rev
+        )
     except ProjectRevisionConflictError:
         raise HTTPException(
             status_code=409,
@@ -96,7 +98,7 @@ async def save_project_config(request: Request) -> dict[str, Any]:
         )
     return JSONResponse(
         content={"status": "saved"},
-        headers={"ETag": f'"{engine._project_revision}"'},
+        headers={"ETag": f'"{new_revision}"'},
     )
 
 

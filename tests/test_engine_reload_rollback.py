@@ -72,9 +72,9 @@ async def test_rollback_does_not_double_register_trigger_listeners(tmp_path, mon
     baseline = len(eng.triggers._state_sub_ids)
     assert baseline == 1, "precondition: one state_change trigger registered"
 
-    # Inject a failure into a step that runs AFTER triggers.start() in
-    # _reload_project_inner — _reload_isc fits, it's the last awaited step
-    # before the broadcast.
+    # Inject a failure into a step that runs AFTER the trigger restart in
+    # the reconcile — _reload_isc fits, it's the last awaited step before
+    # the broadcast.
     async def boom():
         raise RuntimeError("simulated late-reload failure")
 

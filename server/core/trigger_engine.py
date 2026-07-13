@@ -162,8 +162,15 @@ class TriggerEngine:
         if count:
             log.info(f"Loaded {count} trigger(s)")
 
-    async def start(self) -> None:
-        """Register all trigger listeners and start the cron loop."""
+    async def start(self, fire_startup: bool = True) -> None:
+        """Register all trigger listeners and start the cron loop.
+
+        ``fire_startup`` gates the one-shot firing of ``startup`` triggers.
+        It belongs to a genuine (re)start of the system — engine boot or a
+        whole new project arriving — not to the trigger rebuild an
+        incremental save performs, where re-firing would re-run power-on
+        automation in a live room on every edit.
+        """
         self._running = True
 
         has_cron = False
@@ -197,10 +204,11 @@ class TriggerEngine:
                 has_cron = True
 
             elif ttype == "startup":
-                delay = t.get("delay_seconds", 0)
-                startup_task = asyncio.create_task(self._fire_startup(ts, delay))
-                startup_task.add_done_callback(_log_task_exception)
-                self._startup_tasks.append(startup_task)
+                if fire_startup:
+                    delay = t.get("delay_seconds", 0)
+                    startup_task = asyncio.create_task(self._fire_startup(ts, delay))
+                    startup_task.add_done_callback(_log_task_exception)
+                    self._startup_tasks.append(startup_task)
 
         # Start cron loop if any schedule triggers exist
         if has_cron and HAS_CRONITER:

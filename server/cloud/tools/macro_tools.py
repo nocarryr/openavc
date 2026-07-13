@@ -284,7 +284,7 @@ class MacroToolsMixin:
         Called by handlers that modify the project but don't trigger a full
         reload (e.g., add_device, variable tools). Handlers that DO reload
         get this broadcast automatically via engine.reload_project(). Mirrors
-        engine._reload_project_inner's broadcast shape so other tabs'
+        engine.apply_project's broadcast shape so other tabs'
         optimistic-concurrency check has a revision to compare against.
         """
         engine = self._get_engine()

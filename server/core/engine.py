@@ -20,6 +20,7 @@ from server.core.device_manager import DeviceManager
 from server.core.event_bus import EventBus
 from server.core.macro_engine import MacroEngine
 from server.core.plugin_loader import PluginLoader
+from server.core.project_diff import ProjectDiff, ProjectOrigin
 from server.core.project_loader import (
     ProjectConfig,
     ProjectMeta,
@@ -174,6 +175,15 @@ class Engine:
         5. Register UI bindings
         6. Start state batch push
         7. Emit system.started
+
+        This is a deliberately separate inline sequence from
+        :meth:`_reconcile` — it also builds one-time infrastructure (state
+        persister, script engine install, plugin scan, permanent
+        subscriptions, ISC/cloud/mDNS startup) that a reconcile never
+        touches. The subsystem ORDERING constraints are shared, though:
+        macros load before triggers, scripts load after variables and
+        devices. A change to the reconcile ordering must be checked against
+        this sequence too, and vice versa.
         """
         log.info("Engine starting...")
         self._start_time = time.time()
@@ -550,33 +560,43 @@ class Engine:
         log.info("Engine stopped")
 
     async def reload_project(self) -> None:
-        """Hot-reload project.avc without full restart."""
-        async with self._reload_lock:
-            await self._reload_project_inner()
+        """Hot-reload project.avc from disk (LOAD origin — full reconcile).
 
-    async def save_project_checked(
-        self, project: ProjectConfig, expected_revision: int | None = None
-    ) -> None:
-        """Persist ``project`` to disk and hot-reload it, atomically with the
-        optimistic-concurrency check.
-
-        The revision compare must happen under the same lock that increments
-        ``_project_revision`` during reload. Checked outside it, two
-        concurrent saves can both pass the compare and the loser's edit is
-        silently overwritten — the exact race the 409 contract exists to
-        prevent. Raises :class:`ProjectRevisionConflictError` on mismatch;
-        ``expected_revision=None`` skips the check (save unconditionally).
+        The disk read happens under the reload lock so it always sees the
+        latest persisted bytes, never a snapshot taken before a concurrent
+        save finished.
         """
         async with self._reload_lock:
-            if (
-                expected_revision is not None
-                and expected_revision != self._project_revision
-            ):
-                raise ProjectRevisionConflictError(
-                    "Project was modified by another session"
-                )
-            await save_project_async(self.project_path, project)
-            await self._reload_project_inner()
+            new_project = load_project(self.project_path)
+            await self._apply_project_locked(
+                new_project, None, ProjectOrigin.LOAD, persist=False
+            )
+
+    async def apply_project(
+        self,
+        new_project: ProjectConfig,
+        *,
+        expected_revision: int | None = None,
+        origin: ProjectOrigin = ProjectOrigin.EDIT,
+        persist: bool = True,
+    ) -> int:
+        """The one way a project change enters the engine.
+
+        Checks optimistic concurrency (``expected_revision=None`` skips the
+        check), persists the bytes, swaps the in-memory project, bumps the
+        revision, and reconciles only the subsystems the change actually
+        touches. Returns the new revision.
+
+        The revision compare must happen under the same lock that increments
+        ``_project_revision``. Checked outside it, two concurrent saves can
+        both pass the compare and the loser's edit is silently overwritten —
+        the exact race the 409 contract exists to prevent. Raises
+        :class:`ProjectRevisionConflictError` on mismatch.
+        """
+        async with self._reload_lock:
+            return await self._apply_project_locked(
+                new_project, expected_revision, origin, persist
+            )
 
     def reload_persisted_state(self) -> None:
         """Re-apply state.json to the store and restart the persister.
@@ -603,161 +623,253 @@ class Engine:
         self.persister.stop()
         self.persister.start(persistent_keys)
 
-    async def _reload_project_inner(self) -> None:
-        log.info("Reloading project...")
+    async def _apply_project_locked(
+        self,
+        new_project: ProjectConfig,
+        expected_revision: int | None,
+        origin: ProjectOrigin,
+        persist: bool,
+    ) -> int:
+        """Body of :meth:`apply_project`. Caller holds ``_reload_lock``."""
+        if (
+            expected_revision is not None
+            and expected_revision != self._project_revision
+        ):
+            raise ProjectRevisionConflictError(
+                "Project was modified by another session"
+            )
 
-        # Snapshot current state for rollback on failure
+        if persist:
+            # save_project stamps the derived dependency lists onto the
+            # object in place, so after this await new_project matches the
+            # bytes on disk exactly — no re-read or re-validation needed.
+            await save_project_async(self.project_path, new_project)
+
+        if origin is ProjectOrigin.LOAD:
+            diff = ProjectDiff.all_dirty()
+        else:
+            diff = ProjectDiff.compute(self.project, new_project)
+
+        # Snapshot for rollback on reconcile failure
         prev_project = self.project
         prev_revision = self._project_revision
         prev_dirty = self._dirty_since_backup
 
+        # Swapping self.project IS the UI reload: UI dispatch looks elements
+        # up at event time, so a UI-only change needs nothing beyond this
+        # swap and the ui.definition broadcast below.
+        self.project = new_project
+        self._project_revision += 1
+        self._dirty_since_backup = True
+
         try:
-            self.project = load_project(self.project_path)
-            self._project_revision += 1
-            self._dirty_since_backup = True
-
-            # Pick up any community drivers that were dropped into
-            # driver_repo/ since startup (file-system installs, manual
-            # copies during development, etc.). Without this, _sync_devices
-            # below would mark every device using a freshly-installed driver
-            # as orphaned even though the file is on disk.
-            self._load_project_drivers()
-
-            # Stop triggers and cancel macros first — prevents triggers from
-            # firing on state keys that are about to be cleaned up
-            await self.triggers.stop()
-            await self.macros.cancel_all()
-
-            # Sync variables: initialize new defaults, clean up orphaned keys
-            project_var_ids = {v.id for v in self.project.variables}
-            for var in self.project.variables:
-                key = f"var.{var.id}"
-                if self.state.get(key) is None:
-                    self.state.set(key, var.default, source="system")
-            # Remove orphaned var.* state keys for deleted variables
-            all_var_keys = self.state.get_namespace("var.")
-            orphaned_vars = [vid for vid in all_var_keys if vid not in project_var_ids]
-            for vid in orphaned_vars:
-                self.state.delete(f"var.{vid}")
-            if orphaned_vars:
-                log.info(f"Cleaned up {len(orphaned_vars)} orphaned variable state key(s)")
-
-            # Update persistent variable keys
-            if self.persister:
-                persistent_keys = {
-                    f"var.{v.id}" for v in self.project.variables if v.persist
-                }
-                self.persister.update_keys(persistent_keys)
-
-            # Sync devices: remove deleted, add new, update changed
-            await self._sync_devices()
-
-            # Promote any orphans whose driver is now in the registry
-            # (e.g. driver_repo/ files added between reloads). _sync_devices
-            # only re-adds devices whose config changed, so an orphan stuck
-            # waiting for its driver wouldn't otherwise come online here.
-            await self.devices.retry_all_orphans()
-
-            # If simulation is active, sync simulated devices with the new project state
-            if self.simulation.active:
-                await self.simulation.sync()
-
-            # Sync plugins: add new, remove deleted, restart changed
-            await self._sync_plugins()
-
-            # Reload macros and device groups
-            macros_data = [m.model_dump() for m in self.project.macros]
-            self.macros.load_macros(macros_data)
-            groups_data = [g.model_dump() for g in self.project.device_groups]
-            self.macros.load_groups(groups_data)
-
-            # Reload and restart triggers (stopped earlier before variable sync)
-            macros_data_triggers = [m.model_dump() for m in self.project.macros]
-            self.triggers.load_triggers(macros_data_triggers)
-            await self.triggers.start()
-
-            # Re-register UI bindings
-            self._register_ui_bindings()
-
-            # Re-bind variable sources
-            self._bind_variable_sources()
-
-            # Re-register variable validation listeners
-            self._register_variable_validation()
-
-            # Reload scripts
-            if self.scripts:
-                scripts_data = [s.model_dump() for s in self.project.scripts]
-                self.scripts.reload_scripts(scripts_data)
-
-            # Reload ISC config
-            await self._reload_isc()
-
-            # Update mDNS advertiser with new project name
-            if self.mdns_advertiser:
-                self.mdns_advertiser.update_name(self.project.project.name)
-
+            await self._reconcile(diff, origin)
         except Exception:
-            log.error("Reload failed, rolling back to previous project state",
-                      exc_info=True)
+            log.error("Project reconcile failed, rolling back to previous "
+                      "project state", exc_info=True)
             self.project = prev_project
             self._project_revision = prev_revision
             self._dirty_since_backup = prev_dirty
 
-            # Best-effort: re-sync subsystems with the restored project so the
-            # runtime doesn't diverge from self.project. The failure may have
-            # landed after _sync_devices / _sync_plugins already applied part
-            # of the new project (devices removed/added, plugins started or
-            # stopped); re-running both against the restored project reconciles
-            # the live device and plugin set back to it.
+            # The new bytes stay on disk deliberately: the file is the source
+            # of truth and the user's edit must survive a runtime hiccup.
+            # Rollback restores the RUNTIME to the previous project.
             try:
-                await self._sync_devices()
-                await self._sync_plugins()
-
-                macros_data = [m.model_dump() for m in self.project.macros]
-                self.macros.load_macros(macros_data)
-                groups_data = [g.model_dump() for g in self.project.device_groups]
-                self.macros.load_groups(groups_data)
-
-                # Stop triggers before reloading/starting again. The normal
-                # reload path stops triggers up front (line 436) and only
-                # restarts at the end; if the exception fired after that
-                # restart succeeded, `start()` already populated the listener
-                # lists. Calling `start()` again without `stop()` first would
-                # stack a second set of state/event subscriptions on top of
-                # the existing ones, causing triggers to fire 2x per change.
-                await self.triggers.stop()
-                self.triggers.load_triggers(macros_data)
-                await self.triggers.start()
-
-                self._register_ui_bindings()
-                self._bind_variable_sources()
-                self._register_variable_validation()
+                await self._rollback_reconcile(diff)
             except Exception:
                 log.error("Rollback re-sync also failed", exc_info=True)
 
             raise
 
-        # Clean reload succeeded — zero the startup-error count so a stale
+        # Clean apply succeeded — zero the startup-error count so a stale
         # count from the initial start (now fixed) doesn't linger in the store
         # and cloud relay.
         self.state.set("system.startup_errors", 0, source="system")
-        self.state.set("system.project_name", self.project.project.name, source="system")
+        if diff.project_meta:
+            self.state.set("system.project_name", self.project.project.name,
+                           source="system")
+            if self.mdns_advertiser:
+                self.mdns_advertiser.update_name(self.project.project.name)
 
-        # Push new UI definition to all connected panels
-        await self.broadcast_ws({
-            "type": "ui.definition",
-            "ui": self.project.ui.model_dump(mode="json"),
-        })
+        # Push the new UI definition to connected panels — only when the UI
+        # actually changed (panels re-render on every ui.definition).
+        if diff.ui:
+            await self.broadcast_ws({
+                "type": "ui.definition",
+                "ui": self.project.ui.model_dump(mode="json"),
+            })
 
-        # Notify Programmer IDE to refetch project data
+        # Notify the Programmer IDE to refetch project data. Always sent:
+        # external editors need to learn the new revision even for changes
+        # they can't see in the UI definition.
         await self.broadcast_ws({
             "type": "project.reloaded",
             "revision": self._project_revision,
         })
 
         await self.events.emit("system.project.reloaded")
-        log.info("Project reloaded")
+        log.info(f"Project applied (origin={origin.value}, "
+                 f"revision={self._project_revision})")
+        return self._project_revision
+
+    async def _reconcile(self, diff: ProjectDiff, origin: ProjectOrigin) -> None:
+        """Reconcile the running subsystems to ``self.project``, touching only
+        the sections ``diff`` marks dirty.
+
+        The ordering is load-bearing: triggers stop before any state-key
+        cleanup, macros load before triggers rebuild, scripts load after
+        variables and devices (they subscribe to ``var.*`` / ``device.*``
+        keys at import).
+        """
+        # LOAD only: pick up out-of-band driver files copied straight into
+        # driver_repo/ on the filesystem. API-driven installs register their
+        # driver themselves, so an edit-save never pays for a library rescan.
+        if origin is ProjectOrigin.LOAD:
+            self._load_project_drivers()
+
+        # Stop triggers before any reconcile step that deletes state keys
+        # (var.*, device.*, plugin.*) so a state_change trigger can't fire
+        # on a key that is mid-cleanup. Macro changes land here too: the
+        # trigger definitions live in the macros.
+        triggers_stopped = False
+        if diff.requires_trigger_rebuild:
+            await self.triggers.stop()
+            triggers_stopped = True
+
+        # Swapping macro/group definitions under a running macro would
+        # half-execute it against the new definition (nested macro and
+        # group.command steps re-resolve mid-flight) — cancel only when
+        # those definitions actually changed.
+        if diff.macros or diff.device_groups:
+            await self.macros.cancel_all()
+
+        if diff.variables:
+            # Seed new defaults, then clean up orphaned var.* keys
+            project_var_ids = {v.id for v in self.project.variables}
+            for var in self.project.variables:
+                key = f"var.{var.id}"
+                if self.state.get(key) is None:
+                    self.state.set(key, var.default, source="system")
+            all_var_keys = self.state.get_namespace("var.")
+            orphaned_vars = [
+                vid for vid in all_var_keys if vid not in project_var_ids
+            ]
+            for vid in orphaned_vars:
+                self.state.delete(f"var.{vid}")
+            if orphaned_vars:
+                log.info(f"Cleaned up {len(orphaned_vars)} orphaned variable state key(s)")
+
+            if self.persister:
+                persistent_keys = {
+                    f"var.{v.id}" for v in self.project.variables if v.persist
+                }
+                self.persister.update_keys(persistent_keys)
+
+        if diff.devices or diff.connections:
+            # Always the whole sync, never a per-device diff: a bridge edit
+            # changes the resolved host/port of every device bound through
+            # it, so cross-row effects only surface when every device's
+            # resolved config is re-compared. _sync_devices diffs in memory
+            # and is cheap.
+            await self._sync_devices()
+
+            # Promote any orphans whose driver is now in the registry.
+            # Must follow both the driver load and the device sync.
+            await self.devices.retry_all_orphans()
+
+            # _sync_devices replaces driver instances, so simulator
+            # redirects must be re-applied.
+            if self.simulation.active:
+                await self.simulation.sync()
+
+        if diff.plugins:
+            await self._sync_plugins()
+
+        if diff.macros:
+            self.macros.load_macros([m.model_dump() for m in self.project.macros])
+        if diff.device_groups:
+            self.macros.load_groups(
+                [g.model_dump() for g in self.project.device_groups]
+            )
+
+        if triggers_stopped:
+            # The rebuild is loss-free: cooldown and cron-dedup baselines are
+            # restored from the state store for surviving trigger ids.
+            # Startup triggers re-fire only when a whole new project arrives;
+            # an edit-save must not re-run power-on automation.
+            self.triggers.load_triggers(
+                [m.model_dump() for m in self.project.macros]
+            )
+            await self.triggers.start(
+                fire_startup=(origin is ProjectOrigin.LOAD)
+            )
+
+        if diff.variables:
+            self._bind_variable_sources()
+            self._register_variable_validation()
+
+        if diff.scripts and self.scripts:
+            if origin is ProjectOrigin.LOAD:
+                # A new project can replace script FILES while the configs
+                # stay identical (library open, backup restore) — only a
+                # full reload is safe here.
+                self.scripts.reload_scripts(
+                    [s.model_dump() for s in self.project.scripts]
+                )
+            else:
+                # Per-script: unchanged scripts keep their handlers and
+                # timer phase; a failed re-import keeps the old version.
+                for script_id in diff.scripts_to_unload:
+                    self.scripts.unload_script(script_id)
+                for cfg in diff.scripts_to_reload:
+                    result = self.scripts.reload_script(cfg)
+                    if result.get("status") == "error":
+                        log.error(
+                            f"Script '{cfg.get('id')}' failed to reload: "
+                            f"{result.get('error')}"
+                        )
+
+        if diff.isc:
+            await self._reload_isc()
+
+    async def _rollback_reconcile(self, diff: ProjectDiff) -> None:
+        """Best-effort re-sync after a failed reconcile, scoped to the same
+        sections the failed pass may have partially applied, against the
+        restored ``self.project``.
+
+        Deliberately narrower than the forward pass (unchanged from the
+        pre-reconciler rollback): deleted ``var.*`` keys stay deleted,
+        persister keys, scripts, ISC, and mDNS are not restored, and the new
+        bytes stay on disk.
+        """
+        if diff.devices or diff.connections:
+            await self._sync_devices()
+        if diff.plugins:
+            await self._sync_plugins()
+
+        if diff.macros:
+            self.macros.load_macros([m.model_dump() for m in self.project.macros])
+        if diff.device_groups:
+            self.macros.load_groups(
+                [g.model_dump() for g in self.project.device_groups]
+            )
+
+        if diff.requires_trigger_rebuild:
+            # The forward pass may have failed before or after restarting
+            # triggers. stop() first: calling start() on already-started
+            # triggers would stack a second set of state/event subscriptions
+            # and every trigger would fire twice per change. Never re-fire
+            # startup triggers while recovering — the restored project was
+            # already running.
+            await self.triggers.stop()
+            self.triggers.load_triggers(
+                [m.model_dump() for m in self.project.macros]
+            )
+            await self.triggers.start(fire_startup=False)
+
+        if diff.variables:
+            self._bind_variable_sources()
+            self._register_variable_validation()
 
     def resolved_device_config(self, device) -> dict:
         """Get device config dict with driver defaults and connection table merged in.
@@ -1004,8 +1116,17 @@ class Engine:
             elif not was_running and new_enabled:
                 await self.plugin_loader.start_plugin(plugin_id, new_config)
             elif was_running and new_config != old_config:
-                await self.plugin_loader.stop_plugin(plugin_id)
-                await self.plugin_loader.start_plugin(plugin_id, new_config)
+                # Same path as every other config write (REST, cloud AI):
+                # try the plugin's on_config_changed hot-apply hook first,
+                # fall back to a restart.
+                outcome = await self.plugin_loader.restart_or_apply(
+                    plugin_id, new_config
+                )
+                if outcome == "start_failed":
+                    log.error(
+                        f"Plugin '{plugin_id}' failed to restart after a "
+                        f"config change and is stopped"
+                    )
 
     def bump_project_revision(self) -> None:
         """Advance the project revision after a server-side save that bypasses
@@ -1013,7 +1134,7 @@ class Engine:
 
         Plugin enable/disable and plugin-config saves (e.g. the Video Streams
         editor) persist the project directly, without going through
-        ``reload_project`` (which is what normally increments the revision).
+        ``apply_project`` (which is what normally increments the revision).
         Left un-bumped, an open editor's cached ETag still matches the server,
         so its next full-project ``PUT /api/project`` overwrites these changes
         instead of being rejected with a 409. Bumping here keeps the

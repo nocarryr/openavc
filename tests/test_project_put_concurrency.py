@@ -35,7 +35,12 @@ def _client() -> AsyncClient:
 
 
 def _stub_persistence(engine, monkeypatch, save_delay: float = 0.0):
-    """Replace disk save + full reload with counters; keep revision semantics."""
+    """Replace disk save + subsystem reconcile with counters.
+
+    The revision compare-and-bump itself stays REAL — it runs in
+    apply_project under the reload lock, which is exactly the contract
+    these tests pin.
+    """
     saves = []
 
     async def fake_save(path, project):
@@ -49,11 +54,10 @@ def _stub_persistence(engine, monkeypatch, save_delay: float = 0.0):
         "server.api.routes.project.save_project_async", fake_save, raising=False
     )
 
-    async def fake_reload_inner():
-        # Mirror the real _reload_project_inner: reload bumps the revision.
-        engine._project_revision += 1
+    async def fake_reconcile(diff, origin):
+        pass
 
-    monkeypatch.setattr(engine, "_reload_project_inner", fake_reload_inner)
+    monkeypatch.setattr(engine, "_reconcile", fake_reconcile)
     return saves
 
 

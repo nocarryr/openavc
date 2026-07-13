@@ -478,7 +478,7 @@ async def add_device(req: AddDeviceRequest) -> dict[str, Any]:
 
     # Notify the IDE to refresh the project (so Devices tab updates immediately).
     # Include the current revision so other tabs' optimistic-concurrency check
-    # has something to compare against; matches engine._reload_project_inner.
+    # has something to compare against; matches engine.apply_project.
     if _broadcast_fn:
         try:
             await _broadcast_fn({
