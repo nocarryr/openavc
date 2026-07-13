@@ -151,6 +151,12 @@ class Engine:
         # Reload serialization
         self._reload_lock = asyncio.Lock()
 
+        # Deferred bookkeeping persists (see persist_bookkeeping_change):
+        # queued (mutate, on_error) pairs and the task that flushes them
+        # outside the reconcile lock.
+        self._bookkeeping_queue: list[tuple[Any, Any]] = []
+        self._bookkeeping_task: asyncio.Task | None = None
+
         # Tracking
         self._start_time: float = 0
         self._running = False
@@ -458,6 +464,15 @@ class Engine:
         """Stop the engine gracefully."""
         log.info("Engine stopping...")
         self._running = False
+        # Drain any queued bookkeeping persist before teardown so a
+        # just-applied pending-settings clear or plugin-config save isn't
+        # lost when the loop closes.
+        task = self._bookkeeping_task
+        if task and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except Exception:
+                log.warning("Bookkeeping persist did not finish before shutdown")
         # Serialize teardown against an in-flight reload_project (reachable
         # from REST, the cloud command handler, and AI tools). Tearing
         # subsystems down while a hot-reload runs interleaves trigger and
@@ -1142,26 +1157,131 @@ class Engine:
         """
         self._project_revision += 1
 
-    async def _save_plugin_config(self, plugin_id: str, config: dict) -> None:
-        """Save updated plugin config to the project file (callback for PluginAPI)."""
-        if not self.project:
-            return
-        if plugin_id in self.project.plugins:
-            previous = self.project.plugins[plugin_id].config
-            self.project.plugins[plugin_id].config = config
+    async def persist_bookkeeping_change(self, mutate, *, on_error=None) -> int:
+        """Persist an in-place project mutation whose runtime effect is
+        already applied — no reconcile, just save + revision bump +
+        ``project.reloaded`` broadcast (so an open IDE's stale ETag gets a
+        409 instead of silently reverting the change).
+
+        ``mutate(project)`` is applied to the current project under the
+        reconcile lock. On a save failure ``on_error`` runs (to revert the
+        mutation) and the exception propagates.
+
+        MUST NOT be called from code that can run while the reconcile lock
+        is held — event handlers fired during a reconcile (device connect,
+        plugin hooks, state changes) — that would deadlock. Those callers
+        use :meth:`schedule_bookkeeping_change` instead.
+        """
+        async with self._reload_lock:
             try:
+                mutate(self.project)
                 await save_project_async(self.project_path, self.project)
-                self.bump_project_revision()
-            except Exception as e:
-                # Revert the in-memory project so it matches disk. Otherwise a
-                # bad/unwritable config lingers in the shared project model and
-                # the next save of ANYTHING re-serializes it and fails too.
-                self.project.plugins[plugin_id].config = previous
-                log.error(f"Failed to save plugin config for '{plugin_id}': {e}")
+            except Exception:
+                if on_error is not None:
+                    result = on_error()
+                    if asyncio.iscoroutine(result):
+                        await result
+                raise
+            self._project_revision += 1
+            revision = self._project_revision
+        await self.broadcast_ws({
+            "type": "project.reloaded",
+            "revision": revision,
+        })
+        return revision
+
+    def schedule_bookkeeping_change(self, mutate, *, on_error=None) -> None:
+        """Queue a bookkeeping persist to run outside the reconcile lock.
+
+        Safe to call from anywhere — including event handlers awaited inline
+        while ``apply_project`` holds the reconcile lock (device connect
+        inside ``_sync_devices``, plugin hooks inside ``_sync_plugins``),
+        where awaiting the lock would deadlock the engine.
+
+        Writes queued in the same tick coalesce into one save and one
+        revision bump. Each ``mutate(project)`` is applied to whatever
+        project object is current at flush time, so a project swap between
+        schedule and flush can't resurrect stale state or drop the write.
+        """
+        self._bookkeeping_queue.append((mutate, on_error))
+        if self._bookkeeping_task is None or self._bookkeeping_task.done():
+            self._bookkeeping_task = asyncio.create_task(
+                self._flush_bookkeeping()
+            )
+
+    async def _flush_bookkeeping(self) -> None:
+        while self._bookkeeping_queue:
+            revision = None
+            async with self._reload_lock:
+                batch = list(self._bookkeeping_queue)
+                self._bookkeeping_queue.clear()
+                if not self.project:
+                    return
+                try:
+                    for mutate, _on_error in batch:
+                        mutate(self.project)
+                    await save_project_async(self.project_path, self.project)
+                    self._project_revision += 1
+                    revision = self._project_revision
+                except Exception as e:
+                    log.error(f"Deferred project persist failed: {e}")
+                    for _mutate, on_error in batch:
+                        if on_error is None:
+                            continue
+                        try:
+                            result = on_error()
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except Exception:
+                            log.exception("Bookkeeping on_error callback failed")
+            if revision is not None:
                 await self.broadcast_ws({
-                    "type": "error",
-                    "message": f"Failed to save plugin config: {e}",
+                    "type": "project.reloaded",
+                    "revision": revision,
                 })
+
+    async def _save_plugin_config(self, plugin_id: str, config: dict) -> None:
+        """Save updated plugin config to the project file (callback for PluginAPI).
+
+        The plugin already runs with ``config`` (PluginAPI swapped it before
+        calling here), so this is a bookkeeping persist — no reconcile. A
+        plugin can call ``save_config`` from a hook the reconciler awaits
+        inline (``on_start``, ``on_config_changed``, an event handler), i.e.
+        while the reconcile lock is held — taking the lock then would
+        deadlock. When the lock is free this persists before returning and
+        raises on failure (the PluginAPI contract); when it is held, the
+        write is deferred to run right after the reconcile finishes.
+        """
+        if not self.project or plugin_id not in self.project.plugins:
+            return
+        previous = self.project.plugins[plugin_id].config
+
+        def mutate(project) -> None:
+            if plugin_id in project.plugins:
+                project.plugins[plugin_id].config = config
+
+        async def on_error() -> None:
+            # Revert the in-memory project so it matches disk. Otherwise a
+            # bad/unwritable config lingers in the shared project model and
+            # the next save of ANYTHING re-serializes it and fails too.
+            if plugin_id in self.project.plugins:
+                self.project.plugins[plugin_id].config = previous
+            await self.broadcast_ws({
+                "type": "error",
+                "message": f"Failed to save plugin config for '{plugin_id}'",
+            })
+
+        if self._reload_lock.locked():
+            # Possibly our own call chain holds the lock (a plugin hook run
+            # by the reconciler) — awaiting it would deadlock. The plugin's
+            # live config is already current; only the persist is deferred.
+            mutate(self.project)
+            self.schedule_bookkeeping_change(mutate, on_error=on_error)
+        else:
+            try:
+                await self.persist_bookkeeping_change(mutate, on_error=on_error)
+            except Exception as e:
+                log.error(f"Failed to save plugin config for '{plugin_id}': {e}")
                 raise
 
     # --- UI Event Handling ---
@@ -1698,20 +1818,30 @@ class Engine:
     async def _on_pending_settings_applied(
         self, event: str, payload: dict[str, Any]
     ) -> None:
-        """Persist project file after pending device settings are applied."""
+        """Persist the project after pending device settings are applied.
+
+        Fires on device connect — which can be inside ``_sync_devices``
+        while ``apply_project`` holds the reconcile lock (this handler is
+        awaited inline by the EventBus). Always defers: the DeviceManager
+        already cleared the applied settings from the live config, so only
+        the persist (+ revision bump, so a stale IDE PUT can't silently
+        restore the queue) is outstanding.
+        """
         device_id = payload.get("device_id", "")
         if not self.project or not device_id:
             return
 
-        # Update the project config to clear applied pending settings
         remaining = payload.get("remaining", {})
-        for dev in self.project.devices:
-            if dev.id == device_id:
-                dev.pending_settings = remaining
-                break
 
-        await save_project_async(self.project_path, self.project)
-        log.info(f"[{device_id}] Project saved after applying pending settings")
+        def mutate(project) -> None:
+            for dev in project.devices:
+                if dev.id == device_id:
+                    dev.pending_settings = remaining
+                    break
+
+        self.schedule_bookkeeping_change(mutate)
+        log.info(f"[{device_id}] Project persist queued after applying "
+                 f"pending settings")
 
     async def _on_script_error(self, event: str, payload: dict[str, Any]) -> None:
         """Forward script error events to WebSocket clients."""
