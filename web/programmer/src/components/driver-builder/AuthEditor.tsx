@@ -201,9 +201,10 @@ export function AuthEditor({ draft, onUpdate }: AuthEditorProps) {
               <input
                 type="number"
                 value={auth?.timeout_seconds ?? 10}
-                onChange={(e) =>
-                  update({ timeout_seconds: parseInt(e.target.value) || 0 })
-                }
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  update({ timeout_seconds: Number.isFinite(n) && n > 0 ? n : 10 });
+                }}
                 min={1}
                 style={{ width: "100%" }}
               />

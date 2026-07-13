@@ -1208,6 +1208,12 @@ class ConfigurableDriver(BaseDriver):
         success_pattern = auth_def.get("success_pattern")
         failure_pattern = auth_def.get("failure_pattern")
         timeout = float(auth_def.get("timeout_seconds", 10))
+        if timeout <= 0:
+            # A cleared/zero timeout (e.g. the Driver Builder box emptied to 0)
+            # would abort the handshake on the very first loop iteration and
+            # tear the transport down, so the device could never connect. Fall
+            # back to the default rather than bricking every connect.
+            timeout = 10.0
         line_ending = auth_def.get("line_ending", "\r\n")
 
         try:

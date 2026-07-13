@@ -12,6 +12,7 @@ when it never spoke the expected protocol at all. Uses an invented device
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
 
 import pytest
@@ -168,6 +169,40 @@ async def test_successful_login_reports_connected_after_handshake(fake_tcp, stat
     assert drv.get_state("connected") is True
     assert connected_events == ["device.connected.dev3"]
     assert t._frame_parser is t.original_parser  # parser restored
+
+
+async def test_zero_timeout_does_not_brick_the_handshake(fake_tcp, state, events):
+    """A cleared/zero auth timeout (the Driver Builder box emptied, baking in
+    timeout_seconds: 0) must not abort the handshake on the first loop
+    iteration. The runtime clamps a non-positive timeout to the default so the
+    device can still connect instead of failing every attempt."""
+    definition = copy.deepcopy(AUTH_DEFINITION)
+    definition["id"] = "acme_secure_zero"
+    definition["auth"]["timeout_seconds"] = 0
+    cls = create_configurable_driver_class(definition)
+    state.set_event_bus(events)
+    drv = cls(
+        "dev6",
+        {"host": "10.0.0.9", "port": 23, "username": "admin", "password": "pw"},
+        state,
+        events,
+    )
+
+    task = asyncio.create_task(drv.connect())
+    t = await _transport_of(fake_tcp)
+
+    async def script(sent, tt):
+        s = sent.strip()
+        if s == b"admin":
+            await tt.feed(b"Password: ")
+        elif s == b"pw":
+            await tt.feed(b"\r\nOK> ")
+
+    t.script = script
+    await t.feed(b"login: ")
+
+    await task
+    assert drv.get_state("connected") is True
 
 
 async def test_poll_interval_survives_failed_connect(monkeypatch, state, events):
