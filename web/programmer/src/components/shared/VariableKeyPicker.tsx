@@ -8,6 +8,7 @@ import type { VariableConfig } from "../../api/types";
 import { useProjectStore } from "../../store/projectStore";
 import { useConnectionStore } from "../../store/connectionStore";
 import { CopyButton } from "./CopyButton";
+import { groupLabel } from "./variableKeyPickerHelpers";
 import { showError } from "../../store/toastStore";
 import { getDevice, listChildEntities } from "../../api/restClient";
 
@@ -315,19 +316,11 @@ export function VariableKeyPicker({
     const map = new Map<string, { label: string; desc: string; entries: KeyEntry[] }>();
     for (const e of filteredEntries) {
       if (!map.has(e.group)) {
-        let label = "Project Variables";
-        if (e.group === "control") {
-          label = "This control";
-        } else if (e.group.startsWith("device:")) {
-          label = `Device: ${e.deviceName}`;
-        } else if (e.group === "system") {
-          label = "System";
-        } else if (e.group.startsWith("ui:")) {
-          label = `UI: ${e.deviceName}`;
-        } else if (e.group === "trigger") {
-          label = "Trigger event";
-        }
-        map.set(e.group, { label, desc: e.groupDesc, entries: [] });
+        map.set(e.group, {
+          label: groupLabel(e.group, e.deviceName),
+          desc: e.groupDesc,
+          entries: [],
+        });
       }
       map.get(e.group)!.entries.push(e);
     }
