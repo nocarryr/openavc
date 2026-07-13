@@ -1,22 +1,12 @@
 import { useState } from "react";
 import { DRIVER_TEMPLATES } from "./driverTemplates";
+import { DRIVER_CATEGORIES } from "../driver-builder/driverCategories";
 
 interface CreateDriverDialogProps {
   onSubmit: (id: string, source: string) => void;
   onCancel: () => void;
   existingIds?: string[];
 }
-
-const CATEGORIES = [
-  { value: "projector", label: "Projector" },
-  { value: "display", label: "Display" },
-  { value: "switcher", label: "Switcher" },
-  { value: "audio", label: "Audio / DSP" },
-  { value: "camera", label: "Camera" },
-  { value: "video", label: "Video" },
-  { value: "lighting", label: "Lighting" },
-  { value: "utility", label: "Utility" },
-];
 
 const TRANSPORTS = [
   { value: "tcp", label: "TCP" },
@@ -153,7 +143,7 @@ export function CreateDriverDialog({ onSubmit, onCancel, existingIds = [] }: Cre
                 onChange={(e) => setCategory(e.target.value)}
                 style={inputStyle}
               >
-                {CATEGORIES.map((c) => (
+                {DRIVER_CATEGORIES.map((c) => (
                   <option key={c.value} value={c.value}>
                     {c.label}
                   </option>

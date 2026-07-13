@@ -4,6 +4,7 @@ import yaml from "js-yaml";
 import type { DriverDefinition } from "../../api/types";
 import { useProjectStore } from "../../store/projectStore";
 import { useDriverBuilderStore } from "../../store/driverBuilderStore";
+import { DRIVER_CATEGORIES } from "./driverCategories";
 import { TransportPicker } from "./TransportPicker";
 import { CommandBuilder } from "./CommandBuilder";
 import { ResponseBuilder } from "./ResponseBuilder";
@@ -519,19 +520,11 @@ export function DriverEditor({
                   onChange={(e) => onUpdate({ category: e.target.value })}
                   style={{ width: "100%" }}
                 >
-                  <option value="projector">Projector</option>
-                  <option value="display">Display</option>
-                  <option value="switcher">Switcher</option>
-                  <option value="scaler">Scaler</option>
-                  <option value="video">Video (encoders, decoders, NDI)</option>
-                  <option value="audio">Audio</option>
-                  <option value="camera">Camera</option>
-                  <option value="lighting">Lighting</option>
-                  <option value="recorder">Recorder</option>
-                  <option value="power">Power (PDU, UPS, sequencer)</option>
-                  <option value="relay">Relay / GPIO</option>
-                  <option value="utility">Utility</option>
-                  <option value="other">Other</option>
+                  {DRIVER_CATEGORIES.map((c) => (
+                    <option key={c.value} value={c.value}>
+                      {c.label}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
