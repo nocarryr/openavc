@@ -774,3 +774,33 @@ def test_driver_source_reflects_the_current_definitions_tree(tmp_path, monkeypat
         "id: acme_widget\nname: Acme Widget\ntransport: tcp\n", encoding="utf-8"
     )
     assert _get_driver_source("acme_widget") == "builtin"
+
+
+def test_driver_source_detects_add_when_directory_mtime_is_frozen(tmp_path, monkeypatch):
+    """The built-in scan must notice an in-place file add even when the parent
+    directory's own mtime does not move.
+
+    Windows does not reliably bump a directory's mtime when a child file is
+    added, so a cache keyed on the directory mtime keeps serving a stale
+    answer there (green on Linux/macOS, red on windows-latest). This pins the
+    fix — the cache keys on the driver files' own signatures — by reproducing
+    the Windows behavior everywhere: freeze the directory mtime across the add.
+    """
+    import os
+
+    import server.system_config as sc
+    from server.core.project_loader import _get_driver_source
+
+    tree = tmp_path / "defs"
+    tree.mkdir()
+    monkeypatch.setattr(sc, "DRIVER_DEFINITIONS_DIR", tree)
+    # Empty tree: not served -> community (also primes the cache for this tree).
+    assert _get_driver_source("acme_widget") == "community"
+
+    frozen = tree.stat()
+    (tree / "acme_widget.avcdriver").write_text(
+        "id: acme_widget\nname: Acme Widget\ntransport: tcp\n", encoding="utf-8"
+    )
+    # Restore the directory's mtime so it looks unchanged, as it would on Windows.
+    os.utime(tree, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
+    assert _get_driver_source("acme_widget") == "builtin"

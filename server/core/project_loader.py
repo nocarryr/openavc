@@ -549,40 +549,67 @@ def build_driver_dependencies(project: ProjectConfig) -> list[DriverDependency]:
     return deps
 
 
+def _definition_files(definitions_dir: Path) -> list[Path]:
+    """Driver-definition files a tree serves (skips ``_``-prefixed helpers)."""
+    files: list[Path] = []
+    for pattern in ("*.avcdriver", "*.py"):
+        for f in definitions_dir.glob(pattern):
+            if f.name.startswith("_"):
+                continue
+            files.append(f)
+    return files
+
+
+def _definition_signature(definitions_dir: Path) -> tuple:
+    """A change digest for a definitions tree: each served file's name, mtime,
+    and size.
+
+    Adding, removing, or editing a file changes it. This is used to key the
+    scan cache instead of the directory's own mtime, because a directory's
+    mtime is not a reliable change signal for an in-place child add on Windows
+    (so a dir-mtime key serves a stale answer there).
+    """
+    entries = []
+    for f in _definition_files(definitions_dir):
+        st = f.stat()
+        entries.append((f.name, st.st_mtime_ns, st.st_size))
+    return tuple(sorted(entries))
+
+
 @lru_cache(maxsize=8)
-def _scan_builtin_driver_ids(definitions_dir: str, _dir_mtime_ns: int) -> frozenset[str]:
+def _scan_builtin_driver_ids(definitions_dir: str, _signature: tuple) -> frozenset[str]:
     """Read the driver ids declared by the files in ``definitions_dir``.
 
-    Keyed on the directory's mtime as well as its path so the cache can never
-    serve a stale answer: adding or removing a file bumps the directory mtime,
-    and a different directory is a different key. Resolve by each file's
-    DECLARED id rather than its filename stem — the two can differ.
+    Keyed on ``_signature`` (the served files' names, mtimes, and sizes) as
+    well as the path, so the cache can never serve a stale answer: any add,
+    remove, or edit changes the signature, and a different directory is a
+    different key. Resolve by each file's DECLARED id rather than its filename
+    stem — the two can differ.
     """
     from server.drivers.driver_loader import driver_id_from_file
 
     ids: set[str] = set()
-    for pattern in ("*.avcdriver", "*.py"):
-        for f in Path(definitions_dir).glob(pattern):
-            if f.name.startswith("_"):
-                continue
-            driver_id = driver_id_from_file(f)
-            if driver_id:
-                ids.add(driver_id)
+    for f in _definition_files(Path(definitions_dir)):
+        driver_id = driver_id_from_file(f)
+        if driver_id:
+            ids.add(driver_id)
     return frozenset(ids)
 
 
 def _builtin_driver_ids() -> frozenset[str]:
     """Driver ids served by the built-in definitions tree.
 
-    The scan is cached, so the per-call cost is a single stat().
+    The expensive part — opening and parsing each definition file — is cached
+    on the tree's file signature, so the per-call cost is a directory listing
+    plus a stat per file rather than a full re-parse.
     """
     from server.system_config import DRIVER_DEFINITIONS_DIR
 
     try:
-        mtime_ns = DRIVER_DEFINITIONS_DIR.stat().st_mtime_ns
+        signature = _definition_signature(DRIVER_DEFINITIONS_DIR)
     except OSError:
         return frozenset()
-    return _scan_builtin_driver_ids(str(DRIVER_DEFINITIONS_DIR), mtime_ns)
+    return _scan_builtin_driver_ids(str(DRIVER_DEFINITIONS_DIR), signature)
 
 
 def _get_driver_source(driver_id: str) -> str:
