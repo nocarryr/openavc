@@ -128,6 +128,19 @@ function ConfigFieldInputs({
                 placeholder={placeholder}
                 style={{ width: "100%" }}
               />
+            ) : kind === "table" ? (
+              <div
+                style={{
+                  fontSize: "var(--font-size-sm)",
+                  color: "var(--text-muted)",
+                  border: "1px dashed var(--border-color)",
+                  borderRadius: "var(--border-radius)",
+                  padding: "var(--space-sm)",
+                }}
+              >
+                Set this up on the device page after adding — it opens a table
+                editor.
+              </div>
             ) : kind === "textarea" ? (
               <textarea
                 value={configValues[key] ?? ""}

@@ -16,6 +16,7 @@ import { ChildEntities } from "./ChildEntities";
 import { QuickActions } from "./QuickActions";
 import { InlineProtocolEditor } from "./InlineProtocolEditor";
 import { IrCodesEditor } from "./IrCodesEditor";
+import { ConfigTableEditor } from "./ConfigTableEditor";
 import { BridgeIrPort } from "./BridgeIrPort";
 
 export function DeviceDetail({
@@ -753,6 +754,25 @@ export function DeviceDetail({
           onSaved={refetchDeviceInfo}
         />
       )}
+
+      {/* Table config fields — a friendly row editor for any config_schema field
+          declared `type: "table"` (e.g. a Modbus register map). Detected
+          generically from the schema, not a bespoke driver flag. Writes the
+          list of row objects into the device config. */}
+      {Object.entries(
+        (deviceInfo?.driver_info?.config_schema ?? {}) as Record<string, Record<string, unknown>>,
+      )
+        .filter(([, schema]) => schema?.type === "table")
+        .map(([key, schema]) => (
+          <ConfigTableEditor
+            key={key}
+            deviceId={deviceId}
+            fieldKey={key}
+            fieldSchema={schema}
+            connected={connected}
+            onSaved={refetchDeviceInfo}
+          />
+        ))}
 
       {/* Send Command */}
       <div style={sectionStyle}>

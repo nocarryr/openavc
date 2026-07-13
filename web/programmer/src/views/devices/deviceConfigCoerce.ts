@@ -36,6 +36,7 @@ export type ConfigFieldKind =
   | "select"
   | "number"
   | "textarea"
+  | "table"
   | "plain";
 
 export function configFieldKind(
@@ -51,6 +52,10 @@ export function configFieldKind(
   // Secret wins over every other widget: a dropdown or number input would
   // show the credential on screen.
   if (fieldType === "password" || f.secret === true) return "password";
+  // A table field is a repeatable typed-row list, edited on the device page by
+  // ConfigTableEditor — the Add/Edit dialog just shows a pointer to it (the
+  // dialog form is a flat string map that can't hold a row array).
+  if (fieldType === "table") return "table";
   const values = f.values as unknown[] | undefined;
   if (Array.isArray(values) && values.length > 0) return "select";
   if (fieldType === "integer" || fieldType === "number" || fieldType === "float") {
@@ -76,6 +81,21 @@ export function coerceConfigValue(
   if (fieldType === "text") {
     // Multi-line free text — preserve the raw string, no coercion.
     return { ok: true, value: val };
+  }
+  if (fieldType === "table") {
+    // A table field is authored on the device page (ConfigTableEditor), never
+    // in the dialog's flat string form. But the Edit dialog still loads the
+    // whole config into that form (an array value gets JSON-stringified) and
+    // re-coerces on save, so parse it straight back to the row array to
+    // preserve it. Tolerate a blank/invalid value as an empty list rather than
+    // failing a save the user can't fix here.
+    if (val.trim() === "") return { ok: true, value: [] };
+    try {
+      const parsed = JSON.parse(val);
+      return { ok: true, value: Array.isArray(parsed) ? parsed : [] };
+    } catch {
+      return { ok: true, value: [] };
+    }
   }
   if (fieldType === "object" || fieldType === "json") {
     let parsed: unknown;

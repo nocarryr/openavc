@@ -464,9 +464,29 @@ The tables below document each field in detail.
 }
 ```
 
-Types: `string`, `text`, `integer`, `number`, `float`, `boolean`, `enum`. For `enum`, add a `"values"` array.
+Types: `string`, `text`, `integer`, `number`, `float`, `boolean`, `enum`, `table`. For `enum`, add a `"values"` array; for `table`, add a `"columns"` map (see below).
 
-`text` renders as a multi-line monospace textarea in the Add Device dialog. Use it for config that doesn't fit in a single line — block lists for DSPs (e.g., Biamp Tesira's per-block declarations), zone definitions for room combiners, channel-name maps, custom command translation tables, anything the integrator pastes from manufacturer software. The raw string is preserved on save (no JSON parsing or number coercion); your driver parses it at `__init__` time.
+`text` renders as a multi-line monospace textarea in the Add Device dialog. Use it for config that doesn't fit in a single line — zone definitions for room combiners, channel-name maps, custom command translation tables, anything the integrator pastes from manufacturer software. The raw string is preserved on save (no JSON parsing or number coercion); your driver parses it at `__init__` time.
+
+`table` renders a friendly row editor **on the device page** (not the Add Device dialog — the dialog just points the user to it). Use it for a repeatable list of typed rows the integrator declares — a Modbus register map, a DSP block list, a point/channel table. You declare the columns; the platform renders one input per column (dropdowns for `enum`, number inputs for numeric types, a checkbox for `boolean`) with Add/Remove rows and per-cell validation. The stored value is a **list of row objects** keyed by column id, so your driver reads `self.config.get("<field>", [])` as a list of dicts (no string parsing). Each column is a normal scalar field spec:
+
+```yaml
+config_schema:
+  register_map:
+    type: table
+    label: Register Map
+    row_label: register          # singular noun for the "+ Add register" button
+    help: Declare each register you want to read or write.
+    columns:
+      name:    { type: string,  label: Name, required: true }
+      address: { type: integer, label: Address, min: 0, max: 65535 }
+      access:  { type: enum,    label: Access, default: r,
+                 values: [ { value: r, label: Read }, { value: w, label: Write }, { value: rw, label: "Read/Write" } ] }
+      scale:   { type: number,  label: Scale, default: 1 }
+      unit:    { type: string,  label: Unit }
+```
+
+Column cell types: `string`/`text` (text input), `integer`/`number`/`float` (number input, honoring `min`/`max`), `boolean` (checkbox), `enum` (dropdown over `values`, which may be plain strings or `{value, label}` pairs). A column may set `required`, `default`, and `help` (shown as the header tooltip). A blank row is dropped on save. Authoring a table field in the Driver Builder GUI is planned; for now declare it in the `.avcdriver`/Python `DRIVER_INFO` directly.
 
 #### `device_settings` entry
 
