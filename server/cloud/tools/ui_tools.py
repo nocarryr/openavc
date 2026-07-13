@@ -54,7 +54,7 @@ class UIToolsMixin:
         # call yields bindings that were never validated (buttons silently do
         # nothing), while the identical elements added via add_ui_elements work.
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-        from server.core.project_loader import UIPage, save_project_async
+        from server.core.project_loader import UIPage
         elements = input.get("elements", [])
         for el_data in elements:
             if isinstance(el_data, dict) and isinstance(el_data.get("bindings"), dict):
@@ -69,11 +69,12 @@ class UIToolsMixin:
             grid=input.get("grid", {}),
             elements=elements,
         )
-        engine.project.ui.pages.append(new_page)
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        # Build the change on a copy — apply_project diffs it against the
+        # live project; a UI-only change just swaps the project and pushes
+        # the new ui.definition to connected panels.
+        project = engine.project.model_copy(deep=True)
+        project.ui.pages.append(new_page)
+        await engine.apply_project(project)
 
         return {"status": "created", "id": page_id}
 
@@ -83,8 +84,9 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         page_id = input.get("page_id", "")
+        project = engine.project.model_copy(deep=True)
         page = None
-        for p in engine.project.ui.pages:
+        for p in project.ui.pages:
             if p.id == page_id:
                 page = p
                 break
@@ -116,11 +118,7 @@ class UIToolsMixin:
         if not changed:
             return {"error": "No fields to update"}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         return {"status": "updated", "page_id": page_id, "changed": changed}
 
@@ -137,16 +135,13 @@ class UIToolsMixin:
                 element_count = len(pg.elements)
                 break
 
-        original_count = len(engine.project.ui.pages)
-        engine.project.ui.pages = [p for p in engine.project.ui.pages if p.id != page_id]
-        if len(engine.project.ui.pages) == original_count:
+        project = engine.project.model_copy(deep=True)
+        original_count = len(project.ui.pages)
+        project.ui.pages = [p for p in project.ui.pages if p.id != page_id]
+        if len(project.ui.pages) == original_count:
             return {"error": f"UI page '{page_id}' not found"}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         result: dict = {"status": "deleted", "id": page_id}
         if element_count > 0:
@@ -159,8 +154,9 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         page_id = input.get("page_id", "")
+        project = engine.project.model_copy(deep=True)
         page = None
-        for p in engine.project.ui.pages:
+        for p in project.ui.pages:
             if p.id == page_id:
                 page = p
                 break
@@ -179,7 +175,7 @@ class UIToolsMixin:
                 return {"error": f"Element '{el_id}' already exists on page '{page_id}'"}
 
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-        from server.core.project_loader import UIElement, save_project_async
+        from server.core.project_loader import UIElement
         for el_data in elements:
             if "bindings" in el_data and isinstance(el_data["bindings"], dict):
                 el_data["bindings"] = _normalize_bindings(el_data["bindings"])
@@ -187,10 +183,7 @@ class UIToolsMixin:
                 if err:
                     return {"error": f"Element '{el_data.get('id', '?')}': {err}"}
             page.elements.append(UIElement(**el_data))
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         added_ids = [el.get("id", "") for el in elements]
         return {"status": "created", "page_id": page_id, "element_ids": added_ids}
@@ -202,9 +195,10 @@ class UIToolsMixin:
 
         element_id = input.get("element_id", "")
 
-        # Find the element across all pages
+        # Find the element across all pages (on a copy — see apply below)
+        project = engine.project.model_copy(deep=True)
         target_el = None
-        for page in engine.project.ui.pages:
+        for page in project.ui.pages:
             for el in page.elements:
                 if el.id == element_id:
                     target_el = el
@@ -246,11 +240,7 @@ class UIToolsMixin:
         if "bindings" in input:
             target_el.bindings = bindings
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         return {"status": "updated", "element_id": element_id}
 
@@ -265,7 +255,8 @@ class UIToolsMixin:
 
         ids_set = set(element_ids)
         deleted_ids = []
-        for page in engine.project.ui.pages:
+        project = engine.project.model_copy(deep=True)
+        for page in project.ui.pages:
             before_ids = {el.id for el in page.elements}
             page.elements = [el for el in page.elements if el.id not in ids_set]
             deleted_ids.extend(ids_set & before_ids)
@@ -273,11 +264,7 @@ class UIToolsMixin:
         if not deleted_ids:
             return {"error": "No matching elements found"}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         return {"status": "deleted", "element_ids": sorted(deleted_ids)}
 
@@ -298,7 +285,7 @@ class UIToolsMixin:
             return {"error": f"Master element '{element_id}' already exists"}
 
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-        from server.core.project_loader import MasterElement, save_project_async
+        from server.core.project_loader import MasterElement
         el_data = {k: v for k, v in input.items() if k != "id"}
         el_data["id"] = element_id
         if "bindings" in el_data and isinstance(el_data["bindings"], dict):
@@ -307,11 +294,9 @@ class UIToolsMixin:
             if err:
                 return {"error": f"Master element '{element_id}': {err}"}
         new_el = MasterElement(**el_data)
-        engine.project.ui.master_elements.append(new_el)
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        project = engine.project.model_copy(deep=True)
+        project.ui.master_elements.append(new_el)
+        await engine.apply_project(project)
 
         return {"status": "created", "id": element_id}
 
@@ -321,18 +306,15 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         element_id = input.get("element_id", "")
-        original_count = len(engine.project.ui.master_elements)
-        engine.project.ui.master_elements = [
-            el for el in engine.project.ui.master_elements if el.id != element_id
+        project = engine.project.model_copy(deep=True)
+        original_count = len(project.ui.master_elements)
+        project.ui.master_elements = [
+            el for el in project.ui.master_elements if el.id != element_id
         ]
-        if len(engine.project.ui.master_elements) == original_count:
+        if len(project.ui.master_elements) == original_count:
             return {"error": f"Master element '{element_id}' not found"}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         return {"status": "deleted", "element_id": element_id}
 

@@ -103,19 +103,21 @@ class ProjectToolsMixin:
         if not engine or not engine.project:
             return {"error": "No project loaded"}
 
+        # Build the change on a copy — the metadata reconcile updates
+        # system.project_name and the mDNS advertised name, which the old
+        # direct save left stale.
+        project = engine.project.model_copy(deep=True)
         changed = []
         if "name" in input:
-            engine.project.project.name = input["name"]
+            project.project.name = input["name"]
             changed.append("name")
         if "description" in input:
-            engine.project.project.description = input["description"]
+            project.project.description = input["description"]
             changed.append("description")
 
         if not changed:
             return {"error": "No fields to update. Provide 'name' and/or 'description'."}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-        await self._notify_project_changed()
+        await engine.apply_project(project)
 
         return {"status": "updated", "changed": changed}

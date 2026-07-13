@@ -32,7 +32,7 @@ def _make_handler(tmp_path):
     engine.project.ui.settings.theme = "dark"
     engine.project_path = tmp_path / "project.avc"
     rest.set_engine(engine)
-    handler = AIToolHandler(MagicMock(), MagicMock(), MagicMock(), reload_fn=None)
+    handler = AIToolHandler(MagicMock(), MagicMock(), MagicMock())
     return handler, engine
 
 

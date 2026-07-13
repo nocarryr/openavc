@@ -22,7 +22,7 @@ from server.cloud.ai_tool_handler import AIToolHandler
 def _make_handler() -> AIToolHandler:
     agent = MagicMock()
     agent.send_message = AsyncMock()
-    return AIToolHandler(agent, MagicMock(), MagicMock(), reload_fn=None, project_path=None)
+    return AIToolHandler(agent, MagicMock(), MagicMock(), project_path=None)
 
 
 class _Tracker:

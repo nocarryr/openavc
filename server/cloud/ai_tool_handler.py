@@ -887,13 +887,11 @@ class AIToolHandler(
         agent: CloudAgent,
         devices: DeviceManager,
         events: EventBus,
-        reload_fn=None,
         project_path=None,
     ):
         self._agent = agent
         self._devices = devices
         self._events = events
-        self._reload_fn = reload_fn
         self._project_path = project_path
 
         # Backup tracking: create one backup before the first write in a conversation

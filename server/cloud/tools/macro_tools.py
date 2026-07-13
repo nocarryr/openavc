@@ -44,7 +44,7 @@ class MacroToolsMixin:
         if err:
             return {"error": f"Variable '{var_id}': {err}"}
 
-        from server.core.project_loader import VariableConfig, save_project_async
+        from server.core.project_loader import VariableConfig
         new_var = VariableConfig(
             id=var_id,
             type=var_type,
@@ -53,13 +53,13 @@ class MacroToolsMixin:
             dashboard=input.get("dashboard", False),
             persist=input.get("persist", False),
         )
-        engine.project.variables.append(new_var)
-        await save_project_async(engine.project_path, engine.project)
-
-        # Set initial state directly (no reload needed)
-        if new_var.default is not None:
-            self._agent.state.set(f"var.{var_id}", new_var.default, source="config")
-        await self._notify_project_changed()
+        # Build the change on a copy — apply_project diffs it against the
+        # live project, so an in-place edit would reconcile nothing. The
+        # variables reconcile seeds var.<id> from the default and registers
+        # persistence/bindings/validation.
+        project = engine.project.model_copy(deep=True)
+        project.variables.append(new_var)
+        await engine.apply_project(project)
 
         return {"status": "created", "id": var_id}
 
@@ -69,17 +69,17 @@ class MacroToolsMixin:
             return {"error": "No project loaded"}
 
         var_id = input.get("id", "")
-        var_idx = None
-        for i, v in enumerate(engine.project.variables):
-            if v.id == var_id:
-                var_idx = i
-                break
-        if var_idx is None:
-            return {"error": f"Variable '{var_id}' not found"}
-
-        from server.core.project_loader import save_project_async
         from server.cloud.ai_tool_handler import _validate_variable
-        existing = engine.project.variables[var_idx]
+
+        # Mutate a copy — the variables reconcile then applies the change
+        # (persister keys for a persist flip, seeding for a new default,
+        # rebinding/validation), which the old direct save never did.
+        project = engine.project.model_copy(deep=True)
+        existing = next(
+            (v for v in project.variables if v.id == var_id), None
+        )
+        if existing is None:
+            return {"error": f"Variable '{var_id}' not found"}
 
         # Validate before mutating
         check_type = input.get("type", existing.type)
@@ -100,8 +100,7 @@ class MacroToolsMixin:
         if "persist" in input:
             existing.persist = input["persist"]
 
-        await save_project_async(engine.project_path, engine.project)
-        await self._notify_project_changed()
+        await engine.apply_project(project)
 
         return {"status": "updated", "id": var_id}
 
@@ -114,14 +113,16 @@ class MacroToolsMixin:
         # Collect impact before deleting
         impact = self._find_references("variable", var_id)
 
-        original_count = len(engine.project.variables)
-        engine.project.variables = [v for v in engine.project.variables if v.id != var_id]
-        if len(engine.project.variables) == original_count:
+        # Mutate a copy — the variables reconcile sweeps the orphaned
+        # var.<id> state key and drops it from the persister, which the old
+        # direct save left behind.
+        project = engine.project.model_copy(deep=True)
+        original_count = len(project.variables)
+        project.variables = [v for v in project.variables if v.id != var_id]
+        if len(project.variables) == original_count:
             return {"error": f"Variable '{var_id}' not found"}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-        await self._notify_project_changed()
+        await engine.apply_project(project)
 
         result: dict = {"status": "deleted", "id": var_id}
         if impact:
@@ -146,7 +147,7 @@ class MacroToolsMixin:
         if err:
             return {"error": f"Macro '{macro_id}': {err}"}
 
-        from server.core.project_loader import MacroConfig, save_project_async
+        from server.core.project_loader import MacroConfig
         new_macro = MacroConfig(
             id=macro_id,
             name=input.get("name", macro_id),
@@ -155,11 +156,12 @@ class MacroToolsMixin:
             stop_on_error=input.get("stop_on_error", False),
             cancel_group=input.get("cancel_group"),
         )
-        engine.project.macros.append(new_macro)
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        # EDIT-origin apply: the macros reconcile reloads macro/trigger
+        # definitions without re-firing startup triggers (the old full
+        # reload re-fired them on every AI macro edit).
+        project = engine.project.model_copy(deep=True)
+        project.macros.append(new_macro)
+        await engine.apply_project(project)
 
         return {"status": "created", "id": macro_id}
 
@@ -169,18 +171,19 @@ class MacroToolsMixin:
             return {"error": "No project loaded"}
 
         macro_id = input.get("macro_id", "")
+        project = engine.project.model_copy(deep=True)
         macro_idx = None
-        for i, m in enumerate(engine.project.macros):
+        for i, m in enumerate(project.macros):
             if m.id == macro_id:
                 macro_idx = i
                 break
         if macro_idx is None:
             return {"error": f"Macro '{macro_id}' not found"}
 
-        from server.core.project_loader import MacroConfig, save_project_async
+        from server.core.project_loader import MacroConfig
         from server.cloud.ai_tool_handler import _validate_macro
         from server.cloud.tools.ui_tools import _merge_forward_compat
-        existing = engine.project.macros[macro_idx]
+        existing = project.macros[macro_idx]
         # Only validate fields that are being changed
         if "steps" in input or "triggers" in input:
             err = _validate_macro(
@@ -200,11 +203,8 @@ class MacroToolsMixin:
             if k in input
         }
         updated = _merge_forward_compat(existing, MacroConfig, patch)
-        engine.project.macros[macro_idx] = updated
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        project.macros[macro_idx] = updated
+        await engine.apply_project(project)
 
         return {"status": "updated", "id": macro_id}
 
@@ -217,16 +217,13 @@ class MacroToolsMixin:
         # Collect impact before deleting
         impact = self._find_references("macro", macro_id)
 
-        original_count = len(engine.project.macros)
-        engine.project.macros = [m for m in engine.project.macros if m.id != macro_id]
-        if len(engine.project.macros) == original_count:
+        project = engine.project.model_copy(deep=True)
+        original_count = len(project.macros)
+        project.macros = [m for m in project.macros if m.id != macro_id]
+        if len(project.macros) == original_count:
             return {"error": f"Macro '{macro_id}' not found"}
 
-        from server.core.project_loader import save_project_async
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         result: dict = {"status": "deleted", "id": macro_id}
         if impact:
@@ -277,28 +274,6 @@ class MacroToolsMixin:
                 return {"status": "fired", "trigger_id": trigger_id}
             return {"error": f"Trigger '{trigger_id}' not found"}
         return {"error": "Trigger engine not available"}
-
-    async def _notify_project_changed(self) -> None:
-        """Broadcast project change to connected IDE clients.
-
-        Called by handlers that modify the project but don't trigger a full
-        reload (e.g., add_device, variable tools). Handlers that DO reload
-        get this broadcast automatically via engine.reload_project(). Mirrors
-        engine.apply_project's broadcast shape so other tabs'
-        optimistic-concurrency check has a revision to compare against.
-        """
-        engine = self._get_engine()
-        if engine and hasattr(engine, "broadcast_ws"):
-            # Advance the revision before broadcasting so an open IDE's
-            # optimistic-concurrency ETag no longer matches — otherwise its next
-            # full-project PUT silently overwrites this server-side change. These
-            # direct-persist tools bypass reload_project (which normally bumps).
-            if hasattr(engine, "bump_project_revision"):
-                engine.bump_project_revision()
-            await engine.broadcast_ws({
-                "type": "project.reloaded",
-                "revision": getattr(engine, "_project_revision", 0),
-            })
 
     async def _check_references(self, input: dict) -> Any:
         ref_type = input.get("type", "")

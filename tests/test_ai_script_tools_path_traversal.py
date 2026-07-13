@@ -15,7 +15,7 @@ normal filename still works.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,8 +31,16 @@ def _make_handler(tmp_path, scripts=None):
         scripts=scripts or [],
     )
     engine.project_path = tmp_path / "project.avc"
+
+    # Mirror the seam's swap contract — the tools mutate a model_copy and
+    # hand it to apply_project (no reconcile in this unit harness).
+    async def _apply(new_project, **kwargs):
+        engine.project = new_project
+        return 1
+
+    engine.apply_project = AsyncMock(side_effect=_apply)
     rest.set_engine(engine)
-    handler = AIToolHandler(MagicMock(), MagicMock(), MagicMock(), reload_fn=None)
+    handler = AIToolHandler(MagicMock(), MagicMock(), MagicMock())
     return handler, engine
 
 

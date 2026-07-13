@@ -133,6 +133,17 @@ def mock_engine():
     engine.devices = MagicMock()
     engine.devices.add_device = AsyncMock()
     engine.broadcast_ws = AsyncMock()
+    engine._project_revision = 0
+
+    # The tools mutate a model_copy and hand it to apply_project; mirror the
+    # seam's swap-and-bump contract (the reconcile itself is pinned by the
+    # engine tests).
+    async def _apply(new_project, **kwargs):
+        engine.project = new_project
+        engine._project_revision += 1
+        return engine._project_revision
+
+    engine.apply_project = AsyncMock(side_effect=_apply)
     return engine
 
 
@@ -145,8 +156,7 @@ def _patch_save_project():
 
 @pytest.fixture
 def handler(mock_agent, mock_devices, mock_events):
-    reload_fn = AsyncMock()
-    return AIToolHandler(mock_agent, mock_devices, mock_events, reload_fn=reload_fn)
+    return AIToolHandler(mock_agent, mock_devices, mock_events)
 
 
 # ===== READ TOOLS =====
@@ -286,11 +296,13 @@ async def test_add_device(handler, mock_agent, mock_engine):
     assert payload["result"]["status"] == "created"
     assert payload["result"]["id"] == "display1"
 
-    # Device was added to project
+    # Device was added to project, with connection fields split out
     assert any(d.id == "display1" for d in mock_engine.project.devices)
+    assert mock_engine.project.connections["display1"]["host"] == "192.168.1.30"
 
-    # Hot-add was called
-    mock_engine.devices.add_device.assert_called_once()
+    # Applied through the seam — the devices reconcile hot-adds the runtime
+    # device from the resolved config
+    mock_engine.apply_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -333,8 +345,9 @@ async def test_add_variable(handler, mock_agent, mock_engine):
     # Variable was added
     assert any(v.id == "volume_level" for v in mock_engine.project.variables)
 
-    # Default value set in state
-    mock_agent.state.set.assert_called_with("var.volume_level", 50, source="config")
+    # Applied through the seam — the variables reconcile seeds the default
+    # into state (the old manual state.set is gone)
+    mock_engine.apply_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -440,8 +453,8 @@ async def test_add_macro(handler, mock_agent, mock_engine):
     assert len(macro.steps) == 2
     assert macro.stop_on_error is True
 
-    # Reload was called (macros need trigger registration)
-    handler._reload_fn.assert_called_once()
+    # Applied through the seam (the macros reconcile registers triggers)
+    mock_engine.apply_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -958,24 +971,36 @@ async def test_update_ui_element_grid_area_partial_merge(handler, mock_engine):
 # ===== SCHEDULE TOOLS =====
 
 
-# ===== RELOAD BEHAVIOR =====
+# ===== SEAM BEHAVIOR =====
+# Every mutating tool routes through engine.apply_project exactly once, with
+# EDIT origin (the default — no origin/expected_revision overrides). The
+# scoped reconcile replaces the old full reload_fn: an AI macro edit no
+# longer re-fires startup triggers, and variable edits actually take effect
+# (seeding, persister keys, orphan sweep).
+
+
+def _assert_edit_origin_apply(mock_engine):
+    mock_engine.apply_project.assert_awaited_once()
+    kwargs = mock_engine.apply_project.await_args.kwargs
+    assert "origin" not in kwargs, "AI tools must apply with EDIT origin"
+    assert kwargs.get("expected_revision") is None
 
 
 @pytest.mark.asyncio
-async def test_variable_tools_no_reload(handler, mock_agent, mock_engine):
-    """Variable tools should NOT trigger a reload."""
+async def test_variable_tools_apply_through_seam(handler, mock_agent, mock_engine):
+    """Variable tools apply through the seam once, EDIT origin."""
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("add_variable", {"id": "test_var"})
             await handler.handle(msg)
         await _drain()
 
-    handler._reload_fn.assert_not_called()
+    _assert_edit_origin_apply(mock_engine)
 
 
 @pytest.mark.asyncio
-async def test_device_add_no_reload(handler, mock_agent, mock_engine):
-    """add_device should NOT trigger a reload (uses hot-add)."""
+async def test_device_add_applies_through_seam(handler, mock_agent, mock_engine):
+    """add_device applies through the seam (the devices reconcile hot-adds)."""
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("add_device", {
@@ -986,24 +1011,25 @@ async def test_device_add_no_reload(handler, mock_agent, mock_engine):
             await handler.handle(msg)
         await _drain()
 
-    handler._reload_fn.assert_not_called()
+    _assert_edit_origin_apply(mock_engine)
 
 
 @pytest.mark.asyncio
-async def test_macro_tools_trigger_reload(handler, mock_agent, mock_engine):
-    """Macro tools should trigger a reload for trigger registration."""
+async def test_macro_tools_apply_through_seam(handler, mock_agent, mock_engine):
+    """Macro tools apply through the seam — EDIT origin, so trigger
+    registration happens without re-firing startup triggers."""
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("add_macro", {"id": "test_macro", "name": "Test"})
             await handler.handle(msg)
         await _drain()
 
-    handler._reload_fn.assert_called_once()
+    _assert_edit_origin_apply(mock_engine)
 
 
 @pytest.mark.asyncio
-async def test_ui_tools_trigger_reload(handler, mock_agent, mock_engine):
-    """UI tools should trigger a reload for binding registration."""
+async def test_ui_tools_apply_through_seam(handler, mock_agent, mock_engine):
+    """UI tools apply through the seam (broadcast-only reconcile)."""
     with patch.object(handler, "_get_engine", return_value=mock_engine):
         with patch("server.core.project_loader.save_project"):
             msg = _make_tool_call_msg("add_ui_elements", {
@@ -1013,7 +1039,7 @@ async def test_ui_tools_trigger_reload(handler, mock_agent, mock_engine):
             await handler.handle(msg)
         await _drain()
 
-    handler._reload_fn.assert_called_once()
+    _assert_edit_origin_apply(mock_engine)
 
 
 # ===== DISPATCH TABLE =====
@@ -1136,8 +1162,8 @@ async def test_update_macro_preserves_forward_compat_fields(handler, mock_agent,
 
 @pytest.mark.asyncio
 async def test_plugin_config_update_bumps_revision(handler, mock_agent, mock_engine):
-    """Plugin tools persist the project directly; without a revision bump an
-    open IDE's stale ETag still matches and its next save clobbers the edit."""
+    """Plugin config updates apply through the seam; without the revision bump
+    an open IDE's stale ETag still matches and its next save clobbers the edit."""
     from server.core.project_loader import PluginConfig
 
     mock_engine.project.plugins = {"some_plugin": PluginConfig(enabled=True, config={})}
@@ -1159,11 +1185,12 @@ async def test_plugin_config_update_bumps_revision(handler, mock_agent, mock_eng
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
-    mock_engine.bump_project_revision.assert_called_once()
-    assert any(
-        c.args[0].get("type") == "project.reloaded"
-        for c in mock_engine.broadcast_ws.call_args_list
-    )
+    # restart_or_apply ran first (runtime-first, then apply — the reconcile
+    # sees the running config already current), and the seam bumped once.
+    mock_engine.plugin_loader.restart_or_apply.assert_awaited_once()
+    mock_engine.apply_project.assert_awaited_once()
+    assert mock_engine._project_revision == 1
+    assert mock_engine.project.plugins["some_plugin"].config == {"volume": 5}
 
 
 @pytest.mark.asyncio
@@ -1181,7 +1208,10 @@ async def test_disable_plugin_bumps_revision(handler, mock_agent, mock_engine):
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
-    mock_engine.bump_project_revision.assert_called_once()
+    # Seam handoff: enabled=False persisted through apply_project; the
+    # plugins reconcile (pinned in the engine tests) stops the running plugin.
+    mock_engine.apply_project.assert_awaited_once()
+    assert mock_engine.project.plugins["some_plugin"].enabled is False
 
 
 class _StubPlugin:
@@ -1222,11 +1252,11 @@ async def test_enable_plugin_rolls_back_on_start_failure(handler, mock_agent, mo
     payload = _get_result_payload(mock_agent)
     # The failure is reported as a failure (error key -> is_error classifier)
     assert payload["success"] is False
-    # enabled=True was rolled back before the save; config preserved
+    # enabled=True was rolled back before the apply; config preserved
     assert mock_engine.project.plugins["stub_plugin"].enabled is False
     assert mock_engine.project.plugins["stub_plugin"].config == {"keep": "me"}
-    # The rolled-back state was still persisted + revision bumped
-    mock_engine.bump_project_revision.assert_called_once()
+    # The rolled-back state was still applied through the seam (persist + bump)
+    mock_engine.apply_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1270,7 +1300,7 @@ async def test_enable_plugin_success_persists_enabled(handler, mock_agent, mock_
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
     assert mock_engine.project.plugins["stub_plugin"].enabled is True
-    mock_engine.bump_project_revision.assert_called_once()
+    mock_engine.apply_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1291,10 +1321,10 @@ async def test_update_plugin_config_rejects_missing_config(handler, mock_agent, 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is False
     assert payload.get("error")
-    # Config untouched, no restart, no save/bump
+    # Config untouched, no restart, no apply (no save, no bump)
     assert mock_engine.project.plugins["some_plugin"].config == {"brightness": 80}
     mock_engine.plugin_loader.restart_or_apply.assert_not_awaited()
-    mock_engine.bump_project_revision.assert_not_called()
+    mock_engine.apply_project.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -317,7 +317,6 @@ class SystemToolsMixin:
 
     async def _apply_theme(self, input: dict) -> Any:
         from server.api.themes import BUILTIN_THEMES_DIR, _custom_themes_dir
-        from server.core.project_loader import save_project_async
 
         engine = self._get_engine()
         if not engine or not engine.project:
@@ -345,14 +344,14 @@ class SystemToolsMixin:
         if not builtin and not custom:
             return {"error": f"Theme '{theme_id}' not found"}
 
-        engine.project.ui.settings.theme_id = theme_id
-        engine.project.ui.settings.theme = (
+        # UI-section change: the apply pushes the new ui.definition to
+        # connected panels — no other subsystem is touched.
+        project = engine.project.model_copy(deep=True)
+        project.ui.settings.theme_id = theme_id
+        project.ui.settings.theme = (
             "light" if ("light" in theme_id or theme_id == "minimal") else "dark"
         )
-        await save_project_async(engine.project_path, engine.project)
-
-        if self._reload_fn:
-            await self._reload_fn()
+        await engine.apply_project(project)
 
         return {"status": "applied", "theme_id": theme_id}
 

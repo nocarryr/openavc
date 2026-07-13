@@ -2131,7 +2131,6 @@ class Engine:
             from server.cloud.ai_tool_handler import AIToolHandler
             ai_tool_handler = AIToolHandler(
                 self.cloud_agent, self.devices, self.events,
-                reload_fn=self.reload_project,
                 project_path=self.project_path,
             )
             self.cloud_agent.set_ai_tool_handler(ai_tool_handler)
