@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from server.cloud.tools import apply_tool_edit
 from server.utils.logger import get_logger
 from server.utils.paths import safe_path_within
 
@@ -346,12 +347,13 @@ class SystemToolsMixin:
 
         # UI-section change: the apply pushes the new ui.definition to
         # connected panels — no other subsystem is touched.
-        project = engine.project.model_copy(deep=True)
-        project.ui.settings.theme_id = theme_id
-        project.ui.settings.theme = (
-            "light" if ("light" in theme_id or theme_id == "minimal") else "dark"
-        )
-        await engine.apply_project(project)
+        def mutate(project):
+            project.ui.settings.theme_id = theme_id
+            project.ui.settings.theme = (
+                "light" if ("light" in theme_id or theme_id == "minimal") else "dark"
+            )
+
+        await apply_tool_edit(engine, mutate)
 
         return {"status": "applied", "theme_id": theme_id}
 

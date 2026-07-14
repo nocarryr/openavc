@@ -147,9 +147,11 @@ async def create_script(data: ScriptCreateRequest) -> dict[str, Any]:
     path = _safe_script_path(scripts_dir, data.file)
     path.write_text(data.source, encoding="utf-8")
 
-    # Add to a copy of the project config and apply through the one seam:
-    # the scripts diff loads just this script instead of the old full
-    # reload (which re-executed every script and re-fired startup triggers).
+    # Add to the project through the one seam: the scripts diff loads just
+    # this script instead of the old full reload (which re-executed every
+    # script and re-fired startup triggers). The duplicate check runs again
+    # inside the mutate — a create racing this one may have appended the id
+    # after the check above.
     from server.core.project_loader import ScriptConfig
     new_script = ScriptConfig(
         id=data.id,
@@ -157,9 +159,14 @@ async def create_script(data: ScriptCreateRequest) -> dict[str, Any]:
         enabled=data.enabled,
         description=data.description,
     )
-    project = engine.project.model_copy(deep=True)
-    project.scripts.append(new_script)
-    await engine.apply_project(project)
+
+    def mutate(project):
+        for s in project.scripts:
+            if s.id == data.id:
+                raise HTTPException(status_code=409, detail=f"Script '{data.id}' already exists")
+        project.scripts.append(new_script)
+
+    await engine.apply_project_edit(mutate)
     return {"status": "created", "id": data.id}
 
 
@@ -170,22 +177,24 @@ async def delete_script(script_id: str) -> dict[str, Any]:
     if not engine.project:
         raise HTTPException(status_code=503, detail="No project loaded")
 
-    cfg = _find_script_config(script_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail=f"Script '{script_id}' not found")
-
-    # Delete the file
-    scripts_dir = _get_scripts_dir()
-    path = _safe_script_path(scripts_dir, cfg["file"])
-    if path.exists():
-        path.unlink()
-
-    # Remove from a copy of the project config; the scripts diff unloads
-    # just this script (handlers, subscriptions, timers) without disturbing
+    # The find/404 and file delete run inside the mutate against the
+    # project copy taken under the lock; the scripts diff unloads just
+    # this script (handlers, subscriptions, timers) without disturbing
     # the others.
-    project = engine.project.model_copy(deep=True)
-    project.scripts = [s for s in project.scripts if s.id != script_id]
-    await engine.apply_project(project)
+    def mutate(project):
+        cfg = next((s for s in project.scripts if s.id == script_id), None)
+        if cfg is None:
+            raise HTTPException(status_code=404, detail=f"Script '{script_id}' not found")
+
+        # Delete the file
+        scripts_dir = _get_scripts_dir()
+        path = _safe_script_path(scripts_dir, cfg.file)
+        if path.exists():
+            path.unlink()
+
+        project.scripts = [s for s in project.scripts if s.id != script_id]
+
+    await engine.apply_project_edit(mutate)
     return {"status": "deleted"}
 
 

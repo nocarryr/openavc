@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from server.cloud.tools import ToolEditError, apply_tool_edit
+
 
 class PluginToolsMixin:
     """Plugin listing, install/uninstall, enable/disable, and config tools."""
@@ -72,13 +74,14 @@ class PluginToolsMixin:
         # plugin reconcile clears the loader tracking for ids the project no
         # longer references (mirrors the REST uninstall endpoint).
         if engine.project and plugin_id in engine.project.plugins:
-            project = engine.project.model_copy(deep=True)
-            del project.plugins[plugin_id]
-            project.plugin_dependencies = [
-                d for d in project.plugin_dependencies
-                if d.plugin_id != plugin_id
-            ]
-            await engine.apply_project(project)
+            def mutate(project):
+                project.plugins.pop(plugin_id, None)
+                project.plugin_dependencies = [
+                    d for d in project.plugin_dependencies
+                    if d.plugin_id != plugin_id
+                ]
+
+            await apply_tool_edit(engine, mutate)
 
         # Clear tracking directly too: the files are gone even when the
         # plugin was never referenced by the project (no entry to diff).
@@ -105,30 +108,30 @@ class PluginToolsMixin:
         if plugin_class is None:
             return {"error": f"Plugin '{plugin_id}' not installed"}
 
-        # Build the change on a copy — apply_project diffs it against the
-        # live project.
-        project = engine.project.model_copy(deep=True)
-        if plugin_id not in project.plugins:
+        entry = engine.project.plugins.get(plugin_id)
+        if entry is None:
             schema = getattr(plugin_class, "CONFIG_SCHEMA", {}) or {}
-            default_config = build_default_plugin_config(schema)
-            project.plugins[plugin_id] = PluginConfig(
-                enabled=True,
-                config=default_config,
-            )
+            config = build_default_plugin_config(schema)
         else:
-            project.plugins[plugin_id].enabled = True
+            config = entry.config
 
         # Start first; only persist enabled=True if the start succeeded.
         # start_plugins() retries every enabled entry at each startup, so
         # persisting before the start would make a broken plugin retry on
         # every boot (mirrors the REST enable endpoint's rollback). The
         # seam's plugin sync then sees runtime == project and does nothing.
-        config = project.plugins[plugin_id].config
         success = await engine.plugin_loader.start_plugin(plugin_id, config)
-        if not success:
-            project.plugins[plugin_id].enabled = False
 
-        await engine.apply_project(project)
+        def mutate(project):
+            if plugin_id not in project.plugins:
+                project.plugins[plugin_id] = PluginConfig(
+                    enabled=success,
+                    config=config,
+                )
+            else:
+                project.plugins[plugin_id].enabled = success
+
+        await apply_tool_edit(engine, mutate)
 
         if not success:
             health = await engine.plugin_loader.get_health(plugin_id)
@@ -158,13 +161,15 @@ class PluginToolsMixin:
         if not plugin_id:
             return {"error": "plugin_id is required"}
 
-        if plugin_id not in engine.project.plugins:
-            return {"error": f"Plugin '{plugin_id}' not in project"}
+        def mutate(project):
+            if plugin_id not in project.plugins:
+                raise ToolEditError({"error": f"Plugin '{plugin_id}' not in project"})
+            project.plugins[plugin_id].enabled = False
 
-        project = engine.project.model_copy(deep=True)
-        project.plugins[plugin_id].enabled = False
         # The plugins-section reconcile stops the running plugin.
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "disabled", "plugin_id": plugin_id}
 
@@ -259,9 +264,14 @@ class PluginToolsMixin:
         # current and doesn't apply it a second time.
         outcome = await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
 
-        project = engine.project.model_copy(deep=True)
-        project.plugins[plugin_id].config = new_config
-        await engine.apply_project(project)
+        def mutate(project):
+            if plugin_id not in project.plugins:
+                raise ToolEditError({"error": f"Plugin '{plugin_id}' not in project"})
+            project.plugins[plugin_id].config = new_config
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         result = {"status": "updated", "plugin_id": plugin_id, "applied": outcome}
         if missing:

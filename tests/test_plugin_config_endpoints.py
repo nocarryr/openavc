@@ -79,14 +79,16 @@ def _engine(monkeypatch, *, restart_outcome="restarted"):
         _project_revision=0,
     )
 
-    # The route mutates a model_copy and hands it to apply_project; mirror
-    # the swap-and-bump contract (no reconcile — that's pinned elsewhere).
-    async def _apply(new_project, **kwargs):
+    # The route hands a mutate callback to apply_project_edit; mirror the
+    # copy-mutate-swap-and-bump contract (no reconcile — pinned elsewhere).
+    async def _apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
         engine.project = new_project
         engine._project_revision += 1
         return engine._project_revision
 
-    engine.apply_project = _apply
+    engine.apply_project_edit = _apply_edit
     monkeypatch.setattr("server.api.plugins._engine", engine)
     return engine
 
@@ -290,7 +292,7 @@ async def test_context_action_missing_body_emits_empty_dict(monkeypatch):
 
 
 def _removal_engine(monkeypatch):
-    """Engine that records what the route hands to apply_project.
+    """Engine that records what the route's edit applies through the seam.
 
     The route no longer stops the plugin or drops its tracking itself —
     the seam's plugin reconcile does (pinned by the _sync_plugins matrix in
@@ -313,13 +315,15 @@ def _removal_engine(monkeypatch):
         _project_revision=0,
     )
 
-    async def _apply(new_project, **kwargs):
+    async def _apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
         calls["applied"].append(new_project)
         engine.project = new_project
         engine._project_revision += 1
         return engine._project_revision
 
-    engine.apply_project = _apply
+    engine.apply_project_edit = _apply_edit
     monkeypatch.setattr("server.api.plugins._engine", engine)
     return engine, calls
 

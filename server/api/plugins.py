@@ -240,30 +240,29 @@ async def enable_plugin(plugin_id: str) -> dict[str, Any]:
     if plugin_class is None:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not installed")
 
-    # Build the change on a copy — apply_project diffs it against the live
-    # project to decide what to reconcile.
-    project = engine.project.model_copy(deep=True)
-    if plugin_id not in project.plugins:
+    entry = engine.project.plugins.get(plugin_id)
+    if entry is None:
         # First time — build default config from schema
         schema = getattr(plugin_class, "CONFIG_SCHEMA", {}) or {}
-        default_config = build_default_plugin_config(schema)
-        project.plugins[plugin_id] = PluginConfig(
-            enabled=True,
-            config=default_config,
-        )
+        config = build_default_plugin_config(schema)
     else:
-        project.plugins[plugin_id].enabled = True
+        config = entry.config
 
     # Start first so a failed start persists enabled=False (won't retry on
     # the next restart). The seam's plugin sync then sees runtime == project
     # and does nothing further.
-    config = project.plugins[plugin_id].config
     success = await engine.plugin_loader.start_plugin(plugin_id, config)
 
-    if not success:
-        project.plugins[plugin_id].enabled = False
+    def mutate(project):
+        if plugin_id not in project.plugins:
+            project.plugins[plugin_id] = PluginConfig(
+                enabled=success,
+                config=config,
+            )
+        else:
+            project.plugins[plugin_id].enabled = success
 
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
 
     return {
         "status": "enabled" if success else "error",
@@ -279,13 +278,13 @@ async def disable_plugin(plugin_id: str) -> dict[str, Any]:
     if not engine.project:
         raise HTTPException(status_code=503, detail="No project loaded")
 
-    if plugin_id not in engine.project.plugins:
-        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
+    def mutate(project):
+        if plugin_id not in project.plugins:
+            raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
+        project.plugins[plugin_id].enabled = False
 
-    project = engine.project.model_copy(deep=True)
-    project.plugins[plugin_id].enabled = False
     # The plugins-section reconcile stops the running plugin.
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
 
     return {"status": "disabled", "plugin_id": plugin_id}
 
@@ -336,9 +335,12 @@ async def update_plugin_config(plugin_id: str, request: Request) -> dict[str, An
     # doesn't apply it a second time.
     outcome = await engine.plugin_loader.restart_or_apply(plugin_id, new_config)
 
-    project = engine.project.model_copy(deep=True)
-    project.plugins[plugin_id].config = new_config
-    await engine.apply_project(project)
+    def mutate(project):
+        if plugin_id not in project.plugins:
+            raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
+        project.plugins[plugin_id].config = new_config
+
+    await engine.apply_project_edit(mutate)
 
     result: dict[str, Any] = {"status": "updated", "plugin_id": plugin_id, "applied": outcome}
     if missing:
@@ -370,19 +372,25 @@ async def remove_plugin_config(plugin_id: str) -> dict[str, Any]:
     engine = _get_engine()
     if not engine.project or plugin_id not in engine.project.plugins:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
-    try:
-        project = engine.project.model_copy(deep=True)
+
+    def mutate(project):
+        if plugin_id not in project.plugins:
+            raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not in project")
         del project.plugins[plugin_id]
         project.plugin_dependencies = [
             d for d in project.plugin_dependencies
             if d.plugin_id != plugin_id
         ]
+
+    try:
         # The plugins-section reconcile stops a running plugin and drops its
         # missing/incompatible tracking + broadcast state keys, and the
         # revision bump 409s an open editor's stale full-project PUT instead
         # of letting it restore the entry.
-        await engine.apply_project(project)
+        await engine.apply_project_edit(mutate)
         return {"status": "removed", "plugin_id": plugin_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise _api_error(500, f"Failed to remove plugin config for '{plugin_id}'", e)
 
@@ -630,17 +638,18 @@ async def uninstall_plugin_endpoint(
         )
 
         # Remove from project file so it doesn't show as "missing" on restart.
-        # apply_project bumps the revision (a stale editor PUT would otherwise
+        # The apply bumps the revision (a stale editor PUT would otherwise
         # silently restore the entry) and its plugin reconcile clears the
         # loader tracking for ids the project no longer references.
         if engine.project and plugin_id in engine.project.plugins:
-            project = engine.project.model_copy(deep=True)
-            del project.plugins[plugin_id]
-            project.plugin_dependencies = [
-                d for d in project.plugin_dependencies
-                if d.plugin_id != plugin_id
-            ]
-            await engine.apply_project(project)
+            def mutate(project):
+                project.plugins.pop(plugin_id, None)
+                project.plugin_dependencies = [
+                    d for d in project.plugin_dependencies
+                    if d.plugin_id != plugin_id
+                ]
+
+            await engine.apply_project_edit(mutate)
 
         # Clear tracking directly too: the files are gone even when the
         # plugin was never referenced by the project (no entry to diff).

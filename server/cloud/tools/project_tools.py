@@ -3,6 +3,7 @@
 from typing import Any
 
 from server.cloud.state_relay import is_cloud_excluded_key
+from server.cloud.tools import ToolEditError, apply_tool_edit
 
 
 class ProjectToolsMixin:
@@ -103,21 +104,25 @@ class ProjectToolsMixin:
         if not engine or not engine.project:
             return {"error": "No project loaded"}
 
-        # Build the change on a copy — the metadata reconcile updates
-        # system.project_name and the mDNS advertised name, which the old
-        # direct save left stale.
-        project = engine.project.model_copy(deep=True)
+        # The metadata reconcile updates system.project_name and the mDNS
+        # advertised name, which the old direct save left stale.
         changed = []
-        if "name" in input:
-            project.project.name = input["name"]
-            changed.append("name")
-        if "description" in input:
-            project.project.description = input["description"]
-            changed.append("description")
 
-        if not changed:
-            return {"error": "No fields to update. Provide 'name' and/or 'description'."}
+        def mutate(project):
+            if "name" in input:
+                project.project.name = input["name"]
+                changed.append("name")
+            if "description" in input:
+                project.project.description = input["description"]
+                changed.append("description")
 
-        await engine.apply_project(project)
+            if not changed:
+                raise ToolEditError(
+                    {"error": "No fields to update. Provide 'name' and/or 'description'."}
+                )
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "updated", "changed": changed}

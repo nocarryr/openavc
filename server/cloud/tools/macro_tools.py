@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from server.cloud.tools import ToolEditError, apply_tool_edit
 from server.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -34,8 +35,6 @@ class MacroToolsMixin:
         var_id = input.get("id", "")
         if not var_id:
             return {"error": "Variable ID is required"}
-        if any(v.id == var_id for v in engine.project.variables):
-            return {"error": f"Variable '{var_id}' already exists"}
 
         var_type = input.get("type", "string")
         default = input.get("default")
@@ -53,13 +52,17 @@ class MacroToolsMixin:
             dashboard=input.get("dashboard", False),
             persist=input.get("persist", False),
         )
-        # Build the change on a copy — apply_project diffs it against the
-        # live project, so an in-place edit would reconcile nothing. The
-        # variables reconcile seeds var.<id> from the default and registers
-        # persistence/bindings/validation.
-        project = engine.project.model_copy(deep=True)
-        project.variables.append(new_var)
-        await engine.apply_project(project)
+
+        def mutate(project):
+            if any(v.id == var_id for v in project.variables):
+                raise ToolEditError({"error": f"Variable '{var_id}' already exists"})
+            # The variables reconcile seeds var.<id> from the default and
+            # registers persistence/bindings/validation.
+            project.variables.append(new_var)
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "created", "id": var_id}
 
@@ -71,36 +74,38 @@ class MacroToolsMixin:
         var_id = input.get("id", "")
         from server.cloud.ai_tool_handler import _validate_variable
 
-        # Mutate a copy — the variables reconcile then applies the change
-        # (persister keys for a persist flip, seeding for a new default,
+        # The variables reconcile then applies the change (persister keys
+        # for a persist flip, seeding for a new default,
         # rebinding/validation), which the old direct save never did.
-        project = engine.project.model_copy(deep=True)
-        existing = next(
-            (v for v in project.variables if v.id == var_id), None
-        )
-        if existing is None:
-            return {"error": f"Variable '{var_id}' not found"}
+        def mutate(project):
+            existing = next(
+                (v for v in project.variables if v.id == var_id), None
+            )
+            if existing is None:
+                raise ToolEditError({"error": f"Variable '{var_id}' not found"})
 
-        # Validate before mutating
-        check_type = input.get("type", existing.type)
-        check_default = input.get("default", existing.default)
-        if "type" in input or "default" in input:
-            err = _validate_variable(check_type, check_default)
-            if err:
-                return {"error": f"Variable '{var_id}': {err}"}
+            # Validate before mutating
+            check_type = input.get("type", existing.type)
+            check_default = input.get("default", existing.default)
+            if "type" in input or "default" in input:
+                err = _validate_variable(check_type, check_default)
+                if err:
+                    raise ToolEditError({"error": f"Variable '{var_id}': {err}"})
 
-        if "type" in input:
-            existing.type = input["type"]
-        if "default" in input:
-            existing.default = input["default"]
-        if "label" in input:
-            existing.label = input["label"]
-        if "dashboard" in input:
-            existing.dashboard = input["dashboard"]
-        if "persist" in input:
-            existing.persist = input["persist"]
+            if "type" in input:
+                existing.type = input["type"]
+            if "default" in input:
+                existing.default = input["default"]
+            if "label" in input:
+                existing.label = input["label"]
+            if "dashboard" in input:
+                existing.dashboard = input["dashboard"]
+            if "persist" in input:
+                existing.persist = input["persist"]
 
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "updated", "id": var_id}
 
@@ -113,16 +118,18 @@ class MacroToolsMixin:
         # Collect impact before deleting
         impact = self._find_references("variable", var_id)
 
-        # Mutate a copy — the variables reconcile sweeps the orphaned
-        # var.<id> state key and drops it from the persister, which the old
-        # direct save left behind.
-        project = engine.project.model_copy(deep=True)
-        original_count = len(project.variables)
-        project.variables = [v for v in project.variables if v.id != var_id]
-        if len(project.variables) == original_count:
-            return {"error": f"Variable '{var_id}' not found"}
+        # The variables reconcile sweeps the orphaned var.<id> state key
+        # and drops it from the persister, which the old direct save left
+        # behind.
+        def mutate(project):
+            original_count = len(project.variables)
+            project.variables = [v for v in project.variables if v.id != var_id]
+            if len(project.variables) == original_count:
+                raise ToolEditError({"error": f"Variable '{var_id}' not found"})
 
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         result: dict = {"status": "deleted", "id": var_id}
         if impact:
@@ -137,31 +144,36 @@ class MacroToolsMixin:
         macro_id = input.get("id", "")
         if not macro_id:
             return {"error": "Macro ID is required"}
-        if any(m.id == macro_id for m in engine.project.macros):
-            return {"error": f"Macro '{macro_id}' already exists"}
 
         steps = input.get("steps", [])
         triggers = input.get("triggers", [])
         from server.cloud.ai_tool_handler import _validate_macro
-        err = _validate_macro(steps, triggers, engine.project)
-        if err:
-            return {"error": f"Macro '{macro_id}': {err}"}
-
         from server.core.project_loader import MacroConfig
-        new_macro = MacroConfig(
-            id=macro_id,
-            name=input.get("name", macro_id),
-            steps=steps,
-            triggers=triggers,
-            stop_on_error=input.get("stop_on_error", False),
-            cancel_group=input.get("cancel_group"),
-        )
-        # EDIT-origin apply: the macros reconcile reloads macro/trigger
-        # definitions without re-firing startup triggers (the old full
-        # reload re-fired them on every AI macro edit).
-        project = engine.project.model_copy(deep=True)
-        project.macros.append(new_macro)
-        await engine.apply_project(project)
+
+        def mutate(project):
+            if any(m.id == macro_id for m in project.macros):
+                raise ToolEditError({"error": f"Macro '{macro_id}' already exists"})
+
+            err = _validate_macro(steps, triggers, project)
+            if err:
+                raise ToolEditError({"error": f"Macro '{macro_id}': {err}"})
+
+            new_macro = MacroConfig(
+                id=macro_id,
+                name=input.get("name", macro_id),
+                steps=steps,
+                triggers=triggers,
+                stop_on_error=input.get("stop_on_error", False),
+                cancel_group=input.get("cancel_group"),
+            )
+            # EDIT-origin apply: the macros reconcile reloads macro/trigger
+            # definitions without re-firing startup triggers (the old full
+            # reload re-fired them on every AI macro edit).
+            project.macros.append(new_macro)
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "created", "id": macro_id}
 
@@ -171,40 +183,44 @@ class MacroToolsMixin:
             return {"error": "No project loaded"}
 
         macro_id = input.get("macro_id", "")
-        project = engine.project.model_copy(deep=True)
-        macro_idx = None
-        for i, m in enumerate(project.macros):
-            if m.id == macro_id:
-                macro_idx = i
-                break
-        if macro_idx is None:
-            return {"error": f"Macro '{macro_id}' not found"}
-
         from server.core.project_loader import MacroConfig
         from server.cloud.ai_tool_handler import _validate_macro
         from server.cloud.tools.ui_tools import _merge_forward_compat
-        existing = project.macros[macro_idx]
-        # Only validate fields that are being changed
-        if "steps" in input or "triggers" in input:
-            err = _validate_macro(
-                input.get("steps", []) if "steps" in input else [],
-                input.get("triggers", []) if "triggers" in input else [],
-                engine.project,
-            )
-            if err:
-                return {"error": f"Macro '{macro_id}': {err}"}
 
-        # Merge onto the existing macro rather than rebuilding from declared
-        # fields, so forward-compat (extra='allow') fields a newer platform
-        # stored survive the edit.
-        patch = {
-            k: input[k]
-            for k in ("name", "steps", "triggers", "stop_on_error", "cancel_group")
-            if k in input
-        }
-        updated = _merge_forward_compat(existing, MacroConfig, patch)
-        project.macros[macro_idx] = updated
-        await engine.apply_project(project)
+        def mutate(project):
+            macro_idx = None
+            for i, m in enumerate(project.macros):
+                if m.id == macro_id:
+                    macro_idx = i
+                    break
+            if macro_idx is None:
+                raise ToolEditError({"error": f"Macro '{macro_id}' not found"})
+
+            existing = project.macros[macro_idx]
+            # Only validate fields that are being changed
+            if "steps" in input or "triggers" in input:
+                err = _validate_macro(
+                    input.get("steps", []) if "steps" in input else [],
+                    input.get("triggers", []) if "triggers" in input else [],
+                    project,
+                )
+                if err:
+                    raise ToolEditError({"error": f"Macro '{macro_id}': {err}"})
+
+            # Merge onto the existing macro rather than rebuilding from declared
+            # fields, so forward-compat (extra='allow') fields a newer platform
+            # stored survive the edit.
+            patch = {
+                k: input[k]
+                for k in ("name", "steps", "triggers", "stop_on_error", "cancel_group")
+                if k in input
+            }
+            updated = _merge_forward_compat(existing, MacroConfig, patch)
+            project.macros[macro_idx] = updated
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "updated", "id": macro_id}
 
@@ -217,13 +233,15 @@ class MacroToolsMixin:
         # Collect impact before deleting
         impact = self._find_references("macro", macro_id)
 
-        project = engine.project.model_copy(deep=True)
-        original_count = len(project.macros)
-        project.macros = [m for m in project.macros if m.id != macro_id]
-        if len(project.macros) == original_count:
-            return {"error": f"Macro '{macro_id}' not found"}
+        def mutate(project):
+            original_count = len(project.macros)
+            project.macros = [m for m in project.macros if m.id != macro_id]
+            if len(project.macros) == original_count:
+                raise ToolEditError({"error": f"Macro '{macro_id}' not found"})
 
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         result: dict = {"status": "deleted", "id": macro_id}
         if impact:

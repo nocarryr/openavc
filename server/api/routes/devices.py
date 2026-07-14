@@ -167,79 +167,80 @@ async def update_device(device_id: str, body: DeviceUpdateRequest) -> dict[str, 
     if not engine.project:
         raise HTTPException(status_code=503, detail="No project loaded")
 
-    # Mutate a copy, never engine.project in place: apply_project diffs the
-    # new project against the live one to decide what to reconcile, and an
-    # in-place edit would make that diff see nothing.
-    project = engine.project.model_copy(deep=True)
+    # The edit is built inside apply_project_edit's mutate callback: the
+    # engine copies the CURRENT project under the reconcile lock, so a
+    # commit landing while this request is in flight can't be reverted by
+    # a stale copy. All project reads (find-by-id, 404s) live inside it.
+    def mutate(project):
+        # Find the device in the project config
+        device_idx = None
+        for i, d in enumerate(project.devices):
+            if d.id == device_id:
+                device_idx = i
+                break
+        if device_idx is None:
+            raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
 
-    # Find the device in the project config
-    device_idx = None
-    for i, d in enumerate(project.devices):
-        if d.id == device_id:
-            device_idx = i
-            break
-    if device_idx is None:
-        raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
+        # Build updated config — split connection fields into connections table
+        existing = project.devices[device_idx]
+        new_name = _sanitize_device_name(body.name) if body.name is not None else existing.name
+        if not new_name:
+            raise HTTPException(status_code=422, detail="Device name cannot be blank")
+        new_driver = body.driver if body.driver is not None else existing.driver
 
-    # Build updated config — split connection fields into connections table
-    existing = project.devices[device_idx]
-    new_name = _sanitize_device_name(body.name) if body.name is not None else existing.name
-    if not new_name:
-        raise HTTPException(status_code=422, detail="Device name cannot be blank")
-    new_driver = body.driver if body.driver is not None else existing.driver
+        # Validate driver exists
+        if new_driver != existing.driver:
+            from server.core.device_manager import _DRIVER_REGISTRY
+            if new_driver not in _DRIVER_REGISTRY:
+                raise HTTPException(status_code=422, detail=f"Driver '{new_driver}' is not installed")
 
-    # Validate driver exists
-    if new_driver != existing.driver:
-        from server.core.device_manager import _DRIVER_REGISTRY
-        if new_driver not in _DRIVER_REGISTRY:
-            raise HTTPException(status_code=422, detail=f"Driver '{new_driver}' is not installed")
+        if body.config is not None:
+            # Split incoming config: connection fields → connections table, rest → device.config
+            protocol_config = {}
+            conn_overrides = dict(project.connections.get(device_id, {}))
+            for key, value in body.config.items():
+                if key in CONNECTION_FIELDS:
+                    conn_overrides[key] = value
+                else:
+                    protocol_config[key] = value
+            new_config = protocol_config
+            # Remove None values from connection overrides
+            conn_overrides = {k: v for k, v in conn_overrides.items() if v is not None}
+            if conn_overrides:
+                project.connections[device_id] = conn_overrides
+            elif device_id in project.connections:
+                del project.connections[device_id]
+        else:
+            new_config = existing.config
 
-    if body.config is not None:
-        # Split incoming config: connection fields → connections table, rest → device.config
-        protocol_config = {}
-        conn_overrides = dict(project.connections.get(device_id, {}))
-        for key, value in body.config.items():
-            if key in CONNECTION_FIELDS:
-                conn_overrides[key] = value
-            else:
-                protocol_config[key] = value
-        new_config = protocol_config
-        # Remove None values from connection overrides
-        conn_overrides = {k: v for k, v in conn_overrides.items() if v is not None}
-        if conn_overrides:
-            project.connections[device_id] = conn_overrides
-        elif device_id in project.connections:
-            del project.connections[device_id]
-    else:
-        new_config = existing.config
+        # Rebuild by re-validating the existing record's full dump rather than
+        # constructing a fresh DeviceConfig(...) that enumerates only the known
+        # fields. The base model is extra='allow', so a from-scratch rebuild drops
+        # any forward-compat top-level field a newer platform version wrote
+        # (__pydantic_extra__) on every routine edit — defeating the round-trip the
+        # base model exists to guarantee. Dumping then re-validating preserves
+        # those, and also carries pending_settings (re-connect applies them via
+        # _apply_pending_settings()) and child-entity metadata (user labels /
+        # per-child config) unless the request explicitly replaces them — a plain
+        # name/driver/config edit must wipe neither.
+        merged = existing.model_dump()
+        merged.update({
+            "driver": new_driver,
+            "name": new_name,
+            "config": new_config,
+            "enabled": existing.enabled if body.enabled is None else body.enabled,
+        })
+        if body.child_entities is not None:
+            merged["child_entities"] = body.child_entities
+        updated = DeviceConfig.model_validate(merged)
 
-    # Rebuild by re-validating the existing record's full dump rather than
-    # constructing a fresh DeviceConfig(...) that enumerates only the known
-    # fields. The base model is extra='allow', so a from-scratch rebuild drops
-    # any forward-compat top-level field a newer platform version wrote
-    # (__pydantic_extra__) on every routine edit — defeating the round-trip the
-    # base model exists to guarantee. Dumping then re-validating preserves
-    # those, and also carries pending_settings (re-connect applies them via
-    # _apply_pending_settings()) and child-entity metadata (user labels /
-    # per-child config) unless the request explicitly replaces them — a plain
-    # name/driver/config edit must wipe neither.
-    merged = existing.model_dump()
-    merged.update({
-        "driver": new_driver,
-        "name": new_name,
-        "config": new_config,
-        "enabled": existing.enabled if body.enabled is None else body.enabled,
-    })
-    if body.child_entities is not None:
-        merged["child_entities"] = body.child_entities
-    updated = DeviceConfig.model_validate(merged)
+        # Persist and reconcile through the one seam: the device-section diff
+        # drives the hot-swap (_sync_devices), and the revision bump means an
+        # open IDE's stale full-project PUT gets a 409 instead of silently
+        # reverting this edit.
+        project.devices[device_idx] = updated
 
-    # Persist and reconcile through the one seam: the device-section diff
-    # drives the hot-swap (_sync_devices), and the revision bump means an
-    # open IDE's stale full-project PUT gets a 409 instead of silently
-    # reverting this edit.
-    project.devices[device_idx] = updated
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
     return {"status": "updated", "device_id": device_id}
 
 
@@ -250,19 +251,18 @@ async def delete_device(device_id: str) -> dict[str, Any]:
     if not engine.project:
         raise HTTPException(status_code=503, detail="No project loaded")
 
-    # Find and remove from the project config (a copy — see update_device)
-    project = engine.project.model_copy(deep=True)
-    original_count = len(project.devices)
-    project.devices = [d for d in project.devices if d.id != device_id]
-    if len(project.devices) == original_count:
-        raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
+    def mutate(project):
+        original_count = len(project.devices)
+        project.devices = [d for d in project.devices if d.id != device_id]
+        if len(project.devices) == original_count:
+            raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
 
-    # Clean up connections table entry
-    project.connections.pop(device_id, None)
+        # Clean up connections table entry
+        project.connections.pop(device_id, None)
 
     # The reconcile removes the runtime device AND sweeps its orphaned
     # device.{id}.* state keys (the old direct remove_device left them).
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
     return {"status": "deleted", "device_id": device_id}
 
 
@@ -687,17 +687,14 @@ async def store_pending_settings(
     runtime_cfg = engine.devices.get_device_config(device_id) or {}
     pending = dict(runtime_cfg.get("pending_settings", {}))
 
-    project = engine.project.model_copy(deep=True)
-    found = False
-    for dev in project.devices:
-        if dev.id == device_id:
-            dev.pending_settings = pending
-            found = True
-            break
-    if not found:
+    def mutate(project):
+        for dev in project.devices:
+            if dev.id == device_id:
+                dev.pending_settings = pending
+                return
         raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found in project")
 
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
     return {"status": "pending", "device_id": device_id, "settings": body.settings}
 
 
@@ -957,48 +954,57 @@ async def update_child_entity(
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
 
-    # Build the change on a copy of the project (apply_project diffs copy
-    # vs live). Merge — don't overwrite the whole entry — so a label-only
-    # PATCH doesn't wipe an existing config dict, and vice versa.
-    project = engine.project.model_copy(deep=True)
-    device_copy = next(d for d in project.devices if d.id == project_device.id)
-    type_map = device_copy.child_entities.setdefault(child_type, {})
-    existing = type_map.get(padded)
-    new_label = (
-        body.label if body.label is not None
-        else (existing.label if existing else "")
-    )
-    new_config = (
-        dict(body.config) if body.config is not None
-        else (dict(existing.config) if existing else {})
-    )
-    type_map[padded] = ChildEntityConfig(label=new_label, config=new_config)
+    # Merge — don't overwrite the whole entry — so a label-only PATCH
+    # doesn't wipe an existing config dict, and vice versa.
+    result_device = None
 
-    # Apply the change to the live runtime FIRST, so the seam's device
-    # reconcile sees runtime == project and does not tear down / re-add a
-    # connected device for an edit this route already applied in place:
-    #
-    # 1. The driver's project-metadata view, so future register_child calls
-    #    (re-registration after deregister, etc.) seed the latest label.
-    driver.set_project_child_entities({
-        ctype: {pid: {"label": cfg.label, "config": dict(cfg.config)}
-                for pid, cfg in pid_map.items()}
-        for ctype, pid_map in device_copy.child_entities.items()
-    })
-    # 2. The device manager's stored config (the dict _sync_devices compares
-    #    against the project's resolved config).
-    runtime_cfg = engine.devices.get_device_config(device_id)
-    if runtime_cfg is not None:
-        runtime_cfg["child_entities"] = device_copy.model_dump()["child_entities"]
-    # 3. Live state mirror — only if the child is currently registered.
-    #    An unregistered project entry still gets persisted below; the live
-    #    state key is created on the next register_child.
-    if body.label is not None and driver.is_child_registered(child_type, local_id):
-        driver.set_child_state(child_type, local_id, "label", new_label)
+    def mutate(project):
+        nonlocal result_device
+        device_copy = next(
+            (d for d in project.devices if d.id == project_device.id), None
+        )
+        if device_copy is None:
+            raise HTTPException(
+                status_code=404, detail=f"Device '{device_id}' not found"
+            )
+        type_map = device_copy.child_entities.setdefault(child_type, {})
+        existing = type_map.get(padded)
+        new_label = (
+            body.label if body.label is not None
+            else (existing.label if existing else "")
+        )
+        new_config = (
+            dict(body.config) if body.config is not None
+            else (dict(existing.config) if existing else {})
+        )
+        type_map[padded] = ChildEntityConfig(label=new_label, config=new_config)
 
-    await engine.apply_project(project)
+        # Apply the change to the live runtime FIRST, so the seam's device
+        # reconcile sees runtime == project and does not tear down / re-add a
+        # connected device for an edit this route already applied in place:
+        #
+        # 1. The driver's project-metadata view, so future register_child calls
+        #    (re-registration after deregister, etc.) seed the latest label.
+        driver.set_project_child_entities({
+            ctype: {pid: {"label": cfg.label, "config": dict(cfg.config)}
+                    for pid, cfg in pid_map.items()}
+            for ctype, pid_map in device_copy.child_entities.items()
+        })
+        # 2. The device manager's stored config (the dict _sync_devices compares
+        #    against the project's resolved config).
+        runtime_cfg = engine.devices.get_device_config(device_id)
+        if runtime_cfg is not None:
+            runtime_cfg["child_entities"] = device_copy.model_dump()["child_entities"]
+        # 3. Live state mirror — only if the child is currently registered.
+        #    An unregistered project entry still gets persisted below; the live
+        #    state key is created on the next register_child.
+        if body.label is not None and driver.is_child_registered(child_type, local_id):
+            driver.set_child_state(child_type, local_id, "label", new_label)
+        result_device = device_copy
 
-    entry = _build_child_entry(driver, device_copy, child_type, local_id)
+    await engine.apply_project_edit(mutate)
+
+    entry = _build_child_entry(driver, result_device, child_type, local_id)
     return {"device_id": device_id, "child_type": child_type, **entry}
 
 
@@ -1034,7 +1040,7 @@ async def refresh_child_entities(device_id: str) -> dict[str, Any]:
 
 
 def _split_known_connection_ids(
-    engine, table: dict[str, Any]
+    project, table: dict[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
     """Partition a connection table into entries for devices that exist in the
     project and a list of unknown ids.
@@ -1044,7 +1050,7 @@ def _split_known_connection_ids(
     unknown ones, so importing a partial site config still works without
     persisting orphaned/garbage connection rows that no device will ever read.
     """
-    known = {d.id for d in engine.project.devices}
+    known = {d.id for d in project.devices}
     kept = {did: conn for did, conn in table.items() if did in known}
     skipped = [did for did in table if did not in known]
     return kept, skipped
@@ -1066,20 +1072,19 @@ async def update_connection(device_id: str, request: Request) -> dict[str, Any]:
     if not engine.project:
         raise HTTPException(status_code=503, detail="No project loaded")
 
-    # Verify device exists
-    if not any(d.id == device_id for d in engine.project.devices):
-        raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
-
     overrides = await request.json()
     if not isinstance(overrides, dict):
         raise HTTPException(status_code=422, detail="Connection overrides must be a JSON object")
-    project = engine.project.model_copy(deep=True)
-    project.connections[device_id] = overrides
+
+    def mutate(project):
+        if not any(d.id == device_id for d in project.devices):
+            raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
+        project.connections[device_id] = overrides
 
     # The connections-section diff hot-swaps the device — and, if this is a
     # bridge, re-resolves every device bound through it (the old per-device
     # update missed those).
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
     return {"status": "updated", "device_id": device_id}
 
 
@@ -1093,14 +1098,19 @@ async def update_connections_bulk(request: Request) -> dict[str, Any]:
     table = await request.json()
     if not isinstance(table, dict) or not all(isinstance(v, dict) for v in table.values()):
         raise HTTPException(status_code=422, detail="Connection table must be a JSON object of objects")
-    kept, skipped = _split_known_connection_ids(engine, table)
-    project = engine.project.model_copy(deep=True)
-    project.connections = kept
+
+    result: dict[str, Any] = {}
+
+    def mutate(project):
+        kept, skipped = _split_known_connection_ids(project, table)
+        project.connections = kept
+        result["kept"], result["skipped"] = kept, skipped
+
     # An incremental edit, not a whole new project: the connections diff
     # re-syncs the affected devices without the full-reload side effects
     # (startup triggers re-firing, running macros cancelled).
-    await engine.apply_project(project)
-    return {"status": "updated", "count": len(kept), "skipped": skipped}
+    await engine.apply_project_edit(mutate)
+    return {"status": "updated", "count": len(result["kept"]), "skipped": result["skipped"]}
 
 
 @router.delete("/connections/{device_id}")
@@ -1110,14 +1120,13 @@ async def delete_connection(device_id: str) -> dict[str, Any]:
     if not engine.project:
         raise HTTPException(status_code=503, detail="No project loaded")
 
-    if device_id not in engine.project.connections:
-        raise HTTPException(status_code=404, detail=f"No connection overrides for '{device_id}'")
-
-    project = engine.project.model_copy(deep=True)
-    project.connections.pop(device_id, None)
+    def mutate(project):
+        if device_id not in project.connections:
+            raise HTTPException(status_code=404, detail=f"No connection overrides for '{device_id}'")
+        project.connections.pop(device_id, None)
 
     # The connections diff re-syncs the device with config defaults only.
-    await engine.apply_project(project)
+    await engine.apply_project_edit(mutate)
     return {"status": "deleted", "device_id": device_id}
 
 
@@ -1157,9 +1166,13 @@ async def import_connections(request: Request) -> dict[str, Any]:
     for device_id, conn in table.items():
         cleaned[device_id] = {k: v for k, v in conn.items() if not k.startswith("_")}
 
-    kept, skipped = _split_known_connection_ids(engine, cleaned)
-    project = engine.project.model_copy(deep=True)
-    project.connections = kept
+    result: dict[str, Any] = {}
+
+    def mutate(project):
+        kept, skipped = _split_known_connection_ids(project, cleaned)
+        project.connections = kept
+        result["kept"], result["skipped"] = kept, skipped
+
     # Incremental edit (see the bulk-update route above).
-    await engine.apply_project(project)
-    return {"status": "imported", "count": len(kept), "skipped": skipped}
+    await engine.apply_project_edit(mutate)
+    return {"status": "imported", "count": len(result["kept"]), "skipped": result["skipped"]}

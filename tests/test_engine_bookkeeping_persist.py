@@ -300,3 +300,35 @@ async def test_plugin_save_config_failure_reverts_in_memory(tmp_path, monkeypatc
     # Reverted so the poisoned config can't break every later save.
     assert eng.project.plugins["plug1"].config == {"x": 1}
     assert eng._project_revision == 0
+
+
+@pytest.mark.asyncio
+async def test_bookkeeping_scheduled_during_stop_teardown_persists(tmp_path):
+    """A bookkeeping write scheduled while stop() holds the reload lock —
+    a plugin ``on_stop`` calling ``save_config`` during ``_stop_inner``'s
+    teardown — spawns a flush task that queues behind the held lock.
+    ``stop()`` must drain it after teardown releases the lock, so the
+    write persists before the process exits instead of being dropped."""
+    eng = _engine(tmp_path, plugins={
+        "plug1": {"enabled": False, "config": {}},
+    })
+    _capture_broadcasts(eng)
+
+    def mutate(project):
+        project.plugins["plug1"].config["written_during_stop"] = True
+
+    async def stop_all_scheduling_write():
+        # Runs inside _stop_inner with the reload lock held — the same
+        # call shape as a plugin on_stop hook persisting its config.
+        assert eng._reload_lock.locked()
+        eng.schedule_bookkeeping_change(mutate)
+
+    eng.plugin_loader.stop_all = stop_all_scheduling_write
+
+    await asyncio.wait_for(eng.stop(), timeout=5)
+
+    # Persisted by the time stop() returns — no reliance on the event
+    # loop surviving past shutdown.
+    disk = _disk_project(eng)
+    assert disk["plugins"]["plug1"]["config"].get("written_during_stop") is True
+    assert eng._project_revision == 1

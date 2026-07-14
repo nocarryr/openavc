@@ -135,15 +135,17 @@ def mock_engine():
     engine.broadcast_ws = AsyncMock()
     engine._project_revision = 0
 
-    # The tools mutate a model_copy and hand it to apply_project; mirror the
-    # seam's swap-and-bump contract (the reconcile itself is pinned by the
-    # engine tests).
-    async def _apply(new_project, **kwargs):
+    # The tools hand a mutate callback to apply_project_edit; mirror the
+    # seam's copy-mutate-swap-and-bump contract (the reconcile itself is
+    # pinned by the engine tests).
+    async def _apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
         engine.project = new_project
         engine._project_revision += 1
         return engine._project_revision
 
-    engine.apply_project = AsyncMock(side_effect=_apply)
+    engine.apply_project_edit = AsyncMock(side_effect=_apply_edit)
     return engine
 
 
@@ -302,7 +304,7 @@ async def test_add_device(handler, mock_agent, mock_engine):
 
     # Applied through the seam — the devices reconcile hot-adds the runtime
     # device from the resolved config
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -347,7 +349,7 @@ async def test_add_variable(handler, mock_agent, mock_engine):
 
     # Applied through the seam — the variables reconcile seeds the default
     # into state (the old manual state.set is gone)
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -454,7 +456,7 @@ async def test_add_macro(handler, mock_agent, mock_engine):
     assert macro.stop_on_error is True
 
     # Applied through the seam (the macros reconcile registers triggers)
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -972,18 +974,16 @@ async def test_update_ui_element_grid_area_partial_merge(handler, mock_engine):
 
 
 # ===== SEAM BEHAVIOR =====
-# Every mutating tool routes through engine.apply_project exactly once, with
-# EDIT origin (the default — no origin/expected_revision overrides). The
-# scoped reconcile replaces the old full reload_fn: an AI macro edit no
-# longer re-fires startup triggers, and variable edits actually take effect
+# Every mutating tool routes through engine.apply_project_edit exactly once.
+# The edit seam itself applies with EDIT origin and no expected_revision
+# (hardcoded in the engine, pinned by the engine tests). The scoped
+# reconcile replaces the old full reload_fn: an AI macro edit no longer
+# re-fires startup triggers, and variable edits actually take effect
 # (seeding, persister keys, orphan sweep).
 
 
 def _assert_edit_origin_apply(mock_engine):
-    mock_engine.apply_project.assert_awaited_once()
-    kwargs = mock_engine.apply_project.await_args.kwargs
-    assert "origin" not in kwargs, "AI tools must apply with EDIT origin"
-    assert kwargs.get("expected_revision") is None
+    mock_engine.apply_project_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1188,7 +1188,7 @@ async def test_plugin_config_update_bumps_revision(handler, mock_agent, mock_eng
     # restart_or_apply ran first (runtime-first, then apply — the reconcile
     # sees the running config already current), and the seam bumped once.
     mock_engine.plugin_loader.restart_or_apply.assert_awaited_once()
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
     assert mock_engine._project_revision == 1
     assert mock_engine.project.plugins["some_plugin"].config == {"volume": 5}
 
@@ -1208,9 +1208,9 @@ async def test_disable_plugin_bumps_revision(handler, mock_agent, mock_engine):
 
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
-    # Seam handoff: enabled=False persisted through apply_project; the
+    # Seam handoff: enabled=False persisted through the edit seam; the
     # plugins reconcile (pinned in the engine tests) stops the running plugin.
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
     assert mock_engine.project.plugins["some_plugin"].enabled is False
 
 
@@ -1256,7 +1256,7 @@ async def test_enable_plugin_rolls_back_on_start_failure(handler, mock_agent, mo
     assert mock_engine.project.plugins["stub_plugin"].enabled is False
     assert mock_engine.project.plugins["stub_plugin"].config == {"keep": "me"}
     # The rolled-back state was still applied through the seam (persist + bump)
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1300,7 +1300,7 @@ async def test_enable_plugin_success_persists_enabled(handler, mock_agent, mock_
     payload = _get_result_payload(mock_agent)
     assert payload["success"] is True
     assert mock_engine.project.plugins["stub_plugin"].enabled is True
-    mock_engine.apply_project.assert_awaited_once()
+    mock_engine.apply_project_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1324,7 +1324,7 @@ async def test_update_plugin_config_rejects_missing_config(handler, mock_agent, 
     # Config untouched, no restart, no apply (no save, no bump)
     assert mock_engine.project.plugins["some_plugin"].config == {"brightness": 80}
     mock_engine.plugin_loader.restart_or_apply.assert_not_awaited()
-    mock_engine.apply_project.assert_not_awaited()
+    mock_engine.apply_project_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -58,14 +58,16 @@ def mock_engine(tmp_path):
     engine.reload_project = AsyncMock()
     engine._project_revision = 0
 
-    # Script create/delete mutate a model_copy and hand it to apply_project;
-    # mirror the swap-and-bump contract.
-    async def _fake_apply(new_project, **kwargs):
+    # Script create/delete hand a mutate callback to apply_project_edit;
+    # mirror the copy-mutate-swap-and-bump contract.
+    async def _fake_apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
         engine.project = new_project
         engine._project_revision += 1
         return engine._project_revision
 
-    engine.apply_project = AsyncMock(side_effect=_fake_apply)
+    engine.apply_project_edit = AsyncMock(side_effect=_fake_apply_edit)
 
     return engine
 

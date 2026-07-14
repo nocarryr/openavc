@@ -32,13 +32,16 @@ def _make_handler(tmp_path, scripts=None):
     )
     engine.project_path = tmp_path / "project.avc"
 
-    # Mirror the seam's swap contract — the tools mutate a model_copy and
-    # hand it to apply_project (no reconcile in this unit harness).
-    async def _apply(new_project, **kwargs):
+    # Mirror the seam's contract — the tools hand a mutate callback to
+    # apply_project_edit, which copies the current project, applies the
+    # mutation, and swaps it in (no reconcile in this unit harness).
+    async def _apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
         engine.project = new_project
         return 1
 
-    engine.apply_project = AsyncMock(side_effect=_apply)
+    engine.apply_project_edit = AsyncMock(side_effect=_apply_edit)
     rest.set_engine(engine)
     handler = AIToolHandler(MagicMock(), MagicMock(), MagicMock())
     return handler, engine

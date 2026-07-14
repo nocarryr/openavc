@@ -480,6 +480,16 @@ class Engine:
         # subscription start/stop. Wait for any reload to finish first.
         async with self._reload_lock:
             await self._stop_inner()
+        # A bookkeeping write scheduled DURING teardown (e.g. a plugin
+        # on_stop calling save_config) spawned a flush task that queued
+        # behind the lock held above. Drain it now that the lock is free so
+        # the write persists before the process exits.
+        task = self._bookkeeping_task
+        if task and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except Exception:
+                log.warning("Bookkeeping persist did not finish after shutdown")
 
     async def _stop_inner(self) -> None:
         """Tear down all subsystems. Caller holds _reload_lock."""
@@ -612,6 +622,28 @@ class Engine:
         async with self._reload_lock:
             return await self._apply_project_locked(
                 new_project, expected_revision, origin, persist
+            )
+
+    async def apply_project_edit(self, mutate) -> int:
+        """Apply an edit built from the current project, atomically.
+
+        Callers that copy ``engine.project``, mutate the copy, and then call
+        :meth:`apply_project` have a stale-copy window: a commit that lands
+        between the copy and the lock acquisition is silently reverted when
+        the stale copy wins the serialization. Here the copy is taken under
+        the same lock that applies it, so there is nothing to go stale.
+
+        ``mutate(project)`` receives a deep copy of the current project;
+        project reads (find-by-id, 404 checks) belong inside it, since the
+        project it sees may differ from what the caller inspected before the
+        lock was acquired. An exception from ``mutate`` aborts the edit with
+        nothing applied. Returns the new revision.
+        """
+        async with self._reload_lock:
+            new_project = self.project.model_copy(deep=True)
+            mutate(new_project)
+            return await self._apply_project_locked(
+                new_project, None, ProjectOrigin.EDIT, persist=True
             )
 
     def reload_persisted_state(self) -> None:

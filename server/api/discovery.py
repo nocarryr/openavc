@@ -455,20 +455,29 @@ async def add_device(req: AddDeviceRequest) -> dict[str, Any]:
         "enabled": True,
     }
 
-    # Persist and reconcile through the one seam: build the change on a copy
-    # (apply_project diffs it against the live project — an in-place edit
-    # would reconcile nothing), and let the devices reconcile instantiate and
-    # connect the runtime device from the resolved config. The revision bump
-    # and project.reloaded broadcast mean an open IDE's stale full-project
-    # PUT gets a 409 instead of silently deleting the just-discovered device.
+    # Persist and reconcile through the one seam, letting the devices
+    # reconcile instantiate and connect the runtime device from the resolved
+    # config. The revision bump and project.reloaded broadcast mean an open
+    # IDE's stale full-project PUT gets a 409 instead of silently deleting
+    # the just-discovered device. The duplicate check runs again inside the
+    # mutate — an add racing this one may have appended the id after the
+    # idempotency guard above.
     from server.core.project_loader import DeviceConfig
 
-    project = _app_engine.project.model_copy(deep=True)
-    project.devices.append(DeviceConfig(**device_config))
-    if conn_overrides:
-        project.connections[device_id] = conn_overrides
+    def mutate(project):
+        if any(d.id == device_id for d in project.devices):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Device '{device_id}' is already in the project",
+            )
+        project.devices.append(DeviceConfig(**device_config))
+        if conn_overrides:
+            project.connections[device_id] = conn_overrides
+
     try:
-        await _app_engine.apply_project(project)
+        await _app_engine.apply_project_edit(mutate)
+    except HTTPException:
+        raise
     except Exception as e:
         raise _api_error(500, f"Failed to add device '{device_id}'", e)
 

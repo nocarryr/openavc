@@ -92,8 +92,9 @@ class _RefreshSupportingDriver(_FakeControllerDriver):
 
 
 def _wire_seam(engine):
-    """Mirror the route contract: mutate a model_copy of the project, hand
-    it to apply_project, which swaps it in and bumps the revision."""
+    """Mirror the route contract: the route hands a mutate callback to
+    apply_project_edit, which copies the current project, mutates the
+    copy, swaps it in, and bumps the revision."""
     import copy as _copylib
 
     engine._project_revision = 0
@@ -118,6 +119,15 @@ def _wire_seam(engine):
         return engine._project_revision
 
     engine.apply_project = AsyncMock(side_effect=_fake_apply)
+
+    # Dedicated routes hand a mutate callback to apply_project_edit, which
+    # copies the current project under the lock, mutates, and applies.
+    async def _fake_apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
+        return await _fake_apply(new_project)
+
+    engine.apply_project_edit = AsyncMock(side_effect=_fake_apply_edit)
 
 
 def _make_engine(tmp_path: Path, *, driver_cls=_FakeControllerDriver):
@@ -394,7 +404,7 @@ def test_patch_label_persists_to_project_and_state(child_client):
     # Persisted through the seam (which also bumps the revision).
     entry = engine.project.devices[0].child_entities["encoder"]["007"]
     assert entry.label == "Stage Right TX"
-    engine.apply_project.assert_awaited_once()
+    engine.apply_project_edit.assert_awaited_once()
 
     # Live state key updated so existing subscribers see the new label.
     assert driver.state.get("device.ctrl1.encoder.007.label") == "Stage Right TX"
@@ -413,7 +423,7 @@ def test_patch_config_only_preserves_existing_label(child_client):
     body = resp.json()
     assert body["label"] == "Lobby TX"  # untouched
     assert body["config"] == {"room": "Stage", "tag": "primary"}
-    # The applied project (swapped in by apply_project) carries the merge.
+    # The applied project (swapped in by the edit seam) carries the merge.
     entry = engine.project.devices[0].child_entities["encoder"]["005"]
     assert entry.label == "Lobby TX"
     assert entry.config == {"room": "Stage", "tag": "primary"}

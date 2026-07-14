@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from server.cloud.tools import ToolEditError, apply_tool_edit
+
 # State-change sources a simulated UI action can never itself produce. They're
 # excluded from _simulate_ui_action's captured effects so concurrent event-loop
 # activity (system metrics/heartbeat, other AI tools, cloud pushes, ISC peers,
@@ -46,35 +48,39 @@ class UIToolsMixin:
         page_id = input.get("id", "")
         if not page_id:
             return {"error": "Page ID is required"}
-        if any(p.id == page_id for p in engine.project.ui.pages):
-            return {"error": f"UI page '{page_id}' already exists"}
 
-        # Normalize + validate inline-element bindings the same way
-        # _add_ui_elements does — otherwise a page-with-elements created in one
-        # call yields bindings that were never validated (buttons silently do
-        # nothing), while the identical elements added via add_ui_elements work.
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
         from server.core.project_loader import UIPage
         elements = input.get("elements", [])
-        for el_data in elements:
-            if isinstance(el_data, dict) and isinstance(el_data.get("bindings"), dict):
-                el_data["bindings"] = _normalize_bindings(el_data["bindings"])
-                err = _validate_bindings(el_data["bindings"], engine.project)
-                if err:
-                    return {"error": f"Element '{el_data.get('id', '?')}': {err}"}
 
-        new_page = UIPage(
-            id=page_id,
-            name=input.get("name", page_id),
-            grid=input.get("grid", {}),
-            elements=elements,
-        )
-        # Build the change on a copy — apply_project diffs it against the
-        # live project; a UI-only change just swaps the project and pushes
-        # the new ui.definition to connected panels.
-        project = engine.project.model_copy(deep=True)
-        project.ui.pages.append(new_page)
-        await engine.apply_project(project)
+        def mutate(project):
+            if any(p.id == page_id for p in project.ui.pages):
+                raise ToolEditError({"error": f"UI page '{page_id}' already exists"})
+
+            # Normalize + validate inline-element bindings the same way
+            # _add_ui_elements does — otherwise a page-with-elements created in one
+            # call yields bindings that were never validated (buttons silently do
+            # nothing), while the identical elements added via add_ui_elements work.
+            for el_data in elements:
+                if isinstance(el_data, dict) and isinstance(el_data.get("bindings"), dict):
+                    el_data["bindings"] = _normalize_bindings(el_data["bindings"])
+                    err = _validate_bindings(el_data["bindings"], project)
+                    if err:
+                        raise ToolEditError({"error": f"Element '{el_data.get('id', '?')}': {err}"})
+
+            new_page = UIPage(
+                id=page_id,
+                name=input.get("name", page_id),
+                grid=input.get("grid", {}),
+                elements=elements,
+            )
+            # A UI-only change just swaps the project and pushes the new
+            # ui.definition to connected panels.
+            project.ui.pages.append(new_page)
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "created", "id": page_id}
 
@@ -84,41 +90,44 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         page_id = input.get("page_id", "")
-        project = engine.project.model_copy(deep=True)
-        page = None
-        for p in project.ui.pages:
-            if p.id == page_id:
-                page = p
-                break
-        if page is None:
-            return {"error": f"UI page '{page_id}' not found"}
-
         changed = []
-        if "name" in input:
-            page.name = input["name"]
-            changed.append("name")
-        if "grid" in input:
-            from server.core.project_loader import GridConfig
-            # Partial merge: keep omitted fields (don't reset rows/columns to
-            # defaults) and preserve any forward-compat keys.
-            page.grid = _merge_forward_compat(page.grid, GridConfig, input["grid"])
-            changed.append("grid")
-        if "page_type" in input:
-            page.page_type = input["page_type"]
-            changed.append("page_type")
-        if "overlay" in input:
-            from server.core.project_loader import OverlayConfig
-            page.overlay = OverlayConfig(**input["overlay"]) if input["overlay"] else None
-            changed.append("overlay")
-        if "background" in input:
-            from server.core.project_loader import PageBackground
-            page.background = PageBackground(**input["background"]) if input["background"] else None
-            changed.append("background")
 
-        if not changed:
-            return {"error": "No fields to update"}
+        def mutate(project):
+            page = None
+            for p in project.ui.pages:
+                if p.id == page_id:
+                    page = p
+                    break
+            if page is None:
+                raise ToolEditError({"error": f"UI page '{page_id}' not found"})
 
-        await engine.apply_project(project)
+            if "name" in input:
+                page.name = input["name"]
+                changed.append("name")
+            if "grid" in input:
+                from server.core.project_loader import GridConfig
+                # Partial merge: keep omitted fields (don't reset rows/columns to
+                # defaults) and preserve any forward-compat keys.
+                page.grid = _merge_forward_compat(page.grid, GridConfig, input["grid"])
+                changed.append("grid")
+            if "page_type" in input:
+                page.page_type = input["page_type"]
+                changed.append("page_type")
+            if "overlay" in input:
+                from server.core.project_loader import OverlayConfig
+                page.overlay = OverlayConfig(**input["overlay"]) if input["overlay"] else None
+                changed.append("overlay")
+            if "background" in input:
+                from server.core.project_loader import PageBackground
+                page.background = PageBackground(**input["background"]) if input["background"] else None
+                changed.append("background")
+
+            if not changed:
+                raise ToolEditError({"error": "No fields to update"})
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "updated", "page_id": page_id, "changed": changed}
 
@@ -128,20 +137,24 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         page_id = input.get("page_id", "")
-        # Count elements being removed
         element_count = 0
-        for pg in engine.project.ui.pages:
-            if pg.id == page_id:
-                element_count = len(pg.elements)
-                break
 
-        project = engine.project.model_copy(deep=True)
-        original_count = len(project.ui.pages)
-        project.ui.pages = [p for p in project.ui.pages if p.id != page_id]
-        if len(project.ui.pages) == original_count:
-            return {"error": f"UI page '{page_id}' not found"}
+        def mutate(project):
+            nonlocal element_count
+            # Count elements being removed
+            for pg in project.ui.pages:
+                if pg.id == page_id:
+                    element_count = len(pg.elements)
+                    break
 
-        await engine.apply_project(project)
+            original_count = len(project.ui.pages)
+            project.ui.pages = [p for p in project.ui.pages if p.id != page_id]
+            if len(project.ui.pages) == original_count:
+                raise ToolEditError({"error": f"UI page '{page_id}' not found"})
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         result: dict = {"status": "deleted", "id": page_id}
         if element_count > 0:
@@ -154,36 +167,40 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         page_id = input.get("page_id", "")
-        project = engine.project.model_copy(deep=True)
-        page = None
-        for p in project.ui.pages:
-            if p.id == page_id:
-                page = p
-                break
-        if page is None:
-            return {"error": f"UI page '{page_id}' not found"}
-
         elements = input.get("elements", [])
         if not elements:
             return {"error": "No elements provided"}
 
-        # Check for duplicate IDs
-        existing_ids = {el.id for el in page.elements}
-        for el in elements:
-            el_id = el.get("id", "")
-            if el_id in existing_ids:
-                return {"error": f"Element '{el_id}' already exists on page '{page_id}'"}
-
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
         from server.core.project_loader import UIElement
-        for el_data in elements:
-            if "bindings" in el_data and isinstance(el_data["bindings"], dict):
-                el_data["bindings"] = _normalize_bindings(el_data["bindings"])
-                err = _validate_bindings(el_data["bindings"], engine.project)
-                if err:
-                    return {"error": f"Element '{el_data.get('id', '?')}': {err}"}
-            page.elements.append(UIElement(**el_data))
-        await engine.apply_project(project)
+
+        def mutate(project):
+            page = None
+            for p in project.ui.pages:
+                if p.id == page_id:
+                    page = p
+                    break
+            if page is None:
+                raise ToolEditError({"error": f"UI page '{page_id}' not found"})
+
+            # Check for duplicate IDs
+            existing_ids = {el.id for el in page.elements}
+            for el in elements:
+                el_id = el.get("id", "")
+                if el_id in existing_ids:
+                    raise ToolEditError({"error": f"Element '{el_id}' already exists on page '{page_id}'"})
+
+            for el_data in elements:
+                if "bindings" in el_data and isinstance(el_data["bindings"], dict):
+                    el_data["bindings"] = _normalize_bindings(el_data["bindings"])
+                    err = _validate_bindings(el_data["bindings"], project)
+                    if err:
+                        raise ToolEditError({"error": f"Element '{el_data.get('id', '?')}': {err}"})
+                page.elements.append(UIElement(**el_data))
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         added_ids = [el.get("id", "") for el in elements]
         return {"status": "created", "page_id": page_id, "element_ids": added_ids}
@@ -195,52 +212,54 @@ class UIToolsMixin:
 
         element_id = input.get("element_id", "")
 
-        # Find the element across all pages (on a copy — see apply below)
-        project = engine.project.model_copy(deep=True)
-        target_el = None
-        for page in project.ui.pages:
-            for el in page.elements:
-                if el.id == element_id:
-                    target_el = el
+        def mutate(project):
+            # Find the element across all pages
+            target_el = None
+            for page in project.ui.pages:
+                for el in page.elements:
+                    if el.id == element_id:
+                        target_el = el
+                        break
+                if target_el:
                     break
-            if target_el:
-                break
 
-        if target_el is None:
-            return {"error": f"UI element '{element_id}' not found"}
+            if target_el is None:
+                raise ToolEditError({"error": f"UI element '{element_id}' not found"})
 
-        # Validate bindings BEFORE mutating any fields (avoid partial updates).
-        # A non-dict bindings value would bypass the validator AND Pydantic
-        # (UIElement has no validate_assignment), persisting a structurally
-        # invalid element — reject it instead of assigning it raw.
-        if "bindings" in input:
-            from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
-            bindings = input["bindings"]
-            if not isinstance(bindings, dict):
-                return {
-                    "error": f"Element '{element_id}': 'bindings' must be an object, "
-                             f"got {type(bindings).__name__}"
-                }
-            bindings = _normalize_bindings(bindings)
-            err = _validate_bindings(bindings, engine.project)
-            if err:
-                return {"error": f"Element '{element_id}': {err}"}
+            # Validate bindings BEFORE mutating any fields (avoid partial updates).
+            # A non-dict bindings value would bypass the validator AND Pydantic
+            # (UIElement has no validate_assignment), persisting a structurally
+            # invalid element — reject it instead of assigning it raw.
+            if "bindings" in input:
+                from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
+                bindings = input["bindings"]
+                if not isinstance(bindings, dict):
+                    raise ToolEditError({
+                        "error": f"Element '{element_id}': 'bindings' must be an object, "
+                                 f"got {type(bindings).__name__}"
+                    })
+                bindings = _normalize_bindings(bindings)
+                err = _validate_bindings(bindings, project)
+                if err:
+                    raise ToolEditError({"error": f"Element '{element_id}': {err}"})
 
-        if "label" in input:
-            target_el.label = input["label"]
-        if "text" in input:
-            target_el.text = input["text"]
-        if "grid_area" in input:
-            from server.core.project_loader import GridArea
-            # Partial merge: keep omitted fields (don't snap col/row back to 1)
-            # and preserve any forward-compat keys.
-            target_el.grid_area = _merge_forward_compat(target_el.grid_area, GridArea, input["grid_area"])
-        if "style" in input:
-            target_el.style = input["style"]
-        if "bindings" in input:
-            target_el.bindings = bindings
+            if "label" in input:
+                target_el.label = input["label"]
+            if "text" in input:
+                target_el.text = input["text"]
+            if "grid_area" in input:
+                from server.core.project_loader import GridArea
+                # Partial merge: keep omitted fields (don't snap col/row back to 1)
+                # and preserve any forward-compat keys.
+                target_el.grid_area = _merge_forward_compat(target_el.grid_area, GridArea, input["grid_area"])
+            if "style" in input:
+                target_el.style = input["style"]
+            if "bindings" in input:
+                target_el.bindings = bindings
 
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "updated", "element_id": element_id}
 
@@ -255,16 +274,19 @@ class UIToolsMixin:
 
         ids_set = set(element_ids)
         deleted_ids = []
-        project = engine.project.model_copy(deep=True)
-        for page in project.ui.pages:
-            before_ids = {el.id for el in page.elements}
-            page.elements = [el for el in page.elements if el.id not in ids_set]
-            deleted_ids.extend(ids_set & before_ids)
 
-        if not deleted_ids:
-            return {"error": "No matching elements found"}
+        def mutate(project):
+            for page in project.ui.pages:
+                before_ids = {el.id for el in page.elements}
+                page.elements = [el for el in page.elements if el.id not in ids_set]
+                deleted_ids.extend(ids_set & before_ids)
 
-        await engine.apply_project(project)
+            if not deleted_ids:
+                raise ToolEditError({"error": "No matching elements found"})
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "deleted", "element_ids": sorted(deleted_ids)}
 
@@ -277,26 +299,30 @@ class UIToolsMixin:
         if not element_id:
             return {"error": "Element ID is required"}
 
-        # Check for ID collision with page elements and existing master elements
-        for page in engine.project.ui.pages:
-            if any(el.id == element_id for el in page.elements):
-                return {"error": f"Element '{element_id}' already exists on page '{page.id}'"}
-        if any(el.id == element_id for el in engine.project.ui.master_elements):
-            return {"error": f"Master element '{element_id}' already exists"}
-
         from server.cloud.ai_tool_handler import _normalize_bindings, _validate_bindings
         from server.core.project_loader import MasterElement
         el_data = {k: v for k, v in input.items() if k != "id"}
         el_data["id"] = element_id
-        if "bindings" in el_data and isinstance(el_data["bindings"], dict):
-            el_data["bindings"] = _normalize_bindings(el_data["bindings"])
-            err = _validate_bindings(el_data["bindings"], engine.project)
-            if err:
-                return {"error": f"Master element '{element_id}': {err}"}
-        new_el = MasterElement(**el_data)
-        project = engine.project.model_copy(deep=True)
-        project.ui.master_elements.append(new_el)
-        await engine.apply_project(project)
+
+        def mutate(project):
+            # Check for ID collision with page elements and existing master elements
+            for page in project.ui.pages:
+                if any(el.id == element_id for el in page.elements):
+                    raise ToolEditError({"error": f"Element '{element_id}' already exists on page '{page.id}'"})
+            if any(el.id == element_id for el in project.ui.master_elements):
+                raise ToolEditError({"error": f"Master element '{element_id}' already exists"})
+
+            if "bindings" in el_data and isinstance(el_data["bindings"], dict):
+                el_data["bindings"] = _normalize_bindings(el_data["bindings"])
+                err = _validate_bindings(el_data["bindings"], project)
+                if err:
+                    raise ToolEditError({"error": f"Master element '{element_id}': {err}"})
+            new_el = MasterElement(**el_data)
+            project.ui.master_elements.append(new_el)
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "created", "id": element_id}
 
@@ -306,15 +332,18 @@ class UIToolsMixin:
             return {"error": "No project loaded"}
 
         element_id = input.get("element_id", "")
-        project = engine.project.model_copy(deep=True)
-        original_count = len(project.ui.master_elements)
-        project.ui.master_elements = [
-            el for el in project.ui.master_elements if el.id != element_id
-        ]
-        if len(project.ui.master_elements) == original_count:
-            return {"error": f"Master element '{element_id}' not found"}
 
-        await engine.apply_project(project)
+        def mutate(project):
+            original_count = len(project.ui.master_elements)
+            project.ui.master_elements = [
+                el for el in project.ui.master_elements if el.id != element_id
+            ]
+            if len(project.ui.master_elements) == original_count:
+                raise ToolEditError({"error": f"Master element '{element_id}' not found"})
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "deleted", "element_id": element_id}
 

@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from server.cloud.tools import ToolEditError, apply_tool_edit
 from server.utils.paths import is_safe_script_filename, safe_path_within
 
 
@@ -25,70 +26,74 @@ class DeviceToolsMixin:
             return {"error": "No project loaded"}
         device_id = input.get("device_id", "")
         from server.core.project_loader import DeviceConfig
-        # Build the change on a copy — apply_project diffs it against the
-        # live project, and its devices reconcile hot-swaps the runtime
-        # device from the resolved (connection-table-merged) config.
-        project = engine.project.model_copy(deep=True)
-        device_idx = None
-        for i, d in enumerate(project.devices):
-            if d.id == device_id:
-                device_idx = i
-                break
-        if device_idx is None:
-            return {"error": f"Device '{device_id}' not found"}
-        existing = project.devices[device_idx]
-        if "driver" in input and input["driver"] != existing.driver:
-            from server.core.device_manager import _DRIVER_REGISTRY
-            if input["driver"] not in _DRIVER_REGISTRY:
-                from server.utils.logger import get_logger
-                log = get_logger(__name__)
-                log.warning("update_device: driver '%s' not in registry (may not be loaded yet)", input["driver"])
 
-        # Split an incoming config the same way _add_device and the REST editor
-        # do: connection fields (host/port/...) live in project.connections, not
-        # device.config. Without this the AI's host/port edits land in the wrong
-        # place and the IDE can't edit them consistently (v0.5.0 layout).
-        if "config" in input:
-            from server.core.project_migration import CONNECTION_FIELDS
-            raw_config = input.get("config") or {}
-            protocol_config: dict = {}
-            conn_overrides = dict(project.connections.get(device_id, {}))
-            for key, value in raw_config.items():
-                if key in CONNECTION_FIELDS:
-                    conn_overrides[key] = value
-                else:
-                    protocol_config[key] = value
-            new_config = protocol_config
-            conn_overrides = {k: v for k, v in conn_overrides.items() if v is not None}
-            if conn_overrides:
-                project.connections[device_id] = conn_overrides
-            elif device_id in project.connections:
-                del project.connections[device_id]
-        else:
-            new_config = existing.config
+        # The edit is diffed against the live project, and the devices
+        # reconcile hot-swaps the runtime device from the resolved
+        # (connection-table-merged) config.
+        def mutate(project):
+            device_idx = None
+            for i, d in enumerate(project.devices):
+                if d.id == device_id:
+                    device_idx = i
+                    break
+            if device_idx is None:
+                raise ToolEditError({"error": f"Device '{device_id}' not found"})
+            existing = project.devices[device_idx]
+            if "driver" in input and input["driver"] != existing.driver:
+                from server.core.device_manager import _DRIVER_REGISTRY
+                if input["driver"] not in _DRIVER_REGISTRY:
+                    from server.utils.logger import get_logger
+                    log = get_logger(__name__)
+                    log.warning("update_device: driver '%s' not in registry (may not be loaded yet)", input["driver"])
 
-        # Re-validate the existing record's full dump instead of building a
-        # fresh DeviceConfig from scratch. The base model is extra='allow', so
-        # a from-scratch rebuild drops any forward-compat top-level field a
-        # newer platform version wrote (__pydantic_extra__) on every AI edit.
-        # Dumping then re-validating preserves those and keeps pending_settings
-        # + child-entity metadata (user labels / per-child config) — rebuilding
-        # from the tool input alone would drop them on disk and in the
-        # re-seeded live driver. Honor an `enabled` toggle (the schema declares
-        # it); the old code pinned existing.enabled so disable/enable no-op'd.
-        merged = existing.model_dump()
-        merged.update({
-            "driver": input.get("driver", existing.driver),
-            "name": input.get("name", existing.name),
-            "config": new_config,
-            "enabled": input.get("enabled", existing.enabled),
-        })
-        updated = DeviceConfig.model_validate(merged)
-        project.devices[device_idx] = updated
+            # Split an incoming config the same way _add_device and the REST editor
+            # do: connection fields (host/port/...) live in project.connections, not
+            # device.config. Without this the AI's host/port edits land in the wrong
+            # place and the IDE can't edit them consistently (v0.5.0 layout).
+            if "config" in input:
+                from server.core.project_migration import CONNECTION_FIELDS
+                raw_config = input.get("config") or {}
+                protocol_config: dict = {}
+                conn_overrides = dict(project.connections.get(device_id, {}))
+                for key, value in raw_config.items():
+                    if key in CONNECTION_FIELDS:
+                        conn_overrides[key] = value
+                    else:
+                        protocol_config[key] = value
+                new_config = protocol_config
+                conn_overrides = {k: v for k, v in conn_overrides.items() if v is not None}
+                if conn_overrides:
+                    project.connections[device_id] = conn_overrides
+                elif device_id in project.connections:
+                    del project.connections[device_id]
+            else:
+                new_config = existing.config
+
+            # Re-validate the existing record's full dump instead of building a
+            # fresh DeviceConfig from scratch. The base model is extra='allow', so
+            # a from-scratch rebuild drops any forward-compat top-level field a
+            # newer platform version wrote (__pydantic_extra__) on every AI edit.
+            # Dumping then re-validating preserves those and keeps pending_settings
+            # + child-entity metadata (user labels / per-child config) — rebuilding
+            # from the tool input alone would drop them on disk and in the
+            # re-seeded live driver. Honor an `enabled` toggle (the schema declares
+            # it); the old code pinned existing.enabled so disable/enable no-op'd.
+            merged = existing.model_dump()
+            merged.update({
+                "driver": input.get("driver", existing.driver),
+                "name": input.get("name", existing.name),
+                "config": new_config,
+                "enabled": input.get("enabled", existing.enabled),
+            })
+            updated = DeviceConfig.model_validate(merged)
+            project.devices[device_idx] = updated
+
         # The devices reconcile hot-swaps the runtime device with the new
         # resolved config, and the revision bump means a stale IDE PUT gets
         # a 409 instead of silently reverting this edit.
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         return {"status": "updated", "device_id": device_id}
 
     async def _delete_device(self, input: dict) -> Any:
@@ -98,18 +103,22 @@ class DeviceToolsMixin:
         device_id = input.get("device_id", "")
         # Collect impact before deleting
         impact = self._find_references("device", device_id)
-        project = engine.project.model_copy(deep=True)
-        original_count = len(project.devices)
-        project.devices = [d for d in project.devices if d.id != device_id]
-        if len(project.devices) == original_count:
-            return {"error": f"Device '{device_id}' not found"}
-        # Drop the connections-table entry too — leaving it behind hands a
-        # stale host/port to any future device re-added with the same id.
-        project.connections.pop(device_id, None)
+
+        def mutate(project):
+            original_count = len(project.devices)
+            project.devices = [d for d in project.devices if d.id != device_id]
+            if len(project.devices) == original_count:
+                raise ToolEditError({"error": f"Device '{device_id}' not found"})
+            # Drop the connections-table entry too — leaving it behind hands a
+            # stale host/port to any future device re-added with the same id.
+            project.connections.pop(device_id, None)
+
         # The devices reconcile removes the runtime device and sweeps its
         # orphaned device.<id>.* state keys; the revision bump means a stale
         # tab can't resurrect the deleted device on its next save.
-        await engine.apply_project(project)
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         result: dict = {"status": "deleted", "device_id": device_id}
         if impact:
             result["impact"] = impact
@@ -154,13 +163,19 @@ class DeviceToolsMixin:
             config=protocol_config,
             enabled=input.get("enabled", True),
         )
+
         # The devices reconcile hot-adds the runtime device from the
         # resolved (driver-defaults + connection-table) config.
-        project = engine.project.model_copy(deep=True)
-        project.devices.append(new_device)
-        if conn_overrides:
-            project.connections[device_id] = conn_overrides
-        await engine.apply_project(project)
+        def mutate(project):
+            if any(d.id == device_id for d in project.devices):
+                raise ToolEditError({"error": f"Device '{device_id}' already exists"})
+            project.devices.append(new_device)
+            if conn_overrides:
+                project.connections[device_id] = conn_overrides
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
 
         return {"status": "created", "id": device_id}
 
@@ -171,25 +186,29 @@ class DeviceToolsMixin:
         group_id = input.get("id", "")
         if not group_id:
             return {"error": "Group ID is required"}
-        if any(g.id == group_id for g in engine.project.device_groups):
-            return {"error": f"Group '{group_id}' already exists"}
         device_ids = input.get("device_ids", [])
-        if device_ids:
-            project_device_ids = {d.id for d in engine.project.devices}
-            unknown = [did for did in device_ids if did not in project_device_ids]
-            if unknown:
-                return {"error": f"Device(s) not found in project: {', '.join(unknown)}"}
 
-        from server.core.project_loader import DeviceGroup
-        new_group = DeviceGroup(
-            id=group_id,
-            name=input.get("name", group_id),
-            device_ids=device_ids,
-        )
         # The device_groups reconcile reloads the macro engine's group table.
-        project = engine.project.model_copy(deep=True)
-        project.device_groups.append(new_group)
-        await engine.apply_project(project)
+        def mutate(project):
+            if any(g.id == group_id for g in project.device_groups):
+                raise ToolEditError({"error": f"Group '{group_id}' already exists"})
+            if device_ids:
+                project_device_ids = {d.id for d in project.devices}
+                unknown = [did for did in device_ids if did not in project_device_ids]
+                if unknown:
+                    raise ToolEditError({"error": f"Device(s) not found in project: {', '.join(unknown)}"})
+
+            from server.core.project_loader import DeviceGroup
+            new_group = DeviceGroup(
+                id=group_id,
+                name=input.get("name", group_id),
+                device_ids=device_ids,
+            )
+            project.device_groups.append(new_group)
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         return {"status": "created", "id": group_id}
 
     async def _update_device_group(self, input: dict) -> Any:
@@ -197,22 +216,26 @@ class DeviceToolsMixin:
         if not engine or not engine.project:
             return {"error": "No project loaded"}
         group_id = input.get("id", "")
-        project = engine.project.model_copy(deep=True)
-        existing = next(
-            (g for g in project.device_groups if g.id == group_id), None
-        )
-        if existing is None:
-            return {"error": f"Group '{group_id}' not found"}
-        if "device_ids" in input:
-            project_device_ids = {d.id for d in engine.project.devices}
-            unknown = [did for did in input["device_ids"] if did not in project_device_ids]
-            if unknown:
-                return {"error": f"Device(s) not found in project: {', '.join(unknown)}"}
-        if "name" in input:
-            existing.name = input["name"]
-        if "device_ids" in input:
-            existing.device_ids = input["device_ids"]
-        await engine.apply_project(project)
+
+        def mutate(project):
+            existing = next(
+                (g for g in project.device_groups if g.id == group_id), None
+            )
+            if existing is None:
+                raise ToolEditError({"error": f"Group '{group_id}' not found"})
+            if "device_ids" in input:
+                project_device_ids = {d.id for d in project.devices}
+                unknown = [did for did in input["device_ids"] if did not in project_device_ids]
+                if unknown:
+                    raise ToolEditError({"error": f"Device(s) not found in project: {', '.join(unknown)}"})
+            if "name" in input:
+                existing.name = input["name"]
+            if "device_ids" in input:
+                existing.device_ids = input["device_ids"]
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         return {"status": "updated", "id": group_id}
 
     async def _delete_device_group(self, input: dict) -> Any:
@@ -220,12 +243,16 @@ class DeviceToolsMixin:
         if not engine or not engine.project:
             return {"error": "No project loaded"}
         group_id = input.get("id", "")
-        project = engine.project.model_copy(deep=True)
-        original_count = len(project.device_groups)
-        project.device_groups = [g for g in project.device_groups if g.id != group_id]
-        if len(project.device_groups) == original_count:
-            return {"error": f"Group '{group_id}' not found"}
-        await engine.apply_project(project)
+
+        def mutate(project):
+            original_count = len(project.device_groups)
+            project.device_groups = [g for g in project.device_groups if g.id != group_id]
+            if len(project.device_groups) == original_count:
+                raise ToolEditError({"error": f"Group '{group_id}' not found"})
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         return {"status": "deleted", "id": group_id}
 
     async def _send_device_command(self, input: dict) -> Any:
@@ -857,11 +884,18 @@ class DeviceToolsMixin:
 
         from server.core.project_loader import ScriptConfig
         new_script = ScriptConfig(id=script_id, file=filename, enabled=enabled, description=description)
+
         # The scripts reconcile loads just this script (per-script reload,
         # not the old full-project reload).
-        project = engine.project.model_copy(deep=True)
-        project.scripts.append(new_script)
-        await engine.apply_project(project)
+        def mutate(project):
+            for s in project.scripts:
+                if s.id == script_id:
+                    raise ToolEditError({"error": f"Script '{script_id}' already exists"})
+            project.scripts.append(new_script)
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         return {"status": "created", "id": script_id}
 
     async def _update_script_source(self, input: dict) -> Any:
@@ -912,8 +946,15 @@ class DeviceToolsMixin:
             return {"error": "Invalid script filename"}
         if path.exists():
             path.unlink()
+
         # The scripts reconcile unloads just this script.
-        project = engine.project.model_copy(deep=True)
-        project.scripts = [s for s in project.scripts if s.id != script_id]
-        await engine.apply_project(project)
+        def mutate(project):
+            original_count = len(project.scripts)
+            project.scripts = [s for s in project.scripts if s.id != script_id]
+            if len(project.scripts) == original_count:
+                raise ToolEditError({"error": f"Script '{script_id}' not found"})
+
+        err = await apply_tool_edit(engine, mutate)
+        if err:
+            return err
         return {"status": "deleted"}

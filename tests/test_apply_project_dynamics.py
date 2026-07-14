@@ -314,16 +314,16 @@ async def test_get_put_round_trip_is_all_clean(tmp_path, acme_dynamics_drivers):
 async def test_concurrent_writers_no_lost_update_and_gapless_revisions(tmp_path):
     """Interleave two conflict-retrying apply_project writers (two IDEs)
     with a stream of bookkeeping flushes (schedule_bookkeeping_change),
-    then a dedicated-route write (DELETE /api/scripts/...). Every
-    committed write must be visible in the final project (memory AND
-    disk) and the revision sequence must be strictly monotonic with no
-    skips or repeats.
+    and a dedicated-route write (DELETE /api/scripts/...) racing them.
+    Every committed write must be visible in the final project (memory
+    AND disk) and the revision sequence must be strictly monotonic with
+    no skips or repeats.
 
-    The route write runs after the race on purpose: dedicated routes
-    apply a copy of the project with no expected_revision, so a commit
-    that lands between the route's copy and its apply is silently
-    reverted. Until those routes carry conflict protection, racing the
-    route here would (correctly) fail the no-lost-update assertion."""
+    The route write races the other writers deliberately: dedicated
+    routes go through apply_project_edit, which copies the current
+    project under the reconcile lock, so a commit landing while the
+    route request is in flight cannot be reverted by a stale copy. This
+    is the regression pin for that window."""
     from server.api import rest, ws
     from server.main import app
 
@@ -379,13 +379,13 @@ async def test_concurrent_writers_no_lost_update_and_gapless_revisions(tmp_path)
             occ_writer("a", 4),
             occ_writer("b", 4),
             bookkeeping_writer(6),
+            route_writer(),
         )
         # Drain any still-running bookkeeping flush.
         while eng._bookkeeping_queue or (
             eng._bookkeeping_task and not eng._bookkeeping_task.done()
         ):
             await asyncio.sleep(0.01)
-        await route_writer()
     finally:
         rest.set_engine(None)
         ws.set_engine(None)

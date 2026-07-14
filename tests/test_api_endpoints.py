@@ -87,6 +87,15 @@ def _make_mock_engine():
 
     engine.apply_project = AsyncMock(side_effect=_fake_apply)
 
+    # Dedicated routes hand a mutate callback to apply_project_edit, which
+    # copies the current project under the lock, mutates, and applies.
+    async def _fake_apply_edit(mutate):
+        new_project = engine.project.model_copy(deep=True)
+        mutate(new_project)
+        return await _fake_apply(new_project)
+
+    engine.apply_project_edit = AsyncMock(side_effect=_fake_apply_edit)
+
     return engine
 
 
