@@ -110,7 +110,7 @@ export function ChatMessage({ message, canUndo, onUndo }: ChatMessageProps) {
               gap: "var(--space-sm)",
             }}
           >
-            {(message.inputTokens || message.outputTokens) && (
+            {Boolean(message.inputTokens || message.outputTokens) && (
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
                 {message.inputTokens?.toLocaleString()} in / {message.outputTokens?.toLocaleString()} out
               </span>
