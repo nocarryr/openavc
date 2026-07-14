@@ -15,6 +15,7 @@ itself only builds on Linux CI.
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,8 +34,16 @@ GITIGNORE = REPO_ROOT / ".gitignore"
 
 def _render_info_box(*lines: str) -> list[str]:
     """Source openavc-info.sh and render its boot banner for the given body
-    lines, returning the rendered (non-blank) output lines. Skips if bash is
-    unavailable (the script only ever runs on the Linux Pi image)."""
+    lines, returning the rendered (non-blank) output lines.
+
+    The script only ever runs on the Linux Pi image, so this executes real
+    bash. Skip on Windows — the ``bash`` on PATH there is the WSL launcher
+    stub (no POSIX shell, no installed distro), not a usable bash — and skip
+    anywhere bash is genuinely absent. Ubuntu CI (and the Mac dev box) cover
+    the alignment behavior. Decode as UTF-8 explicitly so the box-drawing
+    characters aren't mangled by a non-UTF-8 locale default."""
+    if sys.platform == "win32":
+        pytest.skip("openavc-info.sh is Linux-only Pi-image tooling; no POSIX bash on Windows")
     if shutil.which("bash") is None:
         pytest.skip("bash not installed")
     body = " ".join(f"'{line}'" for line in lines)
@@ -42,6 +51,7 @@ def _render_info_box(*lines: str) -> list[str]:
         ["bash", "-c", f"source '{INFO_SH}'; render_box 'OpenAVC Room Control' {body}"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=30,
     )
     assert proc.returncode == 0, f"render_box failed: {proc.stderr}"
