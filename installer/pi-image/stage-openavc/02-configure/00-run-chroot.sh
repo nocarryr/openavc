@@ -15,8 +15,10 @@ chown -R "$OPENAVC_USER:$OPENAVC_USER" "$DATA_DIR"
 mkdir -p /var/log/openavc
 chown -R "$OPENAVC_USER:$OPENAVC_USER" /var/log/openavc
 
-# Add openavc user to video and input groups (needed for display + touch)
-usermod -aG video,input,dialout "$OPENAVC_USER"
+# Add openavc user to video and input groups (needed for display + touch),
+# and plugdev so the Stream Deck udev rule (GROUP=plugdev, 0660) grants the
+# service user raw HID access without a world-writable device node.
+usermod -aG video,input,dialout,plugdev "$OPENAVC_USER"
 
 # --- Privileged action helper (C10) ---
 #

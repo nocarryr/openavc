@@ -26,6 +26,7 @@ BUILD_SH = REPO_ROOT / "installer" / "pi-image" / "build.sh"
 STAGE_DIR = REPO_ROOT / "installer" / "pi-image" / "stage-openavc"
 RUN_SH = STAGE_DIR / "01-install-openavc" / "00-run.sh"
 CHROOT_SH = STAGE_DIR / "02-configure" / "00-run-chroot.sh"
+STREAMDECK_RULES = STAGE_DIR / "01-install-openavc" / "files" / "99-streamdeck.rules"
 GITIGNORE = REPO_ROOT / ".gitignore"
 
 CANONICAL_SEED = "installer/seed/default/project.avc"
@@ -109,4 +110,35 @@ def test_build_verification_checks_seed():
     text = CHROOT_SH.read_text(encoding="utf-8")
     assert '! -s "$DATA_DIR/projects/default/project.avc"' in text, (
         "00-run-chroot.sh build verification does not check the seed project"
+    )
+
+
+def test_streamdeck_rule_is_not_world_writable():
+    """The Stream Deck udev rule must not grant world read/write (MODE=0666).
+
+    The server runs as the unprivileged 'openavc' system-service user, so a
+    world-writable device node is unnecessary and lets any local user or a
+    compromised process issue raw USB HID traffic. Least privilege: a group
+    the service user belongs to, with 0660.
+    """
+    text = STREAMDECK_RULES.read_text(encoding="utf-8")
+    assert '0666' not in text, (
+        "99-streamdeck.rules is world-writable (MODE=0666) — scope it to a "
+        "group with 0660 instead"
+    )
+    assert 'MODE="0660"' in text, (
+        "99-streamdeck.rules should set MODE=0660 (group-writable only)"
+    )
+    assert 'GROUP="plugdev"' in text, (
+        "99-streamdeck.rules should be owned by the plugdev group"
+    )
+
+
+def test_streamdeck_group_membership_is_granted():
+    """The openavc service user must be in the group the udev rule grants, or
+    the 0660 rule would lock the server out of the Stream Deck entirely."""
+    text = CHROOT_SH.read_text(encoding="utf-8")
+    assert "plugdev" in text, (
+        "00-run-chroot.sh does not add the openavc user to plugdev, so the "
+        "group-scoped Stream Deck rule would deny the service access"
     )
