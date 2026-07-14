@@ -12,6 +12,8 @@ let ws: WebSocket | null = null;
 let wsListeners: Array<(msg: WsMessage) => void> = [];
 let connectionListeners: Array<(connected: boolean) => void> = [];
 let everConnected = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let consumerCount = 0;
 
 interface WsMessage {
   type: "state" | "error" | "protocol";
@@ -22,6 +24,13 @@ interface WsMessage {
 
 function connectWs() {
   if (ws && ws.readyState <= 1) return;
+
+  // Cancel any pending reconnect so timers can't stack (e.g. under StrictMode
+  // double-invoke, or if connectWs is called while a reconnect is queued).
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = `${proto}//${window.location.host}/ws`;
@@ -43,12 +52,28 @@ function connectWs() {
 
   ws.onclose = () => {
     for (const l of connectionListeners) l(false);
-    setTimeout(connectWs, 2000);
+    reconnectTimer = setTimeout(connectWs, 2000);
   };
 
   ws.onerror = () => {
     ws?.close();
   };
+}
+
+// Tear down the shared socket when the last consumer unmounts. Cancels the
+// pending reconnect and closes the socket without triggering another reconnect,
+// and clears everConnected so a fresh mount starts from a clean slate.
+function teardownWs() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+  everConnected = false;
 }
 
 function addWsListener(fn: (msg: WsMessage) => void) {
@@ -83,6 +108,7 @@ export function useSimStore() {
 
   // Connect WebSocket and poll devices on mount
   useEffect(() => {
+    consumerCount++;
     connectWs();
 
     // Poll connection status
@@ -107,6 +133,12 @@ export function useSimStore() {
     return () => {
       clearInterval(interval);
       clearInterval(refresh);
+      // The socket is a module-level singleton shared by all consumers; only
+      // tear it down (and cancel the reconnect timer) once the last one leaves.
+      consumerCount--;
+      if (consumerCount === 0) {
+        teardownWs();
+      }
     };
   }, []);
 
@@ -115,8 +147,14 @@ export function useSimStore() {
     const unsub = addConnectionListener((isConnected) => {
       setConnected(isConnected);
       if (!isConnected && everConnected) {
-        // Server went away after we were connected — it was stopped
-        setStopped(true);
+        // The WS dropped after we were connected. That alone doesn't mean the
+        // simulator stopped — a transient blip drops the socket too. The sim UI
+        // is served by the sim process itself, so confirm the server is really
+        // gone (HTTP unreachable) before showing the "stopped" overlay; a
+        // successful fetch means it was just a transient drop that will reconnect.
+        fetchDevices()
+          .then((d) => setDevices(d))
+          .catch(() => setStopped(true));
       } else if (isConnected) {
         // Server is back — refresh everything
         setStopped(false);
