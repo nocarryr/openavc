@@ -1310,8 +1310,14 @@ function compareSemver(a: string, b: string): number {
 /** Compare semver strings. Returns true if `available` is newer than `installed`.
  *  Handles pre-release and build suffixes (e.g. `1.0.1-beta`) — the old
  *  `.split('.').map(Number)` turned any suffixed segment into NaN and coerced
- *  it to 0, silently hiding updates to (or from) a suffixed version. */
+ *  it to 0, silently hiding updates to (or from) a suffixed version.
+ *
+ *  An installed driver/plugin with no recorded version (an older install or a
+ *  hand-placed file) is treated as older than any catalogued release, so the
+ *  community version is offered as an update — otherwise it silently sticks on
+ *  stale device logic with no way to refresh short of uninstall/reinstall. */
 export function hasUpdate(installed: string, available: string): boolean {
-  if (!installed || !available) return false;
+  if (!available) return false;
+  if (!installed) return true;
   return compareSemver(available, installed) > 0;
 }

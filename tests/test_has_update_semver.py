@@ -82,7 +82,8 @@ SCENARIOS = [
     "build_metadata_not_an_update",
     "installed_release_available_prerelease",
     # Guards.
-    "empty_installed",
+    "empty_installed_offers_update",
+    "empty_installed_empty_available",
     "empty_available",
 ]
 

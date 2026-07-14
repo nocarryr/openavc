@@ -58,7 +58,12 @@ const CASES = {
   installed_release_available_prerelease: ["1.0.0", "1.0.0-beta", false],
 
   // --- Guards ---
-  empty_installed: ["", "1.0.0", false],
+  // An installed thing with no recorded version (older or hand-placed install)
+  // is treated as older than any catalogued release, so the community version
+  // is offered as an update (was hidden by the `!installed` guard).
+  empty_installed_offers_update: ["", "1.0.0", true],
+  // No catalogued version to compare against — nothing to offer.
+  empty_installed_empty_available: ["", "", false],
   empty_available: ["1.0.0", "", false],
 };
 
