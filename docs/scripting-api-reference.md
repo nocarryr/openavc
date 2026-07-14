@@ -103,7 +103,7 @@ Read and write the reactive state store. All values are flat primitives (`str`, 
 | `device.<id>.*` | `device.projector_main.power` | Drivers (read-only for scripts) |
 | `var.*` | `var.room_active` | Scripts, macros, UI |
 | `ui.<id>.*` | `ui.btn_power.label` | Scripts (UI element overrides) |
-| `system.*` | `system.uptime` | System (read-only) |
+| `system.*` | `system.version` | System (read-only) |
 | `plugin.<id>.*` | `plugin.mqtt.connected` | Plugins |
 | `isc.<peer_id>.*` | `isc.lobby.device.proj1.power` | ISC (remote state) |
 

@@ -8,7 +8,7 @@ Keys follow a namespace convention:
     device.<device_id>.<property>    — e.g., "device.projector1.power"
     var.<variable_id>                — e.g., "var.room_active"
     ui.<element_id>.<property>       — e.g., "ui.vol_slider.value"
-    system.<property>                — e.g., "system.uptime"
+    system.<property>                — e.g., "system.version"
     plugin.<plugin_id>.<property>    — e.g., "plugin.streamdeck.connected"
     isc.<instance_id>.<key>          — remote instance state
 
