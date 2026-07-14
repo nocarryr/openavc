@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 import time
 from pathlib import Path
@@ -1504,6 +1505,7 @@ class Engine:
         2. If no backup works, create a minimal empty project so the server starts
         """
         from server.core.backup_manager import list_backups, restore_from_backup
+        from server.system_config import get_seed_project_path
 
         project_dir = self.project_path.parent
 
@@ -1512,6 +1514,23 @@ class Engine:
             return load_project(self.project_path)
         except FileNotFoundError:
             log.warning(f"Project file not found: {self.project_path}")
+            # The configured project doesn't exist yet. This is the normal
+            # first-boot state when install-time seeding didn't reach this path
+            # — notably a Docker image run with a *bind-mounted* /data, which
+            # shadows the seed cp'd into the image layer (only named volumes
+            # inherit image content). Seed from the canonical bundled project so
+            # every deployment boots the starter project instead of an empty
+            # Recovery Project, independent of how /data was provided. A missing
+            # file has no backups to restore, so this is the right first move.
+            seed = get_seed_project_path()
+            if seed is not None:
+                try:
+                    project_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(seed, self.project_path)
+                    log.info(f"Seeded default project from {seed}")
+                    return load_project(self.project_path)
+                except Exception as e:
+                    log.warning(f"Failed to seed project from {seed}: {e}")
         except json.JSONDecodeError as e:
             log.error(f"Project file is corrupted (invalid JSON): {e}")
         except Exception as e:

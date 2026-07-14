@@ -172,6 +172,31 @@ SEED_TEMPLATES_DIR = APP_DIR / "server" / "templates"
 USER_TEMPLATES_DIR = APP_DIR / "user_templates"
 PYPROJECT_PATH = APP_DIR / "pyproject.toml"
 
+# Canonical seed for the default project, bundled read-only in APP_DIR. Its
+# location differs by deployment layout, so probe the known candidates in
+# priority order. Used as a runtime seed when the configured project path is
+# missing, making default-project seeding independent of how the data dir was
+# provided (notably a bind-mounted Docker /data, which shadows the seed cp'd
+# into the image layer — only named volumes inherit image content).
+_SEED_PROJECT_CANDIDATES = (
+    APP_DIR / "seed" / "default" / "project.avc",              # Docker image layout
+    APP_DIR / "installer" / "seed" / "default" / "project.avc",  # source / dev checkout
+    APP_DIR / "projects" / "default" / "project.avc",         # frozen PyInstaller bundle
+)
+
+
+def get_seed_project_path() -> Path | None:
+    """Return the bundled default-project seed, or None if none is present.
+
+    Returns the first candidate that exists so the caller can seed a missing
+    project path from it. All candidates live under APP_DIR (the read-only
+    bundle), never the data dir, so this never returns a live user project.
+    """
+    for candidate in _SEED_PROJECT_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return None
+
 # Default system.json schema
 DEFAULTS: dict[str, Any] = {
     "network": {
