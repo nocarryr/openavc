@@ -16,17 +16,49 @@ function areasOverlap(a: GridArea, b: GridArea): boolean {
   return a.col < bRight && aRight > b.col && a.row < bBottom && aBottom > b.row;
 }
 
+/** Spans above this cell count skip the cell hash below and check pairwise —
+ *  a page-sized background would otherwise dominate the map for no gain. */
+const LARGE_ELEMENT_CELLS = 256;
+
 /** Return set of element IDs that overlap with at least one other element.
- *  Group elements are excluded — they are containers and overlap with their children by design. */
+ *  Group elements are excluded — they are containers and overlap with their children by design.
+ *
+ *  Uses a grid-cell hash rather than all-pairs checks: each element marks the
+ *  cells it covers and a collision is an overlap, so cost tracks covered cells
+ *  instead of n² — this recomputes on every mutation during a drag. */
 function findOverlappingIds(elements: UIElement[]): Set<string> {
   const ids = new Set<string>();
-  for (let i = 0; i < elements.length; i++) {
-    if (elements[i].type === "group") continue;
-    for (let j = i + 1; j < elements.length; j++) {
-      if (elements[j].type === "group") continue;
-      if (areasOverlap(elements[i].grid_area, elements[j].grid_area)) {
-        ids.add(elements[i].id);
-        ids.add(elements[j].id);
+  const cells = new Map<string, UIElement>();
+  const normal: UIElement[] = [];
+  const large: UIElement[] = [];
+
+  for (const el of elements) {
+    if (el.type === "group") continue;
+    const a = el.grid_area;
+    (a.col_span * a.row_span > LARGE_ELEMENT_CELLS ? large : normal).push(el);
+  }
+
+  for (const el of normal) {
+    const a = el.grid_area;
+    for (let c = a.col; c < a.col + a.col_span; c++) {
+      for (let r = a.row; r < a.row + a.row_span; r++) {
+        const key = `${c}:${r}`;
+        const other = cells.get(key);
+        if (other) {
+          ids.add(el.id);
+          ids.add(other.id);
+        } else {
+          cells.set(key, el);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < large.length; i++) {
+    for (const el of [...normal, ...large.slice(i + 1)]) {
+      if (areasOverlap(large[i].grid_area, el.grid_area)) {
+        ids.add(large[i].id);
+        ids.add(el.id);
       }
     }
   }
