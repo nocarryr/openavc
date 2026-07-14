@@ -1392,20 +1392,44 @@ def validate_driver_definition(driver_def: dict[str, Any]) -> list[str]:
                             f"{where}.instances: label must be a string"
                         )
 
-    # Validate each_child entries in polling.queries and on_connect (per-child
-    # query templates). A bad entry would silently poll nothing.
+    # Validate mapping entries in polling.queries and on_connect: per-child
+    # query templates (each_child) and their optional `when:` gate. A bad entry
+    # would silently poll nothing.
+    query_config_fields: set[str] = set()
+    for _src in ("config_schema", "default_config"):
+        _block = driver_def.get(_src)
+        if isinstance(_block, dict):
+            query_config_fields.update(_block.keys())
+
     def _validate_each_child(name: str, entries: Any, allow_osc_dict: bool) -> None:
         if not isinstance(entries, list):
             return
         for i, q in enumerate(entries):
             if not isinstance(q, dict):
                 continue
+            # `when: <config_field>` gates the entry on a truthy config value.
+            # A field name that doesn't exist would silently disable the entry
+            # forever, so a typo is an error rather than a quiet no-op.
+            if "when" in q:
+                when = q.get("when")
+                if not isinstance(when, str) or not when:
+                    errors.append(
+                        f"{name}[{i}]: 'when' must name a config field"
+                    )
+                elif when not in query_config_fields:
+                    errors.append(
+                        f"{name}[{i}]: 'when' field '{when}' is not a declared "
+                        f"config field (config_schema / default_config)"
+                    )
             if "each_child" not in q:
                 if allow_osc_dict and "address" in q:
                     continue  # OSC on_connect {address, args} form
+                send = q.get("send")
+                if isinstance(send, str) and send:
+                    continue  # plain {send, when} query — dict form only for `when`
                 errors.append(
                     f"{name}[{i}]: mapping entries must be "
-                    f"{{each_child, send}}"
+                    f"{{each_child, send}} or {{send, when}}"
                     + (" or {address, args}" if allow_osc_dict else "")
                 )
                 continue

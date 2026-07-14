@@ -27,12 +27,18 @@ ACME_MATRIX = {
         "port": 23,
         "output_count": 4,
         "zone_ids": "1,2,4",
+        "enable_meters": False,
     },
     "config_schema": {
         "host": {"type": "string", "required": True, "label": "IP Address"},
         "port": {"type": "integer", "default": 23, "label": "Port"},
         "output_count": {"type": "integer", "default": 4, "label": "Outputs"},
         "zone_ids": {"type": "string", "default": "1,2,4", "label": "Zone IDs"},
+        "enable_meters": {
+            "type": "boolean",
+            "default": False,
+            "label": "Enable Level Meters",
+        },
     },
     "state_variables": {
         "power": {"type": "boolean", "label": "Power"},
@@ -291,6 +297,84 @@ async def test_expand_query_empty_roster_sends_nothing():
 
 
 # ---------------------------------------------------------------------------
+# Config-gated queries (when:)
+# ---------------------------------------------------------------------------
+
+METER_QUERY = {
+    "each_child": "zone",
+    "send": "METER? {child_id}\r\n",
+    "when": "enable_meters",
+}
+
+
+def _gated_driver(enable_meters):
+    return _make_driver(
+        config={
+            "host": "h",
+            "zone_ids": "1,2,4",
+            "enable_meters": enable_meters,
+        }
+    )
+
+
+async def test_when_gate_off_expands_to_nothing():
+    driver = _gated_driver(False)
+    driver._register_declared_children()
+    assert driver._expand_query(METER_QUERY) == []
+
+
+async def test_when_gate_on_expands_per_child():
+    driver = _gated_driver(True)
+    driver._register_declared_children()
+    assert driver._expand_query(METER_QUERY) == [
+        "METER? 1\r\n",
+        "METER? 2\r\n",
+        "METER? 4\r\n",
+    ]
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("false", False),  # the string "false" is falsy here, not Python-truthy
+        ("0", False),
+        ("", False),
+        (None, False),  # field missing from config
+        ("239.0.0.100", True),  # a non-empty value gates on "is it configured"
+    ],
+)
+async def test_when_gate_truthiness(value, expected):
+    driver = _gated_driver(value)
+    driver._register_declared_children()
+    assert bool(driver._expand_query(METER_QUERY)) is expected
+
+
+async def test_when_gates_a_plain_send_query():
+    driver = _gated_driver(True)
+    entry = {"send": "PSU?\r\n", "when": "enable_meters"}
+    assert driver._expand_query(entry) == ["PSU?\r\n"]
+    off = _gated_driver(False)
+    assert off._expand_query(entry) == []
+
+
+async def test_ungated_queries_always_run():
+    driver = _gated_driver(False)
+    driver._register_declared_children()
+    driver.transport = FakeTransport()
+    await driver.poll()
+    # The driver's own (ungated) queries are untouched by an off gate.
+    assert [s.decode() for s in driver.transport.sent] == [
+        "PWR?\r\n",
+        "VOL? 1\r\n",
+        "VOL? 2\r\n",
+        "VOL? 4\r\n",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Loader validation
 # ---------------------------------------------------------------------------
 
@@ -322,6 +406,38 @@ def test_loader_rejects_unknown_config_field():
         d["child_entity_types"]["output"]["instances"] = {"count_from": "nope"}
 
     assert any("not a declared config field" in e for e in _errors_for(mutate))
+
+
+def test_loader_accepts_when_gated_queries():
+    def mutate(d):
+        d["polling"]["queries"].append(METER_QUERY)
+        d["on_connect"] = [{"send": "SUB PSU\r\n", "when": "enable_meters"}]
+
+    assert _errors_for(mutate) == []
+
+
+def test_loader_rejects_when_naming_unknown_config_field():
+    def mutate(d):
+        d["polling"]["queries"].append({**METER_QUERY, "when": "enabl_meters"})
+
+    assert any(
+        "'when' field 'enabl_meters' is not a declared config field" in e
+        for e in _errors_for(mutate)
+    )
+
+
+def test_loader_rejects_non_string_when():
+    def mutate(d):
+        d["polling"]["queries"].append({**METER_QUERY, "when": True})
+
+    assert any("'when' must name a config field" in e for e in _errors_for(mutate))
+
+
+def test_loader_rejects_dict_query_that_is_neither_form():
+    def mutate(d):
+        d["polling"]["queries"].append({"when": "enable_meters"})  # no send
+
+    assert any("{each_child, send} or {send, when}" in e for e in _errors_for(mutate))
 
 
 def test_loader_rejects_count_over_id_max():

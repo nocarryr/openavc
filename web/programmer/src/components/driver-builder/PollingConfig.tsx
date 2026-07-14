@@ -1,21 +1,26 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { DriverDefinition, DriverEachChildQuery } from "../../api/types";
+import type { DriverDefinition } from "../../api/types";
+import {
+  buildQueryEntry,
+  gateFieldNames,
+  isEachChild,
+  queryWhen,
+  querySend,
+  type QueryEntry,
+} from "./queryEntryHelpers";
 
 interface PollingConfigProps {
   draft: DriverDefinition;
   onUpdate: (partial: Partial<DriverDefinition>) => void;
 }
 
-type PollQuery = string | DriverEachChildQuery;
-
-function isEachChild(q: PollQuery): q is DriverEachChildQuery {
-  return typeof q === "object" && q !== null && "each_child" in q;
-}
+type PollQuery = QueryEntry;
 
 export function PollingConfig({ draft, onUpdate }: PollingConfigProps) {
   const polling = draft.polling ?? {};
   const queries = (polling.queries ?? []) as PollQuery[];
   const childTypeNames = Object.keys(draft.child_entity_types ?? {});
+  const gateFields = gateFieldNames(draft);
   const defaultConfig = (draft.default_config ?? {}) as Record<string, unknown>;
   const pollIntervalRaw = defaultConfig.poll_interval;
   const pollInterval =
@@ -120,6 +125,8 @@ export function PollingConfig({ draft, onUpdate }: PollingConfigProps) {
 
         {queries.map((query: PollQuery, i: number) => {
           const eachChild = isEachChild(query);
+          const send = querySend(query);
+          const when = queryWhen(query);
           return (
             <div
               key={i}
@@ -133,18 +140,9 @@ export function PollingConfig({ draft, onUpdate }: PollingConfigProps) {
               {childTypeNames.length > 0 && (
                 <select
                   value={eachChild ? query.each_child : ""}
-                  onChange={(e) => {
-                    const t = e.target.value;
-                    if (!t) {
-                      // Back to a plain query; keep the template text.
-                      updateQuery(i, eachChild ? query.send : (query as string));
-                    } else {
-                      const send = eachChild
-                        ? query.send
-                        : (query as string) || "";
-                      updateQuery(i, { each_child: t, send });
-                    }
-                  }}
+                  onChange={(e) =>
+                    updateQuery(i, buildQueryEntry(send, e.target.value, when))
+                  }
                   title="Send once, or once per registered child of a type"
                   style={{ width: 130, fontSize: "var(--font-size-sm)" }}
                 >
@@ -157,13 +155,15 @@ export function PollingConfig({ draft, onUpdate }: PollingConfigProps) {
                 </select>
               )}
               <input
-                value={eachChild ? query.send : (query as string)}
+                value={send}
                 onChange={(e) =>
                   updateQuery(
                     i,
-                    eachChild
-                      ? { each_child: query.each_child, send: e.target.value }
-                      : e.target.value,
+                    buildQueryEntry(
+                      e.target.value,
+                      eachChild ? query.each_child : "",
+                      when,
+                    ),
                   )
                 }
                 placeholder={
@@ -179,6 +179,30 @@ export function PollingConfig({ draft, onUpdate }: PollingConfigProps) {
                   fontSize: "var(--font-size-sm)",
                 }}
               />
+              {gateFields.length > 0 && (
+                <select
+                  value={when}
+                  onChange={(e) =>
+                    updateQuery(
+                      i,
+                      buildQueryEntry(
+                        send,
+                        eachChild ? query.each_child : "",
+                        e.target.value,
+                      ),
+                    )
+                  }
+                  title="Only run this query while a config field is on — e.g. poll meters behind an 'Enable Meters' checkbox"
+                  style={{ width: 150, fontSize: "var(--font-size-sm)" }}
+                >
+                  <option value="">Always</option>
+                  {gateFields.map((f) => (
+                    <option key={f} value={f}>
+                      Only if {f}
+                    </option>
+                  ))}
+                </select>
+              )}
               <button
                 onClick={() => removeQuery(i)}
                 style={{ padding: "2px", color: "var(--text-muted)" }}

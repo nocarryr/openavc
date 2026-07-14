@@ -606,6 +606,17 @@ export interface DriverChildSetIdSpec {
 export interface DriverEachChildQuery {
   each_child: string;
   send: string;
+  /** Run only while this config field is truthy (see DriverGatedQuery). */
+  when?: string;
+}
+
+/** A plain query that exists in mapping form only so it can carry `when:` —
+ *  a config field that gates whether the entry runs at all. Used to arm a
+ *  chatty subscription (a level-meter stream) behind an integrator checkbox
+ *  instead of forcing it on every site. */
+export interface DriverGatedQuery {
+  send: string;
+  when: string;
 }
 
 // Driver ``discovery:`` block. Schema reference:
@@ -835,7 +846,10 @@ export interface DriverDefinition {
   child_entity_types?: Record<string, DriverChildEntityType>;
   commands: Record<string, DriverCommandDef>;
   responses: DriverResponseDef[];
-  polling: { interval?: number; queries?: (string | DriverEachChildQuery)[] };
+  polling: {
+    interval?: number;
+    queries?: (string | DriverEachChildQuery | DriverGatedQuery)[];
+  };
   frame_parser?: { type: string; [key: string]: unknown } | null;
   // Send-side packet framing — the send twin of frame_parser. Wraps every
   // byte-stream command (after command_prefix/suffix) in a binary header whose
@@ -860,7 +874,12 @@ export interface DriverDefinition {
   // Sequence of wire strings sent immediately after connect (and after any
   // auth handshake completes). Used for verbose-mode toggles, GET ALL, push
   // subscriptions. The runtime substitutes config-key placeholders.
-  on_connect?: (string | DriverEachChildQuery | Record<string, unknown>)[];
+  on_connect?: (
+    | string
+    | DriverEachChildQuery
+    | DriverGatedQuery
+    | Record<string, unknown>
+  )[];
   // Login handshake the runtime performs after raw connect. Today only
   // type='telnet_login' is implemented (prompt-driven Telnet/SSH banner
   // login). Username/password come from device config keys named here.

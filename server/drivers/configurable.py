@@ -20,6 +20,7 @@ import re
 import time
 from typing import Any
 
+from server.core.condition_eval import _coerce_bool
 from server.drivers.base import (
     BaseDriver,
     ConnectionFaultError,
@@ -825,6 +826,8 @@ class ConfigurableDriver(BaseDriver):
                             address = self._safe_substitute(item, self.config) if "{" in item else item
                             data = osc_encode_message(address)
                         elif isinstance(item, dict):
+                            if not self._query_enabled(item):
+                                continue
                             address = item.get("address", "")
                             if "{" in address:
                                 address = self._safe_substitute(address, self.config)
@@ -912,6 +915,28 @@ class ConfigurableDriver(BaseDriver):
                     self._apply_send_frame(_safe_encode_escapes(formatted))
                 )
 
+    def _query_enabled(self, query: dict[str, Any]) -> bool:
+        """Whether a ``when:``-gated polling/on_connect entry should run.
+
+        ``when: <config_field>`` runs the entry only while that config field is
+        truthy. It exists so a device whose chatty stream must be *armed* by the
+        queries themselves (a per-channel ``subscribe`` to a level meter, say)
+        can offer that as an integrator checkbox instead of forcing the choice
+        on every site. An entry with no ``when`` always runs.
+        """
+        field = query.get("when")
+        if field is None:
+            return True
+        if not isinstance(field, str) or not field:
+            log.warning(
+                f"[{self.device_id}] query 'when' must name a config field; "
+                f"skipping entry {query!r}"
+            )
+            return False
+        value = self.config.get(field)
+        as_bool = _coerce_bool(value)
+        return bool(value) if as_bool is None else as_bool
+
     def _expand_query(self, query: Any) -> list[str]:
         """Expand one polling/on_connect entry. Strings pass through
         unchanged; an ``{each_child: <type>, send: <template>}`` dict yields
@@ -919,23 +944,32 @@ class ConfigurableDriver(BaseDriver):
         substituted (the unpadded local id). ``{child_id:spec}`` format specs
         work too (``{child_id:02d}`` zero-pads for padded-address protocols);
         other ``{placeholders}`` pass through untouched for the downstream
-        config substitution. Anything else is skipped with a warning.
+        config substitution. A ``{send: <string>}`` dict is a plain query that
+        only exists in dict form so it can carry ``when:``. Either dict form may
+        declare ``when: <config_field>`` to run only while that field is truthy.
+        Anything else is skipped with a warning.
         """
         if isinstance(query, str):
             return [query]
-        if isinstance(query, dict) and "each_child" in query:
-            ctype = query.get("each_child")
-            template = query.get("send")
-            if not isinstance(ctype, str) or not isinstance(template, str) or not template:
-                log.warning(
-                    f"[{self.device_id}] each_child query needs 'each_child' "
-                    f"+ 'send'; skipping"
-                )
+        if isinstance(query, dict):
+            if not self._query_enabled(query):
                 return []
-            return [
-                self._safe_substitute(template, {"child_id": local_id})
-                for local_id in self.list_children(ctype)
-            ]
+            if "each_child" in query:
+                ctype = query.get("each_child")
+                template = query.get("send")
+                if not isinstance(ctype, str) or not isinstance(template, str) or not template:
+                    log.warning(
+                        f"[{self.device_id}] each_child query needs 'each_child' "
+                        f"+ 'send'; skipping"
+                    )
+                    return []
+                return [
+                    self._safe_substitute(template, {"child_id": local_id})
+                    for local_id in self.list_children(ctype)
+                ]
+            send = query.get("send")
+            if isinstance(send, str) and send:
+                return [send]
         log.warning(
             f"[{self.device_id}] Unrecognized query entry {query!r}; skipping"
         )

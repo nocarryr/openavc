@@ -315,6 +315,11 @@ export function validateDriver(
   // ── Child entity types ───────────────────────────────────────────────
   const childTypes = draft.child_entity_types ?? {};
   const childTypeNames = new Set(Object.keys(childTypes));
+  // Config fields a query's `when:` gate may name (either block declares them).
+  const gateFieldNames = new Set([
+    ...Object.keys(draft.config_schema ?? {}),
+    ...Object.keys(draft.default_config ?? {}),
+  ]);
   for (const [typeName, typeDef] of Object.entries(childTypes)) {
     if (!CHILD_ID_RE.test(typeName)) {
       issues.push({
@@ -1091,8 +1096,28 @@ export function validateDriver(
     (entries ?? []).forEach((q, i) => {
       if (typeof q !== "object" || q === null) return;
       const entry = q as Record<string, unknown>;
+      // `when: <config_field>` gates the entry on a truthy config value. A
+      // field name that doesn't exist would disable the entry forever, so a
+      // typo is an error, not a quiet no-op.
+      if ("when" in entry) {
+        const when = entry.when;
+        if (typeof when !== "string" || !when) {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            message: `${fieldName} entry ${i + 1}: "when" must name a config field.`,
+          });
+        } else if (!gateFieldNames.has(when)) {
+          issues.push({
+            severity: "error",
+            section: "behavior",
+            message: `${fieldName} entry ${i + 1}: "when" field "${when}" isn't a declared config field, so this entry would never run.`,
+          });
+        }
+      }
       if (!("each_child" in entry)) {
         if (allowOscDict && "address" in entry) return;
+        if (typeof entry.send === "string" && entry.send) return;
         issues.push({
           severity: "error",
           section: "behavior",

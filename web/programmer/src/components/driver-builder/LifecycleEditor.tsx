@@ -1,16 +1,21 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { DriverDefinition, DriverEachChildQuery } from "../../api/types";
+import type { DriverDefinition } from "../../api/types";
+import {
+  buildQueryEntry,
+  gateFieldNames,
+  isEachChild,
+  isOpaque,
+  queryWhen,
+  querySend,
+  type QueryEntry,
+} from "./queryEntryHelpers";
 
 interface LifecycleEditorProps {
   draft: DriverDefinition;
   onUpdate: (partial: Partial<DriverDefinition>) => void;
 }
 
-type ConnectStep = string | DriverEachChildQuery | Record<string, unknown>;
-
-function isEachChild(step: ConnectStep): step is DriverEachChildQuery {
-  return typeof step === "object" && step !== null && "each_child" in step;
-}
+type ConnectStep = QueryEntry;
 
 /**
  * Edits the `on_connect` lifecycle hook — the sequence of wire strings sent
@@ -27,6 +32,7 @@ function isEachChild(step: ConnectStep): step is DriverEachChildQuery {
 export function LifecycleEditor({ draft, onUpdate }: LifecycleEditorProps) {
   const items = (draft.on_connect ?? []) as ConnectStep[];
   const childTypeNames = Object.keys(draft.child_entity_types ?? {});
+  const gateFields = gateFieldNames(draft);
 
   const update = (next: ConnectStep[]) => {
     // Drop the field entirely when the list is empty so we don't write
@@ -115,9 +121,11 @@ export function LifecycleEditor({ draft, onUpdate }: LifecycleEditorProps) {
 
       {items.map((item, i) => {
         const eachChild = isEachChild(item);
-        // A non-each_child object step (an OSC {address, args} entry) has no
-        // inline editor — show it read-only rather than corrupting it.
-        const isOpaque = typeof item !== "string" && !eachChild;
+        // An OSC {address, args} step has no inline editor — show it read-only
+        // rather than corrupting it.
+        const opaque = isOpaque(item);
+        const send = querySend(item);
+        const when = queryWhen(item);
         return (
           <div
             key={i}
@@ -139,18 +147,12 @@ export function LifecycleEditor({ draft, onUpdate }: LifecycleEditorProps) {
             >
               {i + 1}.
             </span>
-            {childTypeNames.length > 0 && !isOpaque && (
+            {childTypeNames.length > 0 && !opaque && (
               <select
                 value={eachChild ? item.each_child : ""}
-                onChange={(e) => {
-                  const t = e.target.value;
-                  if (!t) {
-                    updateItem(i, eachChild ? item.send : (item as string));
-                  } else {
-                    const send = eachChild ? item.send : (item as string) || "";
-                    updateItem(i, { each_child: t, send });
-                  }
-                }}
+                onChange={(e) =>
+                  updateItem(i, buildQueryEntry(send, e.target.value, when))
+                }
                 title="Send once, or once per registered child of a type"
                 style={{ width: 130, fontSize: "var(--font-size-sm)" }}
               >
@@ -163,20 +165,16 @@ export function LifecycleEditor({ draft, onUpdate }: LifecycleEditorProps) {
               </select>
             )}
             <input
-              value={
-                isOpaque
-                  ? JSON.stringify(item)
-                  : eachChild
-                    ? item.send
-                    : (item as string)
-              }
-              disabled={isOpaque}
+              value={opaque ? JSON.stringify(item) : send}
+              disabled={opaque}
               onChange={(e) =>
                 updateItem(
                   i,
-                  eachChild
-                    ? { each_child: item.each_child, send: e.target.value }
-                    : e.target.value,
+                  buildQueryEntry(
+                    e.target.value,
+                    eachChild ? item.each_child : "",
+                    when,
+                  ),
                 )
               }
               placeholder={eachChild ? "e.g., ?VOUT{child_id}\\r" : placeholder}
@@ -186,6 +184,30 @@ export function LifecycleEditor({ draft, onUpdate }: LifecycleEditorProps) {
                 fontSize: "var(--font-size-sm)",
               }}
             />
+            {gateFields.length > 0 && !opaque && (
+              <select
+                value={when}
+                onChange={(e) =>
+                  updateItem(
+                    i,
+                    buildQueryEntry(
+                      send,
+                      eachChild ? item.each_child : "",
+                      e.target.value,
+                    ),
+                  )
+                }
+                title="Only send this step while a config field is on — e.g. arm a level-meter subscription behind an 'Enable Meters' checkbox"
+                style={{ width: 150, fontSize: "var(--font-size-sm)" }}
+              >
+                <option value="">Always</option>
+                {gateFields.map((f) => (
+                  <option key={f} value={f}>
+                    Only if {f}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               onClick={() => removeItem(i)}
               style={{ padding: "2px", color: "var(--text-muted)" }}

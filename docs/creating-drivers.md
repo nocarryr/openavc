@@ -723,6 +723,26 @@ polling:
     - { each_child: channel, send: "/ch/{child_id:02d}/mix/fader" }  # OSC, zero-padded
 ```
 
+##### Gating a query on a config field (`when:`)
+
+Some devices only stream a value once you *ask* them to — a level meter you arm with a `subscribe` per channel, for instance. That traffic is welcome on one job and a nuisance on the next, so make it the integrator's choice: give a query a `when:` naming a config field, and it only runs while that field is on.
+
+```yaml
+config_schema:
+  enable_meters:
+    type: boolean
+    default: false
+    label: "Enable Level Meters"
+    description: "Stream live meter levels. Increases network traffic."
+
+on_connect:
+  # One subscribe per channel — only when the installer ticked the box.
+  - { each_child: channel, send: "subscribe /amp/channels/{child_id}/levels/level_db\n", when: enable_meters }
+  - { send: "subscribe /amp/powerSupply/acLineWatts\n", when: enable_meters }
+```
+
+`when:` works on entries in both `on_connect` and `polling.queries`, with or without `each_child` (the plain `{ send: ..., when: ... }` form exists so a one-off query can be gated too). The field must be one you declared in `config_schema` or `default_config` — a name that doesn't exist is a load error rather than a query that silently never runs. Pair a metering stream with `throttle:` on its response rules and `cloud_priority: low` on the state variables it feeds.
+
 Per-child **writes** need nothing new — declare a command with a `child_id` parameter (see `commands`) and the platform validates and substitutes the ID (as the unpadded local ID; use a format spec like `{channel:02d}` in the send string / OSC address when the wire wants zero-padding). Per-child values that the device persists (a zone volume, an output mute) are modeled as child state variables plus a `child_id` command, not as `device_settings` — a device setting's `state_key` is flat and can't address a child. The IDE's per-child "Refresh from Device" re-derives the roster from config automatically.
 
 Python drivers declare the same block in `DRIVER_INFO` and register instances at runtime with `self.register_child(type, local_id, initial_state=...)`, update them with `set_child_state` / `set_children_state_batch`, and remove them with `deregister_child`. For a **dynamic** type, pass the discovered control schema when registering:
