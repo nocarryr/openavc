@@ -7,6 +7,8 @@ OSC address-segment ids, wire-id maps), and `each_child:` query expansion
 using an invented matrix switcher and an invented OSC mixer.
 """
 
+import asyncio
+
 import pytest
 
 from server.core.event_bus import EventBus
@@ -372,6 +374,62 @@ async def test_ungated_queries_always_run():
         "VOL? 2\r\n",
         "VOL? 4\r\n",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Throttle scoping on a child_set rule
+# ---------------------------------------------------------------------------
+
+
+def _throttled_meter_driver(window=60):
+    """One throttled rule routing a meter to every zone — the shape a
+    per-channel meter takes (one rule, N children)."""
+    import copy
+
+    d = copy.deepcopy(ACME_MATRIX)
+    d["child_entity_types"]["zone"]["state_variables"]["meter"] = {
+        "type": "integer",
+        "label": "Meter",
+    }
+    d["responses"].insert(
+        0,
+        {
+            "match": r"Meter(\d+) (\d+)",
+            "throttle": window,
+            "child_set": [{"type": "zone", "id": "$1", "state": {"meter": "$2"}}],
+        },
+    )
+    return _make_driver(d)
+
+
+async def test_throttled_child_rule_buckets_per_child():
+    # One child must not consume the window on behalf of the others: a rule
+    # serving N children would otherwise refresh only whichever arrived first.
+    driver = _throttled_meter_driver()
+    driver._register_declared_children()
+    await driver.on_data_received(b"Meter1 11")
+    await driver.on_data_received(b"Meter2 22")
+    await driver.on_data_received(b"Meter4 44")
+    assert driver.state.get("device.dev1.zone.1.meter") == 11
+    assert driver.state.get("device.dev1.zone.2.meter") == 22
+    assert driver.state.get("device.dev1.zone.4.meter") == 44
+
+
+async def test_throttled_child_rule_still_caps_one_child():
+    driver = _throttled_meter_driver()
+    driver._register_declared_children()
+    await driver.on_data_received(b"Meter1 11")
+    await driver.on_data_received(b"Meter1 99")  # inside zone 1's window
+    assert driver.state.get("device.dev1.zone.1.meter") == 11
+
+
+async def test_throttled_child_rule_reopens_after_window():
+    driver = _throttled_meter_driver(window=0.02)
+    driver._register_declared_children()
+    await driver.on_data_received(b"Meter1 11")
+    await asyncio.sleep(0.05)
+    await driver.on_data_received(b"Meter1 99")
+    assert driver.state.get("device.dev1.zone.1.meter") == 99
 
 
 # ---------------------------------------------------------------------------

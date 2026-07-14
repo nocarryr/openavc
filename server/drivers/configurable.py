@@ -338,11 +338,13 @@ class ConfigurableDriver(BaseDriver):
                 )
 
     @staticmethod
-    def _build_throttle(resp: dict[str, Any]) -> dict[str, float] | None:
+    def _build_throttle(resp: dict[str, Any]) -> dict[str, Any] | None:
         """Compile a response entry's optional ``throttle: <seconds>`` into a
         per-instance {window, last} state dict (None when absent/invalid).
-        The loader validates the value up-front; runtime parsing stays
-        defensive so a hand-installed file can't crash the driver."""
+        ``last`` maps a throttle scope to its last-fire time — see
+        ``_throttle_skip``. The loader validates the value up-front; runtime
+        parsing stays defensive so a hand-installed file can't crash the
+        driver."""
         raw = resp.get("throttle")
         if raw is None:
             return None
@@ -353,20 +355,50 @@ class ConfigurableDriver(BaseDriver):
             return None
         if window <= 0:
             return None
-        return {"window": window, "last": float("-inf")}
+        return {"window": window, "last": {}}
 
     @staticmethod
-    def _throttle_skip(tstate: dict[str, float] | None) -> bool:
-        """Check-and-stamp: True when the rule fired inside its throttle
-        window (the caller skips this application); otherwise records now as
-        the last-fire time and returns False."""
+    def _throttle_skip(tstate: dict[str, Any] | None, scope: str = "") -> bool:
+        """Check-and-stamp: True when the rule already fired for this scope
+        inside its throttle window (the caller skips this application);
+        otherwise records now as the scope's last-fire time and returns False.
+
+        The scope is what keeps ONE rule serving MANY children honest. A
+        per-channel meter is a single `child_set` rule matching every channel,
+        so a rule-wide window would let whichever channel arrived first consume
+        it and starve the rest — the meter would appear to update only channel
+        1. Throttling per routed child gives each child its own window, which is
+        what the cap is meant to express (N writes/sec per meter, not per
+        driver). Flat rules share the single "" scope, unchanged."""
         if not tstate:
             return False
         now = time.monotonic()
-        if now - tstate["last"] < tstate["window"]:
+        last: dict[str, float] = tstate["last"]
+        if now - last.get(scope, float("-inf")) < tstate["window"]:
             return True
-        tstate["last"] = now
+        last[scope] = now
         return False
+
+    @staticmethod
+    def _throttle_scope(
+        child_mappings: list[dict[str, Any]], match: re.Match[str]
+    ) -> str:
+        """Throttle bucket for a regex rule: the child ids it routes to, so a
+        rule serving N children throttles each independently. Flat rules (no
+        child_set) return "" — one shared bucket, as before."""
+        if not child_mappings:
+            return ""
+        parts = []
+        for cm in child_mappings:
+            id_kind, id_val = cm["id"]
+            raw: Any = id_val
+            if id_kind == "group":
+                try:
+                    raw = match.group(id_val)
+                except (IndexError, re.error):
+                    raw = None
+            parts.append(f"{cm['type']}:{raw}")
+        return "|".join(parts)
 
     def _compile_child_set(self, resp: dict[str, Any]) -> list[dict[str, Any]]:
         """Compile a response entry's ``child_set:`` list — route regex
@@ -1876,7 +1908,10 @@ class ConfigurableDriver(BaseDriver):
             if match:
                 # A throttled rule consumes its frame without applying it —
                 # falling through would let a later rule match the same frame.
-                if self._throttle_skip(tstate):
+                # Scoped per routed child so one rule can serve N children.
+                if self._throttle_skip(
+                    tstate, self._throttle_scope(child_mappings, match)
+                ):
                     log.debug(
                         f"[{self.device_id}] Response throttled: "
                         f"{pattern.pattern}"
@@ -2022,7 +2057,12 @@ class ConfigurableDriver(BaseDriver):
                 if not fnmatch.fnmatch(address, addr_pattern):
                     continue
                 matched = True
-                if self._throttle_skip(tstate):
+                # An OSC child_set rule matches a wildcard address pattern
+                # (/ch/*/mix/fader), so the concrete address IS the per-child
+                # scope — same reason as the regex path above.
+                if self._throttle_skip(
+                    tstate, address if child_mappings else ""
+                ):
                     log.debug(
                         f"[{self.device_id}] OSC response throttled: "
                         f"{addr_pattern}"
