@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, Download, ExternalLink, RefreshCw } from "lucide-react";
 import { Dialog } from "./Dialog";
+import { shouldEnterCertError } from "./restartPollHelpers";
 import * as api from "../../api/restClient";
 
 type Phase = "starting" | "waiting" | "polling" | "cert-error" | "success" | "timeout" | "error";
@@ -19,10 +20,6 @@ interface RestartProgressDialogProps {
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_ATTEMPTS = 60;
-// Once we've seen this many consecutive failures and the new URL is https://
-// (page is http://), assume the browser is rejecting the new self-signed cert
-// rather than the server still being down.
-const CERT_ERROR_THRESHOLD = 5;
 // Time the server's graceful-exit delay (2s) plus a small margin so the
 // listener has actually released the port before polling begins.
 const INITIAL_WAIT_MS = 3000;
@@ -35,10 +32,12 @@ export function RestartProgressDialog({
 }: RestartProgressDialogProps) {
   const [phase, setPhase] = useState<Phase>("starting");
   const [errorDetail, setErrorDetail] = useState<string>("");
-  const cancelled = useRef(false);
 
   useEffect(() => {
-    cancelled.current = false;
+    // Local to THIS effect run — a superseded run (targetUrl/expectsNewCert
+    // changed) keeps its own `cancelled=true` and can't be un-cancelled by the
+    // next run, so a stale run can't re-POST restart or navigate to a stale URL.
+    let cancelled = false;
 
     const run = async () => {
       // Step 1: trigger the restart. A throw here is ambiguous — the server
@@ -48,25 +47,25 @@ export function RestartProgressDialog({
       try {
         await api.restartSystem("graceful");
       } catch (e) {
-        if (cancelled.current) return;
+        if (cancelled) return;
         // Keep the detail around in case polling never succeeds — we'll
         // surface it then. Don't switch phase yet.
         setErrorDetail(String(e));
       }
-      if (cancelled.current) return;
+      if (cancelled) return;
 
       // Step 2: wait for the server to actually exit and its replacement to
       // bind. The server delays exit ~2s to flush logs; a 3s wait covers that
       // plus a small margin for port release.
       setPhase("waiting");
       await new Promise((r) => setTimeout(r, INITIAL_WAIT_MS));
-      if (cancelled.current) return;
+      if (cancelled) return;
 
       // Step 3: poll until /api/health responds or we hit the cap.
       setPhase("polling");
       let consecutiveFailures = 0;
       for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-        if (cancelled.current) return;
+        if (cancelled) return;
         try {
           // `cache: "no-store"` keeps stale 502/0 responses from the previous
           // boot out of the way. `mode: "cors"` makes the cert error surface
@@ -80,30 +79,29 @@ export function RestartProgressDialog({
             // Small grace period so the user reads the "Reconnected" state
             // before the browser navigates.
             setTimeout(() => {
-              if (!cancelled.current) window.location.assign(targetUrl);
+              if (!cancelled) window.location.assign(targetUrl);
             }, 400);
             return;
           }
           consecutiveFailures = 0; // server is up but returning non-2xx; not a network error
         } catch {
           consecutiveFailures += 1;
-          if (
-            expectsNewCert &&
-            consecutiveFailures >= CERT_ERROR_THRESHOLD
-          ) {
-            // Browser likely rejecting the new self-signed cert.
+          // Only blame the cert once failures persist past the window a normal
+          // restart needs to rebind — a slow-but-healthy restart shouldn't
+          // misdirect the user to install a CA cert (see restartPollHelpers).
+          if (shouldEnterCertError(expectsNewCert, consecutiveFailures, attempt)) {
             setPhase("cert-error");
             return;
           }
         }
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
-      if (!cancelled.current) setPhase("timeout");
+      if (!cancelled) setPhase("timeout");
     };
 
     void run();
     return () => {
-      cancelled.current = true;
+      cancelled = true;
     };
   }, [targetUrl, expectsNewCert]);
 
