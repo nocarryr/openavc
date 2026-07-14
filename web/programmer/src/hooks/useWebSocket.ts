@@ -39,7 +39,12 @@ export function useWebSocket() {
       // external changes with stale local data
       const store = useProjectStore.getState();
       const wasDirty = store.dirty;
-      store.load().then(() => {
+      store.load().then((refetched) => {
+        // load() resolves false when it skipped the refetch because of
+        // local unsaved changes — the project was NOT replaced, so a
+        // network blip mid-edit must not wipe undo history or claim a
+        // reload happened.
+        if (!refetched) return;
         // Project replaced from server — UI Builder undo snapshots reference
         // stale pages/settings/master_elements that no longer match.
         useUIBuilderStore.getState().clearUndoHistory();
@@ -67,8 +72,12 @@ export function useWebSocket() {
     const debouncedProjectReload = () => {
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
-        useProjectStore.getState().load().then(() => {
-          useUIBuilderStore.getState().clearUndoHistory();
+        useProjectStore.getState().load().then((refetched) => {
+          // Same guard as syncOnConnect: the user may have started editing
+          // during the debounce window, making load() skip the refetch.
+          if (refetched) {
+            useUIBuilderStore.getState().clearUndoHistory();
+          }
         });
       }, 300);
     };

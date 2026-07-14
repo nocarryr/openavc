@@ -38,7 +38,10 @@ interface ProjectStore {
   redoStack: UndoEntry[];
   lastUndoDescription: string;
 
-  load: () => Promise<void>;
+  /** Refetch the project from the server. Resolves true only when the
+   *  store's project was actually replaced — false when the fetch was
+   *  skipped or discarded because local unsaved changes exist. */
+  load: () => Promise<boolean>;
   save: (retryCount?: number) => Promise<void>;
   debouncedSave: (delay?: number) => void;
   flushSave: () => void;
@@ -69,7 +72,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   load: async () => {
     // Skip reload if we have local unsaved changes (prevents save/reload race)
-    if (get().dirty) return;
+    if (get().dirty) return false;
     set({ loading: true, error: null });
     try {
       const raw = await api.getProject();
@@ -81,11 +84,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const revision = Number.isNaN(parsed) ? null : parsed;
       if (!get().dirty) {
         set({ project: raw, loading: false, dirty: false, etag, revision, conflictDetected: false });
+        return true;
       } else {
         set({ loading: false });
+        return false;
       }
     } catch (e) {
       set({ error: String(e), loading: false });
+      return false;
     }
   },
 
