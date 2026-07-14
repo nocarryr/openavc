@@ -75,7 +75,15 @@ export async function getProject(): Promise<ProjectConfig & { _etag?: string }> 
       };
       worker.onerror = () => {
         worker.terminate();
-        resolve(JSON.parse(text));
+        // Fall back to a main-thread parse, but a malformed body would throw
+        // here and, inside this handler, escape without settling the promise —
+        // leaving getProject() (and the IDE's load) hung forever. Reject so the
+        // failure surfaces instead, matching the non-worker branch below.
+        try {
+          resolve(JSON.parse(text));
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
       };
       worker.postMessage(text);
     });
