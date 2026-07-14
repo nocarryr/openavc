@@ -59,12 +59,19 @@ def main():
     from simulator import _runtime
     _runtime.startup_config = config
 
-    uvicorn.run(
-        "simulator.server:app",
-        host=args.host,
-        port=config["ui_port"],
-        log_level="info",
+    # Run through an explicit Server (not uvicorn.run) so the API's shutdown
+    # endpoints can flip ``should_exit`` for a graceful, cross-platform exit
+    # instead of a self-SIGTERM (which is a hard kill on Windows).
+    server = uvicorn.Server(
+        uvicorn.Config(
+            "simulator.server:app",
+            host=args.host,
+            port=config["ui_port"],
+            log_level="info",
+        )
     )
+    _runtime.uvicorn_server = server
+    server.run()
 
 
 if __name__ == "__main__":

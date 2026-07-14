@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
 import time
 from typing import Any
 
@@ -103,15 +105,32 @@ async def get_status():
     }
 
 
+def _request_process_exit() -> None:
+    """Ask the process to exit, gracefully and cross-platform.
+
+    Prefer flipping uvicorn's ``should_exit`` on the running Server (set by
+    ``__main__``), which unwinds the serve loop and runs the lifespan shutdown
+    hooks on every OS. Only if that handle is missing (an unusual launch) fall
+    back to a self-SIGTERM — graceful on POSIX, but a hard TerminateProcess on
+    Windows that skips uvicorn's own hooks, which is exactly what we avoid when
+    the handle is present.
+    """
+    from simulator import _runtime
+
+    server = getattr(_runtime, "uvicorn_server", None)
+    if server is not None:
+        server.should_exit = True
+    else:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
 @router.post("/shutdown")
 async def shutdown():
     """Shut down the simulator process. Called from the simulator UI or OpenAVC."""
-    import os
-    import signal
     mgr = _get_manager()
     await mgr.stop_all()
-    # Schedule process exit after responding
-    asyncio.get_event_loop().call_later(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    # Schedule the exit just after this response is flushed.
+    asyncio.get_event_loop().call_later(0.5, _request_process_exit)
     return {"status": "shutting_down"}
 
 
@@ -286,15 +305,13 @@ async def ws_endpoint(websocket: WebSocket):
 
 async def _delayed_shutdown() -> None:
     """Wait a grace period, then shut down the simulator process."""
-    import os
-    import signal
     try:
         await asyncio.sleep(5)
         logger.info("No clients reconnected, shutting down simulator")
         if _manager:
             await _manager.stop_all()
         await asyncio.sleep(0.5)
-        os.kill(os.getpid(), signal.SIGTERM)
+        _request_process_exit()
     except asyncio.CancelledError:
         pass
 
