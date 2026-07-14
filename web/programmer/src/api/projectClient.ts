@@ -7,6 +7,48 @@ import { BASE, request } from "./base";
 
 // --- Project ---
 
+// Serialized project size from the most recent GET/PUT, so the save path can
+// decide up front whether to stringify in a worker (same >512 KB threshold as
+// the read path) without first paying for a main-thread stringify to find out.
+let lastProjectTextSize = 0;
+
+/** Stringify the project for a PUT, in a worker when it's known to be large. */
+async function stringifyProject(project: ProjectConfig): Promise<string> {
+  let text: string | null = null;
+  if (lastProjectTextSize > 512_000 && typeof Worker !== "undefined") {
+    text = await new Promise<string | null>((resolve) => {
+      let worker: Worker;
+      try {
+        worker = new Worker(
+          new URL("../workers/projectSerializer.ts", import.meta.url),
+          { type: "module" }
+        );
+      } catch {
+        resolve(null);
+        return;
+      }
+      worker.onmessage = (e) => {
+        worker.terminate();
+        resolve(e.data.ok ? e.data.text : null);
+      };
+      worker.onerror = () => {
+        worker.terminate();
+        resolve(null);
+      };
+      try {
+        worker.postMessage(project);
+      } catch {
+        // Structured clone failed — fall back to the main thread.
+        worker.terminate();
+        resolve(null);
+      }
+    });
+  }
+  if (text === null) text = JSON.stringify(project);
+  lastProjectTextSize = text.length;
+  return text;
+}
+
 export async function getProject(): Promise<ProjectConfig & { _etag?: string }> {
   const res = await fetch(`${BASE}/project`, {
     headers: { "Content-Type": "application/json" },
@@ -17,6 +59,7 @@ export async function getProject(): Promise<ProjectConfig & { _etag?: string }> 
   }
   const etag = res.headers.get("etag") ?? undefined;
   const text = await res.text();
+  lastProjectTextSize = text.length;
 
   let data: ProjectConfig;
   if (text.length > 512_000 && typeof Worker !== "undefined") {
@@ -65,7 +108,7 @@ export async function saveProject(
   const res = await fetch(`${BASE}/project`, {
     method: "PUT",
     headers,
-    body: JSON.stringify(project),
+    body: await stringifyProject(project),
   });
 
   if (res.status === 409) {
