@@ -63,6 +63,16 @@ from server.version import __version__
 
 log = get_logger(__name__)
 
+# Cap inbound WebSocket frames well below uvicorn's implicit 16 MiB default.
+# The /ws and /isc/ws endpoints only ever receive small control/state JSON
+# (panel UI events, device commands, ISC state sync); real project, asset, and
+# driver uploads go over REST, not the socket. 1 MiB is orders of magnitude
+# above any legitimate frame yet a fixed, explicit ceiling on the two
+# unauthenticated/pre-auth socket paths (websockets rejects an oversized frame
+# with a 1009 close before buffering it). Applied to every listener that
+# serves server.main:app.
+_WS_MAX_SIZE = 1024 * 1024
+
 # Set log level from config
 logging.getLogger().setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
 
@@ -973,6 +983,7 @@ async def _run_tls() -> None:
         ssl_keyfile=str(key_path),
         reload=False,
         log_level="info",
+        ws_max_size=_WS_MAX_SIZE,
     )
     # uvicorn builds the SSLContext from the cert/key when the config loads;
     # load it here so we can harden the built context directly (Server.serve()
@@ -1046,6 +1057,7 @@ async def _run_http() -> None:
         port=config.HTTP_PORT,
         reload=False,
         log_level="info",
+        ws_max_size=_WS_MAX_SIZE,
     )
     main_server = uvicorn.Server(main_config)
     tasks: list[asyncio.Task] = [asyncio.create_task(main_server.serve())]
@@ -1108,4 +1120,5 @@ if __name__ == "__main__":
             port=config.HTTP_PORT,
             reload=False,
             log_level="info",
+            ws_max_size=_WS_MAX_SIZE,
         )
