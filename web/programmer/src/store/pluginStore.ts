@@ -145,6 +145,9 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   activatePlugin: async (pluginId) => {
     try {
       await api.activatePlugin(pluginId);
+      // No syncProjectStore() here: activation only starts the runtime
+      // instance from the config already in the project — the project (and
+      // its revision) are untouched, so the store's ETag stays valid.
       await get().load();
     } catch (e) {
       set({ error: String(e) });
@@ -159,6 +162,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
         set({ selectedId: null });
       }
       await get().load();
+      await syncProjectStore();
     } catch (e) {
       set({ error: String(e) });
       showError(`Couldn't remove plugin config for "${pluginId}": ${String(e)}`);
