@@ -1006,6 +1006,14 @@ on_connect:
   - "< GET ALL >"    # Shure: request all current state values
 ```
 
+For **OSC** drivers, a bare address subscribes for pushes (`/xremote`). When the connect message needs to *set* a value rather than just subscribe, use the `{address, args}` form with typed arguments — the Driver Builder shows an argument editor for each OSC step:
+
+```yaml
+on_connect:
+  - "/xremote"                                            # subscribe
+  - { address: "/main/mute", args: [{ type: i, value: "0" }] }   # set a value on connect
+```
+
 Many AV devices can push state changes in real-time (volume knob turned, input switched from front panel) but only after the controller enables feedback mode. Without `on_connect`, the driver relies entirely on polling and misses changes between poll cycles.
 
 #### `auth` section
