@@ -2793,6 +2793,11 @@ def create_configurable_driver_class(
     if "quick_actions" in driver_def:
         driver_info["quick_actions"] = driver_def["quick_actions"]
 
+    # Copy the web-interface declaration (true, or a URL template). Read by
+    # resolve_device_actions to auto-add the Open Web UI link action.
+    if "web_ui" in driver_def:
+        driver_info["web_ui"] = driver_def["web_ui"]
+
     # Add delimiter if specified
     if "delimiter" in driver_def:
         driver_info["delimiter"] = driver_def["delimiter"]

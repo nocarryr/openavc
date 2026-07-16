@@ -915,6 +915,18 @@ actions:
 
 Each promoted command id must name a declared command. If an id appears in both `quick_actions` and `actions`, the `actions` entry wins.
 
+#### `web_ui` (Open Web UI button)
+
+If the device has its own browser interface, declare it at the top level of the driver and the device view gets an "Open Web UI" button for free — no action entry needed:
+
+```yaml
+web_ui: true                        # button opens https://<device host>
+# or, when the interface isn't on https/443:
+web_ui: "http://{host}:8080/admin"  # {host}/{port}/{config_key} substituted
+```
+
+The button opens the URL in a new browser tab; nothing is sent to the device. Declaring your own `kind: link` action replaces the auto-added button (use that when you want a custom label or icon). Available on platform 0.24.0 and later.
+
 #### `responses` entry
 
 The shorthand `set` format is recommended (cleaner, matches community driver conventions):
@@ -2309,6 +2321,7 @@ These are available on every driver via the `BaseDriver` base class:
 |--------|-------------|
 | `self.set_state("power", "on")` | Sets `device.<device_id>.power` in the state store |
 | `self.get_state("power")` | Gets the current value of `device.<device_id>.power` |
+| `self.delete_state("power")` | Removes `device.<device_id>.power` from the store entirely (for drivers that narrow their declared surface at runtime) |
 | `await self.start_polling(15)` | Starts calling `self.poll()` every 15 seconds |
 | `await self.stop_polling()` | Stops the polling loop |
 | `await self._verify_reachable(host, port)` | Returns True if a TCP connection opens within the timeout |

@@ -567,8 +567,11 @@ class DeviceManager:
             "commands": driver.DRIVER_INFO.get("commands", {}),
             # Quick Actions strip: driver-declared actions resolved (quick_actions
             # sugar folded in). The IDE filters by visible_when + availability.
-            # Pass config so link (Open Web UI) URLs get {host}-substituted.
-            "actions": resolve_device_actions(driver.DRIVER_INFO, config),
+            # Link (Open Web UI) URLs substitute {host}/{port} from the driver's
+            # own config — the connection-merged dict it connects with. The
+            # project-level entry here nests that under "config" and has no
+            # host at its top level, so it can't substitute anything.
+            "actions": resolve_device_actions(driver.DRIVER_INFO, driver.config),
             "driver_info": driver.DRIVER_INFO,
         }
 

@@ -247,6 +247,22 @@ def test_configurable_driver_carries_actions_into_driver_info():
     assert resolved[0]["icon"] == "power"
 
 
+def test_configurable_driver_carries_web_ui_into_driver_info():
+    """web_ui is a published .avcdriver field — the YAML->DRIVER_INFO build
+    must carry it so YAML drivers get the auto-added Open Web UI link too."""
+    cls = create_configurable_driver_class(_yaml_driver(web_ui=True))
+    assert cls.DRIVER_INFO.get("web_ui") is True
+    assert any(
+        a["id"] == "open_web_ui" for a in resolve_device_actions(cls.DRIVER_INFO)
+    )
+
+    cls = create_configurable_driver_class(_yaml_driver(web_ui="http://{host}:8080"))
+    link = next(
+        a for a in resolve_device_actions(cls.DRIVER_INFO) if a["kind"] == "link"
+    )
+    assert link["url"] == "http://{host}:8080"
+
+
 def test_get_device_info_includes_resolved_actions():
     state = StateStore()
     events = EventBus()
@@ -265,6 +281,33 @@ def test_get_device_info_includes_resolved_actions():
     info = dm.get_device_info("dev1")
     assert [a["id"] for a in info["actions"]] == ["power_on"]
     assert info["actions"][0]["icon"] == "power"
+
+
+def test_get_device_info_substitutes_link_url_from_connection_config():
+    """The served Open Web UI link substitutes {host} from the driver's
+    connection-merged config. Regression: get_device_info used to pass the
+    project-level device entry (which nests the connection under "config"
+    and has no top-level host), so the button opened a literal "{host}"."""
+    state = StateStore()
+    events = EventBus()
+    state.set_event_bus(events)
+    dm = DeviceManager(state, events)
+
+    cls = create_configurable_driver_class(_yaml_driver(web_ui=True))
+    # The driver gets the connection-merged config, exactly as add_device
+    # hands it over; the device entry keeps it nested under "config".
+    driver = cls("dev1", {"host": "192.0.2.10", "port": 443}, state, events)
+    dm._devices["dev1"] = driver
+    dm._device_configs["dev1"] = {
+        "id": "dev1",
+        "name": "Dev 1",
+        "driver": "acme_yaml",
+        "config": {"host": "192.0.2.10", "port": 443},
+    }
+
+    info = dm.get_device_info("dev1")
+    link = next(a for a in info["actions"] if a["kind"] == "link")
+    assert link["url"] == "https://192.0.2.10"
 
 
 # --- Invoke endpoint -------------------------------------------------------

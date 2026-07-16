@@ -2012,6 +2012,22 @@ class BaseDriver(ABC):
         """Get a state value from this device's namespace."""
         return self.state.get(f"device.{self.device_id}.{property_name}")
 
+    def delete_state(self, property_name: str) -> None:
+        """Remove a state key from this device's namespace entirely.
+
+        Unlike set_state(prop, None), the key disappears from the store (and
+        from every consumer — the IDE's live state table, the cloud relay,
+        WS clients — which are all notified of the removal). For drivers that
+        adapt their surface at runtime: after narrowing the instance
+        DRIVER_INFO to what the connected hardware actually supports, delete
+        the state keys _init_state_variables() seeded for the dropped
+        variables so they don't linger as phantom values.
+        """
+        self.state.delete(
+            f"device.{self.device_id}.{property_name}",
+            source=f"device.{self.device_id}",
+        )
+
     # --- Child entities ---
     #
     # A "child entity" is a sub-unit owned by this device: an encoder/decoder

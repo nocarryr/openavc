@@ -57,9 +57,14 @@ export function DeviceDetail({
     api.getDevice(deviceId).then(setDeviceInfo).catch(console.error);
   }, [deviceId]);
 
+  // Refetch on mount and whenever the connection flips: a role-adaptive
+  // driver narrows its commands/actions to what the hardware reports at
+  // connect, so info fetched while the device was offline goes stale the
+  // moment it comes up (and vice versa).
+  const connected = Boolean(liveState[`device.${deviceId}.connected`]);
   useEffect(() => {
     refetchDeviceInfo();
-  }, [refetchDeviceInfo]);
+  }, [refetchDeviceInfo, connected]);
 
   const deviceConfig = project?.devices.find((d) => d.id === deviceId);
   const isEnabled = deviceConfig?.enabled !== false;
@@ -149,7 +154,6 @@ export function DeviceDetail({
   }
 
   const deviceName = String(liveState[`device.${deviceId}.name`] ?? deviceId);
-  const connected = Boolean(liveState[`device.${deviceId}.connected`]);
   const orphaned = Boolean(liveState[`device.${deviceId}.orphaned`]);
   // Paused for driver testing (device.<id>.paused) — auto-reconnect is
   // suspended until a resume, a manual reconnect, or the server's pause TTL.

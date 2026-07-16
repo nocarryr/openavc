@@ -334,3 +334,35 @@ class TestPollChildren:
         assert apply_sizes == [10]
         for i in range(1, 11):
             assert drv.state.get(f"device.ctrl.encoder.{i:03d}.name") == f"E{i}"
+
+
+class _SeededDriver(BaseDriver):
+    DRIVER_INFO: dict[str, Any] = {
+        "id": "seeded", "name": "Seeded", "transport": "tcp",
+        "state_variables": {
+            "level": {"type": "integer", "min": 5},
+            "label": {"type": "string"},
+        },
+        "commands": {},
+    }
+
+    async def send_command(self, command: str, params: dict | None = None) -> Any:
+        return None
+
+
+class TestDeleteState:
+    """delete_state removes a seeded key from the device namespace entirely
+    (for drivers that narrow their surface at runtime and need to drop the
+    defaults _init_state_variables seeded for the removed variables)."""
+
+    def test_removes_seeded_key(self):
+        drv = _mk(_SeededDriver)
+        assert drv.state.get("device.dev.level") == 5
+        drv.delete_state("level")
+        assert "device.dev.level" not in drv.state.snapshot()
+        # The other seeded key is untouched.
+        assert drv.state.get("device.dev.label") == ""
+
+    def test_missing_key_is_a_no_op(self):
+        drv = _mk(_SeededDriver)
+        drv.delete_state("never_existed")  # must not raise
