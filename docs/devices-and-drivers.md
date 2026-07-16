@@ -145,6 +145,12 @@ The device detail panel includes several management actions:
 - **Duplicate.** Create a copy of the device with a new ID, pre-filled with the same driver and settings.
 - **Device Log.** Filtered log view showing only activity for the selected device (commands sent, responses received, errors).
 
+### When a device won't connect
+
+An offline device shows the reason on its card and detail view (unreachable, connection refused, login rejected, and so on), and OpenAVC keeps retrying in the background with increasing delays for about an hour.
+
+The exception is a **rejected login**: retrying the same credentials can't succeed, and many devices lock out the controller's IP address after a few failed attempts — so after one failed try OpenAVC stops and waits instead of retrying. Fix the username or password in the device's settings (that triggers a fresh attempt), or press **Reconnect** to try once more. Drivers that ship with a vendor's default credentials still get that first try automatically.
+
 ## Device Groups
 
 The **Groups** tab in the Devices view lets you create named groups of devices. Groups serve two purposes:

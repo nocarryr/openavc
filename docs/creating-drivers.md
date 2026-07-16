@@ -2313,6 +2313,8 @@ raise ConnectionFaultError(
 
 The code becomes `offline_reason` verbatim and the message becomes `offline_detail`; unknown codes raise immediately so a typo can't silently misclassify. For a failure with no exception to carry it (a keep-alive loop that stopped hearing replies), stash the reason before forcing the disconnect: `self._stash_fault("no_response", "...")` then `self._handle_transport_disconnect()`. Don't re-wrap transport errors that already carry their cause (a refused socket, a DNS failure) — re-raise those unchanged.
 
+**`auth_failed` also changes the retry policy.** The platform treats a credential rejection as non-transient: it tries once per user action, then pauses auto-reconnect until the credentials change (editing the device or pressing Reconnect tries again). This protects devices with brute-force lockouts, where every failed login counts toward blocking the controller's IP address. So classify precisely — raise `auth_failed` only for a genuine credential rejection, never a transport failure — and never send a login you know can't succeed: if the config has no password and the device requires one, raise the typed fault before contacting the device at all.
+
 ### Convenience Methods
 
 These are available on every driver via the `BaseDriver` base class:

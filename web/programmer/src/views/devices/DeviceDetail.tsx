@@ -161,6 +161,7 @@ export function DeviceDetail({
   // Server-built, human-readable offline reason (device.<id>.offline_detail).
   // The taxonomy lives server-side; this view only renders the message.
   const offlineDetail = String(liveState[`device.${deviceId}.offline_detail`] ?? "");
+  const offlineReason = String(liveState[`device.${deviceId}.offline_reason`] ?? "");
   const reconnectAttempt = Number(liveState[`device.${deviceId}.reconnect_attempt`]) || 0;
   const reconnectFailed = Boolean(liveState[`device.${deviceId}.reconnect_failed`]);
   // Optional driver-provided troubleshooting hint (DRIVER_INFO.help.connection),
@@ -503,6 +504,7 @@ export function DeviceDetail({
       {!connected && isEnabled && !orphaned && !paused && offlineDetail && (
         <OfflineBanner
           detail={offlineDetail}
+          reason={offlineReason}
           attempt={reconnectAttempt}
           failed={reconnectFailed}
           hint={connectionHint}
@@ -1687,11 +1689,13 @@ const devLogTdStyle: React.CSSProperties = {
 
 function OfflineBanner({
   detail,
+  reason,
   attempt,
   failed,
   hint,
 }: {
   detail: string;
+  reason?: string;
   attempt: number;
   failed: boolean;
   hint?: string;
@@ -1735,7 +1739,11 @@ function OfflineBanner({
           }}
         >
           {failed
-            ? "Automatic reconnection gave up. Use the Reconnect button above to try again."
+            ? reason === "auth_failed"
+              // Retrying a rejected login would only trip the device's
+              // brute-force lockout, so the server holds off on purpose.
+              ? "Not retrying — repeated logins can lock this PC out of the device. Fix the credentials in Edit Device, then press Reconnect."
+              : "Automatic reconnection gave up. Use the Reconnect button above to try again."
             : attempt > 0
               ? `Reconnecting automatically… (attempt ${attempt})`
               : "Reconnecting automatically…"}
