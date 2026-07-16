@@ -236,7 +236,7 @@ class CommandHandler:
         await self._send_result(request_id, True, result=f"Restart ({mode}) initiated")
 
         # Emit the restart event — the engine or service manager handles the actual restart
-        await self._events.emit("system.restart_requested", {"mode": mode})
+        await self._events.emit("system.restart_requested", {"mode": mode, "source": "cloud"})
 
     async def _handle_diagnostic(
         self, payload: dict[str, Any], request_id: str, user_name: str

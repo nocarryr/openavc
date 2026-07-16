@@ -572,7 +572,9 @@ async def restart_system(request: Request) -> dict[str, Any]:
     # — the dialog uses this 200 as its cue to start polling for the new
     # listener to come back up.
     import asyncio
-    task = asyncio.create_task(engine.events.emit("system.restart_requested", {"mode": mode}))
+    task = asyncio.create_task(
+        engine.events.emit("system.restart_requested", {"mode": mode, "source": "api"})
+    )
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 

@@ -2,19 +2,42 @@
 // heuristic is unit-testable without React.
 
 /**
- * The health-probe URL for the post-restart server.
+ * The health-probe URL for a given server origin.
  *
- * `targetUrl` is the PAGE the browser lands on after restart, e.g.
- * `https://host:8443/programmer`. The health endpoint is NOT under that SPA
- * mount — it's at the server root, `/api/health`. Appending `/api/health` onto
- * the full `targetUrl` string probes `/programmer/api/health`, which the static
- * mount answers with 404 on every deployment, so the poll never sees a 2xx and
- * always reports a false timeout even though the server is up. Resolving an
- * absolute `/api/health` against `targetUrl` keeps its origin (scheme, host,
- * post-restart port) and replaces the path.
+ * The health endpoint is at the server root, `/api/health` — NOT under the
+ * `/programmer` SPA mount (probing `/programmer/api/health` gets a 404 on every
+ * deployment, so the poll would never see a 2xx and would always time out).
+ * Resolving an absolute `/api/health` against `origin` keeps its scheme/host/
+ * port and sets the correct path.
  */
-export function healthProbeUrl(targetUrl: string): string {
-  return new URL("/api/health", targetUrl).toString();
+export function healthProbeUrl(origin: string): string {
+  return new URL("/api/health", origin).toString();
+}
+
+/**
+ * Ordered, de-duplicated origins to probe for the restarted server.
+ *
+ * `configOrigin` is derived from the saved config (scheme + the configured
+ * HTTP/HTTPS port) — authoritative for DIRECT access, where a port or protocol
+ * change is a real address change the browser must follow. But behind a reverse
+ * proxy or the cloud tunnel the config's internal port is not how the browser
+ * reaches the server at all; there the CURRENT page origin is the only valid
+ * address, and a settings restart leaves it unchanged.
+ *
+ * Probing both — current origin first, except on a protocol switch where the
+ * old origin is going away — covers every deployment without having to detect
+ * which one we're in: direct port/scheme changes still succeed via
+ * `configOrigin`, proxy/tunnel restarts succeed via `currentOrigin`.
+ */
+export function candidateOrigins(
+  configOrigin: string,
+  currentOrigin: string,
+  isProtocolSwitch: boolean,
+): string[] {
+  const ordered = isProtocolSwitch
+    ? [configOrigin]
+    : [currentOrigin, configOrigin];
+  return [...new Set(ordered)];
 }
 
 // Consecutive fetch failures before we consider that the browser might be

@@ -512,7 +512,7 @@ def test_system_restart_default_graceful(client):
     assert body["status"] == "restarting"
     assert body["mode"] == "graceful"
     assert body["delay_seconds"] == 2
-    assert received == [{"mode": "graceful"}]
+    assert received == [{"mode": "graceful", "source": "api"}]
 
 
 def test_system_restart_hard_mode(client):
@@ -530,7 +530,7 @@ def test_system_restart_hard_mode(client):
     body = resp.json()
     assert body["mode"] == "hard"
     assert body["delay_seconds"] == 0
-    assert received == [{"mode": "hard"}]
+    assert received == [{"mode": "hard", "source": "api"}]
 
 
 def test_system_restart_unknown_mode_falls_back_to_graceful(client):

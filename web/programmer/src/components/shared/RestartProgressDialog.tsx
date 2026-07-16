@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Download, ExternalLink, RefreshCw } from "lucide-react";
 import { Dialog } from "./Dialog";
-import { healthProbeUrl, shouldEnterCertError } from "./restartPollHelpers";
+import { candidateOrigins, healthProbeUrl, shouldEnterCertError } from "./restartPollHelpers";
 import * as api from "../../api/restClient";
 
 type Phase = "starting" | "waiting" | "polling" | "cert-error" | "success" | "timeout" | "error";
@@ -61,31 +61,57 @@ export function RestartProgressDialog({
       await new Promise((r) => setTimeout(r, INITIAL_WAIT_MS));
       if (cancelled) return;
 
-      // Step 3: poll until /api/health responds or we hit the cap.
+      // Step 3: poll until /api/health responds or we hit the cap. Probe the
+      // config-derived origin AND the current page origin — so a direct-access
+      // port/scheme change succeeds via config, while a restart behind a
+      // reverse proxy or the cloud tunnel (where config ports are internal and
+      // unreachable) succeeds via the current origin (see candidateOrigins).
       setPhase("polling");
+      const targetPath = new URL(targetUrl).pathname; // "/programmer"
+      const origins = candidateOrigins(
+        new URL(targetUrl).origin,
+        window.location.origin,
+        isProtocolSwitch,
+      );
       let consecutiveFailures = 0;
       for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
         if (cancelled) return;
-        try {
-          // `cache: "no-store"` keeps stale 502/0 responses from the previous
-          // boot out of the way. Probe the server root (/api/health), NOT the
-          // full targetUrl — targetUrl ends in /programmer, and the SPA mount
-          // 404s /programmer/api/health forever (see healthProbeUrl).
-          const res = await fetch(healthProbeUrl(targetUrl), {
-            cache: "no-store",
-            credentials: "omit",
-          });
-          if (res.ok) {
-            setPhase("success");
-            // Small grace period so the user reads the "Reconnected" state
-            // before the browser navigates.
-            setTimeout(() => {
-              if (!cancelled) window.location.assign(targetUrl);
-            }, 400);
-            return;
+        // `sawResponse` distinguishes "server reachable but not ready" (any
+        // HTTP response, even non-2xx) from "no candidate answered" (every
+        // probe threw) — only the latter counts toward the cert-error window.
+        let sawResponse = false;
+        let reachedOrigin: string | null = null;
+        for (const origin of origins) {
+          if (cancelled) return;
+          try {
+            // `cache: "no-store"` keeps stale 502/0 responses from the previous
+            // boot out of the way.
+            const res = await fetch(healthProbeUrl(origin), {
+              cache: "no-store",
+              credentials: "omit",
+            });
+            sawResponse = true;
+            if (res.ok) {
+              reachedOrigin = origin;
+              break;
+            }
+          } catch {
+            // This candidate threw (still rebinding, or an untrusted new cert).
           }
+        }
+        if (reachedOrigin) {
+          setPhase("success");
+          const landing = new URL(targetPath, reachedOrigin).toString();
+          // Small grace period so the user reads the "Reconnected" state
+          // before the browser navigates.
+          setTimeout(() => {
+            if (!cancelled) window.location.assign(landing);
+          }, 400);
+          return;
+        }
+        if (sawResponse) {
           consecutiveFailures = 0; // server is up but returning non-2xx; not a network error
-        } catch {
+        } else {
           consecutiveFailures += 1;
           // Only blame the cert once failures persist past the window a normal
           // restart needs to rebind — a slow-but-healthy restart shouldn't

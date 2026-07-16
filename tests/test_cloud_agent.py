@@ -1001,6 +1001,7 @@ class TestCommandHandler:
         assert sent[0][1]["success"] is True
         assert len(emitted) == 1
         assert emitted[0]["mode"] == "graceful"
+        assert emitted[0]["source"] == "cloud"
 
     @pytest.mark.asyncio
     async def test_config_push_migrates_old_schema(self, tmp_path):

@@ -155,7 +155,13 @@ async def _initialize_engine(app: FastAPI) -> None:
         # so we spawn a replacement ourselves before exiting.
         async def _on_restart_requested(_event: str, data: dict) -> None:
             mode = (data or {}).get("mode", "graceful")
-            log.warning("Cloud-driven restart requested (mode=%s); exiting in 2s", mode)
+            # source distinguishes a local UI/API restart from a cloud-driven
+            # one — the event fires from both, so a hardcoded label misled
+            # anyone reading the log during a Settings-triggered restart.
+            source = (data or {}).get("source", "unknown")
+            log.warning(
+                "Restart requested (source=%s, mode=%s); exiting in 2s", source, mode,
+            )
             # Brief delay so the command_result WS frame and log line flush
             # before the process exits.
             await asyncio.sleep(0 if mode == "hard" else 2)
