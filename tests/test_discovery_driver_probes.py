@@ -1202,3 +1202,92 @@ class TestTLSProbe:
         )
         assert ev is None
         assert captured["ssl"] is None, "plain tcp probe must not pass an ssl context"
+
+
+class TestCertSubjectProbe:
+    """`cert_subject:` identifies a device by its self-signed TLS cert's own
+    subject — the strongest pre-auth signal for gear that ships an identifying
+    cert but no discovery beacon. Invented ACME device, never a real product."""
+
+    def test_cert_subject_parses_and_compiles(self):
+        h = _make_hint("acme_https", tcp_probe={
+            "port": 443, "tls": True, "cert_subject": r"CN=ACME-WIDGET-",
+        })
+        assert h.tcp_probe.cert_subject is not None
+        assert h.tcp_probe.cert_subject.search("CN=ACME-WIDGET-9000,O=Acme")
+        assert h.tcp_probe.cert_subject_source == r"CN=ACME-WIDGET-"
+
+    def test_cert_subject_requires_tls(self):
+        with pytest.raises(DiscoveryHintError, match="cert_subject requires tls"):
+            _make_hint("bad", tcp_probe={"port": 443, "cert_subject": "CN=x"})
+
+    def test_cert_subject_bad_regex_raises(self):
+        with pytest.raises(DiscoveryHintError, match="cert_subject failed to compile"):
+            _make_hint("bad", tcp_probe={
+                "port": 443, "tls": True, "cert_subject": "CN=(unclosed",
+            })
+
+    def test_cert_subject_empty_raises(self):
+        with pytest.raises(DiscoveryHintError, match="cert_subject must be"):
+            _make_hint("bad", tcp_probe={
+                "port": 443, "tls": True, "cert_subject": "",
+            })
+
+    async def _serve_tls(self, tmp_path, cn):
+        from server.tls import generate_self_signed
+        certs = generate_self_signed(tmp_path, hostnames=[cn], ips=["127.0.0.1"])
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certs.cert_path, certs.key_path)
+
+        async def handle(reader, writer):
+            try:
+                await reader.read(64)
+            except OSError:
+                pass
+            writer.close()
+
+        return await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ctx)
+
+    @pytest.mark.asyncio
+    async def test_cert_only_probe_matches_and_extracts_model(self, tmp_path):
+        """A cert-only probe (no send, no payload matcher) identifies the device
+        purely from its cert subject and pulls the model out of the CN — without
+        waiting for a banner the HTTPS server never sends unprompted."""
+        server = await self._serve_tls(tmp_path, "ACME-WIDGET-9000")
+        try:
+            port = server.sockets[0].getsockname()[1]
+            h = _make_hint("acme_https", tcp_probe={
+                "port": port, "tls": True,
+                "cert_subject": r"CN=ACME-WIDGET-",
+                "extract": {"model": {"regex": r"ACME-WIDGET-[0-9]+", "group": 0}},
+                "timeout_ms": 3000,
+            })
+            ev = await run_tcp_active_probe(
+                h.tcp_probe, target="127.0.0.1", source_ip="127.0.0.1", stagger_ms=0,
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert ev is not None, "cert-only probe should match on the cert subject"
+        data = ev.data.get("response", ev.data)
+        assert (data.get("extracted") or {}).get("model") == "ACME-WIDGET-9000"
+
+    @pytest.mark.asyncio
+    async def test_cert_subject_no_match_returns_none(self, tmp_path):
+        """A cert whose subject doesn't match the regex is not this device."""
+        server = await self._serve_tls(tmp_path, "OTHER-VENDOR-1")
+        try:
+            port = server.sockets[0].getsockname()[1]
+            h = _make_hint("acme_https", tcp_probe={
+                "port": port, "tls": True, "cert_subject": r"CN=ACME-WIDGET-",
+                "timeout_ms": 2000,
+            })
+            ev = await run_tcp_active_probe(
+                h.tcp_probe, target="127.0.0.1", source_ip="127.0.0.1", stagger_ms=0,
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert ev is None, "non-matching cert subject must not identify the device"

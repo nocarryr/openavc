@@ -90,6 +90,45 @@ def _make_probe_tls_context() -> ssl.SSLContext:
 _PROBE_TLS_CONTEXT = _make_probe_tls_context()
 
 
+def _read_peer_cert_subject(writer: asyncio.StreamWriter) -> str:
+    """Return the peer TLS certificate's subject as an RFC4514 string, plus any
+    SAN DNS names, or "" if unavailable.
+
+    Discovery uses a permissive (CERT_NONE) context, so ``getpeercert()`` returns
+    an empty dict — the DER form is still available and cryptography parses it.
+    Many AV devices ship a self-signed cert whose subject/SAN carries the model
+    (Crestron NVX: ``CN=DM-NVX-E20-<mac>``), which is a strong pre-auth signal.
+    """
+    ssl_obj = writer.get_extra_info("ssl_object")
+    if ssl_obj is None:
+        return ""
+    try:
+        der = ssl_obj.getpeercert(binary_form=True)
+    except (ValueError, OSError):
+        return ""
+    if not der:
+        return ""
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import ExtensionOID
+
+        cert = x509.load_der_x509_certificate(der)
+        parts = [cert.subject.rfc4514_string()]
+        try:
+            san = cert.extensions.get_extension_for_oid(
+                ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+            ).value
+            names = san.get_values_for_type(x509.DNSName)
+            if names:
+                parts.append("SAN:" + ",".join(names))
+        except x509.ExtensionNotFound:
+            pass
+        return " ".join(parts)
+    except Exception as exc:  # malformed cert / parse failure — treat as no signal
+        log.debug("probe_runner: peer cert parse failed: %s", exc)
+        return ""
+
+
 class RateLimiter:
     """Async token-bucket-style limiter, ``rate`` calls per second.
 
@@ -382,54 +421,65 @@ async def run_tcp_active_probe(
         )
         return None
 
+    match = spec.response_match
+    has_matcher = (
+        match.starts_with is not None
+        or match.contains is not None
+        or match.regex is not None
+    )
+    # A cert-only probe (identify by the cert subject, no send + no payload
+    # matcher) must not wait for a banner: HTTPS gear like NVX only speaks after
+    # a request, so reading would just burn the whole timeout for nothing.
+    cert_only = spec.cert_subject is not None and not spec.send and not has_matcher
+
+    cert_subject_str = ""
     payload = b""
     try:
-        if spec.send:
-            writer.write(spec.send)
-            try:
-                await asyncio.wait_for(writer.drain(), timeout=timeout)
-            except (TimeoutError, asyncio.TimeoutError):
-                pass
-        # Accumulate short reads rather than a single read. A single read
-        # can return just the first TCP segment; for telnet/SSH-style
-        # devices that send IAC negotiation (or a partial greeting) in its
-        # own segment ahead of the identifying banner, that first segment
-        # never carries the fingerprint. Read until the matcher hits, the
-        # peer closes, the byte cap is reached, or the peer goes quiet for
-        # _PROBE_READ_QUIET_SECONDS (whichever comes first). A connect-only
-        # probe (no matcher) returns as soon as any reply arrives.
-        match = spec.response_match
-        has_matcher = (
-            match.starts_with is not None
-            or match.contains is not None
-            or match.regex is not None
-        )
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        acc = bytearray()
-        while loop.time() < deadline and len(acc) < _MAX_RESPONSE_BYTES:
-            remaining = deadline - loop.time()
-            # Wait the full remaining budget for the first byte (a device can
-            # be slow to start sending), but once data is flowing only wait a
-            # short quiet-gap for further segments — so a multi-segment banner
-            # lands while a non-matching host that sent one chunk and went
-            # silent is released promptly.
-            read_timeout = remaining if not acc else min(_PROBE_READ_QUIET_SECONDS, remaining)
-            try:
-                chunk = await asyncio.wait_for(
-                    reader.read(_MAX_RESPONSE_BYTES - len(acc)),
-                    timeout=read_timeout,
-                )
-            except (TimeoutError, asyncio.TimeoutError):
-                break  # first-byte budget elapsed, or peer went quiet mid-banner
-            if not chunk:
-                break  # peer closed the connection
-            acc += chunk
-            if not has_matcher:
-                break  # connect-only probe: any reply is enough
-            if _matches(bytes(acc), match):
-                break  # fingerprint satisfied — return immediately
-        payload = bytes(acc)
+        # Self-signed identity certs carry the model (NVX: CN=DM-NVX-E20-<mac>).
+        if spec.tls and (spec.cert_subject is not None or spec.extract):
+            cert_subject_str = _read_peer_cert_subject(writer)
+
+        if not cert_only:
+            if spec.send:
+                writer.write(spec.send)
+                try:
+                    await asyncio.wait_for(writer.drain(), timeout=timeout)
+                except (TimeoutError, asyncio.TimeoutError):
+                    pass
+            # Accumulate short reads rather than a single read. A single read
+            # can return just the first TCP segment; for telnet/SSH-style
+            # devices that send IAC negotiation (or a partial greeting) in its
+            # own segment ahead of the identifying banner, that first segment
+            # never carries the fingerprint. Read until the matcher hits, the
+            # peer closes, the byte cap is reached, or the peer goes quiet for
+            # _PROBE_READ_QUIET_SECONDS (whichever comes first). A connect-only
+            # probe (no matcher) returns as soon as any reply arrives.
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + timeout
+            acc = bytearray()
+            while loop.time() < deadline and len(acc) < _MAX_RESPONSE_BYTES:
+                remaining = deadline - loop.time()
+                # Wait the full remaining budget for the first byte (a device
+                # can be slow to start), but once data is flowing only wait a
+                # short quiet-gap for further segments — so a multi-segment
+                # banner lands while a non-matching host that sent one chunk and
+                # went silent is released promptly.
+                read_timeout = remaining if not acc else min(_PROBE_READ_QUIET_SECONDS, remaining)
+                try:
+                    chunk = await asyncio.wait_for(
+                        reader.read(_MAX_RESPONSE_BYTES - len(acc)),
+                        timeout=read_timeout,
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    break  # first-byte budget elapsed, or peer went quiet mid-banner
+                if not chunk:
+                    break  # peer closed the connection
+                acc += chunk
+                if not has_matcher:
+                    break  # connect-only probe: any reply is enough
+                if _matches(bytes(acc), match):
+                    break  # fingerprint satisfied — return immediately
+            payload = bytes(acc)
     except (ConnectionResetError, BrokenPipeError, OSError) as exc:
         log.debug(
             "probe_runner: %s read from %s:%d failed: %s",
@@ -442,28 +492,50 @@ async def run_tcp_active_probe(
         except (OSError, ConnectionResetError):
             pass
 
-    if not payload:
+    # Cert gate: a declared cert_subject must match, and stands in for the
+    # payload requirement (a matched cert is signal enough on its own).
+    if spec.cert_subject is not None:
+        if not cert_subject_str or not spec.cert_subject.search(cert_subject_str):
+            return None
+    elif not payload:
         return None
+    # The payload matcher (if any) must still pass; an empty matcher passes.
     if not _matches(payload, spec.response_match):
         return None
 
     reserved, extracted = _apply_extract(payload, spec.extract)
+    if cert_subject_str:
+        # Extract from the cert subject too (e.g. the model out of the CN); the
+        # payload takes precedence, the cert fills in what it didn't provide.
+        c_reserved, c_extracted = _apply_extract(cert_subject_str.encode("utf-8"), spec.extract)
+        for k, v in c_reserved.items():
+            reserved.setdefault(k, v)
+        for k, v in c_extracted.items():
+            extracted.setdefault(k, v)
+
     response: dict[str, object] = {
-        "text": payload.decode("latin-1", errors="replace"),
+        "text": payload.decode("latin-1", errors="replace") or cert_subject_str,
     }
     # Lift manufacturer/make to top of response so extract_vendor_strings
     # finds them; everything else lands under "extracted".
     response.update(reserved)
     if extracted:
         response["extracted"] = extracted
+    if cert_subject_str:
+        response["cert_subject"] = cert_subject_str
+
+    matched_pattern = describe_response_match(spec.response_match) or None
+    if spec.cert_subject is not None:
+        cert_desc = f"cert:{spec.cert_subject_source}"
+        matched_pattern = f"{matched_pattern}, {cert_desc}" if matched_pattern else cert_desc
 
     log.debug(
-        "probe_runner: %s match from %s reserved=%s extracted=%s",
-        spec.probe_id, target, reserved, extracted,
+        "probe_runner: %s match from %s reserved=%s extracted=%s cert=%r",
+        spec.probe_id, target, reserved, extracted, cert_subject_str,
     )
     return evidence_active_probe(
         spec.probe_id,
         response=response,
         port=spec.port,
-        matched_pattern=describe_response_match(spec.response_match) or None,
+        matched_pattern=matched_pattern,
     )

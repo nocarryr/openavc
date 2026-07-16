@@ -173,6 +173,14 @@ class CustomProbeSpec:
     extract: tuple[ExtractRule, ...]
     tls: bool = False   # tcp only: wrap the connection in TLS before send/read
                         # (no cert verification — devices ship self-signed certs)
+    # tcp + tls only: a regex matched against the peer certificate's subject
+    # (RFC4514 string, e.g. "CN=DM-NVX-E20-...,O=Crestron Electronics"). Lets a
+    # driver identify a device by its self-signed cert's own name before any
+    # login — the strongest pre-auth signal for gear that ships an identifying
+    # cert but no discovery beacon. `extract` rules also run against this
+    # string, so the model can be pulled from the CN.
+    cert_subject: re.Pattern | None = None
+    cert_subject_source: str = ""
 
     @property
     def probe_id(self) -> str:
@@ -632,6 +640,27 @@ def _parse_probe(
             f"{driver_id}: discovery.{where}.tls is only valid on a tcp_probe"
         )
 
+    cert_subject = None
+    cert_subject_source = ""
+    raw_cs = block.get("cert_subject")
+    if raw_cs is not None:
+        if not tls:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{where}.cert_subject requires tls: true "
+                "(the certificate is only read on a TLS probe)"
+            )
+        if not isinstance(raw_cs, str) or not raw_cs:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{where}.cert_subject must be a non-empty string"
+            )
+        try:
+            cert_subject = re.compile(raw_cs)
+        except re.error as exc:
+            raise DiscoveryHintError(
+                f"{driver_id}: discovery.{where}.cert_subject failed to compile: {exc}"
+            )
+        cert_subject_source = raw_cs
+
     extract = _parse_extract(driver_id, where, block.get("extract"))
 
     # Sugar: extract_manufacturer: "AcmeCorp" produces an ExtractRule
@@ -654,7 +683,7 @@ def _parse_probe(
     known = {
         "port", "send_hex", "send_ascii",
         "expect", "expect_regex", "expect_hex",
-        "cross_vendor", "timeout_ms", "tls",
+        "cross_vendor", "timeout_ms", "tls", "cert_subject",
         "extract", "extract_manufacturer",
     }
     unknown = set(block.keys()) - known
@@ -673,6 +702,8 @@ def _parse_probe(
         cross_vendor=cross_vendor,
         extract=tuple(extract),
         tls=tls,
+        cert_subject=cert_subject,
+        cert_subject_source=cert_subject_source,
     )
 
 
